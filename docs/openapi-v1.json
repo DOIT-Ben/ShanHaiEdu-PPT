@@ -1,0 +1,222 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PPT Agent API",
+    "version": "1.0.0",
+    "description": "Host-independent API for durable PPT Agent runs."
+  },
+  "servers": [{ "url": "/" }],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/v1/runs": {
+      "post": {
+        "operationId": "createRun",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRunRequest" } } }
+        },
+        "responses": {
+          "201": { "description": "Run created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } } },
+          "200": { "description": "Idempotent replay", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } } },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "get": {
+        "operationId": "listRuns",
+        "parameters": [
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } },
+          { "name": "pageSize", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
+        ],
+        "responses": {
+          "200": { "description": "Cursor-paginated runs" },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/runs/{runId}": {
+      "get": {
+        "operationId": "getRun",
+        "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+        "responses": {
+          "200": { "description": "Run snapshot and approved public artifacts" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/runs/{runId}/actions": {
+      "post": {
+        "operationId": "applyRunAction",
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunAction" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated Run" },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/runs/{runId}/events": {
+      "get": {
+        "operationId": "streamRunEvents",
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persistent event replay followed by live polling",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/runs/{runId}/deliveries/{deliveryId}/content": {
+      "get": {
+        "operationId": "downloadDeliveryContent",
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "name": "deliveryId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          { "name": "format", "in": "query", "schema": { "enum": ["preview", "pptx"], "default": "pptx" } }
+        ],
+        "responses": {
+          "200": { "description": "Owned PNG preview or editable PPTX content" },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    },
+    "parameters": {
+      "RunId": { "name": "runId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" } }
+    },
+    "responses": {
+      "Error": {
+        "description": "Structured error",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      }
+    },
+    "schemas": {
+      "HostContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tenantId", "externalUserId"],
+        "properties": {
+          "tenantId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "externalUserId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "externalProjectId": { "type": "string", "minLength": 1, "maxLength": 160 }
+        }
+      },
+      "DocumentSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "text"],
+            "properties": {
+              "kind": { "const": "TEXT" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+              "text": { "type": "string", "minLength": 20, "maxLength": 2000000 }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "attachmentId"],
+            "properties": {
+              "kind": { "const": "HOST_ATTACHMENT" },
+              "attachmentId": { "type": "string", "minLength": 1, "maxLength": 160 }
+            }
+          }
+        ]
+      },
+      "CreateRunRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "host", "source", "slideCount", "visualDirection", "imageModel", "automationLevel", "budgetUnits"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "host": { "$ref": "#/components/schemas/HostContext" },
+          "source": { "$ref": "#/components/schemas/DocumentSource" },
+          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+          "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
+          "imageModel": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "automationLevel": { "enum": ["SUPERVISED", "BOUNDED_AUTO"] },
+          "budgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 }
+        }
+      },
+      "RunAction": {
+        "type": "object",
+        "required": ["schemaVersion", "type", "expectedVersion"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "type": { "enum": ["APPROVE_BLUEPRINT", "REQUEST_BLUEPRINT_REVISION", "PAUSE", "RESUME", "CANCEL", "ADD_BUDGET", "APPROVE_REVISION", "REJECT_REVISION", "ACCEPT_WITH_OVERRIDE"] },
+          "expectedVersion": { "type": "integer", "minimum": 0 },
+          "instruction": { "type": "string", "minLength": 3, "maxLength": 2000 },
+          "reason": { "type": "string", "minLength": 3, "maxLength": 2000 },
+          "additionalBudgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+        }
+      },
+      "PublicRun": {
+        "type": "object",
+        "required": ["id", "host", "status", "version", "slideCount", "budgetUnits", "committedBudgetUnits", "qualityOverride", "createdAt", "updatedAt"],
+        "properties": {
+          "id": { "type": "string" },
+          "host": { "$ref": "#/components/schemas/HostContext" },
+          "status": { "type": "string" },
+          "version": { "type": "integer" },
+          "slideCount": { "type": "integer" },
+          "budgetUnits": { "type": "integer" },
+          "committedBudgetUnits": { "type": "integer" },
+          "qualityOverride": { "type": "boolean" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RunEnvelope": {
+        "type": "object",
+        "required": ["data", "replayed"],
+        "properties": {
+          "data": { "$ref": "#/components/schemas/PublicRun" },
+          "replayed": { "type": "boolean" }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message", "requestId"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "requestId": { "type": "string" },
+              "details": {}
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@doitben/ppt-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "check:boundaries": "bun scripts/check-boundaries.ts",
+    "check": "bun run check:boundaries && bun test && bun run typecheck && bun run build"
+  },
+  "dependencies": {
+    "pptxgenjs": "^4.0.1",
+    "sharp": "^0.34.3",
+    "zod": "^4.0.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.18",
+    "typescript": "^5.8.3"
+  }
+}
