@@ -2,11 +2,10 @@ import { CONTRACT_VERSION } from '../contracts'
 import {
   deliveryRecordSchema,
   type DeliveryRecord,
-  type PresentationBlueprint,
 } from '../presentation-contracts'
 import { hashInput } from './hash'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
+import { loadPresentationSlides, requirePresentationArtifactReferences } from './presentation-render-input'
 import type {
   AgentRepository,
   ArtifactPort,
@@ -26,12 +25,6 @@ export type DeliveryResult = Readonly<{
   replayed: boolean
 }>
 
-type SlideArtifact = Readonly<{
-  pageNumber: number
-  artifactId: string
-  assets?: readonly Readonly<{ elementId: string; artifactId: string }>[]
-}>
-
 export class DeliveryRunner {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
@@ -43,9 +36,9 @@ export class DeliveryRunner {
   async deliver(runId: string): Promise<DeliveryResult> {
     const run = await this.requireRun(runId)
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
-    let slideArtifacts: readonly SlideArtifact[]
+    let slideArtifacts: Awaited<ReturnType<typeof requirePresentationArtifactReferences>>
     try {
-      slideArtifacts = await this.requireSlideArtifacts(run, blueprint)
+      slideArtifacts = await requirePresentationArtifactReferences(this.dependencies.repository, run, blueprint)
     } catch (error) {
       return this.failBeforeRender(run, error instanceof Error ? error.message : 'DELIVERY_INPUT_FAILED')
     }
@@ -55,33 +48,7 @@ export class DeliveryRunner {
     if (prepared) return prepared
 
     try {
-      const slides = []
-      for (const item of slideArtifacts) {
-        const artifact = await this.dependencies.artifacts.get({
-          tenantId: run.host.tenantId,
-          artifactId: item.artifactId,
-        })
-        if (!artifact || !artifact.mimeType.startsWith('image/') || artifact.bytes.length === 0) {
-          throw new Error('DELIVERY_SOURCE_ARTIFACT_NOT_FOUND')
-        }
-        const assets = []
-        for (const assetReference of item.assets ?? []) {
-          const asset = await this.dependencies.artifacts.get({
-            tenantId: run.host.tenantId,
-            artifactId: assetReference.artifactId,
-          })
-          if (!asset || !asset.mimeType.startsWith('image/') || asset.bytes.length === 0) {
-            throw new Error('DELIVERY_LAYER_ARTIFACT_NOT_FOUND')
-          }
-          assets.push({ elementId: assetReference.elementId, image: asset.bytes, imageMimeType: asset.mimeType })
-        }
-        slides.push({
-          pageNumber: item.pageNumber,
-          image: artifact.bytes,
-          imageMimeType: artifact.mimeType,
-          ...(assets.length > 0 ? { assets } : {}),
-        })
-      }
+      const slides = await loadPresentationSlides(this.dependencies.artifacts, run, slideArtifacts)
       const previewBytes = await this.dependencies.renderer.renderPreview({ blueprint, slides })
       const pptxBytes = await this.dependencies.renderer.renderPptx({ blueprint, slides })
       if (previewBytes.length === 0 || pptxBytes.length === 0) throw new Error('DELIVERY_RENDER_EMPTY')
@@ -242,50 +209,6 @@ export class DeliveryRunner {
     return run
   }
 
-  private async requireSlideArtifacts(run: RunRecord, blueprint: PresentationBlueprint): Promise<readonly SlideArtifact[]> {
-    const steps = (await this.dependencies.repository.listSteps(run.id))
-      .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
-    if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
-      const requirements = blueprintImageRequirements(run, blueprint)
-      const artifactByAssetKey = new Map(requirements.map((requirement) => {
-        const step = latestCompletedAssetStep(steps, requirement, run.revisionRound)
-        const output = step ? this.imageOutput(step) : null
-        if (!output) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
-        return [requirement.assetKey, output.artifactId]
-      }))
-      return blueprint.slides.map((slide) => {
-        if (!slide.layeredDesign) throw new Error('LAYERED_DESIGN_MISSING')
-        const assets = slide.layeredDesign.elements
-          .filter((element): element is Extract<(typeof slide.layeredDesign.elements)[number], { kind: 'IMAGE' }> => element.kind === 'IMAGE')
-          .map((element) => {
-            const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${slide.pageNumber}:element:${element.elementId}`
-            const artifactId = artifactByAssetKey.get(assetKey)
-            if (!artifactId) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
-            return { elementId: element.elementId, artifactId }
-          })
-        const baseElementId = slide.layeredDesign.elements.find((element) => element.kind === 'IMAGE' && element.role === 'BASE_LAYER')?.elementId
-        const base = assets.find((asset) => asset.elementId === baseElementId)
-        if (!base) throw new Error('BASE_LAYER_ARTIFACT_NOT_FOUND')
-        return { pageNumber: slide.pageNumber, artifactId: base.artifactId, assets }
-      })
-    }
-    return blueprint.slides.map((slide) => {
-      const slideId = `${run.id}:slide:${slide.pageNumber}`
-      const candidates = steps.map((step) => this.imageOutput(step))
-        .filter((output): output is NonNullable<typeof output> => output?.slideId === slideId)
-        .filter((output) => output.round <= run.revisionRound)
-        .sort((left, right) => right.round - left.round)
-      if (!candidates[0]) throw new Error('PAGE_ARTIFACT_NOT_FOUND')
-      return { pageNumber: slide.pageNumber, artifactId: candidates[0].artifactId }
-    })
-  }
-
-  private imageOutput(step: StepRecord) {
-    const output = step.output as { slideId?: unknown; versionId?: unknown; artifactId?: unknown } | null
-    if (!output || typeof output.slideId !== 'string' || typeof output.versionId !== 'string' || typeof output.artifactId !== 'string') return null
-    const round = /:r(\d+):/.exec(output.versionId)?.[1]
-    return round === undefined ? null : { slideId: output.slideId, artifactId: output.artifactId, round: Number(round) }
-  }
 }
 
 export function deliveryStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) {
