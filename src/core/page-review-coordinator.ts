@@ -1,5 +1,6 @@
 import { CONTRACT_VERSION } from '../contracts'
 import { getActiveBlueprint } from './active-blueprint'
+import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
 import { transitionRun } from './policy'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
@@ -22,33 +23,32 @@ export class PageReviewCoordinator {
   async reviewAll(runId: string): Promise<ReviewAllPagesResult> {
     const run = await this.dependencies.repository.getRun(runId)
     if (!run) throw new Error('RUN_NOT_FOUND')
-    if (run.status === 'DECK_REVIEW') return this.summary(run)
-    if (run.status !== 'PAGE_REVIEW') throw new Error('RUN_NOT_IN_PAGE_REVIEW')
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
+    if (run.status === 'DECK_REVIEW') return this.summary(run, blueprint)
+    if (run.status !== 'PAGE_REVIEW') throw new Error('RUN_NOT_IN_PAGE_REVIEW')
+    const requirements = blueprintImageRequirements(run, blueprint)
     const completedImageSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
-    const imageSteps = blueprint.slides.map((slide) => completedImageSteps
-      .map((step) => ({ step, output: this.imageOutput(step) }))
-      .filter((candidate) => candidate.output?.slideId === `${runId}:slide:${slide.pageNumber}`
-        && candidate.output.round <= run.revisionRound)
-      .sort((left, right) => right.output!.round - left.output!.round)[0]?.step ?? null)
+    const imageSteps = requirements.map((requirement) =>
+      latestCompletedAssetStep(completedImageSteps, requirement, run.revisionRound))
     if (imageSteps.some((step) => step === null)) throw new Error('PAGE_ARTIFACTS_INCOMPLETE')
 
     const reviews: ReviewSlideResult[] = []
-    for (const slide of blueprint.slides) {
-      const slideId = `${runId}:slide:${slide.pageNumber}`
-      const imageStep = imageSteps[slide.pageNumber - 1]
+    for (const [index, requirement] of requirements.entries()) {
+      const slide = blueprint.slides.find((candidate) => candidate.pageNumber === requirement.pageNumber)
+      if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
+      const imageStep = imageSteps[index]
       const output = imageStep ? this.imageOutput(imageStep) : null
       if (!imageStep || !output) throw new Error('PAGE_ARTIFACT_NOT_FOUND')
       const result = await this.dependencies.reviewer.review({
         runId,
-        stepId: `step-${runId}-slide-${slide.pageNumber}-review-r${output.round}`,
+        stepId: `${imageStep.id}:review`,
         idempotencyKey: `${imageStep.idempotencyKey}:review`,
         slideId: output.slideId,
         versionId: output.versionId,
         artifactId: output.artifactId,
-        visualIntent: slide.visualIntent,
-        layout: slide.layout,
+        visualIntent: requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
+        layout: requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
       })
       reviews.push(result)
@@ -60,11 +60,11 @@ export class PageReviewCoordinator {
     const approved = reviews.filter((result) => result.review?.approved).length
     if (reviews.some((result) => result.review === null) || rejected > 0) {
       await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED')
-    } else if (approved === blueprint.slides.length) {
+    } else if (approved === requirements.length) {
       await this.moveToDeckReview(runId)
     }
     const latest = await this.dependencies.repository.getRun(runId)
-    return { status: latest?.status ?? 'FAILED', approved, rejected, total: blueprint.slides.length, reviews }
+    return { status: latest?.status ?? 'FAILED', approved, rejected, total: requirements.length, reviews }
   }
 
   private imageOutput(step: StepRecord) {
@@ -112,17 +112,15 @@ export class PageReviewCoordinator {
     })
   }
 
-  private async summary(run: RunRecord): Promise<ReviewAllPagesResult> {
-    const candidates = (await this.dependencies.repository.listSteps(run.id))
-      .filter((step) => step.tool === 'review_slide_image' && step.status === 'COMPLETED')
-      .map((step) => ({ step, revision: this.reviewRevision(step) }))
-      .filter((candidate): candidate is { step: StepRecord; revision: { pageNumber: number; round: number } } =>
-        candidate.revision !== null && candidate.revision.round <= run.revisionRound)
-    const reviews = Array.from({ length: run.slideCount }, (_, index) => candidates
-      .filter((candidate) => candidate.revision.pageNumber === index + 1)
-      .sort((left, right) => right.revision.round - left.revision.round)[0])
-      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined)
-      .map(({ step }) => ({ step, review: step.output as ReviewSlideResult['review'], replayed: true }))
+  private async summary(run: RunRecord, blueprint: Awaited<ReturnType<typeof getActiveBlueprint>>): Promise<ReviewAllPagesResult> {
+    const imageSteps = await this.dependencies.repository.listSteps(run.id)
+    const reviewKeys = new Set(blueprintImageRequirements(run, blueprint).map((requirement) => {
+      const imageStep = latestCompletedAssetStep(imageSteps, requirement, run.revisionRound)
+      return imageStep ? `${imageStep.idempotencyKey}:review` : ''
+    }))
+    const reviews = (await this.dependencies.repository.listSteps(run.id))
+      .filter((step) => step.tool === 'review_slide_image' && step.status === 'COMPLETED' && reviewKeys.has(step.idempotencyKey))
+      .map((step) => ({ step, review: step.output as ReviewSlideResult['review'], replayed: true }))
     return {
       status: run.status,
       approved: reviews.filter((result) => result.review?.approved).length,
@@ -132,8 +130,4 @@ export class PageReviewCoordinator {
     }
   }
 
-  private reviewRevision(step: StepRecord) {
-    const match = /:slide:(\d+):image:r(\d+):v1:review$/.exec(step.idempotencyKey)
-    return match ? { pageNumber: Number(match[1]), round: Number(match[2]) } : null
-  }
 }

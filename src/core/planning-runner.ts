@@ -24,6 +24,9 @@ export type PlanPresentationInput = Readonly<{
   source: CreateRunRequest['source']
   slideCount: number
   visualDirection: string
+  presentationMode?: CreateRunRequest['presentationMode']
+  coverDesignMode?: CreateRunRequest['coverDesignMode']
+  maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
 }>
 
 export type PlanPresentationResult = Readonly<{
@@ -63,6 +66,9 @@ export class PlanningRunner {
         payload: {
           slideCount: input.slideCount,
           visualDirection: input.visualDirection,
+          presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
+          coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+          maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
           document: {
             name: document.name,
             chunks: document.chunks.map((chunk) => ({ id: chunk.id, sha256: chunk.sha256, text: chunk.text })),
@@ -70,12 +76,20 @@ export class PlanningRunner {
         },
       })
       const draft = blueprintDraftSchema.parse(raw)
-      this.assertBlueprintCoverage(draft, document, input.slideCount)
+      this.assertBlueprintCoverage(
+        draft,
+        document,
+        input.slideCount,
+        input.presentationMode ?? 'SLIDE_IMAGE_V2',
+        input.maxVisualAssetsPerSlide ?? 4,
+      )
       const now = this.dependencies.clock.now().toISOString()
       const blueprint = presentationBlueprintSchema.parse({
         ...draft,
         id: `blueprint-${hashInput({ runId: input.runId, inputHash: prepared.step.inputHash }).slice(0, 28)}`,
         visualDirection: input.visualDirection,
+        renderMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
+        coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
         createdAt: now,
       })
       const step = await this.complete(input, blueprint)
@@ -102,6 +116,9 @@ export class PlanningRunner {
       tool: 'create_blueprint',
       slideCount: input.slideCount,
       visualDirection: input.visualDirection,
+      presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
+      coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+      maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
       document: {
         name: document.name,
         isComplete: document.isComplete,
@@ -159,6 +176,8 @@ export class PlanningRunner {
     draft: ReturnType<typeof blueprintDraftSchema.parse>,
     document: DocumentResult,
     slideCount: number,
+    presentationMode: CreateRunRequest['presentationMode'],
+    maxVisualAssetsPerSlide: number,
   ) {
     if (draft.slides.length !== slideCount) throw new Error('BLUEPRINT_SLIDE_COUNT_MISMATCH')
     const available = new Set(document.chunks.map((chunk) => chunk.id))
@@ -166,6 +185,11 @@ export class PlanningRunner {
     if ([...cited].some((id) => !available.has(id))) throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
     if (document.chunks.some((chunk) => !draft.curriculum.sourceChunkIds.includes(chunk.id))) {
       throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
+    }
+    if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) =>
+      !slide.layeredDesign || slide.layeredDesign.elements.filter((element) =>
+        element.kind === 'IMAGE' && element.role !== 'BASE_LAYER').length > maxVisualAssetsPerSlide)) {
+      throw new Error('BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED')
     }
   }
 

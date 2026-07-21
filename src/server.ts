@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
+import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createMockRuntime } from './runtime/mock-runtime'
 
@@ -17,7 +18,16 @@ await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
-const runtime = createMockRuntime({ repository, artifacts, apiToken })
+const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
+if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
+const images = runtimeMode === 'gateway'
+  ? new GatewayImageGenerationPort({
+      baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+      apiKey: process.env.MODEL_GATEWAY_IMAGE_KEY?.trim() || '',
+      artifacts,
+    })
+  : undefined
+const runtime = createMockRuntime({ repository, artifacts, apiToken, ...(images ? { images } : {}) })
 let ticking = false
 const timer = setInterval(async () => {
   if (ticking) return
@@ -32,7 +42,7 @@ const timer = setInterval(async () => {
 }, 500)
 
 const server = Bun.serve({ hostname, port, fetch: runtime.handler })
-console.log(`[ppt-agent] mock runtime listening on ${server.url.origin}`)
+console.log(`[ppt-agent] ${runtimeMode} runtime listening on ${server.url.origin}`)
 
 const stop = () => {
   clearInterval(timer)

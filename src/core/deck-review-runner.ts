@@ -8,6 +8,7 @@ import {
 } from '../presentation-contracts'
 import { hashInput } from './hash'
 import { getActiveBlueprint } from './active-blueprint'
+import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
 import type {
   AgentRepository,
   ClockPort,
@@ -211,6 +212,45 @@ export class DeckReviewRunner {
   private async requireSlideArtifacts(run: RunRecord, blueprint: PresentationBlueprint): Promise<readonly DeckSlideInput[]> {
     const steps = (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
+    if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
+      const requirements = blueprintImageRequirements(run, blueprint)
+      const artifactByKey = new Map(requirements.map((requirement) => {
+        const step = latestCompletedAssetStep(steps, requirement, run.revisionRound)
+        const output = step ? this.imageOutput(step) : null
+        if (!output) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
+        return [requirement.assetKey, output.artifactId]
+      }))
+      return blueprint.slides.map((slide) => {
+        if (!slide.layeredDesign) throw new Error('LAYERED_DESIGN_MISSING')
+        const assets = slide.layeredDesign.elements
+          .filter((element): element is Extract<(typeof slide.layeredDesign.elements)[number], { kind: 'IMAGE' }> => element.kind === 'IMAGE')
+          .map((element) => {
+            const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${slide.pageNumber}:element:${element.elementId}`
+            const artifactId = artifactByKey.get(assetKey)
+            if (!artifactId) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
+            return {
+              elementId: element.elementId,
+              role: element.role,
+              artifactId,
+              knowledgePoint: element.knowledgePoint,
+              sourceChunkIds: element.sourceChunkIds,
+            }
+          })
+        const base = assets.find((asset) => asset.role === 'BASE_LAYER')
+        if (!base) throw new Error('BASE_LAYER_ARTIFACT_NOT_FOUND')
+        return {
+          slideId: `${run.id}:slide:${slide.pageNumber}`,
+          pageNumber: slide.pageNumber,
+          artifactId: base.artifactId,
+          title: slide.title,
+          body: slide.body,
+          layout: slide.layout,
+          visualIntent: slide.visualIntent,
+          sourceChunkIds: slide.sourceChunkIds,
+          assets,
+        }
+      })
+    }
     return blueprint.slides.map((slide) => {
       const slideId = `${run.id}:slide:${slide.pageNumber}`
       const candidates = steps.map((step) => this.imageOutput(step))

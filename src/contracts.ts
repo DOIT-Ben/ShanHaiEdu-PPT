@@ -28,6 +28,8 @@ export const runStatusSchema = z.enum([
 ])
 
 export const automationLevelSchema = z.enum(['SUPERVISED', 'BOUNDED_AUTO'])
+export const presentationModeSchema = z.enum(['SLIDE_IMAGE_V2', 'LAYERED_COURSEWARE_V3'])
+export const coverDesignModeSchema = z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE'])
 
 export const documentSourceSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -51,6 +53,9 @@ export const createRunRequestSchema = z.object({
   automationLevel: automationLevelSchema,
   budgetUnits: z.number().int().positive().max(1_000_000),
   maxRevisionRounds: z.number().int().min(0).max(2).default(2),
+  presentationMode: presentationModeSchema.default('SLIDE_IMAGE_V2'),
+  coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
+  maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
 }).strict()
 
 const actionBase = {
@@ -101,6 +106,9 @@ export const issueSummarySchema = z.object({
     'VISUAL_CONSISTENCY',
     'COMPOSITION_CONFLICT',
     'IMAGE_QUALITY',
+    'ASSET_RELEVANCE',
+    'LAYERING_CONFLICT',
+    'CHILD_READABILITY',
     'SOURCE_INCOMPLETE',
     'PLANNING_FAILED',
     'BUDGET_RESERVATION_UNKNOWN',
@@ -112,6 +120,7 @@ export const issueSummarySchema = z.object({
   slideIds: z.array(identifierSchema).max(50),
   sourceChunkIds: z.array(identifierSchema).max(200),
   status: z.enum(['OPEN', 'RESOLVED', 'ACCEPTED']),
+  repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']).optional(),
 }).strict()
 
 export const runSnapshotSchema = z.object({
@@ -128,6 +137,9 @@ export const runSnapshotSchema = z.object({
   committedBudgetUnits: z.number().int().nonnegative(),
   qualityScore: z.number().int().min(0).max(100).nullable(),
   qualityOverride: z.boolean(),
+  presentationMode: presentationModeSchema.default('SLIDE_IMAGE_V2'),
+  coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
+  maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
   issues: z.array(issueSummarySchema),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -181,6 +193,8 @@ export const apiErrorSchema = z.object({
 
 export type HostContext = z.infer<typeof hostContextSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
+export type PresentationMode = z.infer<typeof presentationModeSchema>
+export type CoverDesignMode = z.infer<typeof coverDesignModeSchema>
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>
 export type RunAction = z.infer<typeof runActionSchema>
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>

@@ -23,7 +23,32 @@ describe('public v1 contracts', () => {
     })
 
     expect(result.maxRevisionRounds).toBe(2)
+    expect(result.presentationMode).toBe('SLIDE_IMAGE_V2')
+    expect(result.coverDesignMode).toBe('INDEPENDENT')
+    expect(result.maxVisualAssetsPerSlide).toBe(4)
     expect(result.host.tenantId).toBe('frameflow')
+  })
+
+  test('accepts the layered courseware mode with an explicit template exception', () => {
+    const result = createRunRequestSchema.parse({
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: { kind: 'TEXT', text: '这是一段足够长的低年级数学教材正文，用于创建分层课件。' },
+      slideCount: 8,
+      visualDirection: '明亮清晰的儿童纸黏土课堂插画',
+      imageModel: 'image-2',
+      automationLevel: 'SUPERVISED',
+      budgetUnits: 200,
+      presentationMode: 'LAYERED_COURSEWARE_V3',
+      coverDesignMode: 'FOLLOW_TEMPLATE',
+      maxVisualAssetsPerSlide: 3,
+    })
+
+    expect(result).toMatchObject({
+      presentationMode: 'LAYERED_COURSEWARE_V3',
+      coverDesignMode: 'FOLLOW_TEMPLATE',
+      maxVisualAssetsPerSlide: 3,
+    })
   })
 
   test('rejects unknown fields and unsupported contract versions', () => {

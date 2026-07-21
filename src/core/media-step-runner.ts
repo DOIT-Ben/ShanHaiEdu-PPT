@@ -19,8 +19,13 @@ export type SubmitSlideImageInput = Readonly<{
   slideId: string
   versionId: string
   prompt: string
+  negativePrompt?: string
   model: string
   budgetUnits: number
+  aspectRatio?: '16:9' | '4:3' | '1:1' | '3:4'
+  backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
+  elementId?: string
+  assetReuseKey?: string
 }>
 
 export type SubmitSlideImageResult = Readonly<{
@@ -90,8 +95,10 @@ export class MediaStepRunner {
       const submitted = await this.dependencies.images.submit({
         tenantId: prepared.run.host.tenantId,
         prompt: input.prompt,
+        ...(input.negativePrompt ? { negativePrompt: input.negativePrompt } : {}),
         model: input.model,
-        aspectRatio: '16:9',
+        aspectRatio: input.aspectRatio ?? '16:9',
+        ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
         idempotencyKey: input.idempotencyKey,
       })
       const step = await this.markWaiting(input, reservationId, submitted.operationId)
@@ -160,7 +167,11 @@ export class MediaStepRunner {
       versionId: input.versionId,
       prompt: input.prompt,
       model: input.model,
-      aspectRatio: '16:9',
+      aspectRatio: input.aspectRatio ?? '16:9',
+      ...(input.negativePrompt ? { negativePrompt: input.negativePrompt } : {}),
+      ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
+      ...(input.elementId ? { elementId: input.elementId } : {}),
+      ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
       budgetUnits: input.budgetUnits,
     })
     return this.dependencies.repository.transact(input.runId, (transaction) => {
@@ -189,7 +200,12 @@ export class MediaStepRunner {
         budgetReservationId: null,
         externalOperationId: null,
         errorCode: null,
-        output: { slideId: input.slideId, versionId: input.versionId },
+        output: {
+          slideId: input.slideId,
+          versionId: input.versionId,
+          ...(input.elementId ? { elementId: input.elementId } : {}),
+          ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
+        },
         createdAt: now,
         updatedAt: now,
       }
@@ -234,7 +250,12 @@ export class MediaStepRunner {
         budgetReservationId: reservationId,
         externalOperationId: operationId,
         errorCode: null,
-        output: { slideId: input.slideId, versionId: input.versionId },
+        output: {
+          slideId: input.slideId,
+          versionId: input.versionId,
+          ...(input.elementId ? { elementId: input.elementId } : {}),
+          ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
+        },
         updatedAt: this.dependencies.clock.now().toISOString(),
       }
       transaction.putStep(updated)

@@ -6,6 +6,7 @@ import {
 } from '../presentation-contracts'
 import { hashInput } from './hash'
 import { getActiveBlueprint } from './active-blueprint'
+import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
 import type {
   AgentRepository,
   ArtifactPort,
@@ -25,7 +26,11 @@ export type DeliveryResult = Readonly<{
   replayed: boolean
 }>
 
-type SlideArtifact = Readonly<{ pageNumber: number; artifactId: string }>
+type SlideArtifact = Readonly<{
+  pageNumber: number
+  artifactId: string
+  assets?: readonly Readonly<{ elementId: string; artifactId: string }>[]
+}>
 
 export class DeliveryRunner {
   constructor(private readonly dependencies: Readonly<{
@@ -59,7 +64,23 @@ export class DeliveryRunner {
         if (!artifact || !artifact.mimeType.startsWith('image/') || artifact.bytes.length === 0) {
           throw new Error('DELIVERY_SOURCE_ARTIFACT_NOT_FOUND')
         }
-        slides.push({ pageNumber: item.pageNumber, image: artifact.bytes, imageMimeType: artifact.mimeType })
+        const assets = []
+        for (const assetReference of item.assets ?? []) {
+          const asset = await this.dependencies.artifacts.get({
+            tenantId: run.host.tenantId,
+            artifactId: assetReference.artifactId,
+          })
+          if (!asset || !asset.mimeType.startsWith('image/') || asset.bytes.length === 0) {
+            throw new Error('DELIVERY_LAYER_ARTIFACT_NOT_FOUND')
+          }
+          assets.push({ elementId: assetReference.elementId, image: asset.bytes, imageMimeType: asset.mimeType })
+        }
+        slides.push({
+          pageNumber: item.pageNumber,
+          image: artifact.bytes,
+          imageMimeType: artifact.mimeType,
+          ...(assets.length > 0 ? { assets } : {}),
+        })
       }
       const previewBytes = await this.dependencies.renderer.renderPreview({ blueprint, slides })
       const pptxBytes = await this.dependencies.renderer.renderPptx({ blueprint, slides })
@@ -224,6 +245,30 @@ export class DeliveryRunner {
   private async requireSlideArtifacts(run: RunRecord, blueprint: PresentationBlueprint): Promise<readonly SlideArtifact[]> {
     const steps = (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
+    if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
+      const requirements = blueprintImageRequirements(run, blueprint)
+      const artifactByAssetKey = new Map(requirements.map((requirement) => {
+        const step = latestCompletedAssetStep(steps, requirement, run.revisionRound)
+        const output = step ? this.imageOutput(step) : null
+        if (!output) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
+        return [requirement.assetKey, output.artifactId]
+      }))
+      return blueprint.slides.map((slide) => {
+        if (!slide.layeredDesign) throw new Error('LAYERED_DESIGN_MISSING')
+        const assets = slide.layeredDesign.elements
+          .filter((element): element is Extract<(typeof slide.layeredDesign.elements)[number], { kind: 'IMAGE' }> => element.kind === 'IMAGE')
+          .map((element) => {
+            const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${slide.pageNumber}:element:${element.elementId}`
+            const artifactId = artifactByAssetKey.get(assetKey)
+            if (!artifactId) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
+            return { elementId: element.elementId, artifactId }
+          })
+        const baseElementId = slide.layeredDesign.elements.find((element) => element.kind === 'IMAGE' && element.role === 'BASE_LAYER')?.elementId
+        const base = assets.find((asset) => asset.elementId === baseElementId)
+        if (!base) throw new Error('BASE_LAYER_ARTIFACT_NOT_FOUND')
+        return { pageNumber: slide.pageNumber, artifactId: base.artifactId, assets }
+      })
+    }
     return blueprint.slides.map((slide) => {
       const slideId = `${run.id}:slide:${slide.pageNumber}`
       const candidates = steps.map((step) => this.imageOutput(step))

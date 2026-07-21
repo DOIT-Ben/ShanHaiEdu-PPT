@@ -2,6 +2,88 @@ import { z } from 'zod'
 
 const identifierSchema = z.string().trim().min(1).max(160)
 const sourceChunkIdsSchema = z.array(identifierSchema).min(1).max(200)
+const hexColorSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/)
+
+export const slideElementPlacementSchema = z.object({
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  width: z.number().positive().max(1),
+  height: z.number().positive().max(1),
+}).strict().superRefine((value, context) => {
+  if (value.x + value.width > 1.000_001 || value.y + value.height > 1.000_001) {
+    context.addIssue({ code: 'custom', message: 'element placement must stay inside the slide' })
+  }
+})
+
+export const layeredImageElementSchema = z.object({
+  kind: z.literal('IMAGE'),
+  elementId: identifierSchema,
+  role: z.enum(['BASE_LAYER', 'KNOWLEDGE_VISUAL', 'DIAGRAM', 'CHARACTER']),
+  knowledgePoint: z.string().trim().min(3).max(500),
+  prompt: z.string().trim().min(20).max(3_000),
+  negativePrompt: z.string().trim().min(3).max(1_000),
+  sourceChunkIds: sourceChunkIdsSchema,
+  placement: slideElementPlacementSchema,
+  zIndex: z.number().int().min(0).max(100),
+  fit: z.enum(['COVER', 'CONTAIN']),
+  aspectRatio: z.enum(['16:9', '4:3', '1:1', '3:4']),
+  backgroundMode: z.enum(['OPAQUE', 'TRANSPARENT']),
+  reuseKey: identifierSchema.optional(),
+}).strict()
+
+export const layeredTextElementSchema = z.object({
+  kind: z.literal('TEXT'),
+  elementId: identifierSchema,
+  role: z.enum(['TITLE', 'SUBTITLE', 'BODY', 'CAPTION', 'QUESTION']),
+  text: z.string().trim().min(1).max(1_500),
+  sourceChunkIds: sourceChunkIdsSchema,
+  placement: slideElementPlacementSchema,
+  zIndex: z.number().int().min(0).max(100),
+  style: z.object({
+    fontSize: z.number().int().min(10).max(60),
+    bold: z.boolean(),
+    color: hexColorSchema,
+    align: z.enum(['LEFT', 'CENTER', 'RIGHT']),
+  }).strict(),
+}).strict()
+
+export const layeredShapeElementSchema = z.object({
+  kind: z.literal('SHAPE'),
+  elementId: identifierSchema,
+  role: z.enum(['CONTENT_PANEL', 'HIGHLIGHT', 'ARROW', 'DIVIDER']),
+  shape: z.enum(['RECTANGLE', 'ROUNDED_RECTANGLE', 'ELLIPSE', 'LINE', 'ARROW']),
+  placement: slideElementPlacementSchema,
+  zIndex: z.number().int().min(0).max(100),
+  fillColor: hexColorSchema,
+  transparency: z.number().int().min(0).max(100),
+}).strict()
+
+export const layeredSlideElementSchema = z.discriminatedUnion('kind', [
+  layeredImageElementSchema,
+  layeredTextElementSchema,
+  layeredShapeElementSchema,
+])
+
+export const layeredSlideDesignSchema = z.object({
+  designKind: z.enum(['COVER', 'CONTENT']),
+  backgroundColor: hexColorSchema,
+  elements: z.array(layeredSlideElementSchema).min(3).max(16),
+}).strict().superRefine((value, context) => {
+  const ids = value.elements.map((element) => element.elementId)
+  if (new Set(ids).size !== ids.length) {
+    context.addIssue({ code: 'custom', path: ['elements'], message: 'layer element ids must be unique' })
+  }
+  const images = value.elements.filter((element) => element.kind === 'IMAGE')
+  if (images.filter((element) => element.role === 'BASE_LAYER').length !== 1) {
+    context.addIssue({ code: 'custom', path: ['elements'], message: 'layered slide requires exactly one base layer image' })
+  }
+  if (images.filter((element) => element.role !== 'BASE_LAYER').length > 4) {
+    context.addIssue({ code: 'custom', path: ['elements'], message: 'layered slide allows at most four knowledge visual assets' })
+  }
+  if (!value.elements.some((element) => element.kind === 'TEXT')) {
+    context.addIssue({ code: 'custom', path: ['elements'], message: 'layered slide requires editable text' })
+  }
+})
 
 export const presentationLayoutSchema = z.enum([
   'HERO',
@@ -30,6 +112,7 @@ export const blueprintSlideSchema = z.object({
   visualIntent: z.string().trim().min(10).max(1_000),
   visualPrompt: z.string().trim().min(20).max(3_000),
   sourceChunkIds: sourceChunkIdsSchema,
+  layeredDesign: layeredSlideDesignSchema.optional(),
 }).strict()
 
 export const blueprintDraftSchema = z.object({
@@ -51,8 +134,28 @@ export const blueprintDraftSchema = z.object({
 export const presentationBlueprintSchema = blueprintDraftSchema.extend({
   id: identifierSchema,
   visualDirection: z.string().trim().min(3).max(1_000),
+  renderMode: z.enum(['SLIDE_IMAGE_V2', 'LAYERED_COURSEWARE_V3']).optional(),
+  coverDesignMode: z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE']).optional(),
   createdAt: z.string().datetime(),
-}).strict()
+}).strict().transform((value) => value.renderMode === 'LAYERED_COURSEWARE_V3' && value.coverDesignMode === undefined
+  ? { ...value, coverDesignMode: 'INDEPENDENT' as const }
+  : value).superRefine((value, context) => {
+  if (value.renderMode !== 'LAYERED_COURSEWARE_V3') return
+  value.slides.forEach((slide, index) => {
+    if (!slide.layeredDesign) {
+      context.addIssue({ code: 'custom', path: ['slides', index, 'layeredDesign'], message: 'layered mode requires a design for every slide' })
+      return
+    }
+    const expected = index === 0 ? 'COVER' : 'CONTENT'
+    if (slide.layeredDesign.designKind !== expected) {
+      context.addIssue({
+        code: 'custom',
+        path: ['slides', index, 'layeredDesign', 'designKind'],
+        message: index === 0 ? 'first layered slide must be COVER' : 'only the first layered slide may be COVER',
+      })
+    }
+  })
+})
 
 export const slideVisualReviewSchema = z.object({
   approved: z.boolean(),
@@ -78,6 +181,9 @@ export const deckReviewIssueCategorySchema = z.enum([
   'VISUAL_CONSISTENCY',
   'COMPOSITION_CONFLICT',
   'IMAGE_QUALITY',
+  'ASSET_RELEVANCE',
+  'LAYERING_CONFLICT',
+  'CHILD_READABILITY',
 ])
 
 export const deckReviewIssueSchema = z.object({
@@ -88,6 +194,7 @@ export const deckReviewIssueSchema = z.object({
   slideIds: z.array(identifierSchema).min(1).max(50),
   sourceChunkIds: z.array(identifierSchema).max(200),
   status: z.literal('OPEN'),
+  repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']).optional(),
 }).strict().superRefine((value, context) => {
   if (['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(value.category) && value.sourceChunkIds.length === 0) {
     context.addIssue({
@@ -122,6 +229,7 @@ export const revisionOperationSchema = z.object({
   issueIds: z.array(identifierSchema).min(1).max(20),
   instruction: z.string().trim().min(10).max(2_000),
   sourceChunkIds: z.array(identifierSchema).max(200),
+  targetElementId: identifierSchema.optional(),
 }).strict()
 
 export const revisionPlanDraftSchema = z.object({
@@ -166,3 +274,9 @@ export type DeckReview = z.infer<typeof deckReviewSchema>
 export type RevisionPlanDraft = z.infer<typeof revisionPlanDraftSchema>
 export type RevisionPlan = z.infer<typeof revisionPlanSchema>
 export type DeliveryRecord = z.infer<typeof deliveryRecordSchema>
+
+export function revisionRepairDomain(operation: z.infer<typeof revisionOperationSchema>) {
+  if (operation.kind === 'UPDATE_CONTENT') return 'KNOWLEDGE' as const
+  if (operation.kind === 'REGENERATE_IMAGE') return 'ASSET' as const
+  return 'LAYOUT' as const
+}

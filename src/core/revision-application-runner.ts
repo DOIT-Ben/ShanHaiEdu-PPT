@@ -74,6 +74,8 @@ export class RevisionApplicationRunner {
         ...draft,
         id: `${run.id}:blueprint:r${run.revisionRound}`,
         visualDirection: base.visualDirection,
+        ...(base.renderMode ? { renderMode: base.renderMode } : {}),
+        ...(base.coverDesignMode ? { coverDesignMode: base.coverDesignMode } : {}),
         createdAt: this.dependencies.clock.now().toISOString(),
       })
       return this.complete(run, idempotencyKey, blueprint, plan)
@@ -93,7 +95,7 @@ export class RevisionApplicationRunner {
             status: transaction.run.status,
             step: existing,
             blueprint,
-            requiresMedia: requiresRevisionMedia(plan),
+            requiresMedia: requiresRevisionMedia(plan, blueprint),
             replayed: true,
           }
         }
@@ -139,7 +141,7 @@ export class RevisionApplicationRunner {
       const step = transaction.getStep(key)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const requiresMedia = requiresRevisionMedia(plan)
+      const requiresMedia = requiresRevisionMedia(plan, blueprint)
       const policy = requiresMedia ? transaction.run : transitionRun(transaction.run, 'DECK_REVIEW')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updatedStep: StepRecord = { ...step, status: 'COMPLETED', output: blueprint, errorCode: null, updatedAt: now }
@@ -249,6 +251,9 @@ export class RevisionApplicationRunner {
   }
 }
 
-export function requiresRevisionMedia(plan: RevisionPlan) {
+export function requiresRevisionMedia(plan: RevisionPlan, blueprint?: PresentationBlueprint) {
+  if (blueprint?.renderMode === 'LAYERED_COURSEWARE_V3') {
+    return plan.operations.some((operation) => operation.kind === 'REGENERATE_IMAGE')
+  }
   return plan.operations.some((operation) => operation.kind === 'REGENERATE_IMAGE' || operation.kind === 'RELAYOUT')
 }

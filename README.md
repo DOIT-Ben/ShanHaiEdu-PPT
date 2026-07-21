@@ -9,7 +9,9 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - 已冻结独立产品边界、v1 HTTP/SSE 合同和宿主无关核心状态机。
 - 已实现 SQLite 持久化、lease、预算/媒体幂等、教材完整性、蓝图、逐页质检、整套审查和有限修订决策。
 - 已通过独立 Renderer/Artifact Port 生成 PNG 整套预览和包含可编辑文字对象的 PPTX，并提供归属隔离下载接口。
-- 15 页 Mock 已从教材规划完整运行到交付，默认不调用真实模型或计费 Provider。
+- 15 页 Mock 已从教材规划完整运行到交付，测试默认不调用真实模型或计费 Provider。
+- V3 分层课件默认独立设计封面，每页输出独立底图、最多 4 个知识素材、原生文字和原生形状；跨页素材按复用键只生成一次。
+- 生产 `gateway` 运行模式通过统一模型网关生成真实图片；`mock` 模式只允许测试使用。
 - RevisionPlan 可限定页面执行内容更新、重排和预算保护的局部重绘，并重新进入逐页与整套审查。
 - 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
 - 下一阶段是以功能开关接入 FrameFlow Agent API Client 和工作台。
@@ -33,4 +35,19 @@ bun install --frozen-lockfile
 bun test
 bun run typecheck
 bun run build
+```
+
+## 生产部署
+
+- 发布目录：`/opt/ppt-agent/releases/<timestamp>`，当前版本由 `/opt/ppt-agent/current` 原子软链接指向。
+- 持久化目录：`/opt/ppt-agent/shared/data`，环境文件为 `/opt/ppt-agent/shared/ppt-agent.env`，权限 `600`。
+- 服务只监听 `127.0.0.1:4310`，由 FrameFlow 服务端调用，不经 Nginx 暴露公网。
+- systemd 模板和环境示例位于 `deploy/aliyun/`。
+
+回退时把 `current` 指回上一版本并重启：
+
+```bash
+systemctl restart ppt-agent
+systemctl is-active ppt-agent
+test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:4310/v1/runs)" = 401
 ```

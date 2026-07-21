@@ -1,6 +1,8 @@
 import { CONTRACT_VERSION } from '../contracts'
 import type { PresentationBlueprint } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
+import { blueprintImageRequirements } from './blueprint-assets'
+import { hashInput } from './hash'
 import { MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
 import { evaluateBudget, transitionRun } from './policy'
@@ -35,6 +37,7 @@ export class SlideGenerationCoordinator {
     }
     if (run.status !== 'EXECUTING') throw new Error('RUN_NOT_EXECUTING')
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
+    const requirements = blueprintImageRequirements(run, blueprint)
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image')
     const blockingStep = existingSteps.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
@@ -43,36 +46,44 @@ export class SlideGenerationCoordinator {
       return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
     }
     const existingKeys = new Set(existingSteps.map((step) => step.idempotencyKey))
-    const pendingSlides = blueprint.slides.filter((slide) => !existingKeys.has(this.imageKey(run, slide.pageNumber)))
+    const pendingRequirements = requirements.filter((requirement) => !existingKeys.has(requirement.idempotencyKey))
 
-    if (pendingSlides.length === 0) {
+    if (pendingRequirements.length === 0) {
       return {
         status: run.status,
         submitted: existingSteps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
-        total: blueprint.slides.length,
+        total: requirements.length,
         steps: existingSteps,
       }
     }
 
-    const decision = evaluateBudget(run, pendingSlides.length * unitBudgetUnits)
+    const decision = evaluateBudget(run, pendingRequirements.length * unitBudgetUnits)
     if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
-      const paused = await this.pauseForBudget(run, pendingSlides.length * unitBudgetUnits)
-      return { status: paused.status, submitted: 0, total: blueprint.slides.length, steps: existingSteps }
+      const paused = await this.pauseForBudget(run, pendingRequirements.length * unitBudgetUnits)
+      return { status: paused.status, submitted: 0, total: requirements.length, steps: existingSteps }
     }
     if (!decision.allowed) throw new Error(decision.reason)
 
     const steps = [...existingSteps]
-    for (const slide of pendingSlides) {
-      const key = this.imageKey(run, slide.pageNumber)
+    for (const requirement of pendingRequirements) {
+      const key = requirement.idempotencyKey
+      const versionId = requirement.elementId === null
+        ? `${runId}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
+        : `${runId}:slide:${requirement.pageNumber}:element:${requirement.elementId}:r${run.revisionRound}:v1`
       const result = await this.dependencies.media.submitSlideImage({
         runId,
-        stepId: `step-${runId}-slide-${slide.pageNumber}-image-r${run.revisionRound}`,
+        stepId: `step-${runId}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
         idempotencyKey: key,
-        slideId: `${runId}:slide:${slide.pageNumber}`,
-        versionId: `${runId}:slide:${slide.pageNumber}:r${run.revisionRound}:v1`,
-        prompt: slide.visualPrompt,
+        slideId: requirement.slideId,
+        versionId,
+        prompt: requirement.prompt,
+        ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
         model: run.imageModel,
         budgetUnits: unitBudgetUnits,
+        aspectRatio: requirement.aspectRatio,
+        backgroundMode: requirement.backgroundMode,
+        ...(requirement.elementId ? { elementId: requirement.elementId } : {}),
+        ...(requirement.reuseKey ? { assetReuseKey: requirement.reuseKey } : {}),
       })
       if (!steps.some((step) => step.idempotencyKey === result.step.idempotencyKey)) steps.push(result.step)
       const latestRun = await this.dependencies.repository.getRun(runId)
@@ -81,13 +92,13 @@ export class SlideGenerationCoordinator {
         await this.requireHuman(runId, result.step)
         break
       }
-      await this.appendProgress(runId, result.step.id, steps.length, blueprint.slides.length)
+      await this.appendProgress(runId, result.step.id, steps.length, requirements.length)
     }
     const latest = await this.dependencies.repository.getRun(runId)
     return {
       status: latest?.status ?? 'FAILED',
       submitted: steps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
-      total: blueprint.slides.length,
+      total: requirements.length,
       steps,
     }
   }
@@ -96,8 +107,9 @@ export class SlideGenerationCoordinator {
     const run = await this.dependencies.repository.getRun(runId)
     if (!run) throw new Error('RUN_NOT_FOUND')
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
-    if (run.status === 'PAGE_REVIEW') return this.completedSummary(runId, blueprint.slides.length, run.status)
-    if (run.status !== 'EXECUTING') return this.completedSummary(runId, blueprint.slides.length, run.status)
+    const requirements = blueprintImageRequirements(run, blueprint)
+    if (run.status === 'PAGE_REVIEW') return this.completedSummary(runId, requirements.length, run.status)
+    if (run.status !== 'EXECUTING') return this.completedSummary(runId, requirements.length, run.status)
 
     const steps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image')
@@ -113,7 +125,7 @@ export class SlideGenerationCoordinator {
     if (failed) await this.requireHuman(runId, failed)
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step) !== null)
     const latest = await this.dependencies.repository.getRun(runId)
-    if (!failed && completed.length === blueprint.slides.length && latest?.status === 'EXECUTING') {
+    if (!failed && completed.length === requirements.length && latest?.status === 'EXECUTING') {
       await this.dependencies.repository.transact(runId, (transaction) => {
         if (transaction.run.status !== 'EXECUTING') return
         const now = this.dependencies.clock.now().toISOString()
@@ -130,13 +142,9 @@ export class SlideGenerationCoordinator {
     return {
       status: finalRun?.status ?? 'FAILED',
       completed: completed.length,
-      total: blueprint.slides.length,
+      total: requirements.length,
       artifactIds: completed.map((step) => this.artifactId(step)!),
     }
-  }
-
-  private imageKey(run: RunRecord, pageNumber: number) {
-    return `${run.id}:slide:${pageNumber}:image:r${run.revisionRound}:v1`
   }
 
   private artifactId(step: StepRecord) {

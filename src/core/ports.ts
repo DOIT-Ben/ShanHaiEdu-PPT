@@ -49,8 +49,10 @@ export interface ImageGenerationPort {
   submit(input: Readonly<{
     tenantId: string
     prompt: string
+    negativePrompt?: string
     model: string
-    aspectRatio: '16:9'
+    aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+    backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
     idempotencyKey: string
   }>): Promise<Readonly<{
     operationId: string
@@ -92,6 +94,13 @@ export interface DeckReviewPort {
       layout: string
       visualIntent: string
       sourceChunkIds: readonly string[]
+      assets?: readonly Readonly<{
+        elementId: string
+        role: string
+        artifactId: string
+        knowledgePoint: string
+        sourceChunkIds: readonly string[]
+      }>[]
     }>[]
     idempotencyKey: string
   }>): Promise<unknown>
@@ -166,12 +175,22 @@ export interface ArtifactPort {
 export interface PresentationRendererPort {
   renderPreview(input: Readonly<{
     blueprint: PresentationBlueprint
-    slides: readonly Readonly<{ pageNumber: number; image: Uint8Array; imageMimeType: string }>[]
+    slides: readonly Readonly<{
+      pageNumber: number
+      image: Uint8Array
+      imageMimeType: string
+      assets?: readonly Readonly<{ elementId: string; image: Uint8Array; imageMimeType: string }>[]
+    }>[]
   }>): Promise<Uint8Array>
 
   renderPptx(input: Readonly<{
     blueprint: PresentationBlueprint
-    slides: readonly Readonly<{ pageNumber: number; image: Uint8Array; imageMimeType: string }>[]
+    slides: readonly Readonly<{
+      pageNumber: number
+      image: Uint8Array
+      imageMimeType: string
+      assets?: readonly Readonly<{ elementId: string; image: Uint8Array; imageMimeType: string }>[]
+    }>[]
   }>): Promise<Uint8Array>
 }
 
@@ -189,6 +208,9 @@ export type RunRecord = Readonly<{
   visualDirection: string
   imageModel: string
   automationLevel: CreateRunRequest['automationLevel']
+  presentationMode?: CreateRunRequest['presentationMode']
+  coverDesignMode?: CreateRunRequest['coverDesignMode']
+  maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
   maxRevisionRounds: number
   revisionRound: number
   qualityScore: number | null
