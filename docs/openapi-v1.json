@@ -121,7 +121,8 @@
         "properties": {
           "tenantId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "externalUserId": { "type": "string", "minLength": 1, "maxLength": 160 },
-          "externalProjectId": { "type": "string", "minLength": 1, "maxLength": 160 }
+          "externalProjectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "role": { "enum": ["USER", "ADMIN"], "default": "USER" }
         }
       },
       "DocumentSource": {
@@ -171,10 +172,14 @@
         "required": ["schemaVersion", "type", "expectedVersion"],
         "properties": {
           "schemaVersion": { "const": "1" },
-          "type": { "enum": ["APPROVE_BLUEPRINT", "REQUEST_BLUEPRINT_REVISION", "PAUSE", "RESUME", "CANCEL", "ADD_BUDGET", "APPROVE_REVISION", "SUBMIT_LIMITED_REVISION", "REJECT_REVISION", "ACCEPT_WITH_OVERRIDE"] },
+          "type": { "enum": ["APPROVE_BLUEPRINT", "RETRY_PLANNING", "REPLAN", "REQUEST_BLUEPRINT_REVISION", "PAUSE", "RESUME", "CANCEL", "ADD_BUDGET", "APPROVE_REVISION", "SUBMIT_LIMITED_REVISION", "REJECT_REVISION", "ACCEPT_WITH_OVERRIDE"] },
           "expectedVersion": { "type": "integer", "minimum": 0 },
           "instruction": { "type": "string", "minLength": 3, "maxLength": 2000 },
           "reason": { "type": "string", "minLength": 3, "maxLength": 2000 },
+          "mode": { "const": "STOP_NEW_SUBMISSIONS" },
+          "issueIds": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+          "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
           "additionalBudgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
           "slideId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "repairDomain": { "enum": ["KNOWLEDGE", "ASSET", "LAYOUT"] },
@@ -190,6 +195,9 @@
           "status": { "type": "string" },
           "version": { "type": "integer" },
           "slideCount": { "type": "integer" },
+          "visualDirection": { "type": "string" },
+          "planningAttempt": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "maxPlanningRetries": { "const": 2 },
           "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "LAYERED_COURSEWARE_V3"] },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"] },
           "maxVisualAssetsPerSlide": { "type": "integer" },

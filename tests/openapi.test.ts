@@ -10,7 +10,10 @@ describe('OpenAPI v1 contract', () => {
       info: { version: string }
       security: unknown[]
       paths: Record<string, Record<string, unknown>>
-      components: { parameters: Record<string, { required?: boolean }> }
+      components: {
+        parameters: Record<string, { required?: boolean }>
+        schemas: Record<string, { properties?: Record<string, { enum?: string[] }> }>
+      }
     }
 
     expect(document.openapi).toBe('3.1.0')
@@ -25,5 +28,9 @@ describe('OpenAPI v1 contract', () => {
     ])
     expect(document.paths['/v1/runs/{runId}/events']?.get).toBeDefined()
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
+    expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
+    expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
+      'RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
+    ]))
   })
 })
