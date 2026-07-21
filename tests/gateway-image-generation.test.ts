@@ -78,6 +78,37 @@ describe('gateway image generation adapter', () => {
     })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'GATEWAY_SUBMISSION_UNKNOWN' })
   })
 
+  test('uses a multipart image edit request for a selected source reference', async () => {
+    const artifacts = new MockArtifactPort()
+    const reference = await sharp({ create: { width: 32, height: 32, channels: 3, background: '#4C956C' } }).png().toBuffer()
+    const output = await sharp({ create: { width: 32, height: 32, channels: 3, background: '#2C6E49' } }).png().toBuffer()
+    let captured: { url: string; init: RequestInit } | null = null
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init: init! }
+        return Response.json({ data: [{ b64_json: output.toString('base64') }] })
+      },
+    })
+
+    await adapter.submit({
+      tenantId: 'frameflow', prompt: 'Create a lesson illustration based on the exact supplied textbook leaf',
+      model: 'image-2', aspectRatio: '1:1', idempotencyKey: 'run-1:asset:leaf-reference:r0:v1',
+      referenceImage: { mimeType: 'image/png', bytes: new Uint8Array(reference), sha256: 'a'.repeat(64) },
+    })
+
+    const request = captured as unknown as { url: string; init: RequestInit }
+    expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/images/edits')
+    expect(new Headers(request.init.headers).has('Content-Type')).toBe(false)
+    expect(request.init.body).toBeInstanceOf(FormData)
+    const form = request.init.body as FormData
+    expect(form.get('model')).toBe('image-2')
+    expect(form.get('prompt')).toContain('exact supplied textbook leaf')
+    expect(form.get('image')).toBeInstanceOf(Blob)
+    expect((form.get('image') as Blob).size).toBe(reference.length)
+  })
+
   test('rejects non-loopback plaintext gateway endpoints', () => {
     expect(() => new GatewayImageGenerationPort({
       baseUrl: 'http://example.com/v1', apiKey: 'test-image-key-0001', artifacts: new MockArtifactPort(),

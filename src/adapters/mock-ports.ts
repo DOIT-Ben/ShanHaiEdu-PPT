@@ -49,6 +49,7 @@ export class MockBudgetPort implements BudgetPort {
 export class MockImageGenerationPort implements ImageGenerationPort {
   readonly operations = new Map<string, string>()
   readonly statuses = new Map<string, Awaited<ReturnType<ImageGenerationPort['inspect']>>>()
+  readonly requests = new Map<string, Parameters<ImageGenerationPort['submit']>[0]>()
   nextFailure: MediaSubmissionError | null = null
 
   async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
@@ -61,6 +62,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
     }
     const operationId = `image:${input.tenantId}:${input.idempotencyKey}`
     this.operations.set(input.idempotencyKey, operationId)
+    this.requests.set(input.idempotencyKey, structuredClone(input))
     this.statuses.set(operationId, { state: 'QUEUED' })
     return { operationId, state: 'QUEUED' as const }
   }

@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
 import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
+import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
 
@@ -47,6 +48,10 @@ const runtime = runtimeMode === 'gateway'
         deckReviewer: model,
         revisionPlanner: model,
         revisionApplication: model,
+        frameFlowBackend: new HttpFrameFlowBackend({
+          baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
+          token: apiToken,
+        }),
       })
     })()
   : createMockRuntime({ repository, artifacts, apiToken })

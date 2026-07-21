@@ -13,7 +13,20 @@ export type BlueprintImageRequirement = Readonly<{
   negativePrompt: string | null
   aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
   backgroundMode: 'OPAQUE' | 'TRANSPARENT'
+  sourceAssetIds: readonly string[]
+  sourceAssetStrategy: 'REUSE_ORIGINAL' | 'REFERENCE_GENERATION' | 'REGENERATE'
 }>
+
+export function blueprintElementAssetKey(
+  slide: PresentationBlueprint['slides'][number],
+  element: Extract<NonNullable<PresentationBlueprint['slides'][number]['layeredDesign']>['elements'][number], { kind: 'IMAGE' }>,
+) {
+  const strategy = element.sourceAssetStrategy ?? 'REGENERATE'
+  const sourceIdentity = strategy === 'REGENERATE' ? '' : `:${(element.sourceAssetIds ?? []).join(',')}`
+  return element.reuseKey
+    ? `reuse:${element.reuseKey}:${strategy}${sourceIdentity}`
+    : `slide:${slide.pageNumber}:element:${element.elementId}:${strategy}${sourceIdentity}`
+}
 
 export function blueprintImageRequirements(
   run: Pick<RunRecord, 'id' | 'revisionRound'>,
@@ -31,6 +44,8 @@ export function blueprintImageRequirements(
       negativePrompt: null,
       aspectRatio: '16:9',
       backgroundMode: 'OPAQUE',
+      sourceAssetIds: [],
+      sourceAssetStrategy: 'REGENERATE',
     }))
   }
 
@@ -39,7 +54,8 @@ export function blueprintImageRequirements(
     if (!slide.layeredDesign) throw new Error('LAYERED_DESIGN_MISSING')
     for (const element of slide.layeredDesign.elements) {
       if (element.kind !== 'IMAGE') continue
-      const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${slide.pageNumber}:element:${element.elementId}`
+      const sourceAssetStrategy = element.sourceAssetStrategy ?? 'REGENERATE'
+      const assetKey = blueprintElementAssetKey(slide, element)
       if (unique.has(assetKey)) continue
       const keyHash = hashInput({ assetKey }).slice(0, 28)
       unique.set(assetKey, {
@@ -53,6 +69,8 @@ export function blueprintImageRequirements(
         negativePrompt: element.negativePrompt,
         aspectRatio: element.aspectRatio,
         backgroundMode: element.backgroundMode,
+        sourceAssetIds: element.sourceAssetIds ?? [],
+        sourceAssetStrategy,
       })
     }
   }

@@ -24,6 +24,11 @@ export type SubmitSlideImageInput = Readonly<{
   budgetUnits: number
   aspectRatio?: '16:9' | '4:3' | '1:1' | '3:4'
   backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
+  referenceImage?: Readonly<{
+    mimeType: 'image/png' | 'image/jpeg' | 'image/webp'
+    bytes: Uint8Array
+    sha256: string
+  }>
   elementId?: string
   assetReuseKey?: string
 }>
@@ -99,6 +104,7 @@ export class MediaStepRunner {
         model: input.model,
         aspectRatio: input.aspectRatio ?? '16:9',
         ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
+        ...(input.referenceImage ? { referenceImage: input.referenceImage } : {}),
         idempotencyKey: input.idempotencyKey,
       })
       const step = await this.markWaiting(input, reservationId, submitted.operationId)
@@ -185,6 +191,7 @@ export class MediaStepRunner {
       ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
       ...(input.elementId ? { elementId: input.elementId } : {}),
       ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
+      ...(input.referenceImage ? { referenceImageSha256: input.referenceImage.sha256 } : {}),
       budgetUnits: input.budgetUnits,
     })
     return this.dependencies.repository.transact(input.runId, (transaction) => {

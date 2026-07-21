@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
+import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { planningStepKey } from '../src/core/planning-runner'
-import type { RunRecord } from '../src/core/ports'
+import type { DocumentResult, RunRecord } from '../src/core/ports'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 
 function run(budgetUnits = 100): RunRecord {
@@ -65,11 +65,15 @@ function blueprint() {
   }
 }
 
-async function fixture(budgetUnits = 100) {
+async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blueprint> | Record<string, unknown> = blueprint(), documentResult: DocumentResult = {
+  name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [],
+}) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
   const clock = new FixedClock()
+  const artifacts = new MockArtifactPort()
+  const documents = { resolve: async () => structuredClone(documentResult) }
   await repository.createRun(run(budgetUnits))
   await repository.transact('run-1', (transaction) => {
     const key = planningStepKey('run-1')
@@ -84,14 +88,75 @@ async function fixture(budgetUnits = 100) {
       budgetReservationId: null,
       externalOperationId: null,
       errorCode: null,
-      output: blueprint(),
+      output: blueprintValue,
       createdAt: transaction.run.createdAt,
       updatedAt: transaction.run.updatedAt,
     })
   })
   const media = new MediaStepRunner({ repository, budget, images, clock })
-  const coordinator = new SlideGenerationCoordinator({ repository, media, clock })
-  return { repository, budget, images, coordinator }
+  const coordinator = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock })
+  return { repository, budget, images, artifacts, coordinator }
+}
+
+function layeredBlueprint(strategy: 'REUSE_ORIGINAL' | 'REFERENCE_GENERATION') {
+  const base = blueprint()
+  return {
+    ...base,
+    renderMode: 'LAYERED_COURSEWARE_V3',
+    coverDesignMode: 'INDEPENDENT',
+    sourceManifest: [{ id: 'source-image-1', name: '叶片.png', kind: 'IMAGE', mimeType: 'image/png', status: 'READY' }],
+    sourceAssets: [{
+      id: 'source-asset-1', sourceId: 'source-image-1', name: '叶片.png', mimeType: 'image/png',
+      byteLength: 8, sha256: 'a'.repeat(64), width: 640, height: 480,
+    }],
+    curriculum: { ...base.curriculum, sourceAssetIds: ['source-asset-1'] },
+    slides: base.slides.slice(0, 2).map((slide, index) => ({
+      ...slide,
+      sourceAssetIds: index === 0 ? ['source-asset-1'] : [],
+      layeredDesign: {
+        designKind: index === 0 ? 'COVER' : 'CONTENT',
+        backgroundColor: '#F5F8FF',
+        elements: [
+          {
+            kind: 'IMAGE', elementId: `base-${index + 1}`, role: 'BASE_LAYER',
+            knowledgePoint: '建立教材知识情境', prompt: 'A child friendly botanical classroom scene without text or logos',
+            negativePrompt: 'text, watermark, logo', sourceChunkIds: ['chunk-1'], sourceAssetIds: [],
+            sourceAssetStrategy: 'REGENERATE', placement: { x: 0, y: 0, width: 1, height: 1 }, zIndex: 0,
+            fit: 'COVER', aspectRatio: '16:9', backgroundMode: 'OPAQUE',
+          },
+          ...(index === 0 ? [{
+            kind: 'IMAGE', elementId: 'source-leaf', role: 'KNOWLEDGE_VISUAL',
+            knowledgePoint: '使用教材叶片原图讲解光合作用', prompt: 'Use the supplied textbook leaf as the exact visual reference for this lesson',
+            negativePrompt: 'text, watermark, logo', sourceChunkIds: ['chunk-1'], sourceAssetIds: ['source-asset-1'],
+            sourceAssetStrategy: strategy, placement: { x: 0.6, y: 0.2, width: 0.3, height: 0.5 }, zIndex: 10,
+            fit: 'CONTAIN', aspectRatio: '1:1', backgroundMode: 'TRANSPARENT',
+          }] : []),
+          ...(index > 0 ? [{
+            kind: 'SHAPE', elementId: `panel-${index + 1}`, role: 'CONTENT_PANEL', shape: 'ROUNDED_RECTANGLE',
+            placement: { x: 0.05, y: 0.1, width: 0.48, height: 0.78 }, zIndex: 15,
+            fillColor: '#FFFFFF', transparency: 8,
+          }] : []),
+          {
+            kind: 'TEXT', elementId: `title-${index + 1}`, role: 'TITLE', text: slide.title,
+            sourceChunkIds: ['chunk-1'], sourceAssetIds: index === 0 ? ['source-asset-1'] : [],
+            placement: { x: 0.09, y: 0.2, width: 0.39, height: 0.18 }, zIndex: 20,
+            style: { fontSize: 30, bold: true, color: '#17202A', align: 'LEFT' },
+          },
+        ],
+      },
+    })),
+  }
+}
+
+function sourceDocument() {
+  return {
+    name: 'source-package', chunks: [], isComplete: true, missingRanges: [],
+    assets: [{
+      id: 'source-asset-1', sourceId: 'source-image-1', name: '叶片.png', mimeType: 'image/png' as const,
+      byteLength: 8, sha256: 'a'.repeat(64), width: 640, height: 480,
+      bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    }],
+  }
 }
 
 describe('slide generation coordinator', () => {
@@ -175,5 +240,31 @@ describe('slide generation coordinator', () => {
 
     expect(result.status).toBe('NEEDS_HUMAN')
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 20 })
+  })
+
+  test('reuses an original source image without image-provider calls or budget charge', async () => {
+    const { repository, images, budget, artifacts, coordinator } = await fixture(100, layeredBlueprint('REUSE_ORIGINAL'), sourceDocument())
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ status: 'EXECUTING', submitted: 3, total: 3 })
+    expect(images.operations.size).toBe(2)
+    expect(budget.reservations.size).toBe(2)
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 20 })
+    const reused = result.steps.find((step) => (step.output as { sourceAssetId?: string })?.sourceAssetId === 'source-asset-1')
+    expect(reused).toMatchObject({ status: 'COMPLETED', budgetUnits: 0 })
+    const artifactId = (reused!.output as { artifactId: string }).artifactId
+    expect((await artifacts.get({ tenantId: 'frameflow', artifactId }))?.bytes).toEqual(sourceDocument().assets[0]!.bytes)
+  })
+
+  test('sends the selected source image to reference generation', async () => {
+    const { images, budget, coordinator } = await fixture(100, layeredBlueprint('REFERENCE_GENERATION'), sourceDocument())
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ submitted: 3, total: 3 })
+    expect(images.operations.size).toBe(3)
+    expect(budget.reservations.size).toBe(3)
+    const referenced = [...images.requests.values()].find((request) => request.referenceImage)
+    expect(referenced?.referenceImage).toMatchObject({ mimeType: 'image/png', sha256: 'a'.repeat(64) })
+    expect(referenced?.referenceImage?.bytes).toEqual(sourceDocument().assets[0]!.bytes)
   })
 })

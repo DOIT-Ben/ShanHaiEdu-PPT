@@ -51,6 +51,38 @@ describe('public v1 contracts', () => {
     })
   })
 
+  test('accepts an ordered mixed source package and rejects duplicate attachments', () => {
+    const base = {
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: {
+        kind: 'SOURCE_PACKAGE' as const,
+        name: '混合教材包',
+        sources: [
+          { kind: 'TEXT' as const, sourceId: 'outline', name: '课程要求.md', text: '这是根据教师要求整理的完整课程范围和教学目标。' },
+          { kind: 'HOST_ATTACHMENT' as const, sourceId: 'image-1', attachmentId: 'attachment-image-1' },
+          { kind: 'HOST_ATTACHMENT' as const, sourceId: 'pdf-1', attachmentId: 'attachment-pdf-1' },
+        ],
+      },
+      slideCount: 8,
+      visualDirection: '明亮清晰的儿童课堂视觉',
+      imageModel: 'image-2',
+      automationLevel: 'SUPERVISED' as const,
+      budgetUnits: 200,
+    }
+    expect(createRunRequestSchema.parse(base).source).toMatchObject({ kind: 'SOURCE_PACKAGE' })
+    expect(() => createRunRequestSchema.parse({
+      ...base,
+      source: {
+        ...base.source,
+        sources: [
+          { kind: 'HOST_ATTACHMENT', sourceId: 'image-1', attachmentId: 'attachment-image-1' },
+          { kind: 'HOST_ATTACHMENT', sourceId: 'image-2', attachmentId: 'attachment-image-1' },
+        ],
+      },
+    })).toThrow('attachment ids must be unique')
+  })
+
   test('rejects unknown fields and unsupported contract versions', () => {
     expect(() => createRunRequestSchema.parse({
       schemaVersion: '2',

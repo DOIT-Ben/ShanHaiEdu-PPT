@@ -74,7 +74,7 @@ export class PlanningRunner {
     }
 
     try {
-      const blueprint = await this.createBlueprint(input, document, prepared.step.inputHash)
+      const blueprint = await this.createBlueprint(input, document, prepared.step.inputHash, run.host.tenantId)
       const step = await this.complete(input, blueprint)
       return { step, blueprint, replayed: false }
     } catch (error) {
@@ -86,7 +86,7 @@ export class PlanningRunner {
     }
   }
 
-  private async createBlueprint(input: PlanPresentationInput, document: DocumentResult, inputHash: string) {
+  private async createBlueprint(input: PlanPresentationInput, document: DocumentResult, inputHash: string, tenantId: string) {
     const basePayload = {
       slideCount: input.slideCount,
       visualDirection: input.visualDirection,
@@ -95,7 +95,17 @@ export class PlanningRunner {
       maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
       document: {
         name: document.name,
-        chunks: document.chunks.map((chunk) => ({ id: chunk.id, sha256: chunk.sha256, text: chunk.text })),
+        sources: document.sources ?? [],
+        chunks: document.chunks.map((chunk) => ({
+          id: chunk.id,
+          sourceId: chunk.sourceId,
+          sha256: chunk.sha256,
+          text: chunk.text,
+          pageStart: chunk.pageStart,
+          pageEnd: chunk.pageEnd,
+          region: chunk.region,
+        })),
+        assets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
       },
     }
     let repairIssues: { path: string; message: string }[] = []
@@ -105,10 +115,12 @@ export class PlanningRunner {
           ? input.idempotencyKey
           : `blueprint-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`
         const raw = await this.executeWithProviderRetry(input, {
+          tenantId,
           operation: 'create_blueprint',
           schemaName: 'ppt_agent_blueprint_v1',
           idempotencyKey: modelKey,
           payload: { ...basePayload, ...(repairIssues.length > 0 ? { contractRepairIssues: repairIssues } : {}) },
+          sourceAssets: document.assets ?? [],
         })
         const draft = blueprintDraftSchema.parse(raw)
         this.assertBlueprintCoverage(
@@ -124,6 +136,8 @@ export class PlanningRunner {
           visualDirection: input.visualDirection,
           renderMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
           coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+          sourceManifest: document.sources ?? [],
+          sourceAssets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
           createdAt: this.dependencies.clock.now().toISOString(),
         })
       } catch (error) {
@@ -220,6 +234,10 @@ export class PlanningRunner {
         ? 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
         : message === 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
           ? 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
+          : message === 'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID'
+            ? 'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID'
+            : message === 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE'
+              ? 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE'
           : message === 'BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED'
             ? 'VISUAL_ASSET_LIMIT_EXCEEDED'
             : message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID'
@@ -227,7 +245,13 @@ export class PlanningRunner {
               : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
                 ? 'MODEL_JSON_INVALID'
                 : 'BLUEPRINT_SCHEMA_INVALID'
-    const retryable = ['MODEL_JSON_INVALID', 'BLUEPRINT_SLIDE_COUNT_MISMATCH', 'BLUEPRINT_SOURCE_REFERENCE_INVALID']
+    const retryable = [
+      'MODEL_JSON_INVALID',
+      'BLUEPRINT_SLIDE_COUNT_MISMATCH',
+      'BLUEPRINT_SOURCE_REFERENCE_INVALID',
+      'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID',
+      'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE',
+    ]
       .includes(errorCode)
     return {
       errorCode,
@@ -368,6 +392,18 @@ export class PlanningRunner {
     if ([...cited].some((id) => !available.has(id))) throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
     if (document.chunks.some((chunk) => !draft.curriculum.sourceChunkIds.includes(chunk.id))) {
       throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
+    }
+    const availableAssets = new Set((document.assets ?? []).map((asset) => asset.id))
+    const curriculumAssets = draft.curriculum.sourceAssetIds ?? []
+    const mappedAssets = new Set([
+      ...draft.slides.flatMap((slide) => slide.sourceAssetIds ?? []),
+      ...draft.slides.flatMap((slide) => slide.layeredDesign?.elements.flatMap((element) =>
+        element.kind === 'IMAGE' || element.kind === 'TEXT' ? element.sourceAssetIds ?? [] : []) ?? []),
+    ])
+    const citedAssets = new Set([...curriculumAssets, ...mappedAssets])
+    if ([...citedAssets].some((id) => !availableAssets.has(id))) throw new Error('BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID')
+    if ([...availableAssets].some((id) => !curriculumAssets.includes(id) || !mappedAssets.has(id))) {
+      throw new Error('BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE')
     }
     if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) => !slide.layeredDesign)) {
       throw new Error('LAYERED_BLUEPRINT_SCHEMA_INVALID')

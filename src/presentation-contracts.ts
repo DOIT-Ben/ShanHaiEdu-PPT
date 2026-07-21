@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 const identifierSchema = z.string().trim().min(1).max(160)
 const sourceChunkIdsSchema = z.array(identifierSchema).min(1).max(200)
+const sourceAssetIdsSchema = z.array(identifierSchema).max(200).optional()
 const hexColorSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/)
 
 export const slideElementPlacementSchema = z.object({
@@ -23,13 +24,22 @@ export const layeredImageElementSchema = z.object({
   prompt: z.string().trim().min(20).max(3_000),
   negativePrompt: z.string().trim().min(3).max(1_000),
   sourceChunkIds: sourceChunkIdsSchema,
+  sourceAssetIds: sourceAssetIdsSchema,
+  sourceAssetStrategy: z.enum(['REUSE_ORIGINAL', 'REFERENCE_GENERATION', 'REGENERATE']).optional(),
   placement: slideElementPlacementSchema,
   zIndex: z.number().int().min(0).max(100),
   fit: z.enum(['COVER', 'CONTAIN']),
   aspectRatio: z.enum(['16:9', '4:3', '1:1', '3:4']),
   backgroundMode: z.enum(['OPAQUE', 'TRANSPARENT']),
   reuseKey: identifierSchema.optional(),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if (value.sourceAssetStrategy && value.sourceAssetStrategy !== 'REGENERATE' && (value.sourceAssetIds?.length ?? 0) === 0) {
+    context.addIssue({ code: 'custom', path: ['sourceAssetIds'], message: 'source asset reuse requires a source asset id' })
+  }
+  if (value.sourceAssetStrategy && value.sourceAssetStrategy !== 'REGENERATE' && (value.sourceAssetIds?.length ?? 0) > 1) {
+    context.addIssue({ code: 'custom', path: ['sourceAssetIds'], message: 'one image element must reference exactly one source asset' })
+  }
+})
 
 export const layeredTextElementSchema = z.object({
   kind: z.literal('TEXT'),
@@ -37,6 +47,7 @@ export const layeredTextElementSchema = z.object({
   role: z.enum(['TITLE', 'SUBTITLE', 'BODY', 'CAPTION', 'QUESTION']),
   text: z.string().trim().min(1).max(1_500),
   sourceChunkIds: sourceChunkIdsSchema,
+  sourceAssetIds: sourceAssetIdsSchema,
   placement: slideElementPlacementSchema,
   zIndex: z.number().int().min(0).max(100),
   style: z.object({
@@ -102,6 +113,7 @@ export const curriculumBriefSchema = z.object({
   scopeBoundaries: z.array(z.string().trim().min(1).max(300)).min(1).max(20),
   prohibitedExtensions: z.array(z.string().trim().min(1).max(300)).max(20),
   sourceChunkIds: sourceChunkIdsSchema,
+  sourceAssetIds: sourceAssetIdsSchema,
 }).strict()
 
 export const blueprintSlideSchema = z.object({
@@ -112,6 +124,7 @@ export const blueprintSlideSchema = z.object({
   visualIntent: z.string().trim().min(10).max(1_000),
   visualPrompt: z.string().trim().min(20).max(3_000),
   sourceChunkIds: sourceChunkIdsSchema,
+  sourceAssetIds: sourceAssetIdsSchema,
   layeredDesign: layeredSlideDesignSchema.optional(),
 }).strict()
 
@@ -150,15 +163,63 @@ export const layeredBlueprintDraftSchema = blueprintDraftSchema.safeExtend({
   })
 })
 
+const sourceManifestSchema = z.array(z.object({
+  id: identifierSchema,
+  name: z.string().trim().min(1).max(300),
+  kind: z.enum(['TEXT', 'IMAGE', 'PDF', 'MARKDOWN']),
+  mimeType: z.string().trim().min(1).max(160).optional(),
+  pageCount: z.number().int().positive().max(50).optional(),
+  status: z.enum(['READY', 'FAILED']),
+  failureCode: z.string().trim().min(1).max(160).optional(),
+}).strict()).max(7).default([])
+
+const sourceAssetSummarySchema = z.array(z.object({
+  id: identifierSchema,
+  sourceId: identifierSchema,
+  name: z.string().trim().min(1).max(300),
+  mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+  byteLength: z.number().int().positive().max(24 * 1024 * 1024),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  width: z.number().int().positive().max(20_000),
+  height: z.number().int().positive().max(20_000),
+  pageNumber: z.number().int().positive().max(50).optional(),
+  caption: z.string().trim().min(1).max(500).optional(),
+  ocrText: z.string().trim().min(1).max(2_000).optional(),
+}).strict()).max(200).default([])
+
 export const presentationBlueprintSchema = blueprintDraftSchema.extend({
   id: identifierSchema,
   visualDirection: z.string().trim().min(3).max(1_000),
   renderMode: z.enum(['SLIDE_IMAGE_V2', 'LAYERED_COURSEWARE_V3']).optional(),
   coverDesignMode: z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE']).optional(),
+  sourceManifest: sourceManifestSchema,
+  sourceAssets: sourceAssetSummarySchema,
   createdAt: z.string().datetime(),
-}).strict().transform((value) => value.renderMode === 'LAYERED_COURSEWARE_V3' && value.coverDesignMode === undefined
-  ? { ...value, coverDesignMode: 'INDEPENDENT' as const }
-  : value).superRefine((value, context) => {
+}).strict().transform((value) => ({
+  ...value,
+  ...(value.renderMode === 'LAYERED_COURSEWARE_V3' && value.coverDesignMode === undefined
+    ? { coverDesignMode: 'INDEPENDENT' as const }
+    : {}),
+  curriculum: { ...value.curriculum, sourceAssetIds: value.curriculum.sourceAssetIds ?? [] },
+  slides: value.slides.map((slide) => ({
+    ...slide,
+    sourceAssetIds: slide.sourceAssetIds ?? [],
+    ...(slide.layeredDesign ? {
+      layeredDesign: {
+        ...slide.layeredDesign,
+        elements: slide.layeredDesign.elements.map((element) => element.kind === 'IMAGE'
+          ? {
+              ...element,
+              sourceAssetIds: element.sourceAssetIds ?? [],
+              sourceAssetStrategy: element.sourceAssetStrategy ?? 'REGENERATE' as const,
+            }
+          : element.kind === 'TEXT'
+            ? { ...element, sourceAssetIds: element.sourceAssetIds ?? [] }
+            : element),
+      },
+    } : {}),
+  })),
+})).superRefine((value, context) => {
   if (value.renderMode !== 'LAYERED_COURSEWARE_V3') return
   value.slides.forEach((slide, index) => {
     if (!slide.layeredDesign) {

@@ -12,7 +12,7 @@ describe('OpenAPI v1 contract', () => {
       paths: Record<string, Record<string, unknown>>
       components: {
         parameters: Record<string, { required?: boolean }>
-        schemas: Record<string, { properties?: Record<string, { enum?: string[] }> }>
+        schemas: Record<string, { oneOf?: Array<{ properties?: Record<string, { const?: string }> }>; properties?: Record<string, { enum?: string[] }> }>
       }
     }
 
@@ -33,6 +33,12 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
       'RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
+    ]))
+    expect(document.components.schemas.DocumentSource?.oneOf?.map((source) => source.properties?.kind?.const)).toContain('SOURCE_PACKAGE')
+    expect(document.components.schemas.BlueprintSourceManifestEntry).toBeDefined()
+    expect(document.components.schemas.BlueprintSourceAsset).toBeDefined()
+    expect(document.components.schemas.PlanningFailure?.properties?.errorCode?.enum).toEqual(expect.arrayContaining([
+      'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID', 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE',
     ]))
   })
 })

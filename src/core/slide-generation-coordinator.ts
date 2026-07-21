@@ -4,7 +4,7 @@ import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
 import { hashInput } from './hash'
 import { MediaStepRunner } from './media-step-runner'
-import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
+import type { AgentRepository, ArtifactPort, ClockPort, DocumentPort, RunRecord, SourceAsset, StepRecord } from './ports'
 import { evaluateBudget, transitionRun } from './policy'
 
 export type SubmitBlueprintImagesResult = Readonly<{
@@ -25,6 +25,8 @@ export class SlideGenerationCoordinator {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     media: MediaStepRunner
+    documents: DocumentPort
+    artifacts: ArtifactPort
     clock: ClockPort
   }>) {}
 
@@ -57,19 +59,40 @@ export class SlideGenerationCoordinator {
       }
     }
 
-    const decision = evaluateBudget(run, pendingRequirements.length * unitBudgetUnits)
+    const chargeableCount = pendingRequirements.filter((requirement) => requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
+    const decision = evaluateBudget(run, chargeableCount * unitBudgetUnits)
     if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
-      const paused = await this.pauseForBudget(run, pendingRequirements.length * unitBudgetUnits)
+      const paused = await this.pauseForBudget(run, chargeableCount * unitBudgetUnits)
       return { status: paused.status, submitted: 0, total: requirements.length, steps: existingSteps }
     }
     if (!decision.allowed) throw new Error(decision.reason)
 
+    const needsSourceAssets = pendingRequirements.some((requirement) => requirement.sourceAssetStrategy !== 'REGENERATE')
+    const document = needsSourceAssets
+      ? await this.dependencies.documents.resolve({ host: run.host, source: run.source })
+      : null
+    const sourceAssets = new Map((document?.assets ?? []).map((asset) => [asset.id, asset]))
     const steps = [...existingSteps]
     for (const requirement of pendingRequirements) {
       const key = requirement.idempotencyKey
       const versionId = requirement.elementId === null
         ? `${runId}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
         : `${runId}:slide:${requirement.pageNumber}:element:${requirement.elementId}:r${run.revisionRound}:v1`
+      const sourceAsset = requirement.sourceAssetStrategy === 'REGENERATE'
+        ? null
+        : sourceAssets.get(requirement.sourceAssetIds[0]!) ?? null
+      if (requirement.sourceAssetStrategy !== 'REGENERATE' && !sourceAsset) {
+        const failed = await this.recordSourceAssetFailure(run, requirement, versionId)
+        steps.push(failed)
+        await this.requireHuman(runId, failed)
+        break
+      }
+      if (requirement.sourceAssetStrategy === 'REUSE_ORIGINAL') {
+        const completed = await this.completeSourceAssetReuse(run, requirement, versionId, sourceAsset!)
+        steps.push(completed)
+        await this.appendProgress(runId, completed.id, steps.length, requirements.length)
+        continue
+      }
       const result = await this.dependencies.media.submitSlideImage({
         runId,
         stepId: `step-${runId}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
@@ -84,6 +107,11 @@ export class SlideGenerationCoordinator {
         backgroundMode: requirement.backgroundMode,
         ...(requirement.elementId ? { elementId: requirement.elementId } : {}),
         ...(requirement.reuseKey ? { assetReuseKey: requirement.reuseKey } : {}),
+        ...(sourceAsset ? { referenceImage: {
+          mimeType: sourceAsset.mimeType,
+          bytes: sourceAsset.bytes,
+          sha256: sourceAsset.sha256,
+        } } : {}),
       })
       if (!steps.some((step) => step.idempotencyKey === result.step.idempotencyKey)) steps.push(result.step)
       const latestRun = await this.dependencies.repository.getRun(runId)
@@ -150,6 +178,74 @@ export class SlideGenerationCoordinator {
   private artifactId(step: StepRecord) {
     const output = step.output as { artifactId?: unknown } | null
     return output && typeof output.artifactId === 'string' ? output.artifactId : null
+  }
+
+  private async completeSourceAssetReuse(
+    run: RunRecord,
+    requirement: ReturnType<typeof blueprintImageRequirements>[number],
+    versionId: string,
+    sourceAsset: SourceAsset,
+  ) {
+    const artifact = await this.dependencies.artifacts.put({
+      tenantId: run.host.tenantId,
+      runId: run.id,
+      name: `source-${sourceAsset.id}.${sourceAsset.mimeType.split('/')[1]}`,
+      mimeType: sourceAsset.mimeType,
+      bytes: sourceAsset.bytes,
+      idempotencyKey: `${requirement.idempotencyKey}:source-reuse:${sourceAsset.sha256}`,
+    })
+    return this.dependencies.repository.transact(run.id, (transaction) => {
+      const now = this.dependencies.clock.now().toISOString()
+      const step: StepRecord = {
+        id: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
+        runId: run.id,
+        idempotencyKey: requirement.idempotencyKey,
+        inputHash: hashInput({ tool: 'reuse_source_asset', assetKey: requirement.assetKey, sha256: sourceAsset.sha256 }),
+        tool: 'generate_slide_image',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: {
+          slideId: requirement.slideId,
+          versionId,
+          artifactId: artifact.artifactId,
+          sourceAssetId: sourceAsset.id,
+        },
+        createdAt: now,
+        updatedAt: now,
+      }
+      transaction.putStep(step)
+      return step
+    })
+  }
+
+  private async recordSourceAssetFailure(
+    run: RunRecord,
+    requirement: ReturnType<typeof blueprintImageRequirements>[number],
+    versionId: string,
+  ) {
+    return this.dependencies.repository.transact(run.id, (transaction) => {
+      const now = this.dependencies.clock.now().toISOString()
+      const step: StepRecord = {
+        id: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
+        runId: run.id,
+        idempotencyKey: requirement.idempotencyKey,
+        inputHash: hashInput({ tool: 'source_asset_lookup', assetKey: requirement.assetKey }),
+        tool: 'generate_slide_image',
+        status: 'FAILED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: 'SOURCE_ASSET_NOT_FOUND',
+        output: { slideId: requirement.slideId, versionId },
+        createdAt: now,
+        updatedAt: now,
+      }
+      transaction.putStep(step)
+      return step
+    })
   }
 
   private async completedSummary(runId: string, total: number, status: RunRecord['status']) {

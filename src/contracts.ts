@@ -43,6 +43,34 @@ export const documentSourceSchema = z.discriminatedUnion('kind', [
     kind: z.literal('HOST_ATTACHMENT'),
     attachmentId: identifierSchema,
   }).strict(),
+  z.object({
+    kind: z.literal('SOURCE_PACKAGE'),
+    name: z.string().trim().min(1).max(240).optional(),
+    sources: z.array(z.discriminatedUnion('kind', [
+      z.object({
+        kind: z.literal('TEXT'),
+        sourceId: identifierSchema,
+        name: z.string().trim().min(1).max(240).optional(),
+        text: z.string().trim().min(20).max(2_000_000),
+      }).strict(),
+      z.object({
+        kind: z.literal('HOST_ATTACHMENT'),
+        sourceId: identifierSchema,
+        attachmentId: identifierSchema,
+      }).strict(),
+    ])).min(1).max(7),
+  }).strict().superRefine((value, context) => {
+    const sourceIds = value.sources.map((source) => source.sourceId)
+    if (new Set(sourceIds).size !== sourceIds.length) {
+      context.addIssue({ code: 'custom', path: ['sources'], message: 'source ids must be unique' })
+    }
+    const attachmentIds = value.sources
+      .filter((source) => source.kind === 'HOST_ATTACHMENT')
+      .map((source) => source.attachmentId)
+    if (new Set(attachmentIds).size !== attachmentIds.length) {
+      context.addIssue({ code: 'custom', path: ['sources'], message: 'attachment ids must be unique' })
+    }
+  }),
 ])
 
 export const createRunRequestSchema = z.object({
@@ -131,6 +159,8 @@ export const planningFailureSchema = z.object({
     'BLUEPRINT_SCHEMA_INVALID',
     'BLUEPRINT_SLIDE_COUNT_MISMATCH',
     'BLUEPRINT_SOURCE_REFERENCE_INVALID',
+    'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID',
+    'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE',
     'V3_LAYER_CONTRACT_INVALID',
     'VISUAL_ASSET_LIMIT_EXCEEDED',
   ]),

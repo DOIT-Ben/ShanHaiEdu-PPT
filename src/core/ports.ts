@@ -3,15 +3,45 @@ import type { DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } 
 
 export type SourceChunk = Readonly<{
   id: string
+  sourceId?: string
   text: string
   sha256: string
   pageStart?: number
   pageEnd?: number
+  region?: Readonly<{ x: number; y: number; width: number; height: number }>
+}>
+
+export type SourceAsset = Readonly<{
+  id: string
+  sourceId: string
+  name: string
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp'
+  byteLength: number
+  sha256: string
+  width: number
+  height: number
+  pageNumber?: number
+  region?: Readonly<{ x: number; y: number; width: number; height: number }>
+  caption?: string
+  ocrText?: string
+  bytes: Uint8Array
+}>
+
+export type SourceMaterial = Readonly<{
+  id: string
+  name: string
+  kind: 'TEXT' | 'IMAGE' | 'PDF' | 'MARKDOWN'
+  mimeType?: string
+  pageCount?: number
+  status: 'READY' | 'FAILED'
+  failureCode?: string
 }>
 
 export type DocumentResult = Readonly<{
   name: string
   chunks: readonly SourceChunk[]
+  sources?: readonly SourceMaterial[]
+  assets?: readonly SourceAsset[]
   isComplete: boolean
   missingRanges: readonly string[]
 }>
@@ -26,9 +56,11 @@ export interface DocumentPort {
 export interface StructuredModelPort {
   readonly modelName?: string
   execute(input: Readonly<{
+    tenantId?: string
     operation: string
     schemaName: string
     payload: unknown
+    sourceAssets?: readonly SourceAsset[]
     idempotencyKey: string
   }>): Promise<unknown>
 }
@@ -66,6 +98,11 @@ export interface ImageGenerationPort {
     model: string
     aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
     backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
+    referenceImage?: Readonly<{
+      mimeType: SourceAsset['mimeType']
+      bytes: Uint8Array
+      sha256: string
+    }>
     idempotencyKey: string
   }>): Promise<Readonly<{
     operationId: string

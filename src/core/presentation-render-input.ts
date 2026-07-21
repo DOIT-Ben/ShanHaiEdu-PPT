@@ -1,5 +1,5 @@
 import type { PresentationBlueprint } from '../presentation-contracts'
-import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
+import { blueprintElementAssetKey, blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
 import type { AgentRepository, ArtifactPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 
 export type PresentationArtifactReference = Readonly<{
@@ -28,7 +28,7 @@ export async function requirePresentationArtifactReferences(
       const assets = slide.layeredDesign.elements
         .filter((element): element is Extract<(typeof slide.layeredDesign.elements)[number], { kind: 'IMAGE' }> => element.kind === 'IMAGE')
         .map((element) => {
-          const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${slide.pageNumber}:element:${element.elementId}`
+          const assetKey = blueprintElementAssetKey(slide, element)
           const artifactId = artifactByAssetKey.get(assetKey)
           if (!artifactId) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
           return { elementId: element.elementId, artifactId }

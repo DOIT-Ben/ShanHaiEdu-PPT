@@ -101,23 +101,36 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         : '',
       input.negativePrompt ? `Avoid: ${input.negativePrompt}.` : '',
     ].filter(Boolean).join(' ')
-    let response: Response
-    try {
-      response = await this.fetchImpl(`${this.baseUrl}/images/generations`, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${this.dependencies.apiKey}`,
-          'Content-Type': 'application/json',
-          'Idempotency-Key': input.idempotencyKey,
-        },
-        body: JSON.stringify({
+    const reference = input.referenceImage
+    const body = reference
+      ? (() => {
+          const form = new FormData()
+          form.set('model', input.model)
+          form.set('prompt', prompt)
+          form.set('size', input.aspectRatio)
+          form.set('resolution', '1K')
+          form.set('n', '1')
+          form.set('image', new Blob([Buffer.from(reference.bytes)], { type: reference.mimeType }), `reference.${reference.mimeType.split('/')[1]}`)
+          return form
+        })()
+      : JSON.stringify({
           model: input.model,
           prompt,
           size: input.aspectRatio,
           resolution: '1K',
           n: 1,
-        }),
+        })
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${reference ? '/images/edits' : '/images/generations'}`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${this.dependencies.apiKey}`,
+          ...(!reference ? { 'Content-Type': 'application/json' } : {}),
+          'Idempotency-Key': input.idempotencyKey,
+        },
+        body,
         signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 600_000),
       })
     } catch {

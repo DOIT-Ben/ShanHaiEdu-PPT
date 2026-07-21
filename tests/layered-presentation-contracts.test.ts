@@ -143,4 +143,20 @@ describe('layered courseware v3 contract', () => {
     )
     expect(() => presentationBlueprintSchema.parse(crowded)).toThrow('at most four knowledge visual assets')
   })
+
+  test('records source asset lineage and requires it for reuse or reference generation', () => {
+    const reusable = layeredBlueprint()
+    const element = reusable.slides[1]!.layeredDesign.elements[1]!
+    if (element.kind !== 'IMAGE') throw new Error('expected image element')
+    Object.assign(element, {
+      sourceAssetIds: ['source-asset-1'],
+      sourceAssetStrategy: 'REUSE_ORIGINAL',
+    })
+    const parsed = presentationBlueprintSchema.parse(reusable)
+    const parsedElement = parsed.slides[1]!.layeredDesign!.elements[1]!
+    expect(parsedElement.kind === 'IMAGE' && parsedElement.sourceAssetIds).toEqual(['source-asset-1'])
+
+    Object.assign(element, { sourceAssetIds: [] })
+    expect(() => presentationBlueprintSchema.parse(reusable)).toThrow('source asset reuse requires a source asset id')
+  })
 })

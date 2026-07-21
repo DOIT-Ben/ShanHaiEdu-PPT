@@ -130,6 +130,39 @@ describe('gateway courseware model', () => {
     expect(parameters.properties.slides.items.required).not.toContain('layeredDesign')
   })
 
+  test('sends source assets as labeled multimodal content without embedding bytes in JSON metadata', async () => {
+    let requestBody: Record<string, unknown> | null = null
+    const bytes = new Uint8Array(await sharp({
+      create: { width: 120, height: 80, channels: 3, background: '#68A678' },
+    }).png().toBuffer())
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return completion(layeredBlueprintDraft())
+      },
+    })
+
+    await model.execute({
+      tenantId: 'frameflow', operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', idempotencyKey: 'plan-assets',
+      payload: {
+        slideCount: 2, presentationMode: 'LAYERED_COURSEWARE_V3',
+        document: { assets: [{ id: 'source-asset-1', name: '叶片.png', byteLength: bytes.length }] },
+      },
+      sourceAssets: [{
+        id: 'source-asset-1', sourceId: 'source-image-1', name: '叶片.png', mimeType: 'image/png',
+        byteLength: bytes.length, sha256: 'a'.repeat(64), width: 120, height: 80, bytes,
+      }],
+    })
+
+    const messages = (requestBody! as unknown as { messages: { content: unknown }[] }).messages
+    const content = messages[1]!.content as { type: string; text?: string; image_url?: { url: string } }[]
+    expect(content.some((part) => part.text?.includes('来源图片 source-asset-1'))).toBe(true)
+    expect(content.some((part) => part.image_url?.url.startsWith('data:image/jpeg;base64,'))).toBe(true)
+    expect(JSON.stringify(content[0])).not.toContain(Buffer.from(bytes).toString('base64'))
+  })
+
   test('sends the controlled image to the vision reviewer and parses streamed tool arguments', async () => {
     const artifacts = new MockArtifactPort()
     const png = await sharp({ create: { width: 80, height: 60, channels: 3, background: '#f4f0e8' } }).png().toBuffer()

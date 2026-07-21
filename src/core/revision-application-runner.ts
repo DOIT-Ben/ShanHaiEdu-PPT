@@ -68,7 +68,7 @@ export class RevisionApplicationRunner {
         sourceChunks,
         idempotencyKey,
       })
-      const draft = blueprintDraftSchema.parse(raw)
+      const draft = inheritSourceLineage(base, blueprintDraftSchema.parse(raw))
       this.validateRevision(run.id, base, draft, plan, sourceChunks)
       const blueprint = presentationBlueprintSchema.parse({
         ...draft,
@@ -76,6 +76,8 @@ export class RevisionApplicationRunner {
         visualDirection: base.visualDirection,
         ...(base.renderMode ? { renderMode: base.renderMode } : {}),
         ...(base.coverDesignMode ? { coverDesignMode: base.coverDesignMode } : {}),
+        sourceManifest: base.sourceManifest,
+        sourceAssets: base.sourceAssets,
         createdAt: this.dependencies.clock.now().toISOString(),
       })
       return this.complete(run, idempotencyKey, blueprint, plan)
@@ -249,6 +251,42 @@ export class RevisionApplicationRunner {
       if (revised.sourceChunkIds.some((id) => !sourceIds.has(id))) throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
       validateLayeredRevisionScope(previous, revised, operations)
     }
+  }
+}
+
+function inheritSourceLineage(base: PresentationBlueprint, draft: BlueprintDraft): BlueprintDraft {
+  return {
+    ...draft,
+    curriculum: {
+      ...draft.curriculum,
+      sourceAssetIds: draft.curriculum.sourceAssetIds ?? base.curriculum.sourceAssetIds,
+    },
+    slides: draft.slides.map((slide, index) => {
+      const previous = base.slides[index]
+      if (!previous) return slide
+      return {
+        ...slide,
+        sourceAssetIds: slide.sourceAssetIds ?? previous.sourceAssetIds,
+        ...(slide.layeredDesign && previous.layeredDesign ? {
+          layeredDesign: {
+            ...slide.layeredDesign,
+            elements: slide.layeredDesign.elements.map((element) => {
+              if (element.kind !== 'IMAGE' && element.kind !== 'TEXT') return element
+              const before = previous.layeredDesign?.elements.find((candidate) => candidate.elementId === element.elementId)
+              if (!before || before.kind !== element.kind) return element
+              if (element.kind === 'IMAGE' && before.kind === 'IMAGE') {
+                return {
+                  ...element,
+                  sourceAssetIds: element.sourceAssetIds ?? before.sourceAssetIds,
+                  sourceAssetStrategy: element.sourceAssetStrategy ?? before.sourceAssetStrategy,
+                }
+              }
+              return { ...element, sourceAssetIds: element.sourceAssetIds ?? before.sourceAssetIds }
+            }),
+          },
+        } : {}),
+      }
+    }),
   }
 }
 

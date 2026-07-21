@@ -12,11 +12,13 @@ function blueprint() {
     title: '光合作用',
     visualDirection: '清晰的课堂科学信息图风格',
     createdAt: '2026-07-21T00:00:00.000Z',
+    sourceManifest: [],
+    sourceAssets: [],
     curriculum: {
       subject: '生物', grade: '七年级', lessonTitle: '光合作用',
       sourceSummary: '教材介绍绿色植物利用光能制造有机物并释放氧气的过程。',
       learningObjectives: ['理解光合作用'], scopeBoundaries: ['教材定性范围'],
-      prohibitedExtensions: [], sourceChunkIds: ['chunk-1'],
+      prohibitedExtensions: [], sourceChunkIds: ['chunk-1'], sourceAssetIds: [],
     },
     slides: [1, 2].map((pageNumber) => ({
       pageNumber,
@@ -25,7 +27,7 @@ function blueprint() {
       layout: pageNumber === 1 ? 'HERO' as const : 'SPLIT' as const,
       visualIntent: `第 ${pageNumber} 页对应的教材视觉目标`,
       visualPrompt: `A clean science illustration for page ${pageNumber}, no text or symbols`,
-      sourceChunkIds: ['chunk-1'],
+      sourceChunkIds: ['chunk-1'], sourceAssetIds: [],
     })),
   }
 }

@@ -115,13 +115,25 @@ export class GatewayCoursewareModel implements
     const layered = z.object({ presentationMode: z.literal('LAYERED_COURSEWARE_V3') }).passthrough().safeParse(input.payload).success
     const system = `你是学校采购场景的资深课件总设计师。根据教材创建完整教学蓝图，知识正确优先于视觉效果。
 V3 要求每页 elements 必须且只能有一个 kind=IMAGE、role=BASE_LAYER 的可编辑底图对象，包括封面和所有内容页；另可有最多四个与知识点直接相关的独立图片素材、原生文字和原生形状。所有素材必须引用真实 sourceChunkIds。
+输入可能包含带真实 sourceAssetId 的教材图片或 PDF 页图。必须把每个来源图片映射到 curriculum、目标 slide 和相关 IMAGE/TEXT 元素；需要原样保留时用 REUSE_ORIGINAL，作为指定生图参考时用 REFERENCE_GENERATION，仅在不采用原图时用 REGENERATE。不得虚构 sourceAssetIds。
 当 coverDesignMode=INDEPENDENT 时，第一页必须采用与正文明显不同的封面构图，以课程主题、标题和单一强主视觉建立冲击力；不得套用正文内容面板。当值为 FOLLOW_TEMPLATE 时才允许跟随正文结构。
 如果输入包含 contractRepairIssues，必须重新生成完整蓝图并逐项修正这些合同问题。
 只提交工具参数，不输出解释或思维过程。`
     return this.request({
       model: this.dependencies.textModel,
       system,
-      user: `请依据以下受信教材数据创建蓝图：\n${boundedJson(input.payload)}`,
+      user: input.sourceAssets && input.sourceAssets.length > 0
+        ? [
+            { type: 'text' as const, text: `请依据以下受信教材数据创建蓝图：\n${boundedJson(input.payload)}` },
+            ...(await Promise.all(input.sourceAssets.flatMap((asset) => [
+              Promise.resolve({
+                type: 'text' as const,
+                text: `来源图片 ${asset.id}（${asset.name}${asset.pageNumber ? `，第 ${asset.pageNumber} 页` : ''}）`,
+              }),
+              this.sourceImageContent(asset),
+            ]))),
+          ]
+        : `请依据以下受信教材数据创建蓝图：\n${boundedJson(input.payload)}`,
       toolName: 'submit_courseware_blueprint',
       description: '提交知识驱动、分层可编辑的完整课件蓝图。',
       schema: layered ? layeredBlueprintDraftSchema : blueprintDraftSchema,
@@ -205,6 +217,15 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
       throw new Error('REVIEW_ARTIFACT_NOT_FOUND')
     }
     const jpeg = await sharp(artifact.bytes)
+      .rotate()
+      .resize({ width: 1_600, height: 1_600, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 82, mozjpeg: true })
+      .toBuffer()
+    return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: 'auto' as const } }
+  }
+
+  private async sourceImageContent(asset: NonNullable<Parameters<StructuredModelPort['execute']>[0]['sourceAssets']>[number]) {
+    const jpeg = await sharp(asset.bytes)
       .rotate()
       .resize({ width: 1_600, height: 1_600, fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 82, mozjpeg: true })

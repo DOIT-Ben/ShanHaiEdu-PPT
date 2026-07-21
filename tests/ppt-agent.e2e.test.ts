@@ -147,7 +147,7 @@ describe('PPT Agent 15-page mock end-to-end', () => {
     expect(approved.status).toBe('EXECUTING')
 
     const media = new MediaStepRunner({ repository, budget, images, clock })
-    const generation = new SlideGenerationCoordinator({ repository, media, clock })
+    const generation = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock })
     const submitted = await generation.submitBlueprintImages(runId, 2)
     expect(submitted).toMatchObject({ submitted: 15, total: 15 })
     expect(images.operations.size).toBe(15)

@@ -64,6 +64,32 @@ function document(overrides: Partial<DocumentResult> = {}): DocumentResult {
   }
 }
 
+function documentWithAsset() {
+  const bytes = new Uint8Array([137, 80, 78, 71])
+  return document({
+    sources: [
+      { id: 'outline', name: '课程说明', kind: 'TEXT', status: 'READY' },
+      { id: 'source-image-1', name: '叶片.png', kind: 'IMAGE', mimeType: 'image/png', status: 'READY' },
+    ],
+    assets: [{
+      id: 'source-asset-1', sourceId: 'source-image-1', name: '叶片.png', mimeType: 'image/png',
+      byteLength: bytes.length, sha256: 'a'.repeat(64), width: 640, height: 480, bytes,
+    }],
+  })
+}
+
+function draftWithAsset(assetId = 'source-asset-1', mapToSlide = true) {
+  const value = draft()
+  return {
+    ...value,
+    curriculum: { ...value.curriculum, sourceAssetIds: [assetId] },
+    slides: value.slides.map((slide, index) => ({
+      ...slide,
+      sourceAssetIds: mapToSlide && index === 0 ? [assetId] : [],
+    })),
+  }
+}
+
 function draft(overrides: Record<string, unknown> = {}) {
   return {
     title: '绿色植物的光合作用',
@@ -248,6 +274,30 @@ describe('planning runner', () => {
     expect(executions[1]!.payload).toMatchObject({
       contractRepairIssues: [{ path: 'blueprint', message: 'BLUEPRINT_SOURCE_REFERENCE_INVALID' }],
     })
+  })
+
+  test('persists a blueprint only when every adopted source asset maps to a real target page', async () => {
+    const { runner } = await fixture(documentWithAsset(), draftWithAsset())
+    const result = await runner.plan(request)
+
+    expect(result.step.status).toBe('COMPLETED')
+    expect(result.blueprint?.curriculum.sourceAssetIds).toEqual(['source-asset-1'])
+    expect(result.blueprint?.slides[0]?.sourceAssetIds).toEqual(['source-asset-1'])
+    expect(result.blueprint?.sourceManifest).toHaveLength(2)
+    expect(result.blueprint?.sourceAssets).toEqual([expect.objectContaining({ id: 'source-asset-1', sha256: 'a'.repeat(64) })])
+    expect(result.blueprint?.sourceAssets[0]).not.toHaveProperty('bytes')
+  })
+
+  test.each([
+    ['BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID', draftWithAsset('invented-asset')],
+    ['BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE', draftWithAsset('source-asset-1', false)],
+  ])('rejects invalid source asset lineage with %s', async (errorCode, response) => {
+    const { repository, runner } = await fixture(documentWithAsset(), response)
+    const result = await runner.plan(request)
+
+    expect(result.step).toMatchObject({ status: 'FAILED' })
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'phase.changed' && event.payload.reason === errorCode)).toBe(true)
   })
 
   test('stops before the model when document extraction is incomplete', async () => {

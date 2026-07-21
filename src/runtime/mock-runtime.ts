@@ -280,11 +280,12 @@ type RuntimeInput = Readonly<{
   renderer?: PresentationRendererPort
   images?: ImageGenerationPort
   clock?: ClockPort
+  frameFlowBackend?: FrameFlowBackendClient
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
   const clock = input.clock ?? new SystemClock()
-  const documents = new FrameFlowHostAdapter(new MockFrameFlowBackend())
+  const documents = new FrameFlowHostAdapter(input.frameFlowBackend ?? new MockFrameFlowBackend())
   const budget: BudgetPort = documents
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
@@ -296,7 +297,13 @@ export function createAgentRuntime(input: RuntimeInput) {
     clock,
   })
   const media = new MediaStepRunner({ repository: input.repository, budget, images, clock })
-  const generation = new SlideGenerationCoordinator({ repository: input.repository, media, clock })
+  const generation = new SlideGenerationCoordinator({
+    repository: input.repository,
+    media,
+    documents,
+    artifacts: input.artifacts,
+    clock,
+  })
   const visual = new VisualReviewRunner({
     repository: input.repository,
     reviewer: input.visualReviewer,
