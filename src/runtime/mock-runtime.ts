@@ -100,7 +100,8 @@ class DeterministicPlanningModel implements StructuredModelPort {
         }
         if (payload.presentationMode !== 'LAYERED_COURSEWARE_V3') return slide
         const knowledgeText = slide.body[0]!
-        const visualCount = Math.min(4, Math.max(1, payload.maxVisualAssetsPerSlide ?? 4))
+        const independentCover = pageNumber === 1 && payload.coverDesignMode !== 'FOLLOW_TEMPLATE'
+        const visualCount = independentCover ? 1 : Math.min(4, Math.max(1, payload.maxVisualAssetsPerSlide ?? 4))
         const knowledgeVisuals = Array.from({ length: visualCount }, (_, visualIndex) => {
           const roles = ['KNOWLEDGE_VISUAL', 'DIAGRAM', 'CHARACTER', 'KNOWLEDGE_VISUAL'] as const
           const purposes = [
@@ -141,7 +142,7 @@ class DeterministicPlanningModel implements StructuredModelPort {
                 elementId: `base-${pageNumber}`,
                 role: 'BASE_LAYER' as const,
                 knowledgePoint: `建立第 ${pageNumber} 页教材知识情境`,
-                prompt: `Text-free wide classroom scene supporting lesson page ${pageNumber}, spacious composition, no letters or symbols`,
+                prompt: `Text-free wide classroom scene directly supporting this lesson knowledge: ${knowledgeText}. Spacious composition, no letters or symbols.`,
                 negativePrompt: 'text, numbers, formulas, logo, watermark',
                 sourceChunkIds: [chunk.id],
                 placement: { x: 0, y: 0, width: 1, height: 1 },
@@ -151,7 +152,16 @@ class DeterministicPlanningModel implements StructuredModelPort {
                 backgroundMode: 'OPAQUE' as const,
               },
               ...knowledgeVisuals,
-              {
+              ...(independentCover ? [{
+                kind: 'TEXT' as const,
+                elementId: `title-${pageNumber}`,
+                role: 'TITLE' as const,
+                text: slide.title,
+                sourceChunkIds: [chunk.id],
+                placement: { x: 0.07, y: 0.25, width: 0.46, height: 0.25 },
+                zIndex: 20,
+                style: { fontSize: 44, bold: true, color: '#17202A', align: 'CENTER' as const },
+              }] : [{
                 kind: 'SHAPE' as const,
                 elementId: `panel-${pageNumber}`,
                 role: 'CONTENT_PANEL' as const,
@@ -160,8 +170,7 @@ class DeterministicPlanningModel implements StructuredModelPort {
                 zIndex: 15,
                 fillColor: '#FFFFFF',
                 transparency: 8,
-              },
-              {
+              }, {
                 kind: 'TEXT' as const,
                 elementId: `title-${pageNumber}`,
                 role: 'TITLE' as const,
@@ -169,9 +178,8 @@ class DeterministicPlanningModel implements StructuredModelPort {
                 sourceChunkIds: [chunk.id],
                 placement: { x: 0.09, y: 0.20, width: 0.39, height: 0.17 },
                 zIndex: 20,
-                style: { fontSize: pageNumber === 1 ? 34 : 28, bold: true, color: '#17202A', align: 'LEFT' as const },
-              },
-              {
+                style: { fontSize: 28, bold: true, color: '#17202A', align: 'LEFT' as const },
+              }, {
                 kind: 'TEXT' as const,
                 elementId: `body-${pageNumber}`,
                 role: 'BODY' as const,
@@ -180,7 +188,7 @@ class DeterministicPlanningModel implements StructuredModelPort {
                 placement: { x: 0.09, y: 0.43, width: 0.39, height: 0.30 },
                 zIndex: 20,
                 style: { fontSize: 18, bold: false, color: '#29343D', align: 'LEFT' as const },
-              },
+              }]),
             ],
           },
         }

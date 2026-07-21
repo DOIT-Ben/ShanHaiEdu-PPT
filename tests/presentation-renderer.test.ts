@@ -115,7 +115,7 @@ describe('Sharp and PptxGenJS presentation renderer', () => {
               sourceChunkIds: ['chunk-1'], placement: { x: 0.09, y: 0.44, width: 0.39, height: 0.28 }, zIndex: 20,
               style: { fontSize: 18, bold: false, color: '#29343D', align: 'LEFT' },
             },
-          ],
+          ].filter((element) => index > 0 || element.kind === 'IMAGE' || element.role === 'TITLE'),
         },
       })),
     })

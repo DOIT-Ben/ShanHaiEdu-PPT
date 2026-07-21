@@ -154,6 +154,19 @@ export const presentationBlueprintSchema = blueprintDraftSchema.extend({
         message: index === 0 ? 'first layered slide must be COVER' : 'only the first layered slide may be COVER',
       })
     }
+    if (index === 0 && value.coverDesignMode === 'INDEPENDENT') {
+      const hasBody = slide.layeredDesign.elements.some((element) => element.kind === 'TEXT' && element.role === 'BODY')
+      const hasContentPanel = slide.layeredDesign.elements.some((element) => element.kind === 'SHAPE' && element.role === 'CONTENT_PANEL')
+      const hasTitle = slide.layeredDesign.elements.some((element) => element.kind === 'TEXT' && element.role === 'TITLE')
+      const hasHeroVisual = slide.layeredDesign.elements.some((element) => element.kind === 'IMAGE' && element.role !== 'BASE_LAYER')
+      if (hasBody || hasContentPanel || !hasTitle || !hasHeroVisual) {
+        context.addIssue({
+          code: 'custom',
+          path: ['slides', index, 'layeredDesign', 'elements'],
+          message: 'independent cover requires title and hero visual without body copy or content panel',
+        })
+      }
+    }
   })
 })
 

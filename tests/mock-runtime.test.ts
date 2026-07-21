@@ -213,10 +213,10 @@ describe('mock runtime', () => {
     for (let index = 0; index < 4; index += 1) await runtime.tick()
 
     expect(await repository.getRun(runId)).toMatchObject({
-      status: 'COMPLETED', presentationMode: 'LAYERED_COURSEWARE_V3', committedBudgetUnits: 11,
+      status: 'COMPLETED', presentationMode: 'LAYERED_COURSEWARE_V3', committedBudgetUnits: 8,
     })
     const mediaSteps = (await repository.listSteps(runId)).filter((step) => step.tool === 'generate_slide_image')
-    expect(mediaSteps).toHaveLength(11)
+    expect(mediaSteps).toHaveLength(8)
     const delivery = (await repository.listDeliveries(runId))[0]!
     const artifact = artifacts.artifacts.get(delivery.pptx.artifactId)
     expect(artifact?.bytes.length).toBeGreaterThan(20_000)

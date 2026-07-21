@@ -70,11 +70,15 @@ function layeredBlueprint() {
       layeredDesign: {
         designKind: pageNumber === 1 ? 'COVER' as const : 'CONTENT' as const,
         backgroundColor: '#F7FBFA',
-        elements: [
+        elements: pageNumber === 1 ? [
+          image('base-1', 'BASE_LAYER', 0),
+          image('apples-1', 'KNOWLEDGE_VISUAL', 0.62, 'apples-three'),
+          text('title-1', 'TITLE', '1～5的认识', 0.18),
+        ] : [
           image(`base-${pageNumber}`, 'BASE_LAYER', 0),
           image(`apples-${pageNumber}`, 'KNOWLEDGE_VISUAL', 0.62, 'apples-three'),
           shape(`panel-${pageNumber}`),
-          text(`title-${pageNumber}`, 'TITLE', pageNumber === 1 ? '1～5的认识' : '认识数量 3', 0.18),
+          text(`title-${pageNumber}`, 'TITLE', '认识数量 3', 0.18),
           text(`body-${pageNumber}`, 'BODY', '观察三个苹果，理解数量 3', 0.44),
         ],
       },
@@ -99,6 +103,18 @@ describe('layered courseware v3 contract', () => {
     const invalid = layeredBlueprint()
     invalid.slides[0]!.layeredDesign.designKind = 'CONTENT'
     expect(() => presentationBlueprintSchema.parse(invalid)).toThrow('first layered slide must be COVER')
+  })
+
+  test('rejects a body template on an independent cover but allows the explicit template exception', () => {
+    const invalid = layeredBlueprint()
+    invalid.slides[0]!.layeredDesign.elements.push(
+      shape('cover-panel'),
+      text('cover-body', 'BODY', '这是不应出现在独立封面中的正文。', 0.44),
+    )
+    expect(() => presentationBlueprintSchema.parse(invalid)).toThrow('independent cover requires title and hero visual')
+
+    expect(presentationBlueprintSchema.parse({ ...invalid, coverDesignMode: 'FOLLOW_TEMPLATE' }).coverDesignMode)
+      .toBe('FOLLOW_TEMPLATE')
   })
 
   test('rejects out-of-bounds placement and images without curriculum grounding', () => {
