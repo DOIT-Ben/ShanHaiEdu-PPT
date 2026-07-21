@@ -14,6 +14,13 @@ import type { AgentRepository, AgentTransaction, ClockPort, RunRecord } from './
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 
+const ADMIN_ONLY_CRITICAL_CATEGORIES = new Set([
+  'CURRICULUM_GAP',
+  'FACTUAL_RISK',
+  'SOURCE_INCOMPLETE',
+  'PLANNING_FAILED',
+])
+
 export class RunServiceError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
     super(message)
@@ -134,7 +141,10 @@ export class RunService {
           }
           return existingAction.output as RunRecord
         }
-        const approvedRevisionRound = this.assertActionPrerequisites(transaction, parsed.data)
+        if (parsed.data.expectedVersion !== transaction.run.version) {
+          throw new RunServiceError(409, 'RUN_VERSION_CONFLICT', 'run version does not match expectedVersion')
+        }
+        const approvedRevisionRound = this.assertActionPrerequisites(transaction, parsed.data, host)
         const nextPlanningAttempt = this.planningRetryAttempt(transaction, parsed.data)
         const previous = transaction.run
         const policy = applyRunAction(previous, parsed.data)
@@ -145,6 +155,9 @@ export class RunService {
           ...(parsed.data.type === 'ACCEPT_WITH_OVERRIDE' ? {
             qualityOverrideReason: parsed.data.reason,
             qualityOverrideBy: host.externalUserId,
+            qualityOverrideRole: host.role ?? 'USER',
+            qualityOverrideIssueIds: parsed.data.issueIds,
+            qualityOverrideAt: now,
           } : {}),
           ...(approvedRevisionRound === null ? {} : { revisionRound: approvedRevisionRound }),
           ...(nextPlanningAttempt === null ? {} : {
@@ -197,7 +210,32 @@ export class RunService {
   private assertActionPrerequisites(
     transaction: AgentTransaction,
     action: RunAction,
+    host: HostContext,
   ) {
+    if (action.type === 'ACCEPT_WITH_OVERRIDE') {
+      const blueprintStep = transaction.getStep(transaction.run.revisionRound === 0
+        ? planningStepKey(transaction.run.id, transaction.run.planningAttempt ?? 0)
+        : revisionBlueprintStepKey(transaction.run.id, transaction.run.revisionRound))
+      if (!blueprintStep || blueprintStep.status !== 'COMPLETED') {
+        throw new RunServiceError(409, 'DELIVERY_BLUEPRINT_REQUIRED', 'quality override requires a valid blueprint')
+      }
+      presentationBlueprintSchema.parse(blueprintStep.output)
+      const openIssues = new Map<string, Extract<ReturnType<AgentTransaction['listEvents']>[number], { type: 'issue.detected' }>['payload']>()
+      for (const event of transaction.listEvents()) {
+        if (event.type === 'issue.detected') openIssues.set(event.payload.id, event.payload)
+        if (event.type === 'issue.resolved') openIssues.delete(event.payload.issueId)
+      }
+      if (action.issueIds.length !== openIssues.size || action.issueIds.some((id) => !openIssues.has(id))) {
+        throw new RunServiceError(409, 'QUALITY_OVERRIDE_ISSUES_MISMATCH', 'quality override must acknowledge every open issue')
+      }
+      const adminOnly = action.issueIds.map((id) => openIssues.get(id)!).some((issue) =>
+        issue.severity === 'CRITICAL'
+        && (ADMIN_ONLY_CRITICAL_CATEGORIES.has(issue.category) || issue.repairDomain === 'KNOWLEDGE'))
+      if (adminOnly && (host.role ?? 'USER') !== 'ADMIN') {
+        throw new RunServiceError(403, 'QUALITY_OVERRIDE_ADMIN_REQUIRED', 'critical teaching issues require administrator approval')
+      }
+      return null
+    }
     if (action.type === 'APPROVE_BLUEPRINT') {
       const step = transaction.getStep(planningStepKey(transaction.run.id))
       if (!step || step.status !== 'COMPLETED') {
@@ -331,6 +369,15 @@ export class RunService {
         payload: { budgetUnits: updated.budgetUnits, committedBudgetUnits: updated.committedBudgetUnits },
       })
     } else if (['APPROVE_BLUEPRINT', 'RETRY_PLANNING', 'REPLAN', 'APPROVE_REVISION', 'SUBMIT_LIMITED_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
+      if (action.type === 'ACCEPT_WITH_OVERRIDE') {
+        for (const issueId of action.issueIds) {
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'issue.resolved',
+            payload: { issueId, resolution: 'ACCEPTED' },
+          })
+        }
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'approval.resolved',
@@ -338,6 +385,12 @@ export class RunService {
           kind: action.type === 'APPROVE_BLUEPRINT' ? 'BLUEPRINT'
             : ['RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'SUBMIT_LIMITED_REVISION'].includes(action.type) ? 'HUMAN_REVIEW' : 'REVISION',
           actionType: action.type,
+          ...(action.type === 'ACCEPT_WITH_OVERRIDE' ? {
+            actorId: updated.qualityOverrideBy!,
+            actorRole: updated.qualityOverrideRole!,
+            issueIds: action.issueIds,
+            reason: action.reason,
+          } : {}),
         },
       })
     }

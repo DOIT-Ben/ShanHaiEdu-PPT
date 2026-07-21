@@ -10,6 +10,7 @@ export const hostContextSchema = z.object({
   tenantId: identifierSchema,
   externalUserId: identifierSchema,
   externalProjectId: identifierSchema.optional(),
+  role: z.enum(['USER', 'ADMIN']).optional(),
 }).strict()
 
 export const runStatusSchema = z.enum([
@@ -115,6 +116,7 @@ export const runActionSchema = z.discriminatedUnion('type', [
     ...actionBase,
     type: z.literal('ACCEPT_WITH_OVERRIDE'),
     reason: z.string().trim().min(10).max(2_000),
+    issueIds: z.array(identifierSchema).min(1).max(50).refine((value) => new Set(value).size === value.length),
   }).strict(),
 ])
 
@@ -192,7 +194,14 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('run.started'), payload: z.object({ status: z.literal('PLANNING') }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('phase.changed'), payload: z.object({ from: runStatusSchema, to: runStatusSchema, reason: z.string().max(500).optional() }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('approval.required'), payload: z.object({ kind: z.enum(['BLUEPRINT', 'REVISION', 'BUDGET', 'HUMAN_REVIEW']), summary: z.string().min(1).max(1_000) }).strict() }).strict(),
-  z.object({ ...eventBase, type: z.literal('approval.resolved'), payload: z.object({ kind: z.enum(['BLUEPRINT', 'REVISION', 'BUDGET', 'HUMAN_REVIEW']), actionType: z.string().min(1).max(80) }).strict() }).strict(),
+  z.object({ ...eventBase, type: z.literal('approval.resolved'), payload: z.object({
+    kind: z.enum(['BLUEPRINT', 'REVISION', 'BUDGET', 'HUMAN_REVIEW']),
+    actionType: z.string().min(1).max(80),
+    actorId: identifierSchema.optional(),
+    actorRole: z.enum(['USER', 'ADMIN']).optional(),
+    issueIds: z.array(identifierSchema).max(50).optional(),
+    reason: z.string().trim().min(10).max(2_000).optional(),
+  }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('tool.started'), payload: z.object({ stepId: identifierSchema, tool: z.string().min(1).max(100), label: z.string().min(1).max(240) }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('tool.progress'), payload: z.object({ stepId: identifierSchema, completed: z.number().int().nonnegative(), total: z.number().int().positive(), summary: z.string().max(500).optional() }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('tool.completed'), payload: z.object({ stepId: identifierSchema, summary: z.string().min(1).max(1_000) }).strict() }).strict(),

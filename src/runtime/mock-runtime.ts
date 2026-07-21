@@ -49,9 +49,11 @@ export class SharedTokenAuthentication implements HostAuthenticationPort {
     const tenantId = request.headers.get('X-PPT-Agent-Tenant')?.trim()
     const externalUserId = request.headers.get('X-PPT-Agent-User')?.trim()
     const externalProjectId = request.headers.get('X-PPT-Agent-Project')?.trim()
+    const role = request.headers.get('X-PPT-Agent-Role')?.trim() ?? 'USER'
     if (tenantId !== 'frameflow' || !externalUserId || externalUserId.length > 160) return null
     if (externalProjectId && externalProjectId.length > 160) return null
-    return { tenantId, externalUserId, ...(externalProjectId ? { externalProjectId } : {}) }
+    if (role !== 'USER' && role !== 'ADMIN') return null
+    return { tenantId, externalUserId, role, ...(externalProjectId ? { externalProjectId } : {}) }
   }
 }
 

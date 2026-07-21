@@ -72,6 +72,7 @@ export class InMemoryAgentRepository implements AgentRepository {
       const transaction: AgentTransaction = {
         get run() { return nextRun },
         getStep(idempotencyKey) { return clone(nextSteps.get(idempotencyKey) ?? null) },
+        listEvents() { return nextEvents.map(clone) },
         getDelivery(deliveryId) { return clone(nextDeliveries.get(deliveryId) ?? null) },
         putRun(run) { nextRun = clone(run) },
         putStep(step) { nextSteps.set(step.idempotencyKey, clone(step)) },

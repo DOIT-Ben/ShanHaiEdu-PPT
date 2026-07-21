@@ -290,6 +290,13 @@ export const deliveryRecordSchema = z.object({
   revisionRound: z.number().int().min(0).max(2),
   qualityScore: z.number().int().min(0).max(100).nullable(),
   qualityOverride: z.boolean(),
+  qualityOverrideAudit: z.object({
+    actorId: identifierSchema,
+    actorRole: z.enum(['USER', 'ADMIN']),
+    reason: z.string().trim().min(10).max(2_000),
+    issueIds: z.array(identifierSchema).min(1).max(50),
+    acceptedAt: z.string().datetime(),
+  }).strict().nullable().optional(),
   preview: deliveryArtifactSchema.extend({ mimeType: z.literal('image/png') }).strict(),
   pptx: deliveryArtifactSchema.extend({
     mimeType: z.literal('application/vnd.openxmlformats-officedocument.presentationml.presentation'),

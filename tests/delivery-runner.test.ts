@@ -5,7 +5,7 @@ import { DeliveryRunner } from '../src/core/delivery-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 
-function run(): RunRecord {
+function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
     creationKey: 'create-run-1',
@@ -32,6 +32,7 @@ function run(): RunRecord {
     leaseVersion: 0,
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z',
+    ...overrides,
   }
 }
 
@@ -59,11 +60,11 @@ function blueprint() {
   }
 }
 
-async function fixture() {
+async function fixture(runOverrides: Partial<RunRecord> = {}) {
   const repository = new InMemoryAgentRepository()
   const artifacts = new MockArtifactPort()
   const renderer = new MockPresentationRendererPort()
-  await repository.createRun(run())
+  await repository.createRun(run(runOverrides))
   const imageArtifacts: { artifactId: string; sha256: string }[] = []
   for (const pageNumber of [1, 2]) {
     imageArtifacts.push(await artifacts.put({
@@ -138,6 +139,25 @@ describe('delivery runner', () => {
     expect(replay.delivery).toEqual(first.delivery)
     expect(renderer).toMatchObject({ previewCalls: 1, pptxCalls: 1 })
     expect(artifacts.artifacts.size).toBe(artifactCount)
+  })
+
+  test('carries quality override actor, role, issues and time into delivery metadata', async () => {
+    const { runner } = await fixture({
+      qualityOverride: true,
+      qualityOverrideBy: 'admin-1',
+      qualityOverrideRole: 'ADMIN',
+      qualityOverrideReason: '管理员已逐项复核并接受当前教学风险。',
+      qualityOverrideIssueIds: ['issue-factual-1'],
+      qualityOverrideAt: '2026-07-21T00:00:00.000Z',
+    })
+    const result = await runner.deliver('run-1')
+    expect(result.delivery?.qualityOverrideAudit).toEqual({
+      actorId: 'admin-1',
+      actorRole: 'ADMIN',
+      reason: '管理员已逐项复核并接受当前教学风险。',
+      issueIds: ['issue-factual-1'],
+      acceptedAt: '2026-07-21T00:00:00.000Z',
+    })
   })
 
   test('moves to human review when a controlled source artifact is unavailable', async () => {

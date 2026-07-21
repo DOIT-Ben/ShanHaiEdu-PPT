@@ -233,6 +233,9 @@ export type RunRecord = Readonly<{
   qualityOverride: boolean
   qualityOverrideReason: string | null
   qualityOverrideBy: string | null
+  qualityOverrideRole?: HostContext['role'] | null
+  qualityOverrideIssueIds?: readonly string[]
+  qualityOverrideAt?: string | null
   leaseToken: string | null
   leaseUntil: string | null
   leaseVersion: number
@@ -263,6 +266,7 @@ export type NewAgentEvent = Omit<AgentEvent, 'id' | 'runId' | 'sequence' | 'crea
 export interface AgentTransaction {
   readonly run: RunRecord
   getStep(idempotencyKey: string): StepRecord | null
+  listEvents(): readonly AgentEvent[]
   getDelivery(deliveryId: string): DeliveryRecord | null
   putRun(run: RunRecord): void
   putStep(step: StepRecord): void

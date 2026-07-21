@@ -71,7 +71,20 @@ describe('public v1 contracts', () => {
       type: 'ACCEPT_WITH_OVERRIDE',
       expectedVersion: 7,
       reason: '太短',
+      issueIds: ['issue-1'],
     })).toThrow()
+  })
+
+  test('requires explicit unique issue ids for quality override', () => {
+    const action = {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'ACCEPT_WITH_OVERRIDE',
+      expectedVersion: 7,
+      reason: '教师已经逐项复核并接受这些低风险视觉问题。',
+    } as const
+    expect(() => runActionSchema.parse(action)).toThrow()
+    expect(() => runActionSchema.parse({ ...action, issueIds: ['issue-1', 'issue-1'] })).toThrow()
+    expect(runActionSchema.parse({ ...action, issueIds: ['issue-1'] })).toMatchObject({ issueIds: ['issue-1'] })
   })
 
   test('accepts explicit planning recovery actions', () => {

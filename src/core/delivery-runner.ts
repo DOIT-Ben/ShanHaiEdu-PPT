@@ -77,6 +77,20 @@ export class DeliveryRunner {
         revisionRound: run.revisionRound,
         qualityScore: run.qualityScore,
         qualityOverride: run.qualityOverride,
+        qualityOverrideAudit: run.qualityOverride
+          && run.qualityOverrideBy
+          && run.qualityOverrideRole
+          && run.qualityOverrideReason
+          && run.qualityOverrideIssueIds?.length
+          && run.qualityOverrideAt
+          ? {
+              actorId: run.qualityOverrideBy,
+              actorRole: run.qualityOverrideRole,
+              reason: run.qualityOverrideReason,
+              issueIds: run.qualityOverrideIssueIds,
+              acceptedAt: run.qualityOverrideAt,
+            }
+          : null,
         preview: {
           artifactId: preview.artifactId,
           name: previewName,

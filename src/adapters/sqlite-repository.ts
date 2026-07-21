@@ -119,6 +119,12 @@ export class SqliteAgentRepository implements AgentRepository {
           ).get(runId, idempotencyKey)
           return parseJson<StepRecord>(row)
         },
+        listEvents: () => {
+          const stored = this.#database.query<JsonRow, [string]>(
+            'SELECT data FROM agent_events WHERE run_id = ? ORDER BY sequence ASC',
+          ).all(runId).map((row) => JSON.parse(row.data) as AgentEvent)
+          return [...stored, ...appendedEvents].map((event) => structuredClone(event))
+        },
         getDelivery: (deliveryId) => {
           const touched = touchedDeliveries.get(deliveryId)
           if (touched) return structuredClone(touched)

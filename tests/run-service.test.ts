@@ -125,6 +125,21 @@ describe('run service', () => {
     const created = await service.create(request, 'frameflow-create-0001')
     await repository.transact(created.run.id, (transaction) => {
       transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 1 })
+      transaction.putStep({
+        id: 'step-plan-override', runId: created.run.id, idempotencyKey: planningStepKey(created.run.id),
+        inputHash: 'plan-override-hash', tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null, output: blueprint(),
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-visual-1', category: 'VISUAL_CONSISTENCY', severity: 'WARNING',
+          summary: '第二页插画风格与封面略有差异。', slideIds: [`${created.run.id}:slide:2`],
+          sourceChunkIds: [], status: 'OPEN', repairDomain: 'ASSET',
+        },
+      })
     })
     const reason = '教师已逐页复核事实风险并明确接受当前交付结果。'
     const accepted = await service.act(created.run.id, host, {
@@ -132,6 +147,7 @@ describe('run service', () => {
       type: 'ACCEPT_WITH_OVERRIDE',
       expectedVersion: 1,
       reason,
+      issueIds: ['issue-visual-1'],
     }, 'quality-override-0001')
 
     expect(accepted).toMatchObject({
@@ -139,7 +155,56 @@ describe('run service', () => {
       qualityOverride: true,
       qualityOverrideReason: reason,
       qualityOverrideBy: 'user-1',
+      qualityOverrideRole: 'USER',
+      qualityOverrideIssueIds: ['issue-visual-1'],
     })
+    expect((await repository.listEvents(created.run.id)).some((event) =>
+      event.type === 'issue.resolved' && event.payload.issueId === 'issue-visual-1')).toBe(true)
+  })
+
+  test('blocks ordinary users from overriding critical teaching issues and requires a blueprint', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-critical-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 1 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-factual-1', category: 'FACTUAL_RISK', severity: 'CRITICAL',
+          summary: '课件中的核心事实与教材来源不一致。', slideIds: [], sourceChunkIds: ['chunk-1'], status: 'OPEN',
+          repairDomain: 'KNOWLEDGE',
+        },
+      })
+    })
+    const action = {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'ACCEPT_WITH_OVERRIDE',
+      expectedVersion: 1,
+      reason: '管理员已逐项阅读风险声明并承担本次内容审批责任。',
+      issueIds: ['issue-factual-1'],
+    } as const
+
+    await expect(service.act(created.run.id, host, action, 'critical-override-user-0001'))
+      .rejects.toMatchObject({ status: 409, code: 'DELIVERY_BLUEPRINT_REQUIRED' })
+
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putStep({
+        id: 'step-plan-critical', runId: created.run.id, idempotencyKey: planningStepKey(created.run.id),
+        inputHash: 'plan-critical-hash', tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null, output: blueprint(),
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+    await expect(service.act(created.run.id, host, action, 'critical-override-user-0002'))
+      .rejects.toMatchObject({ status: 403, code: 'QUALITY_OVERRIDE_ADMIN_REQUIRED' })
+
+    const accepted = await service.act(created.run.id, { ...host, role: 'ADMIN' }, action, 'critical-override-admin-0001')
+    expect(accepted).toMatchObject({
+      status: 'DELIVERING', qualityOverrideRole: 'ADMIN', qualityOverrideIssueIds: ['issue-factual-1'],
+    })
+    await expect(service.act(created.run.id, { ...host, role: 'ADMIN' }, action, 'critical-override-admin-stale-0001'))
+      .rejects.toMatchObject({ status: 409, code: 'RUN_VERSION_CONFLICT' })
   })
 
   test('requires a persisted revision plan and advances its round on approval', async () => {

@@ -45,6 +45,7 @@ describe('run transition policy', () => {
       type: 'ACCEPT_WITH_OVERRIDE',
       expectedVersion: 3,
       reason: '教师已复核现有问题并明确接受当前版本。',
+      issueIds: ['issue-visual-1'],
     })
 
     expect(result).toMatchObject({ status: 'DELIVERING', qualityOverride: true, version: 4 })
