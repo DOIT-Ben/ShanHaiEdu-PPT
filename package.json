@@ -7,6 +7,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
+    "dev:mock": "bun src/server.ts",
     "check:boundaries": "bun scripts/check-boundaries.ts",
     "check": "bun run check:boundaries && bun test && bun run typecheck && bun run build"
   },
