@@ -74,6 +74,20 @@ describe('public v1 contracts', () => {
     })).toThrow()
   })
 
+  test('requires a concrete element only for limited asset revision', () => {
+    const base = {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'SUBMIT_LIMITED_REVISION',
+      expectedVersion: 7,
+      slideId: 'run-1:slide:2',
+      instruction: '只重新生成第二页目标知识素材，其他元素保持不变。',
+    } as const
+    expect(() => runActionSchema.parse({ ...base, repairDomain: 'ASSET' })).toThrow()
+    expect(runActionSchema.parse({ ...base, repairDomain: 'ASSET', targetElementId: 'knowledge-2-1' }))
+      .toMatchObject({ targetElementId: 'knowledge-2-1' })
+    expect(() => runActionSchema.parse({ ...base, repairDomain: 'LAYOUT', targetElementId: 'knowledge-2-1' })).toThrow()
+  })
+
   test('requires resumeState exactly while paused', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,

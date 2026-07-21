@@ -6,6 +6,7 @@ import {
   type RunAction,
 } from '../contracts'
 import { presentationBlueprintSchema, revisionPlanSchema } from '../presentation-contracts'
+import { revisionBlueprintStepKey } from './active-blueprint'
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
 import type { AgentRepository, AgentTransaction, ClockPort, RunRecord } from './ports'
@@ -207,6 +208,68 @@ export class RunService {
       }
       return plan.revisionRound
     }
+    if (action.type === 'SUBMIT_LIMITED_REVISION') {
+      if (transaction.run.status !== 'NEEDS_HUMAN') {
+        throw new RunServiceError(422, 'LIMITED_REVISION_NOT_ALLOWED', 'limited revision requires human review')
+      }
+      const targetRound = transaction.run.revisionRound + 1
+      if (targetRound > transaction.run.maxRevisionRounds) {
+        throw new RunServiceError(422, 'REVISION_LIMIT_REACHED', 'revision limit has been reached')
+      }
+      const blueprintStep = transaction.getStep(transaction.run.revisionRound === 0
+        ? planningStepKey(transaction.run.id)
+        : revisionBlueprintStepKey(transaction.run.id, transaction.run.revisionRound))
+      if (!blueprintStep || blueprintStep.status !== 'COMPLETED') {
+        throw new RunServiceError(409, 'BLUEPRINT_NOT_READY', 'active blueprint is not ready')
+      }
+      const blueprint = presentationBlueprintSchema.parse(blueprintStep.output)
+      const slide = blueprint.slides.find((candidate) => `${transaction.run.id}:slide:${candidate.pageNumber}` === action.slideId)
+      if (!slide) throw new RunServiceError(422, 'REVISION_SLIDE_INVALID', 'revision slide does not exist')
+      if (action.repairDomain === 'ASSET') {
+        const element = slide.layeredDesign?.elements.find((candidate) => candidate.elementId === action.targetElementId)
+        if (!element || element.kind !== 'IMAGE' || element.role === 'BASE_LAYER') {
+          throw new RunServiceError(422, 'REVISION_ELEMENT_INVALID', 'revision element is not a knowledge image asset')
+        }
+      }
+      const operationKind = action.repairDomain === 'KNOWLEDGE'
+        ? 'UPDATE_CONTENT' as const
+        : action.repairDomain === 'ASSET' ? 'REGENERATE_IMAGE' as const : 'RELAYOUT' as const
+      const createdAt = this.dependencies.clock.now().toISOString()
+      const issueId = `manual-${hashInput({ runId: transaction.run.id, action }).slice(0, 24)}`
+      const plan = revisionPlanSchema.parse({
+        id: `${transaction.run.id}:manual-revision:r${targetRound}`,
+        reviewId: `${transaction.run.id}:manual-review:r${transaction.run.revisionRound}`,
+        revisionRound: targetRound,
+        createdAt,
+        summary: `教师提交第 ${slide.pageNumber} 页${action.repairDomain}局部修订。`,
+        operations: [{
+          id: `${transaction.run.id}:manual-operation:r${targetRound}`,
+          slideId: action.slideId,
+          kind: operationKind,
+          issueIds: [issueId],
+          instruction: action.instruction,
+          sourceChunkIds: action.repairDomain === 'KNOWLEDGE' ? slide.sourceChunkIds : [],
+          ...(action.targetElementId ? { targetElementId: action.targetElementId } : {}),
+        }],
+      })
+      const key = revisionPlanStepKey(transaction.run.id, targetRound)
+      transaction.putStep({
+        id: `step-${transaction.run.id}-manual-revision-r${targetRound}`,
+        runId: transaction.run.id,
+        idempotencyKey: key,
+        inputHash: hashInput({ tool: 'manual_revision', action }),
+        tool: 'plan_revision',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: plan,
+        createdAt,
+        updatedAt: createdAt,
+      })
+      return targetRound
+    }
     return null
   }
 
@@ -243,12 +306,13 @@ export class RunService {
         type: 'budget.updated',
         payload: { budgetUnits: updated.budgetUnits, committedBudgetUnits: updated.committedBudgetUnits },
       })
-    } else if (['APPROVE_BLUEPRINT', 'APPROVE_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
+    } else if (['APPROVE_BLUEPRINT', 'APPROVE_REVISION', 'SUBMIT_LIMITED_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'approval.resolved',
         payload: {
-          kind: action.type === 'APPROVE_BLUEPRINT' ? 'BLUEPRINT' : action.type === 'ACCEPT_WITH_OVERRIDE' ? 'HUMAN_REVIEW' : 'REVISION',
+          kind: action.type === 'APPROVE_BLUEPRINT' ? 'BLUEPRINT'
+            : action.type === 'ACCEPT_WITH_OVERRIDE' || action.type === 'SUBMIT_LIMITED_REVISION' ? 'HUMAN_REVIEW' : 'REVISION',
           actionType: action.type,
         },
       })

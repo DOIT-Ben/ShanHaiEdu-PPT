@@ -192,6 +192,37 @@ describe('run service', () => {
     expect(approved).toMatchObject({ status: 'REVISING', revisionRound: 1, version: 5 })
   })
 
+  test('turns a teacher limited page request into a persisted revision plan', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-limited-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 4 })
+      transaction.putStep({
+        id: 'step-plan-limited', runId: created.run.id, idempotencyKey: planningStepKey(created.run.id),
+        inputHash: 'plan-limited-hash', tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null, output: blueprint(),
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const revised = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'SUBMIT_LIMITED_REVISION',
+      expectedVersion: 4,
+      slideId: `${created.run.id}:slide:2`,
+      repairDomain: 'LAYOUT',
+      instruction: '将第二页主视觉移到右侧，完整保留左侧可编辑文字区域。',
+    }, 'limited-revision-layout-0001')
+
+    expect(revised).toMatchObject({ status: 'REVISING', revisionRound: 1, version: 5 })
+    const step = (await repository.listSteps(created.run.id))
+      .find((candidate) => candidate.idempotencyKey === revisionPlanStepKey(created.run.id, 1))!
+    expect(step).toMatchObject({
+      tool: 'plan_revision', status: 'COMPLETED',
+      output: { revisionRound: 1, operations: [{ slideId: `${created.run.id}:slide:2`, kind: 'RELAYOUT' }] },
+    })
+  })
+
   test('replays the same user action without duplicate events', async () => {
     const { repository, service } = fixture()
     const created = await service.create(request, 'frameflow-create-0001')

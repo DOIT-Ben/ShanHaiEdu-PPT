@@ -85,6 +85,21 @@ export const runActionSchema = z.discriminatedUnion('type', [
   z.object({ ...actionBase, type: z.literal('APPROVE_REVISION') }).strict(),
   z.object({
     ...actionBase,
+    type: z.literal('SUBMIT_LIMITED_REVISION'),
+    slideId: identifierSchema,
+    repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']),
+    instruction: z.string().trim().min(10).max(2_000),
+    targetElementId: identifierSchema.optional(),
+  }).strict().superRefine((value, context) => {
+    if (value.repairDomain === 'ASSET' && !value.targetElementId) {
+      context.addIssue({ code: 'custom', path: ['targetElementId'], message: 'asset revision requires targetElementId' })
+    }
+    if (value.repairDomain !== 'ASSET' && value.targetElementId) {
+      context.addIssue({ code: 'custom', path: ['targetElementId'], message: 'only asset revision may target an element' })
+    }
+  }),
+  z.object({
+    ...actionBase,
     type: z.literal('REJECT_REVISION'),
     reason: z.string().trim().min(3).max(1_000),
   }).strict(),

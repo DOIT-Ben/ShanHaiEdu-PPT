@@ -87,6 +87,11 @@ export function applyRunAction(state: RunPolicyState, action: RunAction): RunPol
       return { ...state, budgetUnits: state.budgetUnits + action.additionalBudgetUnits, version: state.version + 1 }
     case 'APPROVE_REVISION':
       return transitionRun(state, 'REVISING')
+    case 'SUBMIT_LIMITED_REVISION':
+      if (state.status !== 'NEEDS_HUMAN') {
+        throw new PolicyError('LIMITED_REVISION_NOT_ALLOWED', 'limited revision requires human-review state')
+      }
+      return transitionRun(state, 'REVISING')
     case 'REJECT_REVISION':
       return transitionRun(state, 'NEEDS_HUMAN')
     case 'ACCEPT_WITH_OVERRIDE': {
