@@ -96,6 +96,13 @@ describe('gateway courseware model', () => {
       tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
     }).tools[0]!.function.parameters
     expect(parameters.properties.slides.items.required).toContain('layeredDesign')
+    expect((parameters.properties.slides.items as unknown as {
+      properties: { layeredDesign: { properties: { elements: { contains: unknown } } } }
+    }).properties.layeredDesign.properties.elements.contains).toEqual({
+      type: 'object',
+      properties: { kind: { const: 'IMAGE' }, role: { const: 'BASE_LAYER' } },
+      required: ['kind', 'role'],
+    })
   })
 
   test('keeps layered design optional for legacy slide-image blueprints', async () => {
@@ -121,6 +128,38 @@ describe('gateway courseware model', () => {
       tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
     }).tools[0]!.function.parameters
     expect(parameters.properties.slides.items.required).not.toContain('layeredDesign')
+  })
+
+  test('regenerates a blueprint with contract feedback after an invalid tool response', async () => {
+    const requests: { body: Record<string, unknown>; idempotencyKey: string }[] = []
+    const invalid = layeredBlueprintDraft()
+    delete (invalid.slides[1] as Partial<(typeof invalid.slides)[number]>).body
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requests.push({
+          body: JSON.parse(String(init?.body)),
+          idempotencyKey: new Headers(init?.headers).get('Idempotency-Key') || '',
+        })
+        return completion(requests.length === 1 ? invalid : layeredBlueprintDraft())
+      },
+    })
+
+    const result = await model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', idempotencyKey: 'plan-repair',
+      payload: {
+        slideCount: 2, presentationMode: 'LAYERED_COURSEWARE_V3', coverDesignMode: 'INDEPENDENT',
+        document: { name: '数学教材.txt', chunks: [{ id: 'chunk-1', text: '三个苹果表示数量三。' }] },
+      },
+    })
+
+    expect(result).toEqual(layeredBlueprintDraft())
+    expect(requests).toHaveLength(2)
+    expect(requests[1]!.idempotencyKey).toMatch(/^contract-repair-[a-f0-9]{64}$/)
+    const repairSystem = (requests[1]!.body.messages as { content: string }[])[0]!.content
+    expect(repairSystem).toContain('slides.1.body')
+    expect(repairSystem).not.toContain('三个苹果表示数量三')
   })
 
   test('sends the controlled image to the vision reviewer and parses streamed tool arguments', async () => {
