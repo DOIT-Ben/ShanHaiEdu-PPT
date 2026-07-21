@@ -121,6 +121,32 @@ export const runActionSchema = z.discriminatedUnion('type', [
   }).strict(),
 ])
 
+export const planningFailureSchema = z.object({
+  errorCode: z.enum([
+    'SOURCE_INCOMPLETE',
+    'PROVIDER_TIMEOUT',
+    'PROVIDER_RATE_LIMIT',
+    'PROVIDER_UNAVAILABLE',
+    'MODEL_JSON_INVALID',
+    'BLUEPRINT_SCHEMA_INVALID',
+    'BLUEPRINT_SLIDE_COUNT_MISMATCH',
+    'BLUEPRINT_SOURCE_REFERENCE_INVALID',
+    'V3_LAYER_CONTRACT_INVALID',
+    'VISUAL_ASSET_LIMIT_EXCEEDED',
+  ]),
+  terminalCode: z.literal('CONTRACT_REPAIR_EXHAUSTED').optional(),
+  retryable: z.boolean(),
+  attempt: z.number().int().nonnegative(),
+  maxAttempts: z.number().int().nonnegative(),
+  suggestedAction: z.enum(['RETRY', 'MODIFY_SOURCE', 'CONTACT_ADMIN']),
+  diagnosticCode: z.string().trim().min(1).max(100),
+  fieldPaths: z.array(z.string().trim().min(1).max(160)).max(20),
+  correlationId: identifierSchema,
+  requestId: identifierSchema.nullable(),
+  model: z.string().trim().min(1).max(120).nullable(),
+  contractVersion: z.string().trim().min(1).max(40),
+}).strict()
+
 export const issueSummarySchema = z.object({
   id: identifierSchema,
   category: z.enum([
@@ -147,6 +173,7 @@ export const issueSummarySchema = z.object({
   sourceChunkIds: z.array(identifierSchema).max(200),
   status: z.enum(['OPEN', 'RESOLVED', 'ACCEPTED']),
   repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']).optional(),
+  planningFailure: planningFailureSchema.optional(),
 }).strict()
 
 export const runSnapshotSchema = z.object({
@@ -235,5 +262,6 @@ export type PresentationMode = z.infer<typeof presentationModeSchema>
 export type CoverDesignMode = z.infer<typeof coverDesignModeSchema>
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>
 export type RunAction = z.infer<typeof runActionSchema>
+export type PlanningFailure = z.infer<typeof planningFailureSchema>
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>
 export type AgentEvent = z.infer<typeof agentEventSchema>

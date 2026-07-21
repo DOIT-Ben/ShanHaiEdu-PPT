@@ -21,7 +21,10 @@ class HeaderAuthentication implements HostAuthenticationPort {
   async authenticate(request: Request): Promise<HostContext | null> {
     const tenantId = request.headers.get('X-Test-Tenant')
     const externalUserId = request.headers.get('X-Test-User')
-    return tenantId && externalUserId ? { tenantId, externalUserId } : null
+    const role = request.headers.get('X-Test-Role')
+    return tenantId && externalUserId
+      ? { tenantId, externalUserId, ...(role === 'ADMIN' ? { role } : {}) }
+      : null
   }
 }
 
@@ -167,6 +170,48 @@ describe('HTTP v1 handler', () => {
     const response = await handle(request(`/v1/runs/${runId}`))
     const body = await response.json() as { data: { issues: { id: string; repairDomain?: string }[] } }
     expect(body.data.issues).toEqual([expect.objectContaining({ id: 'issue-layout-2', repairDomain: 'LAYOUT' })])
+  })
+
+  test('lets only tenant administrators aggregate redacted planning failures', async () => {
+    const { repository, handle } = fixture()
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-planning-1', category: 'PLANNING_FAILED', severity: 'CRITICAL',
+          summary: '规划模型限流，已完成自动重试。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+          planningFailure: {
+            errorCode: 'PROVIDER_RATE_LIMIT', retryable: true, attempt: 3, maxAttempts: 3,
+            suggestedAction: 'RETRY', diagnosticCode: 'PROVIDER_RATE_LIMIT', fieldPaths: [],
+            correlationId: 'plan-correlation-1', requestId: 'request-safe-1', model: 'gpt-5.6', contractVersion: '1',
+          },
+        },
+      })
+    })
+
+    const forbidden = await handle(request('/v1/admin/planning-failures'))
+    expect(forbidden.status).toBe(403)
+    const invalidFilter = await handle(request('/v1/admin/planning-failures?model=', {
+      headers: { 'X-Test-Role': 'ADMIN' },
+    }))
+    expect(invalidFilter.status).toBe(422)
+    const admin = await handle(request('/v1/admin/planning-failures?errorCode=PROVIDER_RATE_LIMIT&model=gpt-5.6', {
+      headers: { 'X-Test-Role': 'ADMIN' },
+    }))
+    const body = await admin.json() as { data: unknown[]; totalFailures: number }
+    expect(admin.status).toBe(200)
+    expect(body).toEqual({
+      data: [{
+        errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6', contractVersion: '1',
+        count: 1, lastOccurredAt: '2026-07-21T00:00:00.000Z',
+      }],
+      totalFailures: 1,
+    })
+    expect(JSON.stringify(body)).not.toContain(createBody.source.text)
+    expect(JSON.stringify(body)).not.toContain('request-safe-1')
   })
 
   test('returns owned delivery metadata and streams only the selected controlled artifact', async () => {

@@ -24,12 +24,25 @@ export interface DocumentPort {
 }
 
 export interface StructuredModelPort {
+  readonly modelName?: string
   execute(input: Readonly<{
     operation: string
     schemaName: string
     payload: unknown
     idempotencyKey: string
   }>): Promise<unknown>
+}
+
+export class StructuredModelError extends Error {
+  constructor(
+    readonly code: 'PROVIDER_TIMEOUT' | 'PROVIDER_RATE_LIMIT' | 'PROVIDER_UNAVAILABLE' | 'MODEL_JSON_INVALID',
+    readonly retryable: boolean,
+    readonly model: string,
+    readonly requestId: string | null,
+  ) {
+    super(code)
+    this.name = 'StructuredModelError'
+  }
 }
 
 export type MediaSubmissionState = 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
@@ -266,6 +279,21 @@ export type StepRecord = Readonly<{
 
 export type NewAgentEvent = Omit<AgentEvent, 'id' | 'runId' | 'sequence' | 'createdAt'>
 
+export type PlanningFailureFilters = Readonly<{
+  tenantId: string
+  errorCode: string | null
+  model: string | null
+  contractVersion: string | null
+}>
+
+export type PlanningFailureAggregate = Readonly<{
+  errorCode: string
+  model: string | null
+  contractVersion: string
+  count: number
+  lastOccurredAt: string
+}>
+
 export interface AgentTransaction {
   readonly run: RunRecord
   getStep(idempotencyKey: string): StepRecord | null
@@ -284,5 +312,9 @@ export interface AgentRepository {
   listSteps(runId: string): Promise<readonly StepRecord[]>
   listDeliveries(runId: string): Promise<readonly DeliveryRecord[]>
   listEvents(runId: string, afterSequence?: number): Promise<readonly AgentEvent[]>
+  aggregatePlanningFailures(filters: PlanningFailureFilters): Promise<Readonly<{
+    groups: readonly PlanningFailureAggregate[]
+    totalFailures: number
+  }>>
   transact<T>(runId: string, operation: (transaction: AgentTransaction) => T): Promise<T>
 }

@@ -4,6 +4,8 @@ import type {
   AgentRepository,
   AgentTransaction,
   NewAgentEvent,
+  PlanningFailureAggregate,
+  PlanningFailureFilters,
   RunRecord,
   StepRecord,
 } from '../core/ports'
@@ -11,6 +13,20 @@ import type { DeliveryRecord } from '../presentation-contracts'
 
 type JsonRow = { data: string }
 type SequenceRow = { sequence: number | null }
+type PlanningFailureAggregateRow = {
+  errorCode: string
+  model: string | null
+  contractVersion: string
+  count: number
+  lastOccurredAt: string
+}
+type CountRow = { count: number }
+type PlanningFailureQueryParameters = [
+  string,
+  string | null, string | null,
+  string | null, string | null,
+  string | null, string | null,
+]
 
 function parseJson<T>(row: JsonRow | null): T | null {
   return row ? JSON.parse(row.data) as T : null
@@ -91,6 +107,44 @@ export class SqliteAgentRepository implements AgentRepository {
     return this.#database.query<JsonRow, [string]>(
       'SELECT data FROM agent_deliveries WHERE run_id = ? ORDER BY rowid ASC',
     ).all(runId).map((row) => JSON.parse(row.data) as DeliveryRecord)
+  }
+
+  async aggregatePlanningFailures(filters: PlanningFailureFilters) {
+    const parameters: PlanningFailureQueryParameters = [
+      filters.tenantId,
+      filters.errorCode, filters.errorCode,
+      filters.model, filters.model,
+      filters.contractVersion, filters.contractVersion,
+    ]
+    const where = `
+      json_extract(agent_runs.data, '$.host.tenantId') = ?
+      AND json_extract(agent_events.data, '$.type') = 'issue.detected'
+      AND json_type(agent_events.data, '$.payload.planningFailure') = 'object'
+      AND (? IS NULL OR json_extract(agent_events.data, '$.payload.planningFailure.errorCode') = ?)
+      AND (? IS NULL OR json_extract(agent_events.data, '$.payload.planningFailure.model') = ?)
+      AND (? IS NULL OR json_extract(agent_events.data, '$.payload.planningFailure.contractVersion') = ?)
+    `
+    const count = this.#database.query<CountRow, PlanningFailureQueryParameters>(`
+      SELECT COUNT(*) AS count
+      FROM agent_events
+      JOIN agent_runs ON agent_runs.id = agent_events.run_id
+      WHERE ${where}
+    `).get(...parameters)?.count ?? 0
+    const groups = this.#database.query<PlanningFailureAggregateRow, PlanningFailureQueryParameters>(`
+      SELECT
+        json_extract(agent_events.data, '$.payload.planningFailure.errorCode') AS errorCode,
+        json_extract(agent_events.data, '$.payload.planningFailure.model') AS model,
+        json_extract(agent_events.data, '$.payload.planningFailure.contractVersion') AS contractVersion,
+        COUNT(*) AS count,
+        MAX(json_extract(agent_events.data, '$.createdAt')) AS lastOccurredAt
+      FROM agent_events
+      JOIN agent_runs ON agent_runs.id = agent_events.run_id
+      WHERE ${where}
+      GROUP BY errorCode, model, contractVersion
+      ORDER BY count DESC, lastOccurredAt DESC
+      LIMIT 100
+    `).all(...parameters) as PlanningFailureAggregate[]
+    return { groups, totalFailures: count }
   }
 
   async transact<T>(runId: string, operation: (transaction: AgentTransaction) => T): Promise<T> {

@@ -1,4 +1,4 @@
-import type { CreateRunRequest } from '../contracts'
+import type { CreateRunRequest, PlanningFailure } from '../contracts'
 import { CONTRACT_VERSION } from '../contracts'
 import { ZodError } from 'zod'
 import {
@@ -7,6 +7,7 @@ import {
   type PresentationBlueprint,
 } from '../presentation-contracts'
 import { hashInput } from './hash'
+import { StructuredModelError } from './ports'
 import type {
   AgentRepository,
   ClockPort,
@@ -19,6 +20,15 @@ import type {
 import { transitionRun } from './policy'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
+const MAX_PROVIDER_ATTEMPTS = 3
+const PROVIDER_RETRY_DELAYS_MS = [250, 1_000] as const
+
+class PlanningFailureError extends Error {
+  constructor(readonly failure: PlanningFailure) {
+    super(failure.errorCode)
+    this.name = 'PlanningFailureError'
+  }
+}
 
 export type PlanPresentationInput = Readonly<{
   runId: string
@@ -49,6 +59,7 @@ export class PlanningRunner {
     documents: DocumentPort
     model: StructuredModelPort
     clock: ClockPort
+    sleep?: (milliseconds: number) => Promise<void>
   }>) {}
 
   async plan(input: PlanPresentationInput): Promise<PlanPresentationResult> {
@@ -58,7 +69,7 @@ export class PlanningRunner {
     if (prepared.replayed) return prepared
 
     if (!document.isComplete || document.chunks.length === 0) {
-      const step = await this.fail(input, 'SOURCE_INCOMPLETE', 'SOURCE_INCOMPLETE', document)
+      const step = await this.fail(input, this.sourceFailure(input), 'SOURCE_INCOMPLETE', document)
       return { step, blueprint: null, replayed: false }
     }
 
@@ -67,12 +78,10 @@ export class PlanningRunner {
       const step = await this.complete(input, blueprint)
       return { step, blueprint, replayed: false }
     } catch (error) {
-      const errorCode = error instanceof Error && error.message === 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
-        ? 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
-        : error instanceof Error && error.message === 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
-          ? 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
-          : 'BLUEPRINT_MODEL_OUTPUT_INVALID'
-      const step = await this.fail(input, errorCode, 'PLANNING_FAILED', document)
+      const failure = error instanceof PlanningFailureError
+        ? error.failure
+        : this.contractFailure(input, error, 1, 1, false)
+      const step = await this.fail(input, failure, 'PLANNING_FAILED', document)
       return { step, blueprint: null, replayed: false }
     }
   }
@@ -92,12 +101,13 @@ export class PlanningRunner {
     let repairIssues: { path: string; message: string }[] = []
     for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
       try {
-        const raw = await this.dependencies.model.execute({
+        const modelKey = attempt === 0
+          ? input.idempotencyKey
+          : `blueprint-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`
+        const raw = await this.executeWithProviderRetry(input, {
           operation: 'create_blueprint',
           schemaName: 'ppt_agent_blueprint_v1',
-          idempotencyKey: attempt === 0
-            ? input.idempotencyKey
-            : `blueprint-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`,
+          idempotencyKey: modelKey,
           payload: { ...basePayload, ...(repairIssues.length > 0 ? { contractRepairIssues: repairIssues } : {}) },
         })
         const draft = blueprintDraftSchema.parse(raw)
@@ -117,12 +127,149 @@ export class PlanningRunner {
           createdAt: this.dependencies.clock.now().toISOString(),
         })
       } catch (error) {
+        if (error instanceof PlanningFailureError) throw error
         const issues = this.contractIssues(error)
-        if (!issues || attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) throw error
+        if (!issues) throw new PlanningFailureError(this.contractFailure(input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, false))
+        if (attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) {
+          throw new PlanningFailureError(this.contractFailure(
+            input,
+            error,
+            attempt + 1,
+            MAX_BLUEPRINT_CONTRACT_ATTEMPTS,
+            true,
+          ))
+        }
         repairIssues = issues
       }
     }
     throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
+  }
+
+  private async executeWithProviderRetry(
+    input: PlanPresentationInput,
+    request: Parameters<StructuredModelPort['execute']>[0],
+  ) {
+    for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt++) {
+      try {
+        return await this.dependencies.model.execute(request)
+      } catch (error) {
+        const failure = this.providerFailure(input, error, attempt)
+        if (!failure) throw error
+        if (!failure.retryable || attempt === MAX_PROVIDER_ATTEMPTS) throw new PlanningFailureError(failure)
+        await this.recordProviderRetry(input, failure, attempt + 1)
+        await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
+          PROVIDER_RETRY_DELAYS_MS[attempt - 1] ?? PROVIDER_RETRY_DELAYS_MS.at(-1)!,
+        )
+      }
+    }
+    throw new Error('PROVIDER_RETRY_LOOP_INVALID')
+  }
+
+  private providerFailure(input: PlanPresentationInput, error: unknown, attempt: number): PlanningFailure | null {
+    if (!(error instanceof StructuredModelError) || error.code === 'MODEL_JSON_INVALID') return null
+    return {
+      errorCode: error.code,
+      retryable: error.retryable,
+      attempt,
+      maxAttempts: MAX_PROVIDER_ATTEMPTS,
+      suggestedAction: error.retryable ? 'RETRY' : 'CONTACT_ADMIN',
+      diagnosticCode: error.code,
+      fieldPaths: [],
+      correlationId: this.correlationId(input),
+      requestId: error.requestId ?? this.traceRequestId(input),
+      model: error.model,
+      contractVersion: CONTRACT_VERSION,
+    }
+  }
+
+  private sourceFailure(input: PlanPresentationInput): PlanningFailure {
+    return {
+      errorCode: 'SOURCE_INCOMPLETE',
+      retryable: false,
+      attempt: 0,
+      maxAttempts: 0,
+      suggestedAction: 'MODIFY_SOURCE',
+      diagnosticCode: 'SOURCE_INCOMPLETE',
+      fieldPaths: ['source'],
+      correlationId: this.correlationId(input),
+      requestId: this.traceRequestId(input),
+      model: this.dependencies.model.modelName ?? null,
+      contractVersion: CONTRACT_VERSION,
+    }
+  }
+
+  private contractFailure(
+    input: PlanPresentationInput,
+    error: unknown,
+    attempt: number,
+    maxAttempts: number,
+    exhausted: boolean,
+  ): PlanningFailure {
+    const fieldPaths = error instanceof ZodError
+      ? [...new Set(error.issues.map((issue) => issue.path.join('.') || 'blueprint'))].slice(0, 20)
+      : error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID'
+        ? ['blueprint']
+        : []
+    const message = error instanceof Error ? error.message : ''
+    const errorCode: PlanningFailure['errorCode'] = error instanceof ZodError
+      ? input.presentationMode === 'LAYERED_COURSEWARE_V3' && error.issues.some((issue) =>
+        issue.path.includes('layeredDesign') || issue.path.includes('elements'))
+        ? 'V3_LAYER_CONTRACT_INVALID'
+        : 'BLUEPRINT_SCHEMA_INVALID'
+      : message === 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
+        ? 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
+        : message === 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
+          ? 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
+          : message === 'BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED'
+            ? 'VISUAL_ASSET_LIMIT_EXCEEDED'
+            : message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID'
+              ? 'V3_LAYER_CONTRACT_INVALID'
+              : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
+                ? 'MODEL_JSON_INVALID'
+                : 'BLUEPRINT_SCHEMA_INVALID'
+    const retryable = ['MODEL_JSON_INVALID', 'BLUEPRINT_SLIDE_COUNT_MISMATCH', 'BLUEPRINT_SOURCE_REFERENCE_INVALID']
+      .includes(errorCode)
+    return {
+      errorCode,
+      ...(exhausted ? { terminalCode: 'CONTRACT_REPAIR_EXHAUSTED' as const } : {}),
+      retryable,
+      attempt,
+      maxAttempts,
+      suggestedAction: retryable ? 'RETRY' : 'CONTACT_ADMIN',
+      diagnosticCode: errorCode,
+      fieldPaths,
+      correlationId: this.correlationId(input),
+      requestId: error instanceof StructuredModelError
+        ? error.requestId ?? this.traceRequestId(input)
+        : this.traceRequestId(input),
+      model: error instanceof StructuredModelError
+        ? error.model
+        : this.dependencies.model.modelName ?? null,
+      contractVersion: CONTRACT_VERSION,
+    }
+  }
+
+  private correlationId(input: PlanPresentationInput) {
+    return `plan-${hashInput({ runId: input.runId, stepId: input.stepId, idempotencyKey: input.idempotencyKey }).slice(0, 28)}`
+  }
+
+  private traceRequestId(input: PlanPresentationInput) {
+    return `plan-request-${hashInput({ runId: input.runId, idempotencyKey: input.idempotencyKey }).slice(0, 24)}`
+  }
+
+  private async recordProviderRetry(input: PlanPresentationInput, failure: PlanningFailure, nextAttempt: number) {
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.progress',
+        payload: {
+          stepId: input.stepId,
+          completed: failure.attempt,
+          total: failure.maxAttempts,
+          summary: `规划模型暂时不可用，准备自动重试 ${nextAttempt}/${failure.maxAttempts}`,
+        },
+      })
+    })
   }
 
   private contractIssues(error: unknown) {
@@ -132,8 +279,11 @@ export class PlanningRunner {
         message: issue.message,
       }))
     }
-    if (error instanceof Error && error.message.startsWith('BLUEPRINT_')) {
+    if (error instanceof Error && (error.message.startsWith('BLUEPRINT_') || error.message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID')) {
       return [{ path: 'blueprint', message: error.message }]
+    }
+    if (error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID') {
+      return [{ path: 'blueprint', message: error.code }]
     }
     return null
   }
@@ -219,8 +369,11 @@ export class PlanningRunner {
     if (document.chunks.some((chunk) => !draft.curriculum.sourceChunkIds.includes(chunk.id))) {
       throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
     }
+    if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) => !slide.layeredDesign)) {
+      throw new Error('LAYERED_BLUEPRINT_SCHEMA_INVALID')
+    }
     if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) =>
-      !slide.layeredDesign || slide.layeredDesign.elements.filter((element) =>
+      slide.layeredDesign!.elements.filter((element) =>
         element.kind === 'IMAGE' && element.role !== 'BASE_LAYER').length > maxVisualAssetsPerSlide)) {
       throw new Error('BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED')
     }
@@ -269,7 +422,7 @@ export class PlanningRunner {
 
   private async fail(
     input: PlanPresentationInput,
-    errorCode: string,
+    failure: PlanningFailure,
     issueCategory: 'SOURCE_INCOMPLETE' | 'PLANNING_FAILED',
     document: DocumentResult,
   ) {
@@ -280,13 +433,13 @@ export class PlanningRunner {
       const now = this.dependencies.clock.now().toISOString()
       const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
-      const updated: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
+      const updated: StepRecord = { ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: now }
       transaction.putRun(run)
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode, retryable: false },
+        payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -297,18 +450,29 @@ export class PlanningRunner {
           severity: 'CRITICAL',
           summary: issueCategory === 'SOURCE_INCOMPLETE'
             ? `教材内容不完整：${document.missingRanges.join('；') || '没有可用内容'}`
-            : '教材蓝图未通过结构或来源校验，需要人工处理。',
+            : this.failureSummary(failure),
           slideIds: [],
           sourceChunkIds: document.chunks.map((chunk) => chunk.id),
           status: 'OPEN',
+          planningFailure: failure,
         },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: errorCode },
+        payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: failure.errorCode },
       })
       return updated
     })
+  }
+
+  private failureSummary(failure: PlanningFailure) {
+    if (failure.suggestedAction === 'RETRY') {
+      return `规划暂时失败（${failure.errorCode}），系统已尝试 ${failure.attempt}/${failure.maxAttempts} 次，可以按原参数重试。`
+    }
+    if (failure.suggestedAction === 'MODIFY_SOURCE') {
+      return '教材内容不完整，请补充或替换教材后重新规划。'
+    }
+    return `蓝图合同校验失败（${failure.errorCode}），系统已尝试修复 ${failure.attempt}/${failure.maxAttempts} 次，请联系管理员检查模型或合同版本。`
   }
 }

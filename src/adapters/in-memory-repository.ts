@@ -3,6 +3,8 @@ import type {
   AgentRepository,
   AgentTransaction,
   NewAgentEvent,
+  PlanningFailureAggregate,
+  PlanningFailureFilters,
   RunRecord,
   StepRecord,
 } from '../core/ports'
@@ -52,6 +54,43 @@ export class InMemoryAgentRepository implements AgentRepository {
     const stored = this.#runs.get(runId)
     if (!stored) return []
     return [...stored.deliveries.values()].map(clone)
+  }
+
+  async aggregatePlanningFailures(filters: PlanningFailureFilters) {
+    const groups = new Map<string, PlanningFailureAggregate>()
+    let totalFailures = 0
+    for (const stored of this.#runs.values()) {
+      if (stored.run.host.tenantId !== filters.tenantId) continue
+      for (const event of stored.events) {
+        if (event.type !== 'issue.detected' || !event.payload.planningFailure) continue
+        const failure = event.payload.planningFailure
+        if (filters.errorCode && failure.errorCode !== filters.errorCode) continue
+        if (filters.model && failure.model !== filters.model) continue
+        if (filters.contractVersion && failure.contractVersion !== filters.contractVersion) continue
+        totalFailures += 1
+        const key = JSON.stringify([failure.errorCode, failure.model, failure.contractVersion])
+        const existing = groups.get(key)
+        groups.set(key, existing
+          ? {
+              ...existing,
+              count: existing.count + 1,
+              lastOccurredAt: existing.lastOccurredAt > event.createdAt ? existing.lastOccurredAt : event.createdAt,
+            }
+          : {
+              errorCode: failure.errorCode,
+              model: failure.model,
+              contractVersion: failure.contractVersion,
+              count: 1,
+              lastOccurredAt: event.createdAt,
+            })
+      }
+    }
+    return {
+      groups: [...groups.values()]
+        .sort((left, right) => right.count - left.count || right.lastOccurredAt.localeCompare(left.lastOccurredAt))
+        .slice(0, 100),
+      totalFailures,
+    }
   }
 
   async transact<T>(runId: string, operation: (transaction: AgentTransaction) => T): Promise<T> {

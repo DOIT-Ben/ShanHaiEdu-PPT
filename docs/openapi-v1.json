@@ -8,6 +8,23 @@
   "servers": [{ "url": "/" }],
   "security": [{ "bearerAuth": [] }],
   "paths": {
+    "/v1/admin/planning-failures": {
+      "get": {
+        "operationId": "aggregatePlanningFailures",
+        "description": "Tenant-scoped, administrator-only aggregation of redacted planning failures.",
+        "parameters": [
+          { "name": "errorCode", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 100 } },
+          { "name": "model", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 120 } },
+          { "name": "contractVersion", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 40 } }
+        ],
+        "responses": {
+          "200": { "description": "Aggregated planning failures", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PlanningFailureReport" } } } },
+          "403": { "$ref": "#/components/responses/Error" },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/runs": {
       "post": {
         "operationId": "createRun",
@@ -204,9 +221,67 @@
           "budgetUnits": { "type": "integer" },
           "committedBudgetUnits": { "type": "integer" },
           "qualityOverride": { "type": "boolean" },
-          "issues": { "type": "array", "items": { "type": "object" } },
+          "issues": { "type": "array", "items": { "$ref": "#/components/schemas/IssueSummary" } },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "PlanningFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["errorCode", "retryable", "attempt", "maxAttempts", "suggestedAction", "diagnosticCode", "fieldPaths", "correlationId", "requestId", "model", "contractVersion"],
+        "properties": {
+          "errorCode": { "enum": ["SOURCE_INCOMPLETE", "PROVIDER_TIMEOUT", "PROVIDER_RATE_LIMIT", "PROVIDER_UNAVAILABLE", "MODEL_JSON_INVALID", "BLUEPRINT_SCHEMA_INVALID", "BLUEPRINT_SLIDE_COUNT_MISMATCH", "BLUEPRINT_SOURCE_REFERENCE_INVALID", "V3_LAYER_CONTRACT_INVALID", "VISUAL_ASSET_LIMIT_EXCEEDED"] },
+          "terminalCode": { "const": "CONTRACT_REPAIR_EXHAUSTED" },
+          "retryable": { "type": "boolean" },
+          "attempt": { "type": "integer", "minimum": 0 },
+          "maxAttempts": { "type": "integer", "minimum": 0 },
+          "suggestedAction": { "enum": ["RETRY", "MODIFY_SOURCE", "CONTACT_ADMIN"] },
+          "diagnosticCode": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "fieldPaths": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "correlationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "requestId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+          "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 120 },
+          "contractVersion": { "type": "string", "minLength": 1, "maxLength": 40 }
+        }
+      },
+      "IssueSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "severity", "summary", "slideIds", "sourceChunkIds", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "category": { "type": "string" },
+          "severity": { "enum": ["INFO", "WARNING", "CRITICAL"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "slideIds": { "type": "array", "maxItems": 50, "items": { "type": "string" } },
+          "sourceChunkIds": { "type": "array", "maxItems": 200, "items": { "type": "string" } },
+          "status": { "enum": ["OPEN", "RESOLVED", "ACCEPTED"] },
+          "repairDomain": { "enum": ["KNOWLEDGE", "ASSET", "LAYOUT"] },
+          "planningFailure": { "$ref": "#/components/schemas/PlanningFailure" }
+        }
+      },
+      "PlanningFailureReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data", "totalFailures"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["errorCode", "model", "contractVersion", "count", "lastOccurredAt"],
+              "properties": {
+                "errorCode": { "type": "string", "maxLength": 100 },
+                "model": { "type": ["string", "null"], "maxLength": 120 },
+                "contractVersion": { "type": "string", "maxLength": 40 },
+                "count": { "type": "integer", "minimum": 1 },
+                "lastOccurredAt": { "type": "string", "format": "date-time" }
+              }
+            }
+          },
+          "totalFailures": { "type": "integer", "minimum": 0 }
         }
       },
       "RunEnvelope": {

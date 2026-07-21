@@ -15,6 +15,7 @@ import type {
   StructuredModelPort,
   VisualReviewPort,
 } from '../core/ports'
+import { StructuredModelError } from '../core/ports'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 type ToolContent = string | readonly (
@@ -90,6 +91,7 @@ export class GatewayCoursewareModel implements
   DeckReviewPort,
   RevisionPlanningPort,
   RevisionApplicationPort {
+  readonly modelName: string
   private readonly baseUrl: string
   private readonly fetchImpl: Fetch
 
@@ -104,6 +106,7 @@ export class GatewayCoursewareModel implements
     this.baseUrl = normalizedBaseUrl(dependencies.baseUrl)
     if (dependencies.apiKey.trim().length < 8) throw new Error('GATEWAY_TEXT_KEY_REQUIRED')
     if (dependencies.textModel.trim().length === 0) throw new Error('GATEWAY_TEXT_MODEL_REQUIRED')
+    this.modelName = dependencies.textModel
     this.fetchImpl = dependencies.fetchImpl ?? fetch
   }
 
@@ -250,14 +253,50 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
         }),
         signal: AbortSignal.timeout(180_000),
       })
-    } catch {
-      throw new Error('GATEWAY_MODEL_UNAVAILABLE')
+    } catch (error) {
+      const timeout = error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name)
+      throw new StructuredModelError(
+        timeout ? 'PROVIDER_TIMEOUT' : 'PROVIDER_UNAVAILABLE',
+        true,
+        input.model,
+        null,
+      )
     }
-    if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? 'GATEWAY_MODEL_UNAUTHORIZED' : `GATEWAY_MODEL_HTTP_${response.status}`)
-    const raw = response.headers.get('content-type')?.includes('application/json')
-      ? completionSchema.parse(await response.json()).choices[0]!.message.tool_calls[0]!.function.arguments
-      : await this.readStream(response)
-    return input.schema.parse(JSON.parse(raw))
+    const requestId = this.requestId(response)
+    if (!response.ok) {
+      const code = response.status === 429
+        ? 'PROVIDER_RATE_LIMIT'
+        : [408, 504].includes(response.status)
+          ? 'PROVIDER_TIMEOUT'
+          : 'PROVIDER_UNAVAILABLE'
+      throw new StructuredModelError(code, response.status === 429 || response.status === 408 || response.status >= 500, input.model, requestId)
+    }
+    let raw: string
+    try {
+      raw = response.headers.get('content-type')?.includes('application/json')
+        ? completionSchema.parse(await response.json()).choices[0]!.message.tool_calls[0]!.function.arguments
+        : await this.readStream(response)
+    } catch (error) {
+      if (error instanceof Error && ['GATEWAY_MODEL_STREAM_MISSING', 'GATEWAY_MODEL_STREAM_INCOMPLETE'].includes(error.message)) {
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, input.model, requestId)
+      }
+      const code = error instanceof SyntaxError || error instanceof z.ZodError
+        ? 'MODEL_JSON_INVALID'
+        : 'PROVIDER_UNAVAILABLE'
+      throw new StructuredModelError(code, true, input.model, requestId)
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
+    }
+    return input.schema.parse(parsed)
+  }
+
+  private requestId(response: Response) {
+    const value = response.headers.get('x-request-id') ?? response.headers.get('request-id')
+    return value && /^[A-Za-z0-9._:-]{1,160}$/.test(value) ? value : null
   }
 
   private async readStream(response: Response) {

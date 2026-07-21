@@ -160,9 +160,30 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
 
       const url = new URL(request.url)
       const parts = url.pathname.split('/').filter(Boolean)
-      if (parts[0] !== 'v1' || parts[1] !== 'runs') {
+      if (parts[0] !== 'v1') {
         return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
       }
+
+      if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'planning-failures' && request.method === 'GET') {
+        if ((host.role ?? 'USER') !== 'ADMIN') {
+          return errorResponse(403, 'ADMIN_REQUIRED', 'administrator role is required', requestId)
+        }
+        const filters = {
+          errorCode: url.searchParams.get('errorCode'),
+          model: url.searchParams.get('model'),
+          contractVersion: url.searchParams.get('contractVersion'),
+        }
+        if (Object.values(filters).some((value) => value !== null && (value.length === 0 || value !== value.trim()))
+          || (filters.errorCode?.length ?? 0) > 100
+          || (filters.model?.length ?? 0) > 120
+          || (filters.contractVersion?.length ?? 0) > 40) {
+          return errorResponse(422, 'INVALID_FILTER', 'planning failure filter is invalid', requestId)
+        }
+        const report = await dependencies.repository.aggregatePlanningFailures({ tenantId: host.tenantId, ...filters })
+        return json({ data: report.groups, totalFailures: report.totalFailures })
+      }
+
+      if (parts[1] !== 'runs') return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
 
       if (parts.length === 2 && request.method === 'POST') {
         const idempotencyKey = request.headers.get('Idempotency-Key')

@@ -175,6 +175,61 @@ describe('gateway courseware model', () => {
     })
     await expect(model.execute({
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-fail',
-    })).rejects.toThrow('GATEWAY_MODEL_UNAVAILABLE')
+    })).rejects.toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE', retryable: true, model: 'gpt-5.6', requestId: null,
+    })
+  })
+
+  test('classifies rate limits and malformed model JSON without exposing response content', async () => {
+    const request = {
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-diagnostic',
+    }
+    const rateLimited = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => new Response('private provider response', {
+        status: 429,
+        headers: { 'x-request-id': 'request-safe-1' },
+      }),
+    })
+    await expect(rateLimited.execute(request)).rejects.toMatchObject({
+      code: 'PROVIDER_RATE_LIMIT', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-1',
+    })
+
+    const invalidJson = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        choices: [{ message: { tool_calls: [{ function: { arguments: '{private invalid content' } }] } }],
+      }, { headers: { 'x-request-id': 'request-safe-2' } }),
+    })
+    await expect(invalidJson.execute(request)).rejects.toMatchObject({
+      code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-2',
+    })
+  })
+
+  test('classifies an aborted gateway request as a provider timeout', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(), fetchImpl: async () => { throw new DOMException('private timeout detail', 'TimeoutError') },
+    })
+    await expect(model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-timeout',
+    })).rejects.toMatchObject({ code: 'PROVIDER_TIMEOUT', retryable: true, model: 'gpt-5.6' })
+  })
+
+  test('classifies an interrupted response stream as provider unavailable instead of invalid JSON', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) { controller.error(new TypeError('private stream detail')) },
+      }), { headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'request-stream-1' } }),
+    })
+    await expect(model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream',
+    })).rejects.toMatchObject({
+      code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-stream-1', model: 'gpt-5.6',
+    })
   })
 })

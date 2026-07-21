@@ -174,4 +174,44 @@ describe('SQLite repository', () => {
     expect(await repository.listSteps('run-1')).toHaveLength(1)
     repository.close()
   })
+
+  test('aggregates planning failures in SQLite without crossing tenant boundaries', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun(run())
+    await repository.createRun({
+      ...run(),
+      id: 'run-other-tenant',
+      creationKey: 'create-run-other-tenant',
+      host: { tenantId: 'other-tenant', externalUserId: 'user-2' },
+    })
+    const appendFailure = (runId: string) => repository.transact(runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: `${runId}:planning-failed`, category: 'PLANNING_FAILED', severity: 'CRITICAL',
+          summary: '规划模型限流。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+          planningFailure: {
+            errorCode: 'PROVIDER_RATE_LIMIT', retryable: true, attempt: 3, maxAttempts: 3,
+            suggestedAction: 'RETRY', diagnosticCode: 'PROVIDER_RATE_LIMIT', fieldPaths: [],
+            correlationId: `${runId}:correlation`, requestId: `${runId}:request`, model: 'gpt-5.6', contractVersion: '1',
+          },
+        },
+      })
+    })
+    await appendFailure('run-1')
+    await appendFailure('run-other-tenant')
+
+    expect(await repository.aggregatePlanningFailures({
+      tenantId: 'frameflow', errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6', contractVersion: '1',
+    })).toEqual({
+      groups: [{
+        errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6', contractVersion: '1',
+        count: 1, lastOccurredAt: '2026-07-21T00:00:00.000Z',
+      }],
+      totalFailures: 1,
+    })
+    repository.close()
+  })
 })

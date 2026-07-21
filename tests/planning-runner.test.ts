@@ -4,6 +4,7 @@ import { FixedClock, MockStructuredModelPort } from '../src/adapters/mock-ports'
 import { PlanningRunner } from '../src/core/planning-runner'
 import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
 import type { StructuredModelPort } from '../src/core/ports'
+import { StructuredModelError } from '../src/core/ports'
 
 const source = {
   kind: 'TEXT',
@@ -97,6 +98,51 @@ function draft(overrides: Record<string, unknown> = {}) {
       },
     ],
     ...overrides,
+  }
+}
+
+function layeredDraft(knowledgeAssets = 1) {
+  const value = draft()
+  return {
+    ...value,
+    slides: value.slides.map((slide, index) => {
+      const sourceChunkId = index === 0 ? 'chunk-0001' : 'chunk-0002'
+      const image = (role: 'BASE_LAYER' | 'KNOWLEDGE_VISUAL', imageIndex: number) => ({
+        kind: 'IMAGE' as const,
+        elementId: `${role.toLowerCase()}-${index}-${imageIndex}`,
+        role,
+        knowledgePoint: '呈现光合作用的教材知识点',
+        prompt: 'A child friendly botanical science illustration without text or logos',
+        negativePrompt: 'text, watermark, logo',
+        sourceChunkIds: [sourceChunkId],
+        placement: { x: 0, y: 0, width: 1, height: 1 },
+        zIndex: imageIndex,
+        fit: 'COVER' as const,
+        aspectRatio: '16:9' as const,
+        backgroundMode: 'OPAQUE' as const,
+      })
+      return {
+        ...slide,
+        layeredDesign: {
+          designKind: index === 0 ? 'COVER' as const : 'CONTENT' as const,
+          backgroundColor: '#F5F8FF',
+          elements: [
+            image('BASE_LAYER', 0),
+            ...Array.from({ length: knowledgeAssets }, (_, imageIndex) => image('KNOWLEDGE_VISUAL', imageIndex + 1)),
+            {
+              kind: 'TEXT' as const,
+              elementId: `title-${index}`,
+              role: 'TITLE' as const,
+              text: slide.title,
+              sourceChunkIds: [sourceChunkId],
+              placement: { x: 0.08, y: 0.12, width: 0.42, height: 0.16 },
+              zIndex: 20,
+              style: { fontSize: 36, bold: true, color: '#172033', align: 'LEFT' as const },
+            },
+          ],
+        },
+      }
+    }),
   }
 }
 
@@ -214,7 +260,183 @@ describe('planning runner', () => {
     expect(result).toMatchObject({ blueprint: null, step: { status: 'FAILED', errorCode: 'SOURCE_INCOMPLETE' } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
     expect(model.executions.size).toBe(0)
-    expect((await repository.listEvents('run-1')).some((event) => event.type === 'issue.detected')).toBe(true)
+    const issue = (await repository.listEvents('run-1')).find((event) => event.type === 'issue.detected')
+    expect(issue?.type === 'issue.detected' && issue.payload.planningFailure).toMatchObject({
+      errorCode: 'SOURCE_INCOMPLETE', retryable: false, suggestedAction: 'MODIFY_SOURCE',
+      attempt: 0, maxAttempts: 0, fieldPaths: ['source'], contractVersion: '1',
+    })
+  })
+
+  test('automatically retries a transient provider failure with the same model request key', async () => {
+    const repository = new InMemoryAgentRepository()
+    const documents = new MutableDocumentPort(document())
+    const executions: Parameters<StructuredModelPort['execute']>[0][] = []
+    const delays: number[] = []
+    const model: StructuredModelPort = {
+      modelName: 'gpt-5.6',
+      async execute(input) {
+        executions.push(structuredClone(input))
+        if (executions.length === 1) {
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', 'request-transient-1')
+        }
+        return draft()
+      },
+    }
+    await repository.createRun(run())
+    const runner = new PlanningRunner({
+      repository,
+      documents,
+      model,
+      clock: new FixedClock(),
+      sleep: async (milliseconds) => { delays.push(milliseconds) },
+    })
+
+    const result = await runner.plan(request)
+
+    expect(result.step.status).toBe('COMPLETED')
+    expect(executions).toHaveLength(2)
+    expect(executions[0]!.idempotencyKey).toBe(executions[1]!.idempotencyKey)
+    expect(delays).toEqual([250])
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'tool.progress' && event.payload.summary?.includes('自动重试 2/3'))).toBe(true)
+  })
+
+  test.each([
+    'PROVIDER_TIMEOUT',
+    'PROVIDER_RATE_LIMIT',
+    'PROVIDER_UNAVAILABLE',
+  ] as const)('persists retry diagnostics when %s exhausts automatic attempts', async (errorCode) => {
+    const repository = new InMemoryAgentRepository()
+    const model: StructuredModelPort = {
+      modelName: 'gpt-5.6',
+      async execute() {
+        throw new StructuredModelError(errorCode, true, 'gpt-5.6', 'request-safe-1')
+      },
+    }
+    await repository.createRun(run())
+    const runner = new PlanningRunner({
+      repository,
+      documents: new MutableDocumentPort(document()),
+      model,
+      clock: new FixedClock(),
+      sleep: async () => {},
+    })
+
+    const result = await runner.plan(request)
+    const issue = (await repository.listEvents('run-1')).find((event) => event.type === 'issue.detected')
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode })
+    expect(issue?.type === 'issue.detected' && issue.payload.planningFailure).toMatchObject({
+      errorCode, retryable: true, suggestedAction: 'RETRY', attempt: 3, maxAttempts: 3,
+      requestId: 'request-safe-1', model: 'gpt-5.6', contractVersion: '1',
+    })
+  })
+
+  test('repairs malformed model JSON with a new contract-repair key', async () => {
+    const repository = new InMemoryAgentRepository()
+    const executions: Parameters<StructuredModelPort['execute']>[0][] = []
+    const model: StructuredModelPort = {
+      modelName: 'gpt-5.6',
+      async execute(input) {
+        executions.push(structuredClone(input))
+        if (executions.length === 1) {
+          throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-invalid-json-1')
+        }
+        return draft()
+      },
+    }
+    await repository.createRun(run())
+    const runner = new PlanningRunner({
+      repository, documents: new MutableDocumentPort(document()), model, clock: new FixedClock(), sleep: async () => {},
+    })
+
+    const result = await runner.plan(request)
+
+    expect(result.step.status).toBe('COMPLETED')
+    expect(executions).toHaveLength(2)
+    expect(executions[0]!.idempotencyKey).toBe(request.idempotencyKey)
+    expect(executions[1]!.idempotencyKey).toMatch(/^blueprint-repair-[a-f0-9]{64}$/)
+    expect(executions[1]!.payload).toMatchObject({
+      contractRepairIssues: [{ path: 'blueprint', message: 'MODEL_JSON_INVALID' }],
+    })
+  })
+
+  test('persists the final malformed-JSON diagnosis after contract repair is exhausted', async () => {
+    const repository = new InMemoryAgentRepository()
+    const model: StructuredModelPort = {
+      modelName: 'gpt-5.6',
+      async execute() {
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-invalid-json-final')
+      },
+    }
+    await repository.createRun(run())
+    const runner = new PlanningRunner({
+      repository, documents: new MutableDocumentPort(document()), model, clock: new FixedClock(), sleep: async () => {},
+    })
+
+    const result = await runner.plan(request)
+    const issue = (await repository.listEvents('run-1')).find((event) => event.type === 'issue.detected')
+    const diagnostics = issue?.type === 'issue.detected' ? issue.payload.planningFailure : undefined
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'MODEL_JSON_INVALID' })
+    expect(diagnostics).toMatchObject({
+      errorCode: 'MODEL_JSON_INVALID', terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
+      retryable: true, attempt: 5, maxAttempts: 5, fieldPaths: ['blueprint'],
+      requestId: 'request-invalid-json-final', model: 'gpt-5.6',
+    })
+  })
+
+  test.each([
+    {
+      errorCode: 'BLUEPRINT_SCHEMA_INVALID',
+      response: { ...draft(), title: '' },
+      input: {},
+      fieldPath: 'title',
+    },
+    {
+      errorCode: 'BLUEPRINT_SLIDE_COUNT_MISMATCH',
+      response: (() => {
+        const value = draft()
+        return { ...value, slides: [...value.slides, { ...value.slides[1]!, pageNumber: 3 }] }
+      })(),
+      input: {},
+    },
+    {
+      errorCode: 'BLUEPRINT_SOURCE_REFERENCE_INVALID',
+      response: (() => {
+        const value = draft()
+        value.slides[1]!.sourceChunkIds = ['chunk-invented']
+        return value
+      })(),
+      input: {},
+    },
+    {
+      errorCode: 'V3_LAYER_CONTRACT_INVALID',
+      response: draft(),
+      input: { presentationMode: 'LAYERED_COURSEWARE_V3' as const },
+    },
+    {
+      errorCode: 'VISUAL_ASSET_LIMIT_EXCEEDED',
+      response: layeredDraft(3),
+      input: { presentationMode: 'LAYERED_COURSEWARE_V3' as const, maxVisualAssetsPerSlide: 2 },
+    },
+  ])('classifies exhausted contract repair as $errorCode', async ({ errorCode, response, input, fieldPath }) => {
+    const { repository, runner } = await fixture(document(), response)
+
+    const result = await runner.plan({ ...request, ...input })
+    const issue = (await repository.listEvents('run-1')).find((event) => event.type === 'issue.detected')
+    const diagnostics = issue?.type === 'issue.detected' ? issue.payload.planningFailure : undefined
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode })
+    expect(diagnostics).toMatchObject({
+      errorCode,
+      terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
+      attempt: 5,
+      maxAttempts: 5,
+      diagnosticCode: errorCode,
+      contractVersion: '1',
+    })
+    if (fieldPath) expect(diagnostics?.fieldPaths).toContain(fieldPath)
   })
 
   test('rejects invented source references from model output', async () => {
