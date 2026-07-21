@@ -11,6 +11,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - 已通过独立 Renderer/Artifact Port 生成 PNG 整套预览和包含可编辑文字对象的 PPTX，并提供归属隔离下载接口。
 - 15 页 Mock 已从教材规划完整运行到交付，默认不调用真实模型或计费 Provider。
 - RevisionPlan 可限定页面执行内容更新、重排和预算保护的局部重绘，并重新进入逐页与整套审查。
+- 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
 - 下一阶段是以功能开关接入 FrameFlow Agent API Client 和工作台。
 
 ## 目录
@@ -22,6 +23,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 | `src/adapters/` | 内存、FrameFlow、ShanHaiEdu 和 Provider 适配器 |
 | `tests/` | 合同、策略、恢复和宿主兼容测试 |
 | `docs/decisions/` | 架构决策 |
+| `docs/shanhai-v1-integration.md` | ShanHaiEdu V1 节点、身份、制品与幂等接入规范 |
 | `tasks/` | 规格、计划和任务清单 |
 
 ## 本地验证

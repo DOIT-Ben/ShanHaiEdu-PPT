@@ -51,3 +51,13 @@
 - [ ] 隔离测试环境部署和备份回退演练
 - [ ] 经授权完成两页真实 Provider 验证
 - [ ] 董事长验收后再规划生产或 ShanHaiEdu 接入
+
+## 6. ShanHaiEdu 图片文字 V1
+
+- [x] 冻结山海兼容的逐页图片文字 V1 子集、正文白底和可编辑文字责任
+- [x] 实现封面整图、正文单主视觉槽位和 PNG/PPTX 组合渲染
+- [x] 增加山海执行上下文、受控制品读取、宿主归属和完成收据边界
+- [ ] 在山海仓库建立 Issue 后实现 `ppt.pages.assemble` Adapter
+- [ ] 将预览与 PPTX 分别归属到 `ppt.pages.assemble` 和 `pptx.export`
+- [ ] 使用山海 PostgreSQL `NodeRun`、`ArtifactVersion` 和事务实现完成收据
+- [ ] 通过山海合同、运行时、跨租户和崩溃恢复门禁
