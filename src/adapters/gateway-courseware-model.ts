@@ -3,6 +3,7 @@ import { z } from 'zod'
 import {
   blueprintDraftSchema,
   deckReviewDraftSchema,
+  layeredBlueprintDraftSchema,
   revisionPlanDraftSchema,
   slideVisualReviewSchema,
 } from '../presentation-contracts'
@@ -88,6 +89,7 @@ export class GatewayCoursewareModel implements
 
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
     if (input.operation !== 'create_blueprint') throw new Error('MODEL_OPERATION_UNSUPPORTED')
+    const layered = z.object({ presentationMode: z.literal('LAYERED_COURSEWARE_V3') }).passthrough().safeParse(input.payload).success
     return this.request({
       model: this.dependencies.textModel,
       system: `你是学校采购场景的资深课件总设计师。根据教材创建完整教学蓝图，知识正确优先于视觉效果。
@@ -97,7 +99,7 @@ V3 要求每页一个可编辑底图对象、最多四个与知识点直接相�
       user: `请依据以下受信教材数据创建蓝图：\n${boundedJson(input.payload)}`,
       toolName: 'submit_courseware_blueprint',
       description: '提交知识驱动、分层可编辑的完整课件蓝图。',
-      schema: blueprintDraftSchema,
+      schema: layered ? layeredBlueprintDraftSchema : blueprintDraftSchema,
       idempotencyKey: input.idempotencyKey,
     })
   }

@@ -131,6 +131,25 @@ export const blueprintDraftSchema = z.object({
   })
 })
 
+const layeredBlueprintSlideSchema = blueprintSlideSchema.extend({
+  layeredDesign: layeredSlideDesignSchema,
+}).strict()
+
+export const layeredBlueprintDraftSchema = blueprintDraftSchema.safeExtend({
+  slides: z.array(layeredBlueprintSlideSchema).min(2).max(50),
+}).strict().superRefine((value, context) => {
+  value.slides.forEach((slide, index) => {
+    const expected = index === 0 ? 'COVER' : 'CONTENT'
+    if (slide.layeredDesign.designKind !== expected) {
+      context.addIssue({
+        code: 'custom',
+        path: ['slides', index, 'layeredDesign', 'designKind'],
+        message: index === 0 ? 'first layered slide must be COVER' : 'only the first layered slide may be COVER',
+      })
+    }
+  })
+})
+
 export const presentationBlueprintSchema = blueprintDraftSchema.extend({
   id: identifierSchema,
   visualDirection: z.string().trim().min(3).max(1_000),

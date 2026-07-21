@@ -25,6 +25,41 @@ function blueprintDraft() {
   })
 }
 
+function layeredBlueprintDraft() {
+  const value = blueprintDraft()
+  return {
+    ...value,
+    slides: value.slides.map((slide, index) => ({
+      ...slide,
+      layeredDesign: {
+        designKind: index === 0 ? 'COVER' as const : 'CONTENT' as const,
+        backgroundColor: '#F5F8FF',
+        elements: [
+          {
+            kind: 'IMAGE' as const, elementId: `base-${index}`, role: 'BASE_LAYER' as const,
+            knowledgePoint: '建立数量三和苹果的直观联系', prompt: 'A bright classroom background with soft daylight and no text',
+            negativePrompt: 'text, watermark, logo', sourceChunkIds: ['chunk-1'],
+            placement: { x: 0, y: 0, width: 1, height: 1 }, zIndex: 0, fit: 'COVER' as const,
+            aspectRatio: '16:9' as const, backgroundMode: 'OPAQUE' as const,
+          },
+          {
+            kind: 'IMAGE' as const, elementId: `hero-${index}`, role: 'KNOWLEDGE_VISUAL' as const,
+            knowledgePoint: '用苹果呈现具体数量', prompt: 'Three red apples isolated for a child-friendly math lesson, no text',
+            negativePrompt: 'text, watermark, logo', sourceChunkIds: ['chunk-1'],
+            placement: { x: 0.55, y: 0.18, width: 0.35, height: 0.58 }, zIndex: 10, fit: 'CONTAIN' as const,
+            aspectRatio: '1:1' as const, backgroundMode: 'TRANSPARENT' as const,
+          },
+          {
+            kind: 'TEXT' as const, elementId: `title-${index}`, role: 'TITLE' as const, text: slide.title,
+            sourceChunkIds: ['chunk-1'], placement: { x: 0.08, y: 0.2, width: 0.4, height: 0.2 }, zIndex: 20,
+            style: { fontSize: 36, bold: true, color: '#172033', align: 'LEFT' as const },
+          },
+        ],
+      },
+    })),
+  }
+}
+
 function completion(argumentsValue: unknown) {
   return Response.json({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(argumentsValue) } }] } }] })
 }
@@ -37,7 +72,7 @@ describe('gateway courseware model', () => {
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts,
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
-        return completion(blueprintDraft())
+        return completion(layeredBlueprintDraft())
       },
     })
 
@@ -49,7 +84,7 @@ describe('gateway courseware model', () => {
       },
     })
 
-    expect(result).toEqual(blueprintDraft())
+    expect(result).toEqual(layeredBlueprintDraft())
     expect(requestBody).toMatchObject({
       model: 'gpt-5.6', stream: true,
       tool_choice: { type: 'function', function: { name: 'submit_courseware_blueprint' } },
@@ -57,6 +92,35 @@ describe('gateway courseware model', () => {
     expect(requestBody).not.toBeNull()
     const messages = (requestBody! as unknown as { messages: { content: string }[] }).messages
     expect(messages[0]!.content).toContain('封面构图')
+    const parameters = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
+    }).tools[0]!.function.parameters
+    expect(parameters.properties.slides.items.required).toContain('layeredDesign')
+  })
+
+  test('keeps layered design optional for legacy slide-image blueprints', async () => {
+    let requestBody: Record<string, unknown> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return completion(blueprintDraft())
+      },
+    })
+
+    await model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', idempotencyKey: 'plan-v2',
+      payload: {
+        slideCount: 2, presentationMode: 'SLIDE_IMAGE_V2',
+        document: { name: '数学教材.txt', chunks: [{ id: 'chunk-1', text: '三个苹果表示数量三。' }] },
+      },
+    })
+
+    const parameters = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
+    }).tools[0]!.function.parameters
+    expect(parameters.properties.slides.items.required).not.toContain('layeredDesign')
   })
 
   test('sends the controlled image to the vision reviewer and parses streamed tool arguments', async () => {
