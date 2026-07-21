@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import sharp from 'sharp'
 import type { ArtifactPort, ImageGenerationPort } from '../core/ports'
 import { MediaSubmissionError } from '../core/ports'
 
@@ -32,6 +33,50 @@ function decodedImage(value: string) {
   return { bytes: new Uint8Array(bytes), mimeType: png ? 'image/png' : jpeg ? 'image/jpeg' : 'image/webp' }
 }
 
+async function removeConnectedNeutralBackdrop(image: Uint8Array) {
+  const { data, info } = await sharp(image).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  if (data.some((value, index) => index % 4 === 3 && value < 250)) return image
+  const pixelCount = info.width * info.height
+  const visited = new Uint8Array(pixelCount)
+  const queue = new Int32Array(pixelCount)
+  let head = 0
+  let tail = 0
+  const neutral = (pixel: number) => {
+    const offset = pixel * 4
+    const red = data[offset]!
+    const green = data[offset + 1]!
+    const blue = data[offset + 2]!
+    return Math.max(red, green, blue) - Math.min(red, green, blue) <= 24
+      && (red + green + blue) / 3 >= 160
+  }
+  const enqueue = (pixel: number) => {
+    if (visited[pixel] || !neutral(pixel)) return
+    visited[pixel] = 1
+    queue[tail++] = pixel
+  }
+  for (let x = 0; x < info.width; x += 1) {
+    enqueue(x)
+    enqueue((info.height - 1) * info.width + x)
+  }
+  for (let y = 0; y < info.height; y += 1) {
+    enqueue(y * info.width)
+    enqueue(y * info.width + info.width - 1)
+  }
+  while (head < tail) {
+    const pixel = queue[head++]!
+    const x = pixel % info.width
+    const y = Math.floor(pixel / info.width)
+    if (x > 0) enqueue(pixel - 1)
+    if (x + 1 < info.width) enqueue(pixel + 1)
+    if (y > 0) enqueue(pixel - info.width)
+    if (y + 1 < info.height) enqueue(pixel + info.width)
+  }
+  for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+    if (visited[pixel]) data[pixel * 4 + 3] = 0
+  }
+  return new Uint8Array(await sharp(data, { raw: info }).png({ compressionLevel: 8 }).toBuffer())
+}
+
 export class GatewayImageGenerationPort implements ImageGenerationPort {
   private readonly baseUrl: string
   private readonly fetchImpl: Fetch
@@ -51,7 +96,9 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
   async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
     const prompt = [
       input.prompt,
-      input.backgroundMode === 'TRANSPARENT' ? 'Use an isolated subject on a transparent background.' : '',
+      input.backgroundMode === 'TRANSPARENT'
+        ? 'Use an isolated subject on a transparent background. Never draw a checkerboard, transparency grid, frame, or backdrop.'
+        : '',
       input.negativePrompt ? `Avoid: ${input.negativePrompt}.` : '',
     ].filter(Boolean).join(' ')
     let response: Response
@@ -86,13 +133,16 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     try {
       const parsed = gatewayResponseSchema.parse(payload)
       const image = decodedImage(parsed.data[0]!.b64_json)
+      const bytes = input.backgroundMode === 'TRANSPARENT'
+        ? await removeConnectedNeutralBackdrop(image.bytes)
+        : image.bytes
       const runId = input.idempotencyKey.split(':')[0] || 'gateway-run'
       const artifact = await this.dependencies.artifacts.put({
         tenantId: input.tenantId,
         runId,
         name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${image.mimeType.split('/')[1]}`,
         mimeType: image.mimeType,
-        bytes: image.bytes,
+        bytes,
         idempotencyKey: `${input.idempotencyKey}:gateway-output`,
       })
       return { operationId: `gateway-image:${artifact.artifactId}`, state: 'COMPLETED' as const }

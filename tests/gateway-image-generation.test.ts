@@ -12,7 +12,9 @@ const config = {
 describe('gateway image generation adapter', () => {
   test('stores a synchronous base64 result and recovers it from the opaque operation id', async () => {
     const artifacts = new MockArtifactPort()
-    const png = await sharp({ create: { width: 64, height: 64, channels: 4, background: '#49A078' } }).png().toBuffer()
+    const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 216, g: 216, b: 216 } } })
+      .composite([{ input: Buffer.from('<svg width="32" height="32"><rect width="32" height="32" rx="8" fill="#D62828"/></svg>'), left: 16, top: 16 }])
+      .png().toBuffer()
     let captured: { url: string; init: RequestInit | undefined } | null = null
     const adapter = new GatewayImageGenerationPort({
       ...config,
@@ -33,8 +35,13 @@ describe('gateway image generation adapter', () => {
     })
 
     expect(submitted.state).toBe('COMPLETED')
-    expect(await adapter.inspect({ tenantId: 'frameflow', operationId: submitted.operationId }))
-      .toMatchObject({ state: 'COMPLETED' })
+    const inspected = await adapter.inspect({ tenantId: 'frameflow', operationId: submitted.operationId })
+    expect(inspected).toMatchObject({ state: 'COMPLETED' })
+    const stored = inspected.state === 'COMPLETED' ? artifacts.artifacts.get(inspected.artifactId) : null
+    const raw = await sharp(stored!.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    const alpha = Array.from({ length: raw.info.width * raw.info.height }, (_, index) => raw.data[index * 4 + 3]!)
+    expect(Math.min(...alpha)).toBe(0)
+    expect(Math.max(...alpha)).toBe(255)
     const request = captured as unknown as { url: string; init: RequestInit }
     expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/images/generations')
     expect(new Headers(request.init.headers).get('Idempotency-Key')).toBe('run-1:asset:apples:r0:v1')
