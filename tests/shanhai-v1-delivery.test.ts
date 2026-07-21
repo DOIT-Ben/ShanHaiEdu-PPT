@@ -151,6 +151,10 @@ describe('ShanHai PPT v1 delivery service', () => {
     expect(artifacts.artifacts.size).toBe(artifactCount)
     expect(receipts.receipts.size).toBe(1)
 
+    const reorderedRequest = structuredClone(request)
+    reorderedRequest.image_artifacts.reverse()
+    expect(await service.deliver(host, reorderedRequest)).toEqual(first)
+
     const changedRequest = structuredClone(request)
     changedRequest.deck.title = '同一节点运行不允许更换输入'
     await expect(service.deliver(host, changedRequest)).rejects.toThrow('SHANHAI_V1_NODE_RUN_INPUT_CONFLICT')

@@ -25,6 +25,10 @@ export type ShanHaiPptDeliveryReceiptV1 = Readonly<{
   result: ShanHaiPptDeliveryResultV1
 }>
 
+/**
+ * The host owns durable delivery receipts. save must insert once per node run,
+ * return the stored receipt on an exact replay, and reject a changed input hash.
+ */
 export interface ShanHaiPptDeliveryReceiptPortV1 {
   load(input: Readonly<{
     organizationId: string
@@ -74,10 +78,12 @@ export class ShanHaiPptDeliveryServiceV1 {
       schema_version: request.schema_version,
       execution: request.execution,
       deck: request.deck,
-      image_artifacts: sourceArtifacts.map((artifact) => ({
-        target_slot_key: artifact.target_slot_key,
-        sha256: artifact.sha256,
-      })),
+      image_artifacts: sourceArtifacts
+        .map((artifact) => ({
+          target_slot_key: artifact.target_slot_key,
+          sha256: artifact.sha256,
+        }))
+        .sort((left, right) => left.target_slot_key.localeCompare(right.target_slot_key)),
     })
     const receiptKey = {
       organizationId: request.execution.organization_id,
