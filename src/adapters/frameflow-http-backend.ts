@@ -43,6 +43,7 @@ const readySchema = z.object({
     width: z.number().int().positive().max(20_000),
     height: z.number().int().positive().max(20_000),
     pageNumber: z.number().int().positive().max(50).optional(),
+    region: regionSchema.optional(),
     caption: z.string().trim().min(1).max(500).optional(),
     contentBase64: z.string().min(4).max(32 * 1024 * 1024),
   }).strict()).max(80),
@@ -111,7 +112,7 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
     const data = parsed.data.data
     let assets
     try {
-      assets = data.assets.map(({ contentBase64, pageNumber, caption, ...asset }) => {
+      assets = data.assets.map(({ contentBase64, pageNumber, region, caption, ...asset }) => {
         const bytes = new Uint8Array(Buffer.from(contentBase64, 'base64'))
         if (bytes.length !== asset.byteLength || createHash('sha256').update(bytes).digest('hex') !== asset.sha256) {
           throw new Error('SOURCE_ASSET_INTEGRITY_MISMATCH')
@@ -119,6 +120,7 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
         return {
           ...asset,
           ...(pageNumber === undefined ? {} : { pageNumber }),
+          ...(region === undefined ? {} : { region }),
           ...(caption === undefined ? {} : { caption }),
           bytes,
         }

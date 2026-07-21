@@ -183,6 +183,12 @@ const sourceAssetSummarySchema = z.array(z.object({
   width: z.number().int().positive().max(20_000),
   height: z.number().int().positive().max(20_000),
   pageNumber: z.number().int().positive().max(50).optional(),
+  region: z.object({
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    width: z.number().positive().max(1),
+    height: z.number().positive().max(1),
+  }).strict().optional(),
   caption: z.string().trim().min(1).max(500).optional(),
   ocrText: z.string().trim().min(1).max(2_000).optional(),
 }).strict()).max(200).default([])
