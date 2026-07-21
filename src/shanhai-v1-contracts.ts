@@ -120,5 +120,65 @@ export const shanHaiPptDeckV1Schema = z.object({
   })
 })
 
+const uuidSchema = z.string().uuid()
+
+export const shanHaiPptExecutionContextV1Schema = z.object({
+  organization_id: uuidSchema,
+  project_id: uuidSchema,
+  workflow_run_id: uuidSchema,
+  node_run_id: uuidSchema,
+  content_release_id: uuidSchema,
+  workflow_definition_version_id: uuidSchema,
+  node_key: z.literal('ppt.pages.assemble'),
+  branch_key: z.literal('ppt'),
+  lesson_key: identifierSchema,
+  lesson_unit_id: uuidSchema,
+}).strict()
+
+export const shanHaiPptDeliveryRequestV1Schema = z.object({
+  schema_version: z.literal('shanhai.ppt.delivery.v1'),
+  execution: shanHaiPptExecutionContextV1Schema,
+  deck: shanHaiPptDeckV1Schema,
+  image_artifacts: z.array(z.object({
+    target_slot_key: z.string().trim().regex(/^ppt\.[A-Za-z0-9._:-]+$/).max(240),
+    artifact_id: identifierSchema,
+  }).strict()).min(5).max(60),
+}).strict().superRefine((request, context) => {
+  const slots = new Set<string>()
+  request.image_artifacts.forEach((artifact, index) => {
+    if (slots.has(artifact.target_slot_key)) {
+      context.addIssue({ code: 'custom', path: ['image_artifacts', index], message: 'image artifact slots must be unique' })
+    }
+    slots.add(artifact.target_slot_key)
+  })
+})
+
+const shanHaiPptDeliveryArtifactV1Schema = z.object({
+  artifact_id: identifierSchema,
+  name: z.string().trim().min(1).max(240),
+  mime_type: z.string().trim().min(1).max(160),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  byte_length: z.number().int().positive(),
+}).strict()
+
+export const shanHaiPptDeliveryResultV1Schema = z.object({
+  schema_version: z.literal('shanhai.ppt.delivery-result.v1'),
+  organization_id: uuidSchema,
+  project_id: uuidSchema,
+  node_run_id: uuidSchema,
+  input_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  preview: shanHaiPptDeliveryArtifactV1Schema.extend({
+    name: z.literal('presentation-preview.png'),
+    mime_type: z.literal('image/png'),
+  }).strict(),
+  pptx: shanHaiPptDeliveryArtifactV1Schema.extend({
+    name: z.literal('presentation.pptx'),
+    mime_type: z.literal('application/vnd.openxmlformats-officedocument.presentationml.presentation'),
+  }).strict(),
+}).strict()
+
 export type ShanHaiPptPageV1 = z.infer<typeof shanHaiPptPageV1Schema>
 export type ShanHaiPptDeckV1 = z.infer<typeof shanHaiPptDeckV1Schema>
+export type ShanHaiPptExecutionContextV1 = z.infer<typeof shanHaiPptExecutionContextV1Schema>
+export type ShanHaiPptDeliveryRequestV1 = z.infer<typeof shanHaiPptDeliveryRequestV1Schema>
+export type ShanHaiPptDeliveryResultV1 = z.infer<typeof shanHaiPptDeliveryResultV1Schema>
