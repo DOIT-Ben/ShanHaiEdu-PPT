@@ -1,5 +1,6 @@
 export * from './contracts'
 export * from './presentation-contracts'
+export * from './shanhai-v1-contracts'
 export * from './adapters/in-memory-repository'
 export * from './adapters/frameflow-host'
 export * from './adapters/mock-ports'
