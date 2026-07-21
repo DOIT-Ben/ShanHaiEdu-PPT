@@ -71,4 +71,16 @@ describe('ShanHai PPT image-text v1 contracts', () => {
     invalid.pages[2]!.visual.asset_requirements[0]!.target_slot_key = 'ppt.page-2.main-visual'
     expect(shanHaiPptDeckV1Schema.safeParse(invalid).success).toBe(false)
   })
+
+  test('requires one title and bounds copy for the fixed v1 layouts', () => {
+    const missingTitle = deck()
+    missingTitle.pages[1]!.editable_text_blocks = [
+      { block_key: 'body-only', role: 'body', text: '缺少标题' },
+    ]
+    expect(shanHaiPptDeckV1Schema.safeParse(missingTitle).success).toBe(false)
+
+    const overflow = deck()
+    overflow.pages[1]!.editable_text_blocks[1]!.text = '内容'.repeat(260)
+    expect(shanHaiPptDeckV1Schema.safeParse(overflow).success).toBe(false)
+  })
 })

@@ -57,7 +57,7 @@ export const shanHaiPptPageV1Schema = z.object({
     main_visual_description: z.string().trim().min(1).max(1_000),
     asset_requirements: z.array(shanHaiPptAssetRequirementV1Schema).length(1),
   }).strict(),
-  editable_text_blocks: z.array(shanHaiPptTextBlockV1Schema).min(1).max(20),
+  editable_text_blocks: z.array(shanHaiPptTextBlockV1Schema).min(1).max(6),
   editable_math_shapes: z.array(z.never()).max(0).default([]),
   layout_spec: z.object({
     template: z.enum(['COVER', 'IMAGE_LEFT', 'IMAGE_RIGHT', 'IMAGE_TOP']),
@@ -68,6 +68,17 @@ export const shanHaiPptPageV1Schema = z.object({
   }).strict(),
   speaker_notes: z.string().max(4_000).default(''),
 }).strict().superRefine((page, context) => {
+  const titleBlocks = page.editable_text_blocks.filter((block) => block.role === 'title')
+  const bodyCharacters = page.editable_text_blocks
+    .filter((block) => block.role !== 'title')
+    .reduce((total, block) => total + [...block.text].length, 0)
+  if (titleBlocks.length !== 1 || [...(titleBlocks[0]?.text ?? '')].length > 100) {
+    context.addIssue({ code: 'custom', path: ['editable_text_blocks'], message: 'v1 requires one bounded title block' })
+  }
+  const compactLayout = page.layout_spec.template === 'COVER' || page.layout_spec.template === 'IMAGE_TOP'
+  if (bodyCharacters > (compactLayout ? 220 : 500)) {
+    context.addIssue({ code: 'custom', path: ['editable_text_blocks'], message: 'v1 page copy exceeds the readable layout budget' })
+  }
   if (page.page_type === 'cover') {
     if (page.canvas.background_mode !== 'cover_art' || page.layout_spec.template !== 'COVER') {
       context.addIssue({ code: 'custom', path: ['canvas'], message: 'cover must use cover_art and COVER' })
