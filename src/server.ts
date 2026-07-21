@@ -6,6 +6,7 @@ import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
+import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 
 const hostname = process.env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
 if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1') {
@@ -15,12 +16,20 @@ const port = Number(process.env.PPT_AGENT_PORT ?? 4310)
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error('PPT_AGENT_PORT_INVALID')
 const apiToken = process.env.PPT_AGENT_API_TOKEN?.trim()
 if (!apiToken) throw new Error('PPT_AGENT_API_TOKEN_REQUIRED')
+function boundedMilliseconds(name: string, fallback: number, minimum: number, maximum: number) {
+  const value = Number(process.env[name] ?? fallback)
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${name}_INVALID`)
+  return value
+}
 const dataRoot = path.resolve(process.env.PPT_AGENT_DATA_ROOT?.trim() || '.private/mock-runtime')
 await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
+const appVersion = process.env.PPT_AGENT_APP_VERSION?.trim() || '0.1.0'
+const heartbeatStaleMs = boundedMilliseconds('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
+const tickStaleMs = boundedMilliseconds('PPT_AGENT_TICK_STALE_MS', 15 * 60_000, 10_000, 60 * 60_000)
 if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
 const images = runtimeMode === 'gateway'
   ? new GatewayImageGenerationPort({
@@ -52,24 +61,45 @@ const runtime = runtimeMode === 'gateway'
           baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
           token: apiToken,
         }),
+        appVersion,
+        heartbeatStaleMs,
+        tickStaleMs,
       })
     })()
-  : createMockRuntime({ repository, artifacts, apiToken })
+  : createMockRuntime({ repository, artifacts, apiToken, appVersion, heartbeatStaleMs, tickStaleMs })
 let ticking = false
 const timer = setInterval(async () => {
+  runtime.health.heartbeat()
   if (ticking) return
   ticking = true
+  const startedAt = performance.now()
   try {
-    await runtime.tick()
+    const summary = await runtime.tick()
+    if (summary.activeRuns > 0) {
+      console.log(JSON.stringify(workerLogRecord({
+        event: 'worker_tick_completed', version: appVersion,
+        elapsedMs: performance.now() - startedAt, summary,
+      })))
+    }
   } catch (error) {
-    console.error('[ppt-agent-worker]', error instanceof Error ? error.message : 'unknown error')
+    const failure = error instanceof WorkerTickError
+      ? error.context
+      : { runId: null, phase: null, errorCode: safeWorkerErrorCode(error) }
+    console.error(JSON.stringify(workerLogRecord({
+      event: 'worker_tick_failed', version: appVersion,
+      elapsedMs: performance.now() - startedAt, failure,
+    })))
   } finally {
     ticking = false
   }
 }, 500)
 
 const server = Bun.serve({ hostname, port, fetch: runtime.handler })
-console.log(`[ppt-agent] ${runtimeMode} runtime listening on ${server.url.origin}`)
+console.log(JSON.stringify({
+  ...workerLogRecord({ event: 'service_started', version: appVersion }),
+  runtimeMode,
+  origin: server.url.origin,
+}))
 
 const stop = () => {
   clearInterval(timer)

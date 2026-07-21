@@ -8,6 +8,27 @@
   "servers": [{ "url": "/" }],
   "security": [{ "bearerAuth": [] }],
   "paths": {
+    "/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "description": "Process liveness. This does not imply that the worker loop is making progress.",
+        "security": [],
+        "responses": {
+          "200": { "description": "HTTP process is alive", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Liveness" } } } }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "description": "Worker readiness based on heartbeat, tick age, and the latest tick result.",
+        "security": [],
+        "responses": {
+          "200": { "description": "Worker is ready", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } } },
+          "503": { "description": "HTTP is alive but worker is not ready", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } } }
+        }
+      }
+    },
     "/v1/admin/planning-failures": {
       "get": {
         "operationId": "aggregatePlanningFailures",
@@ -131,6 +152,61 @@
       }
     },
     "schemas": {
+      "Liveness": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service", "status", "version", "checkedAt", "startedAt", "uptimeMs"],
+        "properties": {
+          "service": { "const": "ppt-agent" },
+          "status": { "const": "UP" },
+          "version": { "type": "string" },
+          "checkedAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": "string", "format": "date-time" },
+          "uptimeMs": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "Readiness": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service", "status", "reason", "version", "checkedAt", "worker"],
+        "properties": {
+          "service": { "const": "ppt-agent" },
+          "status": { "enum": ["READY", "NOT_READY"] },
+          "reason": { "type": ["string", "null"], "enum": ["WORKER_NOT_STARTED", "WORKER_HEARTBEAT_STALE", "WORKER_TICK_STUCK", "WORKER_TICK_FAILED", null] },
+          "version": { "type": "string" },
+          "checkedAt": { "type": "string", "format": "date-time" },
+          "worker": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tickInProgress", "tickCount", "lastHeartbeatAt", "heartbeatAgeMs", "lastTickStartedAt", "lastTickCompletedAt", "lastTickFailedAt", "tickAgeMs", "lastFailure"],
+            "properties": {
+              "tickInProgress": { "type": "boolean" },
+              "tickCount": { "type": "integer", "minimum": 0 },
+              "lastHeartbeatAt": { "type": ["string", "null"], "format": "date-time" },
+              "heartbeatAgeMs": { "type": ["integer", "null"], "minimum": 0 },
+              "lastTickStartedAt": { "type": ["string", "null"], "format": "date-time" },
+              "lastTickCompletedAt": { "type": ["string", "null"], "format": "date-time" },
+              "lastTickFailedAt": { "type": ["string", "null"], "format": "date-time" },
+              "tickAgeMs": { "type": ["integer", "null"], "minimum": 0 },
+              "lastFailure": {
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["runId", "phase", "errorCode"],
+                    "properties": {
+                      "runId": { "type": ["string", "null"] },
+                      "phase": { "type": ["string", "null"] },
+                      "errorCode": { "type": "string" }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
       "HostContext": {
         "type": "object",
         "additionalProperties": false,

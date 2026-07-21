@@ -4,6 +4,7 @@ import { apiErrorSchema, MAX_PLANNING_RETRIES } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
+import type { RuntimeHealthMonitor } from '../observability/runtime-health'
 
 export interface HostAuthenticationPort {
   authenticate(request: Request): Promise<HostContext | null>
@@ -14,6 +15,7 @@ type HandlerDependencies = Readonly<{
   repository: AgentRepository
   artifacts: ArtifactPort
   authentication: HostAuthenticationPort
+  health: RuntimeHealthMonitor
   eventPollMs?: number
 }>
 
@@ -155,10 +157,17 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
     const requestIdHeader = request.headers.get('X-Request-ID')
     const requestId = requestIdHeader && requestIdHeader.length <= 160 ? requestIdHeader : randomUUID()
     try {
+      const url = new URL(request.url)
+      if (request.method === 'GET' && url.pathname === '/health/live') {
+        return json(dependencies.health.liveness())
+      }
+      if (request.method === 'GET' && url.pathname === '/health/ready') {
+        const readiness = dependencies.health.readiness()
+        return json(readiness, readiness.status === 'READY' ? 200 : 503)
+      }
       const host = await dependencies.authentication.authenticate(request)
       if (!host) return errorResponse(401, 'UNAUTHENTICATED', 'authentication is required', requestId)
 
-      const url = new URL(request.url)
       const parts = url.pathname.split('/').filter(Boolean)
       if (parts[0] !== 'v1') {
         return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)

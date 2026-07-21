@@ -30,6 +30,7 @@ import type {
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
+import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 
 export class SystemClock implements ClockPort {
   now() { return new Date() }
@@ -281,10 +282,18 @@ type RuntimeInput = Readonly<{
   images?: ImageGenerationPort
   clock?: ClockPort
   frameFlowBackend?: FrameFlowBackendClient
+  appVersion?: string
+  heartbeatStaleMs?: number
+  tickStaleMs?: number
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
   const clock = input.clock ?? new SystemClock()
+  const health = new RuntimeHealthMonitor(clock, {
+    version: input.appVersion ?? '0.1.0',
+    ...(input.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: input.heartbeatStaleMs }),
+    ...(input.tickStaleMs === undefined ? {} : { tickStaleMs: input.tickStaleMs }),
+  })
   const documents = new FrameFlowHostAdapter(input.frameFlowBackend ?? new MockFrameFlowBackend())
   const budget: BudgetPort = documents
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
@@ -344,12 +353,20 @@ export function createAgentRuntime(input: RuntimeInput) {
   })
   const revisionMedia = new RevisionMediaCoordinator({ repository: input.repository, media, clock })
 
-  const tick = async () => {
-    for (const candidate of await input.repository.listRuns()) {
-      await media.reconcilePendingRun(candidate.id)
-      const run = await input.repository.getRun(candidate.id)
-      if (!run) continue
-      if (run.status === 'PLANNING') {
+  const tick = () => health.runTick(async () => {
+    const candidates = await input.repository.listRuns()
+    let activeRuns = 0
+    for (const candidate of candidates) {
+      let phase = candidate.status
+      try {
+        await media.reconcilePendingRun(candidate.id)
+        const run = await input.repository.getRun(candidate.id)
+        if (!run) continue
+        phase = run.status
+        if (!['AWAITING_BLUEPRINT_APPROVAL', 'AWAITING_REVISION_APPROVAL', 'PAUSED', 'NEEDS_HUMAN', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status)) {
+          activeRuns += 1
+        }
+        if (run.status === 'PLANNING') {
         const planningAttempt = run.planningAttempt ?? 0
         await planning.plan({
           runId: run.id,
@@ -363,28 +380,36 @@ export function createAgentRuntime(input: RuntimeInput) {
           maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
           attempt: planningAttempt,
         })
-      } else if (run.status === 'EXECUTING') {
-        await generation.submitBlueprintImages(run.id, 1)
-        await generation.refreshBlueprintImages(run.id)
-      } else if (run.status === 'PAGE_REVIEW') {
-        await pages.reviewAll(run.id)
-      } else if (run.status === 'DECK_REVIEW') {
-        const reviewed = await deck.review(run.id)
-        const latest = await input.repository.getRun(run.id)
-        if (latest?.status === 'DECK_REVIEW' && reviewed.review && !reviewed.passed) {
-          await revisionPlanning.plan(run.id)
+        } else if (run.status === 'EXECUTING') {
+          await generation.submitBlueprintImages(run.id, 1)
+          await generation.refreshBlueprintImages(run.id)
+        } else if (run.status === 'PAGE_REVIEW') {
+          await pages.reviewAll(run.id)
+        } else if (run.status === 'DECK_REVIEW') {
+          const reviewed = await deck.review(run.id)
+          const latest = await input.repository.getRun(run.id)
+          if (latest?.status === 'DECK_REVIEW' && reviewed.review && !reviewed.passed) {
+            await revisionPlanning.plan(run.id)
+          }
+        } else if (run.status === 'REVISING') {
+          const applied = await revisionApplication.apply(run.id)
+          if (applied.status === 'REVISING' && applied.requiresMedia) {
+            await revisionMedia.submit(run.id, 1)
+            await revisionMedia.refresh(run.id)
+          }
+        } else if (run.status === 'DELIVERING') {
+          await delivery.deliver(run.id)
         }
-      } else if (run.status === 'REVISING') {
-        const applied = await revisionApplication.apply(run.id)
-        if (applied.status === 'REVISING' && applied.requiresMedia) {
-          await revisionMedia.submit(run.id, 1)
-          await revisionMedia.refresh(run.id)
-        }
-      } else if (run.status === 'DELIVERING') {
-        await delivery.deliver(run.id)
+      } catch (error) {
+        throw new WorkerTickError({
+          runId: candidate.id,
+          phase,
+          errorCode: safeWorkerErrorCode(error),
+        }, error)
       }
     }
-  }
+    return { scannedRuns: candidates.length, activeRuns }
+  })
 
   return {
     handler: createHttpHandler({
@@ -392,8 +417,10 @@ export function createAgentRuntime(input: RuntimeInput) {
       repository: input.repository,
       artifacts: input.artifacts,
       authentication: new SharedTokenAuthentication(input.apiToken),
+      health,
     }),
     tick,
+    health,
   }
 }
 

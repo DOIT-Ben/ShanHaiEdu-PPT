@@ -4,6 +4,7 @@ import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockArtifactPort } from '../src/adapters/mock-ports'
 import { RunService } from '../src/core/run-service'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
+import { RuntimeHealthMonitor } from '../src/observability/runtime-health'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 const createBody = {
@@ -30,16 +31,19 @@ class HeaderAuthentication implements HostAuthenticationPort {
 
 function fixture() {
   const repository = new InMemoryAgentRepository()
-  const runs = new RunService({ repository, clock: new FixedClock() })
+  const clock = new FixedClock()
+  const runs = new RunService({ repository, clock })
   const artifacts = new MockArtifactPort()
+  const health = new RuntimeHealthMonitor(clock, { version: 'test' })
   const handle = createHttpHandler({
     repository,
     artifacts,
     runs,
     authentication: new HeaderAuthentication(),
+    health,
     eventPollMs: 10,
   })
-  return { repository, runs, artifacts, handle }
+  return { repository, runs, artifacts, health, handle }
 }
 
 function request(path: string, init: RequestInit = {}) {
@@ -58,6 +62,21 @@ async function createRun(handle: (request: Request) => Promise<Response>, key = 
 }
 
 describe('HTTP v1 handler', () => {
+  test('distinguishes HTTP liveness from worker readiness without authentication', async () => {
+    const { handle, health } = fixture()
+    const live = await handle(new Request('http://ppt-agent.test/health/live'))
+    const beforeTick = await handle(new Request('http://ppt-agent.test/health/ready'))
+    await health.runTick(async () => ({ scannedRuns: 0, activeRuns: 0 }))
+    const ready = await handle(new Request('http://ppt-agent.test/health/ready'))
+
+    expect(live.status).toBe(200)
+    expect(await live.json()).toMatchObject({ service: 'ppt-agent', status: 'UP', version: 'test' })
+    expect(beforeTick.status).toBe(503)
+    expect(await beforeTick.json()).toMatchObject({ status: 'NOT_READY', reason: 'WORKER_NOT_STARTED' })
+    expect(ready.status).toBe(200)
+    expect(await ready.json()).toMatchObject({ status: 'READY', worker: { tickCount: 1 } })
+  })
+
   test('creates and replays a Run without exposing private source or lease data', async () => {
     const { handle } = fixture()
     const first = await createRun(handle)

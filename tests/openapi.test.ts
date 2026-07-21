@@ -20,6 +20,8 @@ describe('OpenAPI v1 contract', () => {
     expect(document.info.version).toBe('1.0.0')
     expect(document.security).toEqual([{ bearerAuth: [] }])
     expect(Object.keys(document.paths).sort()).toEqual([
+      '/health/live',
+      '/health/ready',
       '/v1/admin/planning-failures',
       '/v1/runs',
       '/v1/runs/{runId}',
@@ -29,6 +31,8 @@ describe('OpenAPI v1 contract', () => {
     ])
     expect(document.paths['/v1/runs/{runId}/events']?.get).toBeDefined()
     expect(document.paths['/v1/admin/planning-failures']?.get).toBeDefined()
+    expect(document.paths['/health/live']?.get).toBeDefined()
+    expect(document.paths['/health/ready']?.get).toBeDefined()
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
