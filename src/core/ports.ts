@@ -173,6 +173,16 @@ export interface ArtifactPort {
 }
 
 export interface PresentationRendererPort {
+  renderSlidePreviews(input: Readonly<{
+    blueprint: PresentationBlueprint
+    slides: readonly Readonly<{
+      pageNumber: number
+      image: Uint8Array
+      imageMimeType: string
+      assets?: readonly Readonly<{ elementId: string; image: Uint8Array; imageMimeType: string }>[]
+    }>[]
+  }>): Promise<readonly Readonly<{ pageNumber: number; image: Uint8Array }>[]>
+
   renderPreview(input: Readonly<{
     blueprint: PresentationBlueprint
     slides: readonly Readonly<{

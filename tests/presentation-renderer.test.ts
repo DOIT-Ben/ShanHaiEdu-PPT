@@ -54,6 +54,16 @@ describe('Sharp and PptxGenJS presentation renderer', () => {
     expect(stats.channels.some((channel) => channel.stdev > 5)).toBe(true)
   })
 
+  test('renders ordered full-size slide previews for visual review', async () => {
+    const renderer = new SharpPptxPresentationRenderer()
+    const previews = await renderer.renderSlidePreviews(await input())
+
+    expect(previews.map((preview) => preview.pageNumber)).toEqual([1, 2])
+    for (const preview of previews) {
+      expect(await sharp(preview.image).metadata()).toMatchObject({ format: 'png', width: 1600, height: 900 })
+    }
+  })
+
   test('renders a valid Open XML package with editable slide text', async () => {
     const renderer = new SharpPptxPresentationRenderer()
     const pptx = await renderer.renderPptx(await input())

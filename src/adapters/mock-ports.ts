@@ -194,9 +194,19 @@ export class MockArtifactPort implements ArtifactPort {
 }
 
 export class MockPresentationRendererPort implements PresentationRendererPort {
+  slidePreviewCalls = 0
   previewCalls = 0
   pptxCalls = 0
   nextFailure: Error | null = null
+
+  async renderSlidePreviews(input: Parameters<PresentationRendererPort['renderSlidePreviews']>[0]) {
+    this.slidePreviewCalls += 1
+    this.throwIfNeeded()
+    return input.slides.map((slide) => ({
+      pageNumber: slide.pageNumber,
+      image: new TextEncoder().encode(`SLIDE:${input.blueprint.id}:${slide.pageNumber}`),
+    }))
+  }
 
   async renderPreview(input: Parameters<PresentationRendererPort['renderPreview']>[0]) {
     this.previewCalls += 1

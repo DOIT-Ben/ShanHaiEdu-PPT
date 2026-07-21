@@ -152,7 +152,7 @@ function slideByPage(input: RenderInput) {
 }
 
 export class SharpPptxPresentationRenderer implements PresentationRendererPort {
-  async renderPreview(input: RenderInput) {
+  async renderSlidePreviews(input: RenderInput) {
     const rendered = await Promise.all(slideByPage(input).map(({ blueprint, source }) => {
       if (input.blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
         if (!blueprint.layeredDesign) throw new Error(`RENDER_LAYERED_DESIGN_MISSING:${blueprint.pageNumber}`)
@@ -167,6 +167,14 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
         slideLayout: blueprint.layout,
       })
     }))
+    return rendered.map((image, index) => ({
+      pageNumber: input.blueprint.slides[index]!.pageNumber,
+      image: new Uint8Array(image),
+    }))
+  }
+
+  async renderPreview(input: RenderInput) {
+    const rendered = (await this.renderSlidePreviews(input)).map((slide) => slide.image)
     const columns = Math.min(3, rendered.length)
     const rows = Math.ceil(rendered.length / columns)
     const thumbnailWidth = 480
