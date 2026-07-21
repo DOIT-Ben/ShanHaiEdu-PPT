@@ -148,6 +148,27 @@ describe('HTTP v1 handler', () => {
     expect((await response.json() as { error: { code: string } }).error.code).toBe('RUN_NOT_FOUND')
   })
 
+  test('returns unresolved quality issues in the owned run detail', async () => {
+    const { repository, handle } = fixture()
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-layout-2', category: 'COMPOSITION_CONFLICT', severity: 'WARNING',
+          summary: '第二页素材遮挡了可编辑文字。', slideIds: [`${runId}:slide:2`],
+          sourceChunkIds: [], status: 'OPEN', repairDomain: 'LAYOUT',
+        },
+      })
+    })
+
+    const response = await handle(request(`/v1/runs/${runId}`))
+    const body = await response.json() as { data: { issues: { id: string; repairDomain?: string }[] } }
+    expect(body.data.issues).toEqual([expect.objectContaining({ id: 'issue-layout-2', repairDomain: 'LAYOUT' })])
+  })
+
   test('returns owned delivery metadata and streams only the selected controlled artifact', async () => {
     const { repository, artifacts, handle } = fixture()
     const created = await createRun(handle)

@@ -247,7 +247,59 @@ export class RevisionApplicationRunner {
         throw new Error('REVISION_SCOPE_VIOLATION')
       }
       if (revised.sourceChunkIds.some((id) => !sourceIds.has(id))) throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
+      validateLayeredRevisionScope(previous, revised, operations)
     }
+  }
+}
+
+function validateLayeredRevisionScope(
+  previous: PresentationBlueprint['slides'][number],
+  revised: BlueprintDraft['slides'][number],
+  operations: RevisionPlan['operations'],
+) {
+  if (!previous.layeredDesign && !revised.layeredDesign) return
+  if (!previous.layeredDesign || !revised.layeredDesign) throw new Error('REVISION_SCOPE_VIOLATION')
+  if (previous.layeredDesign.designKind !== revised.layeredDesign.designKind
+    || previous.layeredDesign.backgroundColor !== revised.layeredDesign.backgroundColor
+    || previous.layeredDesign.elements.length !== revised.layeredDesign.elements.length) {
+    throw new Error('REVISION_SCOPE_VIOLATION')
+  }
+  const kinds = new Set(operations.map((operation) => operation.kind))
+  const regenerated = new Set(operations
+    .filter((operation) => operation.kind === 'REGENERATE_IMAGE')
+    .map((operation) => operation.targetElementId))
+  for (const [index, next] of revised.layeredDesign.elements.entries()) {
+    const before = previous.layeredDesign.elements[index]
+    if (!before || before.elementId !== next.elementId || before.kind !== next.kind) {
+      throw new Error('REVISION_SCOPE_VIOLATION')
+    }
+    const beforeComparable = structuredClone(before) as Record<string, unknown>
+    const nextComparable = structuredClone(next) as Record<string, unknown>
+    if (kinds.has('RELAYOUT')) {
+      delete beforeComparable.placement
+      delete beforeComparable.zIndex
+      delete nextComparable.placement
+      delete nextComparable.zIndex
+    }
+    if (kinds.has('UPDATE_CONTENT') && before.kind === 'TEXT' && next.kind === 'TEXT') {
+      delete beforeComparable.text
+      delete beforeComparable.sourceChunkIds
+      delete nextComparable.text
+      delete nextComparable.sourceChunkIds
+    }
+    if (regenerated.has(before.elementId) && before.kind === 'IMAGE' && next.kind === 'IMAGE') {
+      delete beforeComparable.prompt
+      delete beforeComparable.negativePrompt
+      delete nextComparable.prompt
+      delete nextComparable.negativePrompt
+    }
+    if (JSON.stringify(beforeComparable) !== JSON.stringify(nextComparable)) {
+      throw new Error('REVISION_SCOPE_VIOLATION')
+    }
+  }
+  if ([...regenerated].some((elementId) => !previous.layeredDesign!.elements
+    .some((element) => element.kind === 'IMAGE' && element.elementId === elementId))) {
+    throw new Error('REVISION_SCOPE_VIOLATION')
   }
 }
 

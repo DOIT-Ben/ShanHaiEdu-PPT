@@ -73,9 +73,17 @@ function decodeCursor(cursor: string) {
 }
 
 async function runDetail(repository: AgentRepository, run: RunRecord) {
-  const deliveries = await repository.listDeliveries(run.id)
+  const [deliveries, events] = await Promise.all([
+    repository.listDeliveries(run.id),
+    repository.listEvents(run.id),
+  ])
   const blueprint = await getActiveBlueprint(repository, run.id, run.revisionRound).catch(() => null)
-  return { ...publicRun(run), blueprint, deliveries }
+  const issues = new Map<string, Extract<(typeof events)[number], { type: 'issue.detected' }>['payload']>()
+  for (const event of events) {
+    if (event.type === 'issue.detected') issues.set(event.payload.id, event.payload)
+    if (event.type === 'issue.resolved') issues.delete(event.payload.issueId)
+  }
+  return { ...publicRun(run), blueprint, deliveries, issues: [...issues.values()] }
 }
 
 function sseResponse(input: Readonly<{

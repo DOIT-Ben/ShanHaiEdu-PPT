@@ -253,8 +253,9 @@ export class RunService {
         }],
       })
       const key = revisionPlanStepKey(transaction.run.id, targetRound)
+      const existingPlan = transaction.getStep(key)
       transaction.putStep({
-        id: `step-${transaction.run.id}-manual-revision-r${targetRound}`,
+        id: existingPlan?.id ?? `step-${transaction.run.id}-manual-revision-r${targetRound}`,
         runId: transaction.run.id,
         idempotencyKey: key,
         inputHash: hashInput({ tool: 'manual_revision', action }),
@@ -265,7 +266,7 @@ export class RunService {
         externalOperationId: null,
         errorCode: null,
         output: plan,
-        createdAt,
+        createdAt: existingPlan?.createdAt ?? createdAt,
         updatedAt: createdAt,
       })
       return targetRound
