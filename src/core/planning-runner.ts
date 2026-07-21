@@ -1,5 +1,6 @@
 import type { CreateRunRequest } from '../contracts'
 import { CONTRACT_VERSION } from '../contracts'
+import { ZodError } from 'zod'
 import {
   blueprintDraftSchema,
   presentationBlueprintSchema,
@@ -16,6 +17,8 @@ import type {
   StructuredModelPort,
 } from './ports'
 import { transitionRun } from './policy'
+
+const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 
 export type PlanPresentationInput = Readonly<{
   runId: string
@@ -59,39 +62,7 @@ export class PlanningRunner {
     }
 
     try {
-      const raw = await this.dependencies.model.execute({
-        operation: 'create_blueprint',
-        schemaName: 'ppt_agent_blueprint_v1',
-        idempotencyKey: input.idempotencyKey,
-        payload: {
-          slideCount: input.slideCount,
-          visualDirection: input.visualDirection,
-          presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
-          coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
-          maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
-          document: {
-            name: document.name,
-            chunks: document.chunks.map((chunk) => ({ id: chunk.id, sha256: chunk.sha256, text: chunk.text })),
-          },
-        },
-      })
-      const draft = blueprintDraftSchema.parse(raw)
-      this.assertBlueprintCoverage(
-        draft,
-        document,
-        input.slideCount,
-        input.presentationMode ?? 'SLIDE_IMAGE_V2',
-        input.maxVisualAssetsPerSlide ?? 4,
-      )
-      const now = this.dependencies.clock.now().toISOString()
-      const blueprint = presentationBlueprintSchema.parse({
-        ...draft,
-        id: `blueprint-${hashInput({ runId: input.runId, inputHash: prepared.step.inputHash }).slice(0, 28)}`,
-        visualDirection: input.visualDirection,
-        renderMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
-        coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
-        createdAt: now,
-      })
+      const blueprint = await this.createBlueprint(input, document, prepared.step.inputHash)
       const step = await this.complete(input, blueprint)
       return { step, blueprint, replayed: false }
     } catch (error) {
@@ -103,6 +74,67 @@ export class PlanningRunner {
       const step = await this.fail(input, errorCode, 'PLANNING_FAILED', document)
       return { step, blueprint: null, replayed: false }
     }
+  }
+
+  private async createBlueprint(input: PlanPresentationInput, document: DocumentResult, inputHash: string) {
+    const basePayload = {
+      slideCount: input.slideCount,
+      visualDirection: input.visualDirection,
+      presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
+      coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+      maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
+      document: {
+        name: document.name,
+        chunks: document.chunks.map((chunk) => ({ id: chunk.id, sha256: chunk.sha256, text: chunk.text })),
+      },
+    }
+    let repairIssues: { path: string; message: string }[] = []
+    for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
+      try {
+        const raw = await this.dependencies.model.execute({
+          operation: 'create_blueprint',
+          schemaName: 'ppt_agent_blueprint_v1',
+          idempotencyKey: attempt === 0
+            ? input.idempotencyKey
+            : `blueprint-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`,
+          payload: { ...basePayload, ...(repairIssues.length > 0 ? { contractRepairIssues: repairIssues } : {}) },
+        })
+        const draft = blueprintDraftSchema.parse(raw)
+        this.assertBlueprintCoverage(
+          draft,
+          document,
+          input.slideCount,
+          input.presentationMode ?? 'SLIDE_IMAGE_V2',
+          input.maxVisualAssetsPerSlide ?? 4,
+        )
+        return presentationBlueprintSchema.parse({
+          ...draft,
+          id: `blueprint-${hashInput({ runId: input.runId, inputHash }).slice(0, 28)}`,
+          visualDirection: input.visualDirection,
+          renderMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
+          coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+          createdAt: this.dependencies.clock.now().toISOString(),
+        })
+      } catch (error) {
+        const issues = this.contractIssues(error)
+        if (!issues || attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) throw error
+        repairIssues = issues
+      }
+    }
+    throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
+  }
+
+  private contractIssues(error: unknown) {
+    if (error instanceof ZodError) {
+      return error.issues.slice(0, 20).map((issue) => ({
+        path: issue.path.join('.'),
+        message: issue.message,
+      }))
+    }
+    if (error instanceof Error && error.message.startsWith('BLUEPRINT_')) {
+      return [{ path: 'blueprint', message: error.message }]
+    }
+    return null
   }
 
   private async requireRun(runId: string) {

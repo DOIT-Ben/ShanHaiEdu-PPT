@@ -3,6 +3,7 @@ import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockStructuredModelPort } from '../src/adapters/mock-ports'
 import { PlanningRunner } from '../src/core/planning-runner'
 import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
+import type { StructuredModelPort } from '../src/core/ports'
 
 const source = {
   kind: 'TEXT',
@@ -139,6 +140,31 @@ describe('planning runner', () => {
     expect(replay.replayed).toBe(true)
     expect(replay.blueprint).toEqual(first.blueprint)
     expect(model.executions.size).toBe(1)
+  })
+
+  test('repairs dynamic source-reference failures before persisting the blueprint', async () => {
+    const repository = new InMemoryAgentRepository()
+    const documents = new MutableDocumentPort(document())
+    const invalid = draft()
+    invalid.slides[1]!.sourceChunkIds = ['chunk-invented']
+    const executions: Parameters<StructuredModelPort['execute']>[0][] = []
+    const model: StructuredModelPort = {
+      async execute(input) {
+        executions.push(structuredClone(input))
+        return structuredClone(executions.length === 1 ? invalid : draft())
+      },
+    }
+    await repository.createRun(run())
+    const runner = new PlanningRunner({ repository, documents, model, clock: new FixedClock() })
+
+    const result = await runner.plan(request)
+
+    expect(result.step.status).toBe('COMPLETED')
+    expect(executions).toHaveLength(2)
+    expect(executions[1]!.idempotencyKey).toMatch(/^blueprint-repair-[a-f0-9]{64}$/)
+    expect(executions[1]!.payload).toMatchObject({
+      contractRepairIssues: [{ path: 'blueprint', message: 'BLUEPRINT_SOURCE_REFERENCE_INVALID' }],
+    })
   })
 
   test('stops before the model when document extraction is incomplete', async () => {

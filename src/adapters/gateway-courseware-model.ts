@@ -1,5 +1,4 @@
 import sharp from 'sharp'
-import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import {
   blueprintDraftSchema,
@@ -22,7 +21,6 @@ type ToolContent = string | readonly (
   | Readonly<{ type: 'text'; text: string }>
   | Readonly<{ type: 'image_url'; image_url: Readonly<{ url: string; detail: 'auto' }> }>
 )[]
-const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 
 const streamChunkSchema = z.object({
   choices: z.array(z.object({
@@ -86,17 +84,6 @@ function boundedJson(value: unknown, maxLength = 240_000) {
   return text
 }
 
-function repairIdempotencyKey(idempotencyKey: string, attempt: number) {
-  return `contract-repair-${createHash('sha256').update(`${idempotencyKey}\0${attempt}`).digest('hex')}`
-}
-
-function contractIssues(error: z.ZodError) {
-  return error.issues.slice(0, 20).map((issue) => ({
-    path: issue.path.join('.'),
-    message: issue.message,
-  }))
-}
-
 export class GatewayCoursewareModel implements
   StructuredModelPort,
   VisualReviewPort,
@@ -126,28 +113,18 @@ export class GatewayCoursewareModel implements
     const system = `你是学校采购场景的资深课件总设计师。根据教材创建完整教学蓝图，知识正确优先于视觉效果。
 V3 要求每页 elements 必须且只能有一个 kind=IMAGE、role=BASE_LAYER 的可编辑底图对象，包括封面和所有内容页；另可有最多四个与知识点直接相关的独立图片素材、原生文字和原生形状。所有素材必须引用真实 sourceChunkIds。
 当 coverDesignMode=INDEPENDENT 时，第一页必须采用与正文明显不同的封面构图，以课程主题、标题和单一强主视觉建立冲击力；不得套用正文内容面板。当值为 FOLLOW_TEMPLATE 时才允许跟随正文结构。
+如果输入包含 contractRepairIssues，必须重新生成完整蓝图并逐项修正这些合同问题。
 只提交工具参数，不输出解释或思维过程。`
-    let previousIssues: { path: string; message: string }[] = []
-    for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
-      try {
-        return await this.request({
-          model: this.dependencies.textModel,
-          system: previousIssues.length === 0
-            ? system
-            : `${system}\n上一次工具参数未通过合同校验。重新生成完整蓝图，并严格修正这些字段：${boundedJson(previousIssues, 8_000)}`,
-          user: `请依据以下受信教材数据创建蓝图：\n${boundedJson(input.payload)}`,
-          toolName: 'submit_courseware_blueprint',
-          description: '提交知识驱动、分层可编辑的完整课件蓝图。',
-          schema: layered ? layeredBlueprintDraftSchema : blueprintDraftSchema,
-          requireLayeredBaseImage: layered,
-          idempotencyKey: attempt === 0 ? input.idempotencyKey : repairIdempotencyKey(input.idempotencyKey, attempt),
-        })
-      } catch (error) {
-        if (!(error instanceof z.ZodError) || attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) throw error
-        previousIssues = contractIssues(error)
-      }
-    }
-    throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
+    return this.request({
+      model: this.dependencies.textModel,
+      system,
+      user: `请依据以下受信教材数据创建蓝图：\n${boundedJson(input.payload)}`,
+      toolName: 'submit_courseware_blueprint',
+      description: '提交知识驱动、分层可编辑的完整课件蓝图。',
+      schema: layered ? layeredBlueprintDraftSchema : blueprintDraftSchema,
+      requireLayeredBaseImage: layered,
+      idempotencyKey: input.idempotencyKey,
+    })
   }
 
   async review(input: Parameters<VisualReviewPort['review']>[0]) {
