@@ -1,6 +1,6 @@
 import type { PresentationBlueprint } from '../presentation-contracts'
 import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
-import type { AgentRepository, ArtifactPort, RunRecord, StepRecord } from './ports'
+import type { AgentRepository, ArtifactPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 
 export type PresentationArtifactReference = Readonly<{
   pageNumber: number
@@ -78,6 +78,34 @@ export async function loadPresentationSlides(
     })
   }
   return slides
+}
+
+export async function renderAndStoreSlidePreviews(input: Readonly<{
+  artifacts: ArtifactPort
+  renderer: PresentationRendererPort
+  run: RunRecord
+  blueprint: PresentationBlueprint
+  references: readonly PresentationArtifactReference[]
+  idempotencyPrefix: string
+}>) {
+  const slides = await loadPresentationSlides(input.artifacts, input.run, input.references)
+  const previews = await input.renderer.renderSlidePreviews({ blueprint: input.blueprint, slides })
+  const expectedPages = input.blueprint.slides.map((slide) => slide.pageNumber)
+  if (previews.length !== expectedPages.length
+    || previews.some((preview, index) => preview.pageNumber !== expectedPages[index] || preview.image.length === 0)) {
+    throw new Error('SLIDE_PREVIEW_OUTPUT_INVALID')
+  }
+  return Promise.all(previews.map(async (preview) => {
+    const stored = await input.artifacts.put({
+      tenantId: input.run.host.tenantId,
+      runId: input.run.id,
+      name: `slide-${preview.pageNumber}-review.png`,
+      mimeType: 'image/png',
+      bytes: preview.image,
+      idempotencyKey: `${input.idempotencyPrefix}:slide:${preview.pageNumber}:composite`,
+    })
+    return { pageNumber: preview.pageNumber, artifactId: stored.artifactId }
+  }))
 }
 
 function imageOutput(step: StepRecord) {

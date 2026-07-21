@@ -8,12 +8,18 @@ import {
 } from '../presentation-contracts'
 import { hashInput } from './hash'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
+import {
+  renderAndStoreSlidePreviews,
+  requirePresentationArtifactReferences,
+  type PresentationArtifactReference,
+} from './presentation-render-input'
 import type {
   AgentRepository,
+  ArtifactPort,
   ClockPort,
   DeckReviewPort,
   DocumentPort,
+  PresentationRendererPort,
   RunRecord,
   SourceChunk,
   StepRecord,
@@ -36,6 +42,8 @@ export class DeckReviewRunner {
     repository: AgentRepository
     documents: DocumentPort
     reviewer: DeckReviewPort
+    artifacts: ArtifactPort
+    renderer: PresentationRendererPort
     clock: ClockPort
   }>) {}
 
@@ -44,11 +52,13 @@ export class DeckReviewRunner {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     let sourceChunks: readonly SourceChunk[]
     let slides: readonly DeckSlideInput[]
+    let artifactReferences: readonly PresentationArtifactReference[]
     try {
       const document = await this.dependencies.documents.resolve({ host: run.host, source: run.source })
       if (!document.isComplete) throw new Error('SOURCE_INCOMPLETE')
       sourceChunks = this.requireSourceCoverage(blueprint, document.chunks)
-      slides = await this.requireSlideArtifacts(run, blueprint)
+      artifactReferences = await requirePresentationArtifactReferences(this.dependencies.repository, run, blueprint)
+      slides = this.deckSlides(run, blueprint, artifactReferences)
     } catch (error) {
       const code = error instanceof Error ? error.message : 'DECK_REVIEW_INPUT_FAILED'
       return this.failBeforeStart(run, code)
@@ -65,11 +75,25 @@ export class DeckReviewRunner {
     if (prepared) return prepared
 
     try {
+      const previews = await renderAndStoreSlidePreviews({
+        artifacts: this.dependencies.artifacts,
+        renderer: this.dependencies.renderer,
+        run,
+        blueprint,
+        references: artifactReferences,
+        idempotencyPrefix: idempotencyKey,
+      })
+      const previewByPage = new Map(previews.map((preview) => [preview.pageNumber, preview.artifactId]))
+      const reviewSlides = slides.map((slide) => {
+        const artifactId = previewByPage.get(slide.pageNumber)
+        if (!artifactId) throw new Error('SLIDE_PREVIEW_ARTIFACT_MISSING')
+        return { ...slide, artifactId }
+      })
       const raw = await this.dependencies.reviewer.evaluate({
         tenantId: run.host.tenantId,
         blueprint,
         sourceChunks,
-        slides,
+        slides: reviewSlides,
         idempotencyKey,
       })
       const draft = deckReviewDraftSchema.parse(raw)
@@ -209,24 +233,22 @@ export class DeckReviewRunner {
     return chunks
   }
 
-  private async requireSlideArtifacts(run: RunRecord, blueprint: PresentationBlueprint): Promise<readonly DeckSlideInput[]> {
-    const steps = (await this.dependencies.repository.listSteps(run.id))
-      .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
+  private deckSlides(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    references: readonly PresentationArtifactReference[],
+  ): readonly DeckSlideInput[] {
+    const referenceByPage = new Map(references.map((reference) => [reference.pageNumber, reference]))
     if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
-      const requirements = blueprintImageRequirements(run, blueprint)
-      const artifactByKey = new Map(requirements.map((requirement) => {
-        const step = latestCompletedAssetStep(steps, requirement, run.revisionRound)
-        const output = step ? this.imageOutput(step) : null
-        if (!output) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
-        return [requirement.assetKey, output.artifactId]
-      }))
       return blueprint.slides.map((slide) => {
         if (!slide.layeredDesign) throw new Error('LAYERED_DESIGN_MISSING')
+        const reference = referenceByPage.get(slide.pageNumber)
+        if (!reference?.assets) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
+        const artifactByElement = new Map(reference.assets.map((asset) => [asset.elementId, asset.artifactId]))
         const assets = slide.layeredDesign.elements
           .filter((element): element is Extract<(typeof slide.layeredDesign.elements)[number], { kind: 'IMAGE' }> => element.kind === 'IMAGE')
           .map((element) => {
-            const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${slide.pageNumber}:element:${element.elementId}`
-            const artifactId = artifactByKey.get(assetKey)
+            const artifactId = artifactByElement.get(element.elementId)
             if (!artifactId) throw new Error('LAYER_ARTIFACT_NOT_FOUND')
             return {
               elementId: element.elementId,
@@ -241,7 +263,7 @@ export class DeckReviewRunner {
         return {
           slideId: `${run.id}:slide:${slide.pageNumber}`,
           pageNumber: slide.pageNumber,
-          artifactId: base.artifactId,
+          artifactId: reference.artifactId,
           title: slide.title,
           body: slide.body,
           layout: slide.layout,
@@ -252,17 +274,12 @@ export class DeckReviewRunner {
       })
     }
     return blueprint.slides.map((slide) => {
-      const slideId = `${run.id}:slide:${slide.pageNumber}`
-      const candidates = steps.map((step) => this.imageOutput(step))
-        .filter((output): output is NonNullable<typeof output> => output?.slideId === slideId)
-        .filter((output) => output.round <= run.revisionRound)
-        .sort((left, right) => right.round - left.round)
-      const current = candidates[0]
-      if (!current) throw new Error('PAGE_ARTIFACT_NOT_FOUND')
+      const reference = referenceByPage.get(slide.pageNumber)
+      if (!reference) throw new Error('PAGE_ARTIFACT_NOT_FOUND')
       return {
-        slideId,
+        slideId: `${run.id}:slide:${slide.pageNumber}`,
         pageNumber: slide.pageNumber,
-        artifactId: current.artifactId,
+        artifactId: reference.artifactId,
         title: slide.title,
         body: slide.body,
         layout: slide.layout,
@@ -270,14 +287,6 @@ export class DeckReviewRunner {
         sourceChunkIds: slide.sourceChunkIds,
       }
     })
-  }
-
-  private imageOutput(step: StepRecord) {
-    const output = step.output as { slideId?: unknown; versionId?: unknown; artifactId?: unknown } | null
-    if (!output || typeof output.slideId !== 'string' || typeof output.versionId !== 'string' || typeof output.artifactId !== 'string') return null
-    const round = /:r(\d+):/.exec(output.versionId)?.[1]
-    if (round === undefined) return null
-    return { slideId: output.slideId, artifactId: output.artifactId, round: Number(round) }
   }
 
   private validateReferences(draft: DeckReviewDraft, runId: string, blueprint: PresentationBlueprint, chunks: readonly SourceChunk[]) {

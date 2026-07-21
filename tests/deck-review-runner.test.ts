@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock, MockDeckReviewPort } from '../src/adapters/mock-ports'
+import { FixedClock, MockArtifactPort, MockDeckReviewPort, MockPresentationRendererPort } from '../src/adapters/mock-ports'
 import { DeckReviewRunner } from '../src/core/deck-review-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
@@ -97,6 +97,12 @@ async function fixture(response: unknown = passingReview()) {
   const repository = new InMemoryAgentRepository()
   const documents = new StaticDocumentPort(document())
   const reviewer = new MockDeckReviewPort(response)
+  const artifacts = new MockArtifactPort()
+  const renderer = new MockPresentationRendererPort()
+  const sourceArtifacts = await Promise.all([1, 2].map((pageNumber) => artifacts.put({
+    tenantId: 'frameflow', runId: 'run-1', name: `slide-${pageNumber}.png`, mimeType: 'image/png',
+    bytes: new TextEncoder().encode(`source-${pageNumber}`), idempotencyKey: `source-${pageNumber}`,
+  })))
   await repository.createRun(run())
   await repository.transact('run-1', (transaction) => {
     transaction.putStep({
@@ -120,7 +126,7 @@ async function fixture(response: unknown = passingReview()) {
         output: {
           slideId: `run-1:slide:${pageNumber}`,
           versionId: `run-1:slide:${pageNumber}:r0:v1`,
-          artifactId: `artifact-${pageNumber}`,
+          artifactId: sourceArtifacts[pageNumber - 1]!.artifactId,
         },
         createdAt: transaction.run.createdAt,
         updatedAt: transaction.run.updatedAt,
@@ -131,19 +137,25 @@ async function fixture(response: unknown = passingReview()) {
     repository,
     documents,
     reviewer,
-    runner: new DeckReviewRunner({ repository, documents, reviewer, clock: new FixedClock() }),
+    artifacts,
+    renderer,
+    runner: new DeckReviewRunner({ repository, documents, reviewer, artifacts, renderer, clock: new FixedClock() }),
   }
 }
 
 describe('deck review runner', () => {
   test('evaluates ordered controlled artifacts and enters delivery after the fixed quality gate passes', async () => {
-    const { repository, reviewer, runner } = await fixture()
+    const { repository, reviewer, renderer, runner } = await fixture()
     const result = await runner.review('run-1')
 
     expect(result).toMatchObject({ passed: true, replayed: false, review: { qualityScore: 88 } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'DELIVERING', qualityScore: 88, version: 6 })
     const request = [...reviewer.requests.values()][0]!
-    expect(request.slides.map((slide) => slide.artifactId)).toEqual(['artifact-1', 'artifact-2'])
+    expect(request.slides.map((slide) => slide.artifactId)).toEqual([
+      'artifact:frameflow:run-1:deck-review:r0:slide:1:composite',
+      'artifact:frameflow:run-1:deck-review:r0:slide:2:composite',
+    ])
+    expect(renderer.slidePreviewCalls).toBe(1)
     expect(request.sourceChunks.map((chunk) => chunk.id)).toEqual(['chunk-1', 'chunk-2'])
   })
 

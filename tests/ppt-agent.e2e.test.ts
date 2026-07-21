@@ -168,11 +168,11 @@ describe('PPT Agent 15-page mock end-to-end', () => {
     expect(generated).toMatchObject({ status: 'PAGE_REVIEW', completed: 15, total: 15 })
 
     const visual = new VisualReviewRunner({ repository, reviewer: visualReviewer, clock })
-    const pages = new PageReviewCoordinator({ repository, reviewer: visual, clock })
+    const pages = new PageReviewCoordinator({ repository, reviewer: visual, artifacts, renderer, clock })
     const pageReview = await pages.reviewAll(runId)
-    expect(pageReview).toMatchObject({ status: 'DECK_REVIEW', approved: 15, rejected: 0 })
+    expect(pageReview).toMatchObject({ status: 'DECK_REVIEW', approved: 30, rejected: 0 })
 
-    const deck = new DeckReviewRunner({ repository, documents, reviewer: deckReviewer, clock })
+    const deck = new DeckReviewRunner({ repository, documents, reviewer: deckReviewer, artifacts, renderer, clock })
     const firstDeckReview = await deck.review(runId)
     expect(firstDeckReview).toMatchObject({ passed: false, review: { qualityScore: 74 } })
 
@@ -208,7 +208,7 @@ describe('PPT Agent 15-page mock end-to-end', () => {
     })
     images.complete(revisedImageKey, revisedSourceArtifact.artifactId)
     expect(await revisionMedia.refresh(runId)).toMatchObject({ status: 'PAGE_REVIEW', completed: 1 })
-    expect(await pages.reviewAll(runId)).toMatchObject({ status: 'DECK_REVIEW', approved: 15, rejected: 0 })
+    expect(await pages.reviewAll(runId)).toMatchObject({ status: 'DECK_REVIEW', approved: 30, rejected: 0 })
 
     deckReviewer.response = passingDeckReview
     const finalDeckReview = await deck.review(runId)
@@ -226,7 +226,7 @@ describe('PPT Agent 15-page mock end-to-end', () => {
     })
     expect(await repository.listDeliveries(runId)).toHaveLength(1)
     expect(planningModel.executions.size).toBe(1)
-    expect(visualReviewer.reviews.size).toBe(16)
+    expect(visualReviewer.reviews.size).toBe(46)
     expect(deckReviewer.evaluations.size).toBe(2)
     expect(revisionPlannerPort.plans.size).toBe(1)
     expect(revisionApplicationPort.applications.size).toBe(1)

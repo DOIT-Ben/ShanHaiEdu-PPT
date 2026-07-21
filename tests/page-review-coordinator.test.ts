@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock, MockVisualReviewPort } from '../src/adapters/mock-ports'
+import {
+  FixedClock,
+  MockArtifactPort,
+  MockPresentationRendererPort,
+  MockVisualReviewPort,
+} from '../src/adapters/mock-ports'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
@@ -70,6 +75,12 @@ async function fixture() {
     retryInstruction: null,
   })
   const clock = new FixedClock()
+  const artifacts = new MockArtifactPort()
+  const renderer = new MockPresentationRendererPort()
+  const sourceArtifacts = await Promise.all([1, 2, 3].map((pageNumber) => artifacts.put({
+    tenantId: 'frameflow', runId: 'run-1', name: `slide-${pageNumber}.png`, mimeType: 'image/png',
+    bytes: new TextEncoder().encode(`source-${pageNumber}`), idempotencyKey: `source-${pageNumber}`,
+  })))
   await repository.createRun(run())
   await repository.transact('run-1', (transaction) => {
     transaction.putStep({
@@ -93,7 +104,7 @@ async function fixture() {
         output: {
           slideId: `run-1:slide:${pageNumber}`,
           versionId: `run-1:slide:${pageNumber}:r0:v1`,
-          artifactId: `artifact-${pageNumber}`,
+          artifactId: sourceArtifacts[pageNumber - 1]!.artifactId,
         },
         createdAt: transaction.run.createdAt,
         updatedAt: transaction.run.updatedAt,
@@ -101,22 +112,30 @@ async function fixture() {
     }
   })
   const reviewer = new VisualReviewRunner({ repository, reviewer: reviewerPort, clock })
-  return { repository, reviewerPort, coordinator: new PageReviewCoordinator({ repository, reviewer, clock }) }
+  return {
+    repository,
+    reviewerPort,
+    renderer,
+    coordinator: new PageReviewCoordinator({ repository, reviewer, artifacts, renderer, clock }),
+  }
 }
 
 describe('page review coordinator', () => {
   test('moves to deck review only when every page is approved', async () => {
-    const { repository, reviewerPort, coordinator } = await fixture()
+    const { repository, reviewerPort, renderer, coordinator } = await fixture()
     const result = await coordinator.reviewAll('run-1')
 
-    expect(result).toMatchObject({ status: 'DECK_REVIEW', approved: 3, rejected: 0, total: 3 })
-    expect(reviewerPort.reviews.size).toBe(3)
+    expect(result).toMatchObject({ status: 'DECK_REVIEW', approved: 6, rejected: 0, total: 6 })
+    expect(reviewerPort.reviews.size).toBe(6)
+    expect(renderer.slidePreviewCalls).toBe(1)
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'DECK_REVIEW', version: 6 })
   })
 
   test('stops for human approval when one page is rejected without creating media', async () => {
     const { repository, reviewerPort, coordinator } = await fixture()
-    reviewerPort.respondToArtifact('artifact-2', {
+    const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    const artifactId = (imageStep.output as { artifactId: string }).artifactId
+    reviewerPort.respondToArtifact(artifactId, {
       approved: false,
       textDetected: true,
       visualScore: 35,
@@ -125,7 +144,7 @@ describe('page review coordinator', () => {
     })
     const result = await coordinator.reviewAll('run-1')
 
-    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', approved: 2, rejected: 1, total: 3 })
+    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', approved: 2, rejected: 1, total: 6 })
     expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')).toHaveLength(3)
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toContain('approval.required')
   })
@@ -135,8 +154,8 @@ describe('page review coordinator', () => {
     const first = await coordinator.reviewAll('run-1')
     const replay = await coordinator.reviewAll('run-1')
 
-    expect(replay).toMatchObject({ status: 'DECK_REVIEW', approved: 3, total: 3 })
+    expect(replay).toMatchObject({ status: 'DECK_REVIEW', approved: 6, total: 6 })
     expect(first.approved).toBe(replay.approved)
-    expect(reviewerPort.reviews.size).toBe(3)
+    expect(reviewerPort.reviews.size).toBe(6)
   })
 })

@@ -257,6 +257,7 @@ export function createMockRuntime(input: Readonly<{
   const documents = new FrameFlowHostAdapter(new MockFrameFlowBackend())
   const budget: BudgetPort = documents
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
+  const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
   const runs = new RunService({ repository: input.repository, clock })
   const planning = new PlanningRunner({
     repository: input.repository,
@@ -271,17 +272,25 @@ export function createMockRuntime(input: Readonly<{
     reviewer: new PassingVisualReview(),
     clock,
   })
-  const pages = new PageReviewCoordinator({ repository: input.repository, reviewer: visual, clock })
+  const pages = new PageReviewCoordinator({
+    repository: input.repository,
+    reviewer: visual,
+    artifacts: input.artifacts,
+    renderer,
+    clock,
+  })
   const deck = new DeckReviewRunner({
     repository: input.repository,
     documents,
     reviewer: new PassingDeckReview(),
+    artifacts: input.artifacts,
+    renderer,
     clock,
   })
   const delivery = new DeliveryRunner({
     repository: input.repository,
     artifacts: input.artifacts,
-    renderer: input.renderer ?? new SharpPptxPresentationRenderer(),
+    renderer,
     clock,
   })
 

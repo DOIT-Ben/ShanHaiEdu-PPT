@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock, MockBudgetPort, MockImageGenerationPort, MockVisualReviewPort } from '../src/adapters/mock-ports'
+import {
+  FixedClock,
+  MockArtifactPort,
+  MockBudgetPort,
+  MockImageGenerationPort,
+  MockPresentationRendererPort,
+  MockVisualReviewPort,
+} from '../src/adapters/mock-ports'
 import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
@@ -62,6 +69,8 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
+  const artifacts = new MockArtifactPort()
+  const renderer = new MockPresentationRendererPort()
   const clock = new FixedClock()
   await repository.createRun(run(overrides))
   await repository.transact('run-1', (transaction) => {
@@ -83,12 +92,17 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
     )
   })
   const media = new MediaStepRunner({ repository, budget, images, clock })
-  return { repository, images, clock, coordinator: new RevisionMediaCoordinator({ repository, media, clock }) }
+  for (const artifactId of ['artifact-r0-1', 'artifact-r0-2', 'artifact-r1-2']) {
+    artifacts.artifacts.set(artifactId, {
+      mimeType: 'image/png', bytes: new TextEncoder().encode(artifactId), sha256: artifactId.padEnd(64, '0').slice(0, 64),
+    })
+  }
+  return { repository, images, artifacts, renderer, clock, coordinator: new RevisionMediaCoordinator({ repository, media, clock }) }
 }
 
 describe('revision media coordinator', () => {
   test('redraws only planned pages and returns the revised deck to page review', async () => {
-    const { repository, images, clock, coordinator } = await fixture()
+    const { repository, images, artifacts, renderer, clock, coordinator } = await fixture()
     const submitted = await coordinator.submit('run-1', 5)
     const key = 'run-1:slide:2:image:r1:v1'
 
@@ -102,9 +116,9 @@ describe('revision media coordinator', () => {
       approved: true, textDetected: false, visualScore: 91, reasons: [], retryInstruction: null,
     })
     const reviewer = new VisualReviewRunner({ repository, reviewer: reviewerPort, clock })
-    const pages = new PageReviewCoordinator({ repository, reviewer, clock })
-    expect(await pages.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', approved: 2, total: 2 })
-    expect(reviewerPort.reviews.size).toBe(2)
+    const pages = new PageReviewCoordinator({ repository, reviewer, artifacts, renderer, clock })
+    expect(await pages.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', approved: 4, total: 4 })
+    expect(reviewerPort.reviews.size).toBe(4)
   })
 
   test('pauses before any redraw when the remaining budget is insufficient', async () => {
