@@ -41,6 +41,9 @@ export class SqliteAgentRepository implements AgentRepository {
     this.#database.exec('PRAGMA synchronous = FULL')
     this.#database.exec('PRAGMA foreign_keys = ON')
     this.#database.exec('PRAGMA busy_timeout = 5000')
+    const hasEventSnapshots = Boolean(this.#database.query<{ name: string }, []>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_open_issues'",
+    ).get())
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
@@ -69,7 +72,26 @@ export class SqliteAgentRepository implements AgentRepository {
         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
       ) STRICT;
       CREATE INDEX IF NOT EXISTS agent_deliveries_run_idx ON agent_deliveries(run_id);
+      CREATE TABLE IF NOT EXISTS agent_open_issues (
+        run_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (run_id, issue_id),
+        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS agent_open_issues_run_idx ON agent_open_issues(run_id, sequence);
+      CREATE TABLE IF NOT EXISTS agent_progress (
+        run_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY (run_id, step_id),
+        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS agent_progress_run_idx ON agent_progress(run_id, sequence);
     `)
+    if (!hasEventSnapshots) this.backfillEventSnapshots()
   }
 
   close() {
@@ -101,6 +123,36 @@ export class SqliteAgentRepository implements AgentRepository {
     return this.#database.query<JsonRow, [string, number]>(
       'SELECT data FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC',
     ).all(runId, afterSequence).map((row) => JSON.parse(row.data) as AgentEvent)
+  }
+
+  async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
+    const rows = this.#database.query<JsonRow, [string, number, number]>(
+      'SELECT data FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?',
+    ).all(runId, input.afterSequence, input.limit + 1)
+    const events: AgentEvent[] = []
+    let byteLength = 0
+    for (const row of rows.slice(0, input.limit)) {
+      const bytes = Buffer.byteLength(row.data)
+      if (events.length > 0 && byteLength + bytes > input.maxBytes) break
+      events.push(JSON.parse(row.data) as AgentEvent)
+      byteLength += bytes
+    }
+    return {
+      events,
+      nextAfter: events.at(-1)?.sequence ?? input.afterSequence,
+      hasMore: rows.length > events.length,
+      byteLength,
+    }
+  }
+
+  async getRunEventSnapshot(runId: string) {
+    const openIssues = this.#database.query<JsonRow, [string]>(
+      'SELECT data FROM agent_open_issues WHERE run_id = ? ORDER BY sequence ASC',
+    ).all(runId).map((row) => (JSON.parse(row.data) as Extract<AgentEvent, { type: 'issue.detected' }>).payload)
+    const progress = this.#database.query<JsonRow, [string]>(
+      'SELECT data FROM agent_progress WHERE run_id = ? ORDER BY sequence ASC',
+    ).all(runId).map((row) => (JSON.parse(row.data) as Extract<AgentEvent, { type: 'tool.progress' }>).payload)
+    return { openIssues, progress }
   }
 
   async listDeliveries(runId: string) {
@@ -226,10 +278,45 @@ export class SqliteAgentRepository implements AgentRepository {
       const insertEvent = this.#database.query<unknown, [string, number, string]>(
         'INSERT INTO agent_events (run_id, sequence, data) VALUES (?, ?, ?)',
       )
-      for (const event of appendedEvents) insertEvent.run(runId, event.sequence, JSON.stringify(event))
+      for (const event of appendedEvents) {
+        insertEvent.run(runId, event.sequence, JSON.stringify(event))
+        this.updateEventSnapshot(event)
+      }
       return result
     })
 
     return execute.immediate()
+  }
+
+  private updateEventSnapshot(event: AgentEvent) {
+    if (event.type === 'issue.detected') {
+      this.#database.query<unknown, [string, string, number, string]>(`
+        INSERT INTO agent_open_issues (run_id, issue_id, sequence, data) VALUES (?, ?, ?, ?)
+        ON CONFLICT(run_id, issue_id) DO UPDATE SET sequence = excluded.sequence, data = excluded.data
+      `).run(event.runId, event.payload.id, event.sequence, JSON.stringify(event))
+    } else if (event.type === 'issue.resolved') {
+      this.#database.query<unknown, [string, string]>(
+        'DELETE FROM agent_open_issues WHERE run_id = ? AND issue_id = ?',
+      ).run(event.runId, event.payload.issueId)
+    } else if (event.type === 'tool.progress') {
+      this.#database.query<unknown, [string, string, number, string]>(`
+        INSERT INTO agent_progress (run_id, step_id, sequence, data) VALUES (?, ?, ?, ?)
+        ON CONFLICT(run_id, step_id) DO UPDATE SET sequence = excluded.sequence, data = excluded.data
+      `).run(event.runId, event.payload.stepId, event.sequence, JSON.stringify(event))
+    } else if (event.type === 'tool.completed' || event.type === 'tool.failed') {
+      this.#database.query<unknown, [string, string]>(
+        'DELETE FROM agent_progress WHERE run_id = ? AND step_id = ?',
+      ).run(event.runId, event.payload.stepId)
+    }
+  }
+
+  private backfillEventSnapshots() {
+    const events = this.#database.query<JsonRow, []>(
+      "SELECT data FROM agent_events WHERE json_extract(data, '$.type') IN ('issue.detected', 'issue.resolved', 'tool.progress', 'tool.completed', 'tool.failed') ORDER BY run_id, sequence",
+    ).all().map((row) => JSON.parse(row.data) as AgentEvent)
+    const backfill = this.#database.transaction(() => {
+      for (const event of events) this.updateEventSnapshot(event)
+    })
+    backfill.immediate()
   }
 }

@@ -5,6 +5,7 @@ import { getActiveBlueprint } from '../core/active-blueprint'
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
+import { DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
 
 export interface HostAuthenticationPort {
   authenticate(request: Request): Promise<HostContext | null>
@@ -77,30 +78,24 @@ function decodeCursor(cursor: string) {
 }
 
 async function runDetail(repository: AgentRepository, run: RunRecord) {
-  const [deliveries, events] = await Promise.all([
+  const [deliveries, snapshot] = await Promise.all([
     repository.listDeliveries(run.id),
-    repository.listEvents(run.id),
+    repository.getRunEventSnapshot(run.id),
   ])
   const blueprint = await getActiveBlueprint(repository, run.id, run.revisionRound).catch(() => null)
-  const issues = new Map<string, Extract<(typeof events)[number], { type: 'issue.detected' }>['payload']>()
-  for (const event of events) {
-    if (event.type === 'issue.detected') issues.set(event.payload.id, event.payload)
-    if (event.type === 'issue.resolved') issues.delete(event.payload.issueId)
-  }
-  return { ...publicRun(run), blueprint, deliveries, issues: [...issues.values()] }
+  return { ...publicRun(run), blueprint, deliveries, issues: snapshot.openIssues, progress: snapshot.progress }
 }
 
 function sseResponse(input: Readonly<{
-  repository: AgentRepository
+  broker: RunEventBroker
   runId: string
   after: number
   signal: AbortSignal
-  pollMs: number
 }>) {
   const encoder = new TextEncoder()
   let cursor = input.after
-  let timer: ReturnType<typeof setTimeout> | null = null
   let heartbeat: ReturnType<typeof setInterval> | null = null
+  let unsubscribe: (() => void) | null = null
   let closed = false
 
   const stream = new ReadableStream<Uint8Array>({
@@ -108,8 +103,8 @@ function sseResponse(input: Readonly<{
       const close = () => {
         if (closed) return
         closed = true
-        if (timer) clearTimeout(timer)
         if (heartbeat) clearInterval(heartbeat)
+        unsubscribe?.()
         try { controller.close() } catch {}
       }
       input.signal.addEventListener('abort', close, { once: true })
@@ -117,30 +112,26 @@ function sseResponse(input: Readonly<{
         if (!closed) controller.enqueue(encoder.encode(': heartbeat\n\n'))
       }, 15_000)
 
-      const poll = async () => {
-        if (closed) return
-        try {
-          const events = await input.repository.listEvents(input.runId, cursor)
-          for (const event of events) {
-            cursor = event.sequence
-            controller.enqueue(encoder.encode(
-              `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-            ))
-          }
-          timer = setTimeout(poll, input.pollMs)
-        } catch (error) {
-          controller.error(error)
-          close()
-        }
-      }
-      await poll()
+      unsubscribe = await input.broker.subscribe({
+        runId: input.runId,
+        after: cursor,
+        onEvent(event) {
+          if (closed || (controller.desiredSize ?? 1) <= 0) return false
+          cursor = event.sequence
+          controller.enqueue(encoder.encode(
+            `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+          ))
+          return true
+        },
+        onClose: close,
+      })
     },
     cancel() {
       closed = true
-      if (timer) clearTimeout(timer)
       if (heartbeat) clearInterval(heartbeat)
+      unsubscribe?.()
     },
-  })
+  }, { highWaterMark: DEFAULT_EVENT_BATCH_LIMIT })
 
   return new Response(stream, {
     headers: {
@@ -153,6 +144,10 @@ function sseResponse(input: Readonly<{
 }
 
 export function createHttpHandler(dependencies: HandlerDependencies) {
+  const eventBroker = new RunEventBroker({
+    repository: dependencies.repository,
+    pollMs: dependencies.eventPollMs ?? 500,
+  })
   return async function handle(request: Request): Promise<Response> {
     const requestIdHeader = request.headers.get('X-Request-ID')
     const requestId = requestIdHeader && requestIdHeader.length <= 160 ? requestIdHeader : randomUUID()
@@ -254,11 +249,10 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           return errorResponse(422, 'INVALID_EVENT_CURSOR', 'event cursor must be a non-negative integer', requestId)
         }
         return sseResponse({
-          repository: dependencies.repository,
+          broker: eventBroker,
           runId,
           after,
           signal: request.signal,
-          pollMs: dependencies.eventPollMs ?? 500,
         })
       }
 

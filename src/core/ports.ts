@@ -331,6 +331,18 @@ export type PlanningFailureAggregate = Readonly<{
   lastOccurredAt: string
 }>
 
+export type EventPage = Readonly<{
+  events: readonly AgentEvent[]
+  nextAfter: number
+  hasMore: boolean
+  byteLength: number
+}>
+
+export type RunEventSnapshot = Readonly<{
+  openIssues: readonly Extract<AgentEvent, { type: 'issue.detected' }>['payload'][]
+  progress: readonly Extract<AgentEvent, { type: 'tool.progress' }>['payload'][]
+}>
+
 export interface AgentTransaction {
   readonly run: RunRecord
   getStep(idempotencyKey: string): StepRecord | null
@@ -349,6 +361,8 @@ export interface AgentRepository {
   listSteps(runId: string): Promise<readonly StepRecord[]>
   listDeliveries(runId: string): Promise<readonly DeliveryRecord[]>
   listEvents(runId: string, afterSequence?: number): Promise<readonly AgentEvent[]>
+  readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>): Promise<EventPage>
+  getRunEventSnapshot(runId: string): Promise<RunEventSnapshot>
   aggregatePlanningFailures(filters: PlanningFailureFilters): Promise<Readonly<{
     groups: readonly PlanningFailureAggregate[]
     totalFailures: number

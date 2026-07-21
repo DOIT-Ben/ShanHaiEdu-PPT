@@ -214,4 +214,70 @@ describe('SQLite repository', () => {
     })
     repository.close()
   })
+
+  test('pages events with bounded batches and materializes open issue and progress state', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION, type: 'issue.detected',
+        payload: {
+          id: 'issue-1', category: 'PROVIDER_RESULT_FAILED', severity: 'WARNING', summary: '等待时间超过 SLA',
+          slideIds: [], sourceChunkIds: [], status: 'OPEN', repairDomain: 'ASSET',
+        },
+      })
+      for (let index = 0; index < 250; index++) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION, type: 'tool.progress',
+          payload: { stepId: 'step-1', completed: index, total: 250, summary: `progress-${index}` },
+        })
+      }
+    })
+
+    const first = await repository.readEvents('run-1', { afterSequence: 0, limit: 100, maxBytes: 256 * 1024 })
+    const second = await repository.readEvents('run-1', { afterSequence: first.nextAfter, limit: 100, maxBytes: 256 * 1024 })
+    expect(first).toMatchObject({ hasMore: true })
+    expect(first.events).toHaveLength(100)
+    expect(first.byteLength).toBeLessThanOrEqual(256 * 1024)
+    expect(second.events[0]!.sequence).toBe(first.nextAfter + 1)
+    expect(await repository.getRunEventSnapshot('run-1')).toMatchObject({
+      openIssues: [{ id: 'issue-1' }],
+      progress: [{ stepId: 'step-1', completed: 249, total: 250 }],
+    })
+    repository.close()
+  })
+
+  test('replays 10,000 events without gaps, duplicates, or unbounded pages', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      for (let index = 0; index < 10_000; index++) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION, type: 'tool.progress',
+          payload: { stepId: 'step-1', completed: index + 1, total: 10_000 },
+        })
+      }
+    })
+
+    const sequences: number[] = []
+    let afterSequence = 0
+    do {
+      const page = await repository.readEvents('run-1', {
+        afterSequence, limit: 100, maxBytes: 256 * 1024,
+      })
+      expect(page.events.length).toBeLessThanOrEqual(100)
+      expect(page.byteLength).toBeLessThanOrEqual(256 * 1024)
+      sequences.push(...page.events.map((event) => event.sequence))
+      afterSequence = page.nextAfter
+      if (!page.hasMore) break
+    } while (true)
+
+    expect(sequences).toEqual(Array.from({ length: 10_000 }, (_, index) => index + 1))
+    expect(await repository.getRunEventSnapshot('run-1')).toMatchObject({
+      openIssues: [], progress: [{ stepId: 'step-1', completed: 10_000, total: 10_000 }],
+    })
+    repository.close()
+  })
 })

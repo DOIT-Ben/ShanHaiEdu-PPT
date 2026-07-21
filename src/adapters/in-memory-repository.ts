@@ -50,6 +50,37 @@ export class InMemoryAgentRepository implements AgentRepository {
     return stored.events.filter((event) => event.sequence > afterSequence).map(clone)
   }
 
+  async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
+    const candidates = (await this.listEvents(runId, input.afterSequence)).slice(0, input.limit + 1)
+    const events: AgentEvent[] = []
+    let byteLength = 0
+    for (const event of candidates.slice(0, input.limit)) {
+      const bytes = Buffer.byteLength(JSON.stringify(event))
+      if (events.length > 0 && byteLength + bytes > input.maxBytes) break
+      events.push(event)
+      byteLength += bytes
+    }
+    return {
+      events,
+      nextAfter: events.at(-1)?.sequence ?? input.afterSequence,
+      hasMore: candidates.length > events.length,
+      byteLength,
+    }
+  }
+
+  async getRunEventSnapshot(runId: string) {
+    const events = await this.listEvents(runId)
+    const issues = new Map<string, Extract<AgentEvent, { type: 'issue.detected' }>['payload']>()
+    const progress = new Map<string, Extract<AgentEvent, { type: 'tool.progress' }>['payload']>()
+    for (const event of events) {
+      if (event.type === 'issue.detected') issues.set(event.payload.id, event.payload)
+      else if (event.type === 'issue.resolved') issues.delete(event.payload.issueId)
+      else if (event.type === 'tool.progress') progress.set(event.payload.stepId, event.payload)
+      else if (event.type === 'tool.completed' || event.type === 'tool.failed') progress.delete(event.payload.stepId)
+    }
+    return { openIssues: [...issues.values()].map(clone), progress: [...progress.values()].map(clone) }
+  }
+
   async listDeliveries(runId: string) {
     const stored = this.#runs.get(runId)
     if (!stored) return []

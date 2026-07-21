@@ -30,11 +30,14 @@ describe('OpenAPI v1 contract', () => {
       '/v1/runs/{runId}/events',
     ])
     expect(document.paths['/v1/runs/{runId}/events']?.get).toBeDefined()
+    expect(JSON.stringify(document.paths['/v1/runs/{runId}/events'])).toContain('100 events')
+    expect(JSON.stringify(document.paths['/v1/runs/{runId}/events'])).toContain('terminal')
     expect(document.paths['/v1/admin/planning-failures']?.get).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
     expect(document.paths['/health/ready']?.get).toBeDefined()
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
+    expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
       'RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
     ]))

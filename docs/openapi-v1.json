@@ -106,6 +106,7 @@
     "/v1/runs/{runId}/events": {
       "get": {
         "operationId": "streamRunEvents",
+        "description": "Replays durable events after the supplied cursor in batches of at most 100 events and 256 KiB, then shares one live poller per Run. The stream closes after a terminal run.completed, run.failed, or run.cancelled event. Clients reconnect with Last-Event-ID or after and must ignore event ids they have already applied.",
         "parameters": [
           { "$ref": "#/components/parameters/RunId" },
           { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
@@ -113,7 +114,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Persistent event replay followed by live polling",
+            "description": "Bounded persistent replay followed by shared live polling; closes at the Run terminal event",
             "content": { "text/event-stream": { "schema": { "type": "string" } } }
           },
           "4XX": { "$ref": "#/components/responses/Error" },
@@ -381,6 +382,20 @@
           "committedBudgetUnits": { "type": "integer" },
           "qualityOverride": { "type": "boolean" },
           "issues": { "type": "array", "items": { "$ref": "#/components/schemas/IssueSummary" } },
+          "progress": {
+            "type": "array",
+            "description": "Materialized latest progress for steps that have not completed or failed.",
+            "items": {
+              "type": "object",
+              "required": ["stepId", "completed", "total"],
+              "properties": {
+                "stepId": { "type": "string" },
+                "completed": { "type": "integer", "minimum": 0 },
+                "total": { "type": "integer", "minimum": 1 },
+                "summary": { "type": "string", "maxLength": 500 }
+              }
+            }
+          },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }
         }
