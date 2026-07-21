@@ -102,6 +102,16 @@ describe('public v1 contracts', () => {
     })).toMatchObject({ type: 'REPLAN', slideCount: 8 })
   })
 
+  test('makes cancellation semantics explicit without breaking legacy callers', () => {
+    expect(runActionSchema.parse({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'CANCEL',
+      expectedVersion: 2,
+      mode: 'STOP_NEW_SUBMISSIONS',
+      reason: '用户停止继续提交任务',
+    })).toMatchObject({ type: 'CANCEL', mode: 'STOP_NEW_SUBMISSIONS' })
+  })
+
   test('requires a concrete element only for limited asset revision', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,

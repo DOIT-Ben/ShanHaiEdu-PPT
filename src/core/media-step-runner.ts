@@ -153,7 +153,20 @@ export class MediaStepRunner {
         changed: true,
       }
     }
-    return { step: await this.markResultFailure(runId, idempotencyKey, status.errorCode), changed: true }
+    return {
+      step: await this.markResultFailure(runId, idempotencyKey, status.errorCode, status.billingState),
+      changed: true,
+    }
+  }
+
+  async reconcilePendingRun(runId: string) {
+    const pending = (await this.dependencies.repository.listSteps(runId))
+      .filter((step) => step.tool === 'generate_slide_image' && step.status === 'WAITING')
+    let changed = 0
+    for (const step of pending) {
+      if ((await this.refreshSlideImage(runId, step.idempotencyKey)).changed) changed += 1
+    }
+    return { inspected: pending.length, changed }
   }
 
   private async prepare(input: SubmitSlideImageInput): Promise<{
@@ -180,7 +193,8 @@ export class MediaStepRunner {
         if (existing.id !== input.stepId || existing.inputHash !== inputHash || existing.tool !== 'generate_slide_image') {
           throw new Error('STEP_IDEMPOTENCY_CONFLICT')
         }
-        if (['WAITING', 'COMPLETED', 'FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(existing.status)) {
+        if (['WAITING', 'COMPLETED', 'FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN',
+          'COMPLETED_AFTER_CANCEL', 'FAILED_NOT_CHARGED', 'FAILED_CHARGED', 'BILLING_UNKNOWN'].includes(existing.status)) {
           return { run: transaction.run, step: existing, replayed: true as const }
         }
         return { run: transaction.run, step: existing, replayed: false as const }
@@ -289,11 +303,12 @@ export class MediaStepRunner {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
-      if (step.status === 'COMPLETED') return step
+      if (step.status === 'COMPLETED' || step.status === 'COMPLETED_AFTER_CANCEL') return step
       const output = step.output && typeof step.output === 'object' ? step.output : {}
+      const completedAfterCancel = transaction.run.status === 'CANCELLED'
       const updated: StepRecord = {
         ...step,
-        status: 'COMPLETED',
+        status: completedAfterCancel ? 'COMPLETED_AFTER_CANCEL' : 'COMPLETED',
         output: { ...output, artifactId },
         errorCode: null,
         updatedAt: this.dependencies.clock.now().toISOString(),
@@ -302,28 +317,53 @@ export class MediaStepRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
-        payload: { stepId: step.id, summary: '页面图片生成完成并已保存受控产物' },
+        payload: {
+          stepId: step.id,
+          summary: completedAfterCancel
+            ? '任务取消后 Provider 仍完成，产物已保留并进入最终对账'
+            : '页面图片生成完成并已保存受控产物',
+        },
       })
       return updated
     })
   }
 
-  private async markResultFailure(runId: string, idempotencyKey: string, errorCode: string) {
+  private async markResultFailure(
+    runId: string,
+    idempotencyKey: string,
+    errorCode: string,
+    billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN',
+  ) {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transaction.run.status === 'NEEDS_HUMAN'
+      const cancelled = transaction.run.status === 'CANCELLED'
+      const policy = cancelled || transaction.run.status === 'NEEDS_HUMAN'
         ? transaction.run
         : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
-      const updated: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
+      const updated: StepRecord = {
+        ...step,
+        status: cancelled
+          ? billingState === 'CHARGED' ? 'FAILED_CHARGED'
+            : billingState === 'NOT_CHARGED' ? 'FAILED_NOT_CHARGED' : 'BILLING_UNKNOWN'
+          : 'FAILED',
+        errorCode,
+        updatedAt: now,
+      }
       transaction.putRun(run)
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode, retryable: false },
+        payload: {
+          stepId: step.id,
+          errorCode: (updated.status === 'FAILED_CHARGED' ? `FAILED_CHARGED:${errorCode}`
+            : updated.status === 'FAILED_NOT_CHARGED' ? `FAILED_NOT_CHARGED:${errorCode}`
+              : updated.status === 'BILLING_UNKNOWN' ? `BILLING_UNKNOWN:${errorCode}` : errorCode).slice(0, 100),
+          retryable: false,
+        },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -332,7 +372,11 @@ export class MediaStepRunner {
           id: `${step.id}:provider-result`,
           category: 'PROVIDER_RESULT_FAILED',
           severity: 'CRITICAL',
-          summary: '图片任务失败且费用状态不能安全释放，需要人工核对。',
+          summary: billingState === 'CHARGED'
+            ? '图片任务失败但 Provider 已计费，需要人工核对产物和费用归属。'
+            : billingState === 'NOT_CHARGED'
+              ? '图片任务失败且 Provider 明确未计费，但本地没有可释放的预留记录，需要人工核对。'
+              : '图片任务失败且费用状态未知，需要人工核对。',
           slideIds: [],
           sourceChunkIds: [],
           status: 'OPEN',
@@ -365,7 +409,7 @@ export class MediaStepRunner {
       const run = mergePolicy(transaction.run, policy, now)
       const updated: StepRecord = {
         ...step,
-        status: 'FAILED',
+        status: transaction.run.status === 'CANCELLED' ? 'FAILED_NOT_CHARGED' : 'FAILED',
         budgetReservationId: reservationId,
         errorCode,
         updatedAt: now,
@@ -375,7 +419,11 @@ export class MediaStepRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode, retryable: false },
+        payload: {
+          stepId: step.id,
+          errorCode: (updated.status === 'FAILED_NOT_CHARGED' ? `FAILED_NOT_CHARGED:${errorCode}` : errorCode).slice(0, 100),
+          retryable: false,
+        },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,

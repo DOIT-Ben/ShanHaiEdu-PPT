@@ -212,4 +212,51 @@ describe('media step runner', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 10 })
     expect(budget.released.size).toBe(0)
   })
+
+  test('reconciles a provider result that completes after run cancellation', async () => {
+    const { repository, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED', version: transaction.run.version + 1 })
+    })
+    images.complete(request.idempotencyKey, 'artifact-after-cancel')
+
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({
+      status: 'COMPLETED_AFTER_CANCEL',
+      output: { artifactId: 'artifact-after-cancel' },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 10 })
+  })
+
+  test('releases uncharged work that fails after cancellation', async () => {
+    const { repository, budget, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED', version: transaction.run.version + 1 })
+    })
+    images.fail(request.idempotencyKey, 'PROVIDER_REJECTED', 'NOT_CHARGED')
+
+    await runner.reconcilePendingRun('run-1')
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({ status: 'FAILED_NOT_CHARGED' })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 0 })
+    expect(budget.released.size).toBe(1)
+  })
+
+  test.each([
+    ['CHARGED', 'FAILED_CHARGED'],
+    ['UNKNOWN', 'BILLING_UNKNOWN'],
+  ] as const)('keeps %s failed work visible after cancellation', async (billingState, expectedStatus) => {
+    const { repository, budget, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED', version: transaction.run.version + 1 })
+    })
+    images.fail(request.idempotencyKey, 'PROVIDER_FAILED_AFTER_CANCEL', billingState)
+
+    await runner.reconcilePendingRun('run-1')
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({ status: expectedStatus })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 10 })
+    expect(budget.released.size).toBe(0)
+  })
 })

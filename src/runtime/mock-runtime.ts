@@ -338,7 +338,10 @@ export function createAgentRuntime(input: RuntimeInput) {
   const revisionMedia = new RevisionMediaCoordinator({ repository: input.repository, media, clock })
 
   const tick = async () => {
-    for (const run of await input.repository.listRuns()) {
+    for (const candidate of await input.repository.listRuns()) {
+      await media.reconcilePendingRun(candidate.id)
+      const run = await input.repository.getRun(candidate.id)
+      if (!run) continue
       if (run.status === 'PLANNING') {
         const planningAttempt = run.planningAttempt ?? 0
         await planning.plan({

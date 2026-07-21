@@ -243,7 +243,10 @@ export type RunRecord = Readonly<{
   updatedAt: string
 }>
 
-export type StepStatus = 'RUNNING' | 'RESERVED' | 'SUBMITTING' | 'WAITING' | 'COMPLETED' | 'RELEASING' | 'FAILED' | 'RESERVATION_UNKNOWN' | 'SUBMISSION_UNKNOWN'
+export type StepStatus =
+  | 'RUNNING' | 'RESERVED' | 'SUBMITTING' | 'WAITING' | 'COMPLETED' | 'RELEASING' | 'FAILED'
+  | 'RESERVATION_UNKNOWN' | 'SUBMISSION_UNKNOWN'
+  | 'COMPLETED_AFTER_CANCEL' | 'FAILED_NOT_CHARGED' | 'FAILED_CHARGED' | 'BILLING_UNKNOWN'
 
 export type StepRecord = Readonly<{
   id: string

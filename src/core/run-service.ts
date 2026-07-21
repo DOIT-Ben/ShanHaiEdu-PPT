@@ -360,7 +360,7 @@ export class RunService {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'run.cancelled',
-        payload: { reason: action.reason ?? null },
+        payload: { reason: action.reason ?? null, mode: action.mode ?? 'STOP_NEW_SUBMISSIONS' },
       })
     } else if (action.type === 'ADD_BUDGET') {
       transaction.appendEvent({

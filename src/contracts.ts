@@ -84,6 +84,7 @@ export const runActionSchema = z.discriminatedUnion('type', [
   z.object({
     ...actionBase,
     type: z.literal('CANCEL'),
+    mode: z.literal('STOP_NEW_SUBMISSIONS').optional(),
     reason: z.string().trim().min(3).max(500).optional(),
   }).strict(),
   z.object({
@@ -211,7 +212,10 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('budget.updated'), payload: z.object({ budgetUnits: z.number().int().nonnegative(), committedBudgetUnits: z.number().int().nonnegative() }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('run.paused'), payload: z.object({ reason: z.string().min(1).max(500), resumeState: runStatusSchema }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('run.resumed'), payload: z.object({ status: runStatusSchema }).strict() }).strict(),
-  z.object({ ...eventBase, type: z.literal('run.cancelled'), payload: z.object({ reason: z.string().max(500).nullable() }).strict() }).strict(),
+  z.object({ ...eventBase, type: z.literal('run.cancelled'), payload: z.object({
+    reason: z.string().max(500).nullable(),
+    mode: z.literal('STOP_NEW_SUBMISSIONS').optional(),
+  }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('run.completed'), payload: z.object({ deliveryId: identifierSchema, qualityOverride: z.boolean() }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('run.failed'), payload: z.object({ errorCode: z.string().min(1).max(100) }).strict() }).strict(),
 ])
