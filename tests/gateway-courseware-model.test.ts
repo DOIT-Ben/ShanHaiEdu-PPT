@@ -130,7 +130,7 @@ describe('gateway courseware model', () => {
     expect(parameters.properties.slides.items.required).not.toContain('layeredDesign')
   })
 
-  test('regenerates a blueprint with contract feedback after an invalid tool response', async () => {
+  test('regenerates a blueprint up to the bounded fifth contract attempt', async () => {
     const requests: { body: Record<string, unknown>; idempotencyKey: string }[] = []
     const invalid = layeredBlueprintDraft()
     delete (invalid.slides[1] as Partial<(typeof invalid.slides)[number]>).body
@@ -142,7 +142,7 @@ describe('gateway courseware model', () => {
           body: JSON.parse(String(init?.body)),
           idempotencyKey: new Headers(init?.headers).get('Idempotency-Key') || '',
         })
-        return completion(requests.length === 1 ? invalid : layeredBlueprintDraft())
+        return completion(requests.length < 5 ? invalid : layeredBlueprintDraft())
       },
     })
 
@@ -155,7 +155,7 @@ describe('gateway courseware model', () => {
     })
 
     expect(result).toEqual(layeredBlueprintDraft())
-    expect(requests).toHaveLength(2)
+    expect(requests).toHaveLength(5)
     expect(requests[1]!.idempotencyKey).toMatch(/^contract-repair-[a-f0-9]{64}$/)
     const repairSystem = (requests[1]!.body.messages as { content: string }[])[0]!.content
     expect(repairSystem).toContain('slides.1.body')

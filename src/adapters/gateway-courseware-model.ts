@@ -22,6 +22,7 @@ type ToolContent = string | readonly (
   | Readonly<{ type: 'text'; text: string }>
   | Readonly<{ type: 'image_url'; image_url: Readonly<{ url: string; detail: 'auto' }> }>
 )[]
+const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 
 const streamChunkSchema = z.object({
   choices: z.array(z.object({
@@ -127,7 +128,7 @@ V3 要求每页 elements 必须且只能有一个 kind=IMAGE、role=BASE_LAYER �
 当 coverDesignMode=INDEPENDENT 时，第一页必须采用与正文明显不同的封面构图，以课程主题、标题和单一强主视觉建立冲击力；不得套用正文内容面板。当值为 FOLLOW_TEMPLATE 时才允许跟随正文结构。
 只提交工具参数，不输出解释或思维过程。`
     let previousIssues: { path: string; message: string }[] = []
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
       try {
         return await this.request({
           model: this.dependencies.textModel,
@@ -142,7 +143,7 @@ V3 要求每页 elements 必须且只能有一个 kind=IMAGE、role=BASE_LAYER �
           idempotencyKey: attempt === 0 ? input.idempotencyKey : repairIdempotencyKey(input.idempotencyKey, attempt),
         })
       } catch (error) {
-        if (!(error instanceof z.ZodError) || attempt === 2) throw error
+        if (!(error instanceof z.ZodError) || attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) throw error
         previousIssues = contractIssues(error)
       }
     }
