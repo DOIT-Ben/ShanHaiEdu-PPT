@@ -1,5 +1,6 @@
 import {
   CONTRACT_VERSION,
+  MAX_PLANNING_RETRIES,
   createRunRequestSchema,
   runActionSchema,
   type HostContext,
@@ -64,6 +65,7 @@ export class RunService {
       maxVisualAssetsPerSlide: parsed.data.maxVisualAssetsPerSlide,
       maxRevisionRounds: parsed.data.maxRevisionRounds,
       revisionRound: 0,
+      planningAttempt: 0,
       qualityScore: null,
       status: 'PLANNING',
       resumeState: null,
@@ -133,6 +135,7 @@ export class RunService {
           return existingAction.output as RunRecord
         }
         const approvedRevisionRound = this.assertActionPrerequisites(transaction, parsed.data)
+        const nextPlanningAttempt = this.planningRetryAttempt(transaction, parsed.data)
         const previous = transaction.run
         const policy = applyRunAction(previous, parsed.data)
         const now = this.dependencies.clock.now().toISOString()
@@ -144,6 +147,13 @@ export class RunService {
             qualityOverrideBy: host.externalUserId,
           } : {}),
           ...(approvedRevisionRound === null ? {} : { revisionRound: approvedRevisionRound }),
+          ...(nextPlanningAttempt === null ? {} : {
+            planningAttempt: nextPlanningAttempt,
+            ...(parsed.data.type === 'REPLAN' ? {
+              slideCount: parsed.data.slideCount,
+              visualDirection: parsed.data.visualDirection,
+            } : {}),
+          }),
           updatedAt: now,
         }
         transaction.putRun(updated)
@@ -274,6 +284,19 @@ export class RunService {
     return null
   }
 
+  private planningRetryAttempt(transaction: AgentTransaction, action: RunAction) {
+    if (action.type !== 'RETRY_PLANNING' && action.type !== 'REPLAN') return null
+    const currentAttempt = transaction.run.planningAttempt ?? 0
+    if (currentAttempt >= MAX_PLANNING_RETRIES) {
+      throw new RunServiceError(422, 'PLANNING_RETRY_LIMIT_REACHED', 'planning retry limit has been reached')
+    }
+    const failed = transaction.getStep(planningStepKey(transaction.run.id, currentAttempt))
+    if (!failed || failed.status !== 'FAILED') {
+      throw new RunServiceError(409, 'PLANNING_FAILURE_NOT_READY', 'failed planning attempt is not available')
+    }
+    return currentAttempt + 1
+  }
+
   private appendActionEvents(
     transaction: AgentTransaction,
     previous: RunRecord,
@@ -307,13 +330,13 @@ export class RunService {
         type: 'budget.updated',
         payload: { budgetUnits: updated.budgetUnits, committedBudgetUnits: updated.committedBudgetUnits },
       })
-    } else if (['APPROVE_BLUEPRINT', 'APPROVE_REVISION', 'SUBMIT_LIMITED_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
+    } else if (['APPROVE_BLUEPRINT', 'RETRY_PLANNING', 'REPLAN', 'APPROVE_REVISION', 'SUBMIT_LIMITED_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'approval.resolved',
         payload: {
           kind: action.type === 'APPROVE_BLUEPRINT' ? 'BLUEPRINT'
-            : action.type === 'ACCEPT_WITH_OVERRIDE' || action.type === 'SUBMIT_LIMITED_REVISION' ? 'HUMAN_REVIEW' : 'REVISION',
+            : ['RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'SUBMIT_LIMITED_REVISION'].includes(action.type) ? 'HUMAN_REVIEW' : 'REVISION',
           actionType: action.type,
         },
       })

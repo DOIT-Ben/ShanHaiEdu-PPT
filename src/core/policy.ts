@@ -17,7 +17,7 @@ const TRANSITIONS: Readonly<Record<Exclude<RunStatus, 'PAUSED'>, ReadonlySet<Run
   DECK_REVIEW: new Set(['AWAITING_REVISION_APPROVAL', 'REVISING', 'PAUSED', 'NEEDS_HUMAN', 'DELIVERING', 'FAILED', 'CANCELLED']),
   AWAITING_REVISION_APPROVAL: new Set(['REVISING', 'PAUSED', 'NEEDS_HUMAN', 'CANCELLED']),
   REVISING: new Set(['EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'PAUSED', 'NEEDS_HUMAN', 'FAILED', 'CANCELLED']),
-  NEEDS_HUMAN: new Set(['REVISING', 'DELIVERING', 'CANCELLED']),
+  NEEDS_HUMAN: new Set(['PLANNING', 'REVISING', 'DELIVERING', 'CANCELLED']),
   DELIVERING: new Set(['COMPLETED', 'NEEDS_HUMAN', 'CANCELLED']),
   COMPLETED: new Set(),
   FAILED: new Set(),
@@ -69,6 +69,12 @@ export function applyRunAction(state: RunPolicyState, action: RunAction): RunPol
   switch (action.type) {
     case 'APPROVE_BLUEPRINT':
       return transitionRun(state, 'EXECUTING')
+    case 'RETRY_PLANNING':
+    case 'REPLAN':
+      if (state.status !== 'NEEDS_HUMAN') {
+        throw new PolicyError('PLANNING_RETRY_NOT_ALLOWED', 'planning retry requires human-review state')
+      }
+      return transitionRun(state, 'PLANNING')
     case 'REQUEST_BLUEPRINT_REVISION':
       return transitionRun(state, 'PLANNING')
     case 'PAUSE':

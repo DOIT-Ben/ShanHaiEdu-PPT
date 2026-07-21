@@ -142,6 +142,43 @@ describe('planning runner', () => {
     expect(model.executions.size).toBe(1)
   })
 
+  test('uses a new planning key after failure and resolves the previous planning issue on success', async () => {
+    const { repository, runner } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'PLANNING', planningAttempt: 1, version: 2 })
+      transaction.putStep({
+        id: 'step-plan-failed-0',
+        runId: 'run-1',
+        idempotencyKey: 'run-1:blueprint:v1',
+        inputHash: 'failed-input-0',
+        tool: 'create_blueprint',
+        status: 'FAILED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: 'BLUEPRINT_MODEL_OUTPUT_INVALID',
+        output: null,
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const result = await runner.plan({
+      ...request,
+      stepId: 'step-plan-retry-1',
+      idempotencyKey: 'run-1:blueprint:retry:1',
+      attempt: 1,
+    })
+
+    expect(result.step.status).toBe('COMPLETED')
+    expect((await repository.listSteps('run-1')).map((step) => step.idempotencyKey)).toEqual([
+      'run-1:blueprint:v1',
+      'run-1:blueprint:retry:1',
+    ])
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'issue.resolved' && event.payload.issueId === 'step-plan-failed-0:planning-failed')).toBe(true)
+  })
+
   test('repairs dynamic source-reference failures before persisting the blueprint', async () => {
     const repository = new InMemoryAgentRepository()
     const documents = new MutableDocumentPort(document())

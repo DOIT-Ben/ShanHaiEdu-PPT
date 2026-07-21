@@ -61,6 +61,20 @@ describe('run transition policy', () => {
     expect(canTransition('COMPLETED', 'EXECUTING')).toBe(false)
     expect(canTransition('NEEDS_HUMAN', 'COMPLETED')).toBe(false)
   })
+
+  test('returns a failed planning run to planning only through recovery actions', () => {
+    const recovered = applyRunAction(state({ status: 'NEEDS_HUMAN' }), {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_PLANNING',
+      expectedVersion: 3,
+    })
+    expect(recovered).toMatchObject({ status: 'PLANNING', version: 4 })
+    expect(() => applyRunAction(state({ status: 'EXECUTING' }), {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_PLANNING',
+      expectedVersion: 3,
+    })).toThrow('planning retry requires human-review state')
+  })
 })
 
 describe('media budget policy', () => {

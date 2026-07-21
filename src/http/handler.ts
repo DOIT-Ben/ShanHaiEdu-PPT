@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { HostContext } from '../contracts'
-import { apiErrorSchema } from '../contracts'
+import { apiErrorSchema, MAX_PLANNING_RETRIES } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
@@ -33,6 +33,8 @@ function publicRun(run: RunRecord) {
     maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
     maxRevisionRounds: run.maxRevisionRounds,
     revisionRound: run.revisionRound,
+    planningAttempt: run.planningAttempt ?? 0,
+    maxPlanningRetries: MAX_PLANNING_RETRIES,
     budgetUnits: run.budgetUnits,
     committedBudgetUnits: run.committedBudgetUnits,
     qualityScore: run.qualityScore,

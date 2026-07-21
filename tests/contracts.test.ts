@@ -74,6 +74,21 @@ describe('public v1 contracts', () => {
     })).toThrow()
   })
 
+  test('accepts explicit planning recovery actions', () => {
+    expect(runActionSchema.parse({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_PLANNING',
+      expectedVersion: 2,
+    }).type).toBe('RETRY_PLANNING')
+    expect(runActionSchema.parse({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'REPLAN',
+      expectedVersion: 2,
+      slideCount: 8,
+      visualDirection: '明亮、清晰、适合低年级课堂的视觉方向',
+    })).toMatchObject({ type: 'REPLAN', slideCount: 8 })
+  })
+
   test('requires a concrete element only for limited asset revision', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,
@@ -97,6 +112,8 @@ describe('public v1 contracts', () => {
       slideCount: 15,
       revisionRound: 0,
       maxRevisionRounds: 2,
+      planningAttempt: 0,
+      maxPlanningRetries: 2,
       budgetUnits: 200,
       committedBudgetUnits: 0,
       qualityScore: null,

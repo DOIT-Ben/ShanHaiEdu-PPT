@@ -223,6 +223,60 @@ describe('run service', () => {
     })
   })
 
+  test('retries failed planning with distinct attempts and enforces the retry limit', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-replan-0001')
+    const failAttempt = async (attempt: number, version: number) => repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', planningAttempt: attempt, version })
+      transaction.putStep({
+        id: `step-plan-failed-${attempt}`,
+        runId: created.run.id,
+        idempotencyKey: planningStepKey(created.run.id, attempt),
+        inputHash: `failed-input-${attempt}`,
+        tool: 'create_blueprint',
+        status: 'FAILED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: 'BLUEPRINT_MODEL_OUTPUT_INVALID',
+        output: null,
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    await failAttempt(0, 1)
+    const retried = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_PLANNING',
+      expectedVersion: 1,
+    }, 'retry-planning-0001')
+    expect(retried).toMatchObject({ status: 'PLANNING', planningAttempt: 1, version: 2 })
+
+    await failAttempt(1, 3)
+    const replanned = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'REPLAN',
+      expectedVersion: 3,
+      slideCount: 3,
+      visualDirection: '更明亮、留白更多的低年级课堂视觉',
+    }, 'replan-with-input-0001')
+    expect(replanned).toMatchObject({
+      status: 'PLANNING', planningAttempt: 2, version: 4, slideCount: 3,
+      visualDirection: '更明亮、留白更多的低年级课堂视觉',
+    })
+
+    await failAttempt(2, 5)
+    await expect(service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_PLANNING',
+      expectedVersion: 5,
+    }, 'retry-planning-over-limit-0001')).rejects.toMatchObject({
+      status: 422,
+      code: 'PLANNING_RETRY_LIMIT_REACHED',
+    })
+  })
+
   test('replays the same user action without duplicate events', async () => {
     const { repository, service } = fixture()
     const created = await service.create(request, 'frameflow-create-0001')

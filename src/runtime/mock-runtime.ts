@@ -338,16 +338,18 @@ export function createAgentRuntime(input: RuntimeInput) {
   const tick = async () => {
     for (const run of await input.repository.listRuns()) {
       if (run.status === 'PLANNING') {
+        const planningAttempt = run.planningAttempt ?? 0
         await planning.plan({
           runId: run.id,
-          stepId: `step-${run.id}-plan`,
-          idempotencyKey: planningStepKey(run.id),
+          stepId: planningAttempt === 0 ? `step-${run.id}-plan` : `step-${run.id}-plan-retry-${planningAttempt}`,
+          idempotencyKey: planningStepKey(run.id, planningAttempt),
           source: run.source,
           slideCount: run.slideCount,
           visualDirection: run.visualDirection,
           presentationMode: run.presentationMode ?? 'SLIDE_IMAGE_V2',
           coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
           maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
+          attempt: planningAttempt,
         })
       } else if (run.status === 'EXECUTING') {
         await generation.submitBlueprintImages(run.id, 1)

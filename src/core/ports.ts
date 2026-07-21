@@ -223,6 +223,7 @@ export type RunRecord = Readonly<{
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
   maxRevisionRounds: number
   revisionRound: number
+  planningAttempt?: number
   qualityScore: number | null
   status: RunStatus
   resumeState: RunStatus | null

@@ -30,6 +30,7 @@ export type PlanPresentationInput = Readonly<{
   presentationMode?: CreateRunRequest['presentationMode']
   coverDesignMode?: CreateRunRequest['coverDesignMode']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
+  attempt?: number
 }>
 
 export type PlanPresentationResult = Readonly<{
@@ -38,8 +39,8 @@ export type PlanPresentationResult = Readonly<{
   replayed: boolean
 }>
 
-export function planningStepKey(runId: string) {
-  return `${runId}:blueprint:v1`
+export function planningStepKey(runId: string, attempt = 0) {
+  return attempt === 0 ? `${runId}:blueprint:v1` : `${runId}:blueprint:retry:${attempt}`
 }
 
 export class PlanningRunner {
@@ -241,6 +242,17 @@ export class PlanningRunner {
         type: 'tool.completed',
         payload: { stepId: step.id, summary: `已生成 ${blueprint.slides.length} 页教学蓝图` },
       })
+      const attempt = input.attempt ?? 0
+      if (attempt > 0) {
+        const previous = transaction.getStep(planningStepKey(input.runId, attempt - 1))
+        if (previous?.status === 'FAILED') {
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'issue.resolved',
+            payload: { issueId: `${previous.id}:planning-failed`, resolution: 'FIXED' },
+          })
+        }
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
