@@ -11,6 +11,9 @@ import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
 import { PlanningRunner, planningStepKey } from '../core/planning-runner'
+import { RevisionApplicationRunner } from '../core/revision-application-runner'
+import { RevisionMediaCoordinator } from '../core/revision-media-coordinator'
+import { RevisionPlanningRunner } from '../core/revision-planning-runner'
 import type {
   AgentRepository,
   ArtifactPort,
@@ -19,6 +22,8 @@ import type {
   DeckReviewPort,
   ImageGenerationPort,
   PresentationRendererPort,
+  RevisionApplicationPort,
+  RevisionPlanningPort,
   StructuredModelPort,
   VisualReviewPort,
 } from '../core/ports'
@@ -245,14 +250,29 @@ class PassingDeckReview implements DeckReviewPort {
   }
 }
 
-export function createMockRuntime(input: Readonly<{
+class UnsupportedRevisionPlanning implements RevisionPlanningPort {
+  async plan(): Promise<never> { throw new Error('MOCK_REVISION_PLANNING_NOT_CONFIGURED') }
+}
+
+class UnsupportedRevisionApplication implements RevisionApplicationPort {
+  async apply(): Promise<never> { throw new Error('MOCK_REVISION_APPLICATION_NOT_CONFIGURED') }
+}
+
+type RuntimeInput = Readonly<{
   repository: AgentRepository
   artifacts: ArtifactPort
   apiToken: string
+  model: StructuredModelPort
+  visualReviewer: VisualReviewPort
+  deckReviewer: DeckReviewPort
+  revisionPlanner: RevisionPlanningPort
+  revisionApplication: RevisionApplicationPort
   renderer?: PresentationRendererPort
   images?: ImageGenerationPort
   clock?: ClockPort
-}>) {
+}>
+
+export function createAgentRuntime(input: RuntimeInput) {
   const clock = input.clock ?? new SystemClock()
   const documents = new FrameFlowHostAdapter(new MockFrameFlowBackend())
   const budget: BudgetPort = documents
@@ -262,14 +282,14 @@ export function createMockRuntime(input: Readonly<{
   const planning = new PlanningRunner({
     repository: input.repository,
     documents,
-    model: new DeterministicPlanningModel(),
+    model: input.model,
     clock,
   })
   const media = new MediaStepRunner({ repository: input.repository, budget, images, clock })
   const generation = new SlideGenerationCoordinator({ repository: input.repository, media, clock })
   const visual = new VisualReviewRunner({
     repository: input.repository,
-    reviewer: new PassingVisualReview(),
+    reviewer: input.visualReviewer,
     clock,
   })
   const pages = new PageReviewCoordinator({
@@ -282,7 +302,7 @@ export function createMockRuntime(input: Readonly<{
   const deck = new DeckReviewRunner({
     repository: input.repository,
     documents,
-    reviewer: new PassingDeckReview(),
+    reviewer: input.deckReviewer,
     artifacts: input.artifacts,
     renderer,
     clock,
@@ -293,6 +313,19 @@ export function createMockRuntime(input: Readonly<{
     renderer,
     clock,
   })
+  const revisionPlanning = new RevisionPlanningRunner({
+    repository: input.repository,
+    documents,
+    planner: input.revisionPlanner,
+    clock,
+  })
+  const revisionApplication = new RevisionApplicationRunner({
+    repository: input.repository,
+    documents,
+    application: input.revisionApplication,
+    clock,
+  })
+  const revisionMedia = new RevisionMediaCoordinator({ repository: input.repository, media, clock })
 
   const tick = async () => {
     for (const run of await input.repository.listRuns()) {
@@ -314,7 +347,17 @@ export function createMockRuntime(input: Readonly<{
       } else if (run.status === 'PAGE_REVIEW') {
         await pages.reviewAll(run.id)
       } else if (run.status === 'DECK_REVIEW') {
-        await deck.review(run.id)
+        const reviewed = await deck.review(run.id)
+        const latest = await input.repository.getRun(run.id)
+        if (latest?.status === 'DECK_REVIEW' && reviewed.review && !reviewed.passed) {
+          await revisionPlanning.plan(run.id)
+        }
+      } else if (run.status === 'REVISING') {
+        const applied = await revisionApplication.apply(run.id)
+        if (applied.status === 'REVISING' && applied.requiresMedia) {
+          await revisionMedia.submit(run.id, 1)
+          await revisionMedia.refresh(run.id)
+        }
       } else if (run.status === 'DELIVERING') {
         await delivery.deliver(run.id)
       }
@@ -330,4 +373,16 @@ export function createMockRuntime(input: Readonly<{
     }),
     tick,
   }
+}
+
+export function createMockRuntime(input: Omit<RuntimeInput,
+  'model' | 'visualReviewer' | 'deckReviewer' | 'revisionPlanner' | 'revisionApplication'>) {
+  return createAgentRuntime({
+    ...input,
+    model: new DeterministicPlanningModel(),
+    visualReviewer: new PassingVisualReview(),
+    deckReviewer: new PassingDeckReview(),
+    revisionPlanner: new UnsupportedRevisionPlanning(),
+    revisionApplication: new UnsupportedRevisionApplication(),
+  })
 }

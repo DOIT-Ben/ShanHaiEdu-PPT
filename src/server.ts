@@ -2,8 +2,9 @@ import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
+import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
-import { createMockRuntime } from './runtime/mock-runtime'
+import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
 
 const hostname = process.env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
 if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1') {
@@ -27,7 +28,28 @@ const images = runtimeMode === 'gateway'
       artifacts,
     })
   : undefined
-const runtime = createMockRuntime({ repository, artifacts, apiToken, ...(images ? { images } : {}) })
+const runtime = runtimeMode === 'gateway'
+  ? (() => {
+      const model = new GatewayCoursewareModel({
+        baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+        apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
+        textModel: process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6',
+        visionModel: process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6',
+        artifacts,
+      })
+      return createAgentRuntime({
+        repository,
+        artifacts,
+        apiToken,
+        images: images!,
+        model,
+        visualReviewer: model,
+        deckReviewer: model,
+        revisionPlanner: model,
+        revisionApplication: model,
+      })
+    })()
+  : createMockRuntime({ repository, artifacts, apiToken })
 let ticking = false
 const timer = setInterval(async () => {
   if (ticking) return

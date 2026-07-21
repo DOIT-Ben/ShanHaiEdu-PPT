@@ -3,8 +3,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { MockArtifactPort, MockPresentationRendererPort } from '../src/adapters/mock-ports'
-import { createMockRuntime } from '../src/runtime/mock-runtime'
+import {
+  MockArtifactPort,
+  MockPresentationRendererPort,
+  MockVisualReviewPort,
+} from '../src/adapters/mock-ports'
+import type { DeckReviewPort, RevisionApplicationPort, RevisionPlanningPort } from '../src/core/ports'
+import { createAgentRuntime, createMockRuntime } from '../src/runtime/mock-runtime'
 
 const token = 'test-runtime-token-0001'
 
@@ -17,6 +22,110 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
 }
 
 describe('mock runtime', () => {
+  test('routes a failed deck review through approved local revision and re-review', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const renderer = new MockPresentationRendererPort()
+    const blueprint = {
+      title: '光合作用',
+      curriculum: {
+        subject: '生物', grade: '七年级', lessonTitle: '光合作用',
+        sourceSummary: '教材介绍绿色植物利用光能制造有机物并释放氧气的基本过程。',
+        learningObjectives: ['理解光合作用'], scopeBoundaries: ['教材定性范围'],
+        prohibitedExtensions: [], sourceChunkIds: ['chunk-0001-8c189f673e93'],
+      },
+      slides: [1, 2].map((pageNumber) => ({
+        pageNumber, title: pageNumber === 1 ? '光合作用' : '条件与产物', body: ['绿色植物利用光能制造有机物'],
+        layout: pageNumber === 1 ? 'HERO' as const : 'SPLIT' as const,
+        visualIntent: `用科学课堂画面解释第 ${pageNumber} 页知识`,
+        visualPrompt: `A text-free science classroom illustration for page ${pageNumber}`,
+        sourceChunkIds: ['chunk-0001-8c189f673e93'],
+      })),
+    }
+    const deckReviewer: DeckReviewPort = {
+      async evaluate(input) {
+        const revised = input.blueprint.id.includes(':r1')
+        return {
+          qualityScore: revised ? 91 : 72,
+          curriculumCoverageScore: 90, narrativeCoherenceScore: 88,
+          visualConsistencyScore: 86, compositionScore: revised ? 90 : 68,
+          summary: revised ? '局部修订后布局冲突已消除，整套课件达到交付标准。' : '第二页布局冲突，需要只调整该页元素位置。',
+          reviewedSourceChunkIds: input.sourceChunks.map((chunk) => chunk.id),
+          issues: revised ? [] : [{
+            id: 'issue-layout-2', category: 'COMPOSITION_CONFLICT', severity: 'WARNING',
+            summary: '第二页素材与文字区发生布局冲突。', slideIds: [input.slides[1]!.slideId],
+            sourceChunkIds: [], status: 'OPEN', repairDomain: 'LAYOUT',
+          }],
+        }
+      },
+    }
+    const revisionPlanner: RevisionPlanningPort = {
+      async plan(input) {
+        return {
+          summary: '只重新组装第二页，不重新生成图片素材。',
+          operations: [{
+            id: 'relayout-slide-2', slideId: input.review.issues[0]!.slideIds[0]!,
+            kind: 'RELAYOUT', issueIds: ['issue-layout-2'],
+            instruction: 'Move the visual away from the editable text area without changing any image prompt.',
+            sourceChunkIds: [],
+          }],
+        }
+      },
+    }
+    const revisionApplication: RevisionApplicationPort = {
+      async apply(input) {
+        return {
+          title: input.blueprint.title,
+          curriculum: input.blueprint.curriculum,
+          slides: input.blueprint.slides.map((slide) => slide.pageNumber === 2 ? { ...slide, layout: 'EDITORIAL' } : slide),
+        }
+      },
+    }
+    const runtime = createAgentRuntime({
+      repository, artifacts, renderer, apiToken: token,
+      model: {
+        async execute(input) {
+          const payload = input.payload as { document: { chunks: { id: string }[] } }
+          const sourceChunkIds = [payload.document.chunks[0]!.id]
+          return {
+            ...blueprint,
+            curriculum: { ...blueprint.curriculum, sourceChunkIds },
+            slides: blueprint.slides.map((slide) => ({ ...slide, sourceChunkIds })),
+          }
+        },
+      },
+      visualReviewer: new MockVisualReviewPort({
+        approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null,
+      }),
+      deckReviewer, revisionPlanner, revisionApplication,
+    })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'runtime-revision-create' },
+      body: JSON.stringify({
+        schemaVersion: '1', host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: { kind: 'TEXT', name: '光合作用.txt', text: '绿色植物利用光能制造有机物，并释放氧气。这是完整教材内容。' },
+        slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'mock-image',
+        automationLevel: 'SUPERVISED', budgetUnits: 10, maxRevisionRounds: 2,
+      }),
+    }))
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await runtime.tick()
+    await runtime.handler(request(`/v1/runs/${runId}/actions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'runtime-revision-approve-blueprint' },
+      body: JSON.stringify({ schemaVersion: '1', type: 'APPROVE_BLUEPRINT', expectedVersion: 1 }),
+    }))
+    for (let index = 0; index < 3; index += 1) await runtime.tick()
+    const awaiting = (await repository.getRun(runId))!
+    expect(awaiting.status).toBe('AWAITING_REVISION_APPROVAL')
+
+    await runtime.handler(request(`/v1/runs/${runId}/actions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'runtime-revision-approve-plan' },
+      body: JSON.stringify({ schemaVersion: '1', type: 'APPROVE_REVISION', expectedVersion: awaiting.version }),
+    }))
+    for (let index = 0; index < 4; index += 1) await runtime.tick()
+    expect(await repository.getRun(runId)).toMatchObject({ status: 'COMPLETED', revisionRound: 1, qualityScore: 91 })
+  })
+
   test('runs an authenticated approved deck through delivery with zero provider calls', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
