@@ -4,7 +4,7 @@ import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort }
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { planningStepKey } from '../src/core/planning-runner'
-import type { DocumentResult, RunRecord } from '../src/core/ports'
+import type { AssetCandidate, AssetDiscoveryPort, DocumentResult, RunRecord } from '../src/core/ports'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 
 function run(budgetUnits = 100): RunRecord {
@@ -67,7 +67,7 @@ function blueprint() {
 
 async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blueprint> | Record<string, unknown> = blueprint(), documentResult: DocumentResult = {
   name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [],
-}) {
+}, discovery?: AssetDiscoveryPort) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
@@ -94,8 +94,51 @@ async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blue
     })
   })
   const media = new MediaStepRunner({ repository, budget, images, clock })
-  const coordinator = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock })
+  const coordinator = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock, ...(discovery ? { discovery } : {}) })
   return { repository, budget, images, artifacts, coordinator }
+}
+
+function webSearchBlueprint() {
+  const value = layeredBlueprint('REUSE_ORIGINAL')
+  for (const slide of value.slides) {
+    for (const element of slide.layeredDesign.elements) {
+      if (element.kind !== 'IMAGE') continue
+      Object.assign(element, {
+        sourceAssetIds: [],
+        sourceAssetStrategy: 'SEARCH_WEB',
+        assetIntent: {
+          searchQueries: [`${element.elementId} classroom visual`, element.knowledgePoint],
+          mediaType: element.role === 'BASE_LAYER' ? 'TEXTURE' : 'PHOTO',
+          styleKeywords: ['bright classroom', 'clean composition'],
+          transparencyPreference: element.role === 'BASE_LAYER' ? 'PREFER_OPAQUE' : 'EITHER',
+        },
+      })
+    }
+  }
+  return value
+}
+
+function discovery(returnCandidates = true) {
+  const searches: Parameters<AssetDiscoveryPort['search']>[0][] = []
+  const acquisitions: Parameters<AssetDiscoveryPort['acquire']>[0][] = []
+  const candidate: AssetCandidate = {
+    provider: 'WIKIMEDIA_COMMONS', providerAssetId: 'file-1', title: 'Classroom visual',
+    sourceUrl: 'https://commons.wikimedia.org/wiki/File:Classroom_visual.png',
+    downloadUrl: 'https://upload.wikimedia.org/classroom-visual.png', creator: 'Example Author',
+    license: 'CC_BY', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+    attribution: 'Classroom visual by Example Author, CC BY 4.0', mimeType: 'image/png', width: 1200, height: 800,
+  }
+  const port: AssetDiscoveryPort = {
+    async search(input) {
+      searches.push(input)
+      return returnCandidates ? [{ ...candidate, providerAssetId: `file-${searches.length}` }] : []
+    },
+    async acquire(input) {
+      acquisitions.push(input)
+      return { candidate: input.candidate, bytes: new Uint8Array([137, 80, 78, 71]), sha256: 'b'.repeat(64) }
+    },
+  }
+  return { port, searches, acquisitions }
 }
 
 function layeredBlueprint(strategy: 'REUSE_ORIGINAL' | 'REFERENCE_GENERATION') {
@@ -266,5 +309,31 @@ describe('slide generation coordinator', () => {
     const referenced = [...images.requests.values()].find((request) => request.referenceImage)
     expect(referenced?.referenceImage).toMatchObject({ mimeType: 'image/png', sha256: 'a'.repeat(64) })
     expect(referenced?.referenceImage?.bytes).toEqual(sourceDocument().assets[0]!.bytes)
+  })
+
+  test('uses discovered web assets without image generation or budget charge', async () => {
+    const found = discovery()
+    const { repository, images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), found.port)
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ submitted: 3, total: 3 })
+    expect(found.searches).toHaveLength(3)
+    expect(found.acquisitions).toHaveLength(3)
+    expect(images.operations.size).toBe(0)
+    expect(budget.reservations.size).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect(result.steps.every((step) => (step.output as { acquisition?: string })?.acquisition === 'SEARCH_WEB')).toBe(true)
+    expect((result.steps[0]!.output as { provenance: { license: string } }).provenance.license).toBe('CC_BY')
+  })
+
+  test('falls back to AI only for web searches without an acceptable candidate', async () => {
+    const missing = discovery(false)
+    const { images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), missing.port)
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ submitted: 3, total: 3 })
+    expect(missing.searches).toHaveLength(3)
+    expect(images.operations.size).toBe(3)
+    expect(budget.reservations.size).toBe(3)
   })
 })

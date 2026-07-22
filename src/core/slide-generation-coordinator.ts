@@ -4,7 +4,17 @@ import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
 import { hashInput } from './hash'
 import { MediaStepRunner } from './media-step-runner'
-import type { AgentRepository, ArtifactPort, ClockPort, DocumentPort, RunRecord, SourceAsset, StepRecord } from './ports'
+import type {
+  AcquiredWebAsset,
+  AgentRepository,
+  ArtifactPort,
+  AssetDiscoveryPort,
+  ClockPort,
+  DocumentPort,
+  RunRecord,
+  SourceAsset,
+  StepRecord,
+} from './ports'
 import { evaluateBudget, transitionRun } from './policy'
 
 export type SubmitBlueprintImagesResult = Readonly<{
@@ -27,6 +37,7 @@ export class SlideGenerationCoordinator {
     media: MediaStepRunner
     documents: DocumentPort
     artifacts: ArtifactPort
+    discovery?: AssetDiscoveryPort
     clock: ClockPort
   }>) {}
 
@@ -59,29 +70,47 @@ export class SlideGenerationCoordinator {
       }
     }
 
-    const chargeableCount = pendingRequirements.filter((requirement) => requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
-    const decision = evaluateBudget(run, chargeableCount * unitBudgetUnits)
-    if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
-      const paused = await this.pauseForBudget(run, chargeableCount * unitBudgetUnits)
-      return { status: paused.status, submitted: 0, total: requirements.length, steps: existingSteps }
+    const steps = [...existingSteps]
+    const unresolvedRequirements = []
+    for (const requirement of pendingRequirements) {
+      if (requirement.sourceAssetStrategy !== 'SEARCH_WEB') {
+        unresolvedRequirements.push(requirement)
+        continue
+      }
+      const completed = await this.tryCompleteWebAsset(run, requirement)
+      if (!completed) {
+        unresolvedRequirements.push(requirement)
+        continue
+      }
+      steps.push(completed)
+      await this.appendProgress(runId, completed.id, steps.length, requirements.length, '已获取网络素材')
     }
-    if (!decision.allowed) throw new Error(decision.reason)
 
-    const needsSourceAssets = pendingRequirements.some((requirement) => requirement.sourceAssetStrategy !== 'REGENERATE')
+    const chargeableCount = unresolvedRequirements.filter((requirement) => requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
+    if (chargeableCount > 0) {
+      const decision = evaluateBudget(run, chargeableCount * unitBudgetUnits)
+      if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
+        const paused = await this.pauseForBudget(run, chargeableCount * unitBudgetUnits)
+        return { status: paused.status, submitted: steps.length, total: requirements.length, steps }
+      }
+      if (!decision.allowed) throw new Error(decision.reason)
+    }
+
+    const needsSourceAssets = unresolvedRequirements.some((requirement) =>
+      requirement.sourceAssetStrategy === 'REUSE_ORIGINAL' || requirement.sourceAssetStrategy === 'REFERENCE_GENERATION')
     const document = needsSourceAssets
       ? await this.dependencies.documents.resolve({ host: run.host, source: run.source })
       : null
     const sourceAssets = new Map((document?.assets ?? []).map((asset) => [asset.id, asset]))
-    const steps = [...existingSteps]
-    for (const requirement of pendingRequirements) {
+    for (const requirement of unresolvedRequirements) {
       const key = requirement.idempotencyKey
       const versionId = requirement.elementId === null
         ? `${runId}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
         : `${runId}:slide:${requirement.pageNumber}:element:${requirement.elementId}:r${run.revisionRound}:v1`
-      const sourceAsset = requirement.sourceAssetStrategy === 'REGENERATE'
+      const sourceAsset = ['REGENERATE', 'SEARCH_WEB'].includes(requirement.sourceAssetStrategy)
         ? null
         : sourceAssets.get(requirement.sourceAssetIds[0]!) ?? null
-      if (requirement.sourceAssetStrategy !== 'REGENERATE' && !sourceAsset) {
+      if (!['REGENERATE', 'SEARCH_WEB'].includes(requirement.sourceAssetStrategy) && !sourceAsset) {
         const failed = await this.recordSourceAssetFailure(run, requirement, versionId)
         steps.push(failed)
         await this.requireHuman(runId, failed)
@@ -120,7 +149,9 @@ export class SlideGenerationCoordinator {
         await this.requireHuman(runId, result.step)
         break
       }
-      await this.appendProgress(runId, result.step.id, steps.length, requirements.length)
+      await this.appendProgress(runId, result.step.id, steps.length, requirements.length, requirement.sourceAssetStrategy === 'SEARCH_WEB'
+        ? '网络素材未命中，已回退 AI 生成'
+        : '已安全提交图片任务')
     }
     const latest = await this.dependencies.repository.getRun(runId)
     return {
@@ -221,6 +252,121 @@ export class SlideGenerationCoordinator {
     })
   }
 
+  private async tryCompleteWebAsset(
+    run: RunRecord,
+    requirement: ReturnType<typeof blueprintImageRequirements>[number],
+  ): Promise<StepRecord | null> {
+    const discovery = this.dependencies.discovery
+    if (!discovery || !requirement.assetIntent) return null
+    const stepId = `search-${hashInput(requirement.assetKey).slice(0, 24)}`
+    await this.appendSearchEvent(run.id, {
+      type: 'tool.started',
+      payload: { stepId, tool: 'search_web_asset', label: `正在查找：${requirement.assetIntent.searchQueries[0]}` },
+    })
+    try {
+      const candidates = await discovery.search({
+        tenantId: run.host.tenantId,
+        intent: requirement.assetIntent,
+        aspectRatio: requirement.aspectRatio,
+        idempotencyKey: `${requirement.idempotencyKey}:search`,
+      })
+      for (const candidate of candidates.slice(0, 5)) {
+        try {
+          const acquired = await discovery.acquire({
+            tenantId: run.host.tenantId,
+            candidate,
+            idempotencyKey: `${requirement.idempotencyKey}:acquire:${candidate.provider}:${candidate.providerAssetId}`,
+          })
+          const step = await this.completeWebAsset(run, requirement, acquired)
+          await this.appendSearchEvent(run.id, {
+            type: 'tool.completed',
+            payload: { stepId, summary: `已选用 ${candidate.provider} 素材：${candidate.title}` },
+          })
+          return step
+        } catch {
+          continue
+        }
+      }
+      await this.appendSearchEvent(run.id, {
+        type: 'tool.completed',
+        payload: { stepId, summary: '没有找到许可与质量均合格的素材，改用 AI 补缺' },
+      })
+      return null
+    } catch {
+      await this.appendSearchEvent(run.id, {
+        type: 'tool.failed',
+        payload: { stepId, errorCode: 'ASSET_SEARCH_UNAVAILABLE', retryable: true },
+      })
+      return null
+    }
+  }
+
+  private async completeWebAsset(
+    run: RunRecord,
+    requirement: ReturnType<typeof blueprintImageRequirements>[number],
+    acquired: AcquiredWebAsset,
+  ) {
+    const extension = acquired.candidate.mimeType.split('/')[1]
+    const artifact = await this.dependencies.artifacts.put({
+      tenantId: run.host.tenantId,
+      runId: run.id,
+      name: `web-${acquired.candidate.provider.toLowerCase()}-${acquired.candidate.providerAssetId}.${extension}`,
+      mimeType: acquired.candidate.mimeType,
+      bytes: acquired.bytes,
+      idempotencyKey: `${requirement.idempotencyKey}:web:${acquired.sha256}`,
+    })
+    return this.dependencies.repository.transact(run.id, (transaction) => {
+      const now = this.dependencies.clock.now().toISOString()
+      const versionId = `${run.id}:slide:${requirement.pageNumber}:element:${requirement.elementId}:r${run.revisionRound}:v1`
+      const step: StepRecord = {
+        id: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
+        runId: run.id,
+        idempotencyKey: requirement.idempotencyKey,
+        inputHash: hashInput({ tool: 'search_web_asset', assetKey: requirement.assetKey, sha256: acquired.sha256 }),
+        tool: 'generate_slide_image',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: {
+          slideId: requirement.slideId,
+          versionId,
+          artifactId: artifact.artifactId,
+          acquisition: 'SEARCH_WEB',
+          provenance: {
+            provider: acquired.candidate.provider,
+            providerAssetId: acquired.candidate.providerAssetId,
+            title: acquired.candidate.title,
+            sourceUrl: acquired.candidate.sourceUrl,
+            creator: acquired.candidate.creator,
+            license: acquired.candidate.license,
+            licenseUrl: acquired.candidate.licenseUrl,
+            attribution: acquired.candidate.attribution,
+            sha256: acquired.sha256,
+          },
+        },
+        createdAt: now,
+        updatedAt: now,
+      }
+      transaction.putStep(step)
+      return step
+    })
+  }
+
+  private async appendSearchEvent(
+    runId: string,
+    event: Readonly<
+      | { type: 'tool.started'; payload: { stepId: string; tool: string; label: string } }
+      | { type: 'tool.completed'; payload: { stepId: string; summary: string } }
+      | { type: 'tool.failed'; payload: { stepId: string; errorCode: string; retryable: boolean } }
+    >,
+  ) {
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, ...event })
+    })
+  }
+
   private async recordSourceAssetFailure(
     run: RunRecord,
     requirement: ReturnType<typeof blueprintImageRequirements>[number],
@@ -297,12 +443,12 @@ export class SlideGenerationCoordinator {
     })
   }
 
-  private async appendProgress(runId: string, stepId: string, completed: number, total: number) {
+  private async appendProgress(runId: string, stepId: string, completed: number, total: number, summary = '已安全提交图片任务') {
     await this.dependencies.repository.transact(runId, (transaction) => {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.progress',
-        payload: { stepId, completed, total, summary: `已安全提交 ${completed}/${total} 页图片任务` },
+        payload: { stepId, completed, total, summary: `${summary}（${completed}/${total}）` },
       })
     })
   }
