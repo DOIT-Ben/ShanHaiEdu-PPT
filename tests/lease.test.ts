@@ -6,6 +6,7 @@ import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock } from '../src/adapters/mock-ports'
 import { SqliteAgentRepository } from '../src/adapters/sqlite-repository'
 import {
+  acquireMediaReconciliationLease,
   acquireRunLease,
   listRecoverableRunIds,
   releaseRunLease,
@@ -133,5 +134,25 @@ describe('run lease', () => {
     expect(await renewRunLease({ repository: reopened, clock, runId: 'run-1', lease: lease!, ttlMs: 5_000 }))
       .toMatchObject({ token: 'worker-a', version: 1 })
     reopened.close()
+  })
+
+  test('allows only one worker to reconcile pending media on a terminal Run', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await seed(repository, run('cancelled', 'CANCELLED'))
+    await repository.transact('cancelled', (transaction) => {
+      transaction.putStep({
+        id: 'waiting-step', runId: 'cancelled', idempotencyKey: 'waiting-key', inputHash: 'waiting-input',
+        tool: 'generate_slide_image', status: 'WAITING', budgetUnits: 1, budgetReservationId: 'reservation-1',
+        externalOperationId: 'operation-1', errorCode: null, output: {},
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const leases = await Promise.all([
+      acquireMediaReconciliationLease({ repository, clock, runId: 'cancelled', token: 'worker-a', ttlMs: 5_000 }),
+      acquireMediaReconciliationLease({ repository, clock, runId: 'cancelled', token: 'worker-b', ttlMs: 5_000 }),
+    ])
+    expect(leases.filter(Boolean)).toHaveLength(1)
   })
 })

@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import sharp from 'sharp'
 import type { HostContext } from '../contracts'
 import type { BlueprintDraft } from '../presentation-contracts'
@@ -12,6 +12,13 @@ import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
 import { PlanningRunner, planningStepKey } from '../core/planning-runner'
+import {
+  acquireMediaReconciliationLease,
+  acquireRunLease,
+  releaseRunLease,
+  renewRunLease,
+  type RunLease,
+} from '../core/lease'
 import { RevisionApplicationRunner } from '../core/revision-application-runner'
 import { RevisionMediaCoordinator } from '../core/revision-media-coordinator'
 import { RevisionPlanningRunner } from '../core/revision-planning-runner'
@@ -26,6 +33,7 @@ import type {
   PresentationRendererPort,
   RevisionApplicationPort,
   RevisionPlanningPort,
+  RunRecord,
   StructuredModelPort,
   VisualReviewPort,
 } from '../core/ports'
@@ -291,10 +299,22 @@ type RuntimeInput = Readonly<{
   tickStaleMs?: number
   waitingSlaMs?: number
   stepSlaMs?: number
+  workerId?: string
+  workerConcurrency?: number
+  runLeaseTtlMs?: number
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
   const clock = input.clock ?? new SystemClock()
+  const workerId = input.workerId?.trim() || `worker-${randomUUID()}`
+  const workerConcurrency = input.workerConcurrency ?? 2
+  const runLeaseTtlMs = input.runLeaseTtlMs ?? 60_000
+  if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency < 1 || workerConcurrency > 8) {
+    throw new Error('WORKER_CONCURRENCY_INVALID')
+  }
+  if (!Number.isSafeInteger(runLeaseTtlMs) || runLeaseTtlMs < 5_000 || runLeaseTtlMs > 15 * 60_000) {
+    throw new Error('RUN_LEASE_TTL_INVALID')
+  }
   const health = new RuntimeHealthMonitor(clock, {
     version: input.appVersion ?? '0.1.0',
     ...(input.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: input.heartbeatStaleMs }),
@@ -361,20 +381,14 @@ export function createAgentRuntime(input: RuntimeInput) {
   })
   const revisionMedia = new RevisionMediaCoordinator({ repository: input.repository, media, clock })
 
-  const tick = () => health.runTick(async () => {
-    const candidates = await input.repository.listRuns()
-    let activeRuns = 0
-    for (const candidate of candidates) {
-      let phase = candidate.status
-      try {
-        await media.reconcilePendingRun(candidate.id)
-        const run = await input.repository.getRun(candidate.id)
-        if (!run) continue
-        phase = run.status
-        if (!['AWAITING_BLUEPRINT_APPROVAL', 'AWAITING_REVISION_APPROVAL', 'PAUSED', 'NEEDS_HUMAN', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(run.status)) {
-          activeRuns += 1
-        }
-        if (run.status === 'PLANNING') {
+  const advanceRun = async (candidate: RunRecord) => {
+    let phase = candidate.status
+    try {
+      await media.reconcilePendingRun(candidate.id)
+      const run = await input.repository.getRun(candidate.id)
+      if (!run) return
+      phase = run.status
+      if (run.status === 'PLANNING') {
         const planningAttempt = run.planningAttempt ?? 0
         await planning.plan({
           runId: run.id,
@@ -389,35 +403,98 @@ export function createAgentRuntime(input: RuntimeInput) {
           maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
           attempt: planningAttempt,
         })
-        } else if (run.status === 'EXECUTING') {
-          await generation.submitBlueprintImages(run.id, 1)
-          await generation.refreshBlueprintImages(run.id)
-        } else if (run.status === 'PAGE_REVIEW') {
-          await pages.reviewAll(run.id)
-        } else if (run.status === 'DECK_REVIEW') {
-          const reviewed = await deck.review(run.id)
-          const latest = await input.repository.getRun(run.id)
-          if (latest?.status === 'DECK_REVIEW' && reviewed.review && !reviewed.passed) {
-            await revisionPlanning.plan(run.id)
-          }
-        } else if (run.status === 'REVISING') {
-          const applied = await revisionApplication.apply(run.id)
-          if (applied.status === 'REVISING' && applied.requiresMedia) {
-            await revisionMedia.submit(run.id, 1)
-            await revisionMedia.refresh(run.id)
-          }
-        } else if (run.status === 'DELIVERING') {
-          await delivery.deliver(run.id)
+      } else if (run.status === 'EXECUTING') {
+        await generation.submitBlueprintImages(run.id, 1)
+        await generation.refreshBlueprintImages(run.id)
+      } else if (run.status === 'PAGE_REVIEW') {
+        await pages.reviewAll(run.id)
+      } else if (run.status === 'DECK_REVIEW') {
+        const reviewed = await deck.review(run.id)
+        const latest = await input.repository.getRun(run.id)
+        if (latest?.status === 'DECK_REVIEW' && reviewed.review && !reviewed.passed) {
+          await revisionPlanning.plan(run.id)
         }
-      } catch (error) {
-        throw new WorkerTickError({
-          runId: candidate.id,
-          phase,
-          errorCode: safeWorkerErrorCode(error),
-        }, error)
+      } else if (run.status === 'REVISING') {
+        const applied = await revisionApplication.apply(run.id)
+        if (applied.status === 'REVISING' && applied.requiresMedia) {
+          await revisionMedia.submit(run.id, 1)
+          await revisionMedia.refresh(run.id)
+        }
+      } else if (run.status === 'DELIVERING') {
+        await delivery.deliver(run.id)
       }
+    } catch (error) {
+      throw new WorkerTickError({
+        runId: candidate.id,
+        phase,
+        errorCode: safeWorkerErrorCode(error),
+      }, error)
     }
-    return { scannedRuns: candidates.length, activeRuns }
+  }
+
+  const withRenewedLease = async <T>(runId: string, lease: RunLease, operation: () => Promise<T>) => {
+    let currentLease = lease
+    let renewalFailure: unknown = null
+    let renewal: Promise<void> | null = null
+    const timer = setInterval(() => {
+      if (renewal || renewalFailure) return
+      renewal = renewRunLease({ repository: input.repository, clock, runId, lease: currentLease, ttlMs: runLeaseTtlMs })
+        .then((renewed) => { currentLease = renewed })
+        .catch((error) => { renewalFailure = error })
+        .finally(() => { renewal = null })
+    }, Math.max(1_000, Math.floor(runLeaseTtlMs / 3)))
+    timer.unref?.()
+    try {
+      const result = await operation()
+      if (renewalFailure) throw renewalFailure
+      return result
+    } finally {
+      clearInterval(timer)
+      if (renewal) await renewal
+      await releaseRunLease({ repository: input.repository, clock, runId, lease: currentLease })
+    }
+  }
+
+  const tick = () => health.runTick(async () => {
+    const candidates = await input.repository.listRunnableRuns({
+      now: clock.now().toISOString(),
+      limit: workerConcurrency,
+    })
+    const runnableIds = new Set(candidates.map((candidate) => candidate.id))
+    const pendingMediaIds = (await input.repository.listRunsWithPendingMedia(workerConcurrency))
+      .filter((runId) => !runnableIds.has(runId))
+
+    const runnableResults = await Promise.allSettled(candidates.map(async (candidate) => {
+      const lease = await acquireRunLease({
+        repository: input.repository,
+        clock,
+        runId: candidate.id,
+        token: `${workerId}:${candidate.id}:${randomUUID()}`,
+        ttlMs: runLeaseTtlMs,
+      })
+      if (!lease) return false
+      await withRenewedLease(candidate.id, lease, () => advanceRun(candidate))
+      return true
+    }))
+    const reconciliationResults = await Promise.allSettled(pendingMediaIds.map(async (runId) => {
+      const lease = await acquireMediaReconciliationLease({
+        repository: input.repository,
+        clock,
+        runId,
+        token: `${workerId}:${runId}:reconcile:${randomUUID()}`,
+        ttlMs: runLeaseTtlMs,
+      })
+      if (!lease) return false
+      await withRenewedLease(runId, lease, () => media.reconcilePendingRun(runId))
+      return true
+    }))
+    const failure = [...runnableResults, ...reconciliationResults]
+      .find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failure) throw failure.reason
+    return {
+      scannedRuns: candidates.length + pendingMediaIds.length,
+      activeRuns: runnableResults.filter((result) => result.status === 'fulfilled' && result.value).length,
+    }
   })
 
   return {

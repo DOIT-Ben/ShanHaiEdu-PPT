@@ -59,6 +59,39 @@ export async function acquireRunLease(input: Readonly<{
   })
 }
 
+export async function acquireMediaReconciliationLease(input: Readonly<{
+  repository: AgentRepository
+  clock: ClockPort
+  runId: string
+  token: string
+  ttlMs: number
+}>): Promise<RunLease | null> {
+  if (!input.token.trim()) throw new RunLeaseError('INVALID_LEASE_TOKEN', 'lease token is required')
+  if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 1_000) {
+    throw new RunLeaseError('INVALID_LEASE_TTL', 'lease ttl must be at least 1000ms')
+  }
+
+  return input.repository.transact(input.runId, (transaction) => {
+    const now = input.clock.now()
+    const hasPendingMedia = transaction.listSteps()
+      .some((step) => step.tool === 'generate_slide_image' && step.status === 'WAITING')
+    if (!hasPendingMedia || isLeaseActive(transaction.run, now)) return null
+    const lease: RunLease = {
+      token: input.token,
+      version: transaction.run.leaseVersion + 1,
+      until: new Date(now.getTime() + input.ttlMs).toISOString(),
+    }
+    transaction.putRun({
+      ...transaction.run,
+      leaseToken: lease.token,
+      leaseUntil: lease.until,
+      leaseVersion: lease.version,
+      updatedAt: now.toISOString(),
+    })
+    return lease
+  })
+}
+
 export async function renewRunLease(input: Readonly<{
   repository: AgentRepository
   clock: ClockPort
