@@ -12,6 +12,15 @@ const MAX_BYTES = 24 * 1024 * 1024
 const MAX_PIXELS = 40_000_000
 const MAX_REDIRECTS = 3
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp'])
+const QUERY_NOISE = new Set([
+  'cc0', 'cc', 'creative', 'commons', 'public', 'domain',
+])
+const COMPACT_NOISE = new Set(['photo', 'photograph', 'image', 'full', 'disk', 'side', 'view', 'isolated'])
+const RELEVANCE_NOISE = new Set([...QUERY_NOISE, ...COMPACT_NOISE, 'nasa', 'deep', 'clean', 'classroom'])
+const CHILD_UNSAFE = [
+  'gun', 'rifle', 'pistol', 'firearm', 'weapon', 'machine gun', 'submachine', 'suppressor',
+  'p90', 'tactical', 'military', 'knife', 'sword', 'warfare', 'e-cig', 'ecig', 'vape', 'tobacco',
+]
 
 const openverseSchema = z.object({
   results: z.array(z.object({
@@ -99,6 +108,33 @@ function scoreCandidate(candidate: AssetCandidate, query: string, ratio: number,
   return relevance + ratioScore + transparencyScore + Math.min(6, Math.log10(candidate.width * candidate.height))
 }
 
+function queryTokens(query: string) {
+  return query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []
+}
+
+export function buildAssetSearchQueries(queries: readonly string[]) {
+  const values: string[] = []
+  for (const raw of queries) {
+    const tokens = queryTokens(raw)
+    if (tokens.length === 0) continue
+    const cleaned = tokens.filter((token) => !QUERY_NOISE.has(token))
+    if (cleaned.length > 0) values.push(cleaned.join(' '))
+    const compact = cleaned.filter((token) => !COMPACT_NOISE.has(token))
+    if (compact.length > 0 && compact.length !== cleaned.length) values.push(compact.join(' '))
+    if (compact.length > 3) values.push(compact.slice(-3).join(' '))
+  }
+  return [...new Set(values)].slice(0, 4)
+}
+
+export function candidatePassesTextGate(candidate: Pick<AssetCandidate, 'title'>, query: string) {
+  const title = candidate.title.toLowerCase()
+  if (CHILD_UNSAFE.some((term) => title.includes(term))) return false
+  const anchors = queryTokens(query).filter((token) => !RELEVANCE_NOISE.has(token))
+  if (anchors.length === 0) return false
+  const subject = anchors.at(-1)!
+  return title.includes(subject) || (subject.endsWith('s') && title.includes(subject.slice(0, -1)))
+}
+
 export class PublicAssetDiscoveryPort implements AssetDiscoveryPort {
   private readonly fetchImpl: Fetch
   private readonly resolveHost: ResolveHost
@@ -112,14 +148,16 @@ export class PublicAssetDiscoveryPort implements AssetDiscoveryPort {
   }
 
   async search(input: Parameters<AssetDiscoveryPort['search']>[0]) {
-    const query = input.intent.searchQueries[0]!
-    const results = await Promise.allSettled([this.searchCommons(query), this.searchOpenverse(query)])
-    const candidates = results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+    const queries = buildAssetSearchQueries(input.intent.searchQueries)
+    const results = await Promise.allSettled(queries.flatMap((query) => [this.searchCommons(query), this.searchOpenverse(query)]))
+    const discovered = results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+    const candidates = [...new Map(discovered.map((candidate) => [`${candidate.provider}:${candidate.providerAssetId}`, candidate])).values()]
     const ratio = ({ '16:9': 16 / 9, '4:3': 4 / 3, '1:1': 1, '3:4': 3 / 4 } as const)[input.aspectRatio]
     const preferTransparent = input.intent.transparencyPreference === 'PREFER_TRANSPARENT'
     return candidates
       .filter((candidate) => candidate.width >= 256 && candidate.height >= 256)
-      .sort((left, right) => scoreCandidate(right, query, ratio, preferTransparent) - scoreCandidate(left, query, ratio, preferTransparent))
+      .filter((candidate) => queries.some((query) => candidatePassesTextGate(candidate, query)))
+      .sort((left, right) => scoreCandidate(right, queries[0] ?? '', ratio, preferTransparent) - scoreCandidate(left, queries[0] ?? '', ratio, preferTransparent))
       .slice(0, 12)
   }
 

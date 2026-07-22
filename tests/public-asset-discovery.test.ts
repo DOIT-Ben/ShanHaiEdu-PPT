@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import sharp from 'sharp'
-import { isPublicAddress, PublicAssetDiscoveryPort } from '../src/adapters/public-asset-discovery'
+import {
+  buildAssetSearchQueries,
+  candidatePassesTextGate,
+  isPublicAddress,
+  PublicAssetDiscoveryPort,
+} from '../src/adapters/public-asset-discovery'
 import type { AssetCandidate } from '../src/core/ports'
 
 const candidate: AssetCandidate = {
@@ -11,6 +16,20 @@ const candidate: AssetCandidate = {
 }
 
 describe('public asset discovery', () => {
+  test('removes license and view modifiers while preserving the subject noun', () => {
+    expect(buildAssetSearchQueries(['NASA Blue Marble full Earth public domain']))
+      .toEqual(['nasa blue marble full earth', 'nasa blue marble earth', 'blue marble earth'])
+    expect(buildAssetSearchQueries(['flashlight side view CC0'])).toEqual(['flashlight side view', 'flashlight'])
+  })
+
+  test('rejects weakly related and child-unsafe titles before download', () => {
+    expect(candidatePassesTextGate({ title: 'Grundschule Naußlitz 05.jpg' }, 'classroom globe')).toBe(false)
+    expect(candidatePassesTextGate({ title: 'Antique classroom globe' }, 'classroom globe')).toBe(true)
+    expect(candidatePassesTextGate({ title: 'FN P90 with flashlight and suppressor' }, 'flashlight')).toBe(false)
+    expect(candidatePassesTextGate({ title: 'Small LED flashlight' }, 'flashlight')).toBe(true)
+    expect(candidatePassesTextGate({ title: 'Rainbow flashlight e-cig mod' }, 'flashlight')).toBe(false)
+  })
+
   test('rejects private, loopback, metadata and documentation addresses', () => {
     expect(isPublicAddress('127.0.0.1')).toBe(false)
     expect(isPublicAddress('10.0.0.8')).toBe(false)
