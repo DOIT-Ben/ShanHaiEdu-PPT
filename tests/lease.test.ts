@@ -103,7 +103,7 @@ describe('run lease', () => {
       run('done', 'COMPLETED'),
     )
 
-    expect(await listRecoverableRunIds({ repository, clock })).toEqual(['planning', 'executing'])
+    expect(await listRecoverableRunIds({ repository, clock })).toEqual(['executing', 'planning'])
   })
 
   test('persists lease ownership across SQLite reopen', async () => {

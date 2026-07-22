@@ -39,6 +39,25 @@ export class InMemoryAgentRepository implements AgentRepository {
     return [...this.#runs.values()].map((stored) => clone(stored.run))
   }
 
+  async listRunnableRuns(input: Readonly<{ now: string; limit: number }>) {
+    const now = Date.parse(input.now)
+    return [...this.#runs.values()]
+      .map((stored) => stored.run)
+      .filter((run) => ['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING'].includes(run.status))
+      .filter((run) => run.leaseUntil === null || Date.parse(run.leaseUntil) <= now)
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id))
+      .slice(0, input.limit)
+      .map(clone)
+  }
+
+  async listRunsWithPendingMedia(limit: number) {
+    return [...this.#runs.values()]
+      .filter((stored) => [...stored.steps.values()].some((step) => step.tool === 'generate_slide_image' && step.status === 'WAITING'))
+      .sort((left, right) => left.run.updatedAt.localeCompare(right.run.updatedAt) || left.run.id.localeCompare(right.run.id))
+      .slice(0, limit)
+      .map((stored) => stored.run.id)
+  }
+
   async listSteps(runId: string) {
     const stored = this.#runs.get(runId)
     if (!stored) return []

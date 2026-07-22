@@ -448,6 +448,8 @@ export interface AgentRepository {
   createRun(run: RunRecord): Promise<void>
   getRun(runId: string): Promise<RunRecord | null>
   listRuns(): Promise<readonly RunRecord[]>
+  listRunnableRuns(input: Readonly<{ now: string; limit: number }>): Promise<readonly RunRecord[]>
+  listRunsWithPendingMedia(limit: number): Promise<readonly string[]>
   listSteps(runId: string): Promise<readonly StepRecord[]>
   listDeliveries(runId: string): Promise<readonly DeliveryRecord[]>
   listEvents(runId: string, afterSequence?: number): Promise<readonly AgentEvent[]>

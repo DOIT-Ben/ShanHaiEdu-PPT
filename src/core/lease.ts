@@ -113,9 +113,6 @@ export async function listRecoverableRunIds(input: Readonly<{
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
     throw new RunLeaseError('INVALID_RECOVERY_LIMIT', 'recovery limit must be between 1 and 1000')
   }
-  return (await input.repository.listRuns())
-    .filter((run) => RUNNABLE_STATES.has(run.status) && !isLeaseActive(run, now))
-    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
-    .slice(0, limit)
+  return (await input.repository.listRunnableRuns({ now: now.toISOString(), limit }))
     .map((run) => run.id)
 }

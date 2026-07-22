@@ -43,6 +43,7 @@ type OperationalStepRow = {
   updatedAt: string
 }
 type CountRow = { count: number }
+type TableColumnRow = { name: string }
 type PlanningFailureQueryParameters = [
   string,
   string | null, string | null,
@@ -69,7 +70,10 @@ export class SqliteAgentRepository implements AgentRepository {
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
-        data TEXT NOT NULL
+        data TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PLANNING',
+        lease_until TEXT,
+        updated_at TEXT NOT NULL DEFAULT ''
       ) STRICT;
       CREATE TABLE IF NOT EXISTS agent_steps (
         id TEXT PRIMARY KEY,
@@ -113,6 +117,15 @@ export class SqliteAgentRepository implements AgentRepository {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS agent_progress_run_idx ON agent_progress(run_id, sequence);
     `)
+    this.ensureRunColumns()
+    this.#database.exec(`
+      UPDATE agent_runs
+      SET status = json_extract(data, '$.status'),
+          lease_until = json_extract(data, '$.leaseUntil'),
+          updated_at = json_extract(data, '$.updatedAt');
+      CREATE INDEX IF NOT EXISTS agent_runs_runnable_idx
+        ON agent_runs(status, lease_until, updated_at, id);
+    `)
     if (!hasEventSnapshots) this.backfillEventSnapshots()
   }
 
@@ -121,8 +134,9 @@ export class SqliteAgentRepository implements AgentRepository {
   }
 
   async createRun(run: RunRecord) {
-    this.#database.query<unknown, [string, string]>('INSERT INTO agent_runs (id, data) VALUES (?, ?)')
-      .run(run.id, JSON.stringify(run))
+    this.#database.query<unknown, [string, string, string, string | null, string]>(
+      'INSERT INTO agent_runs (id, data, status, lease_until, updated_at) VALUES (?, ?, ?, ?, ?)',
+    ).run(run.id, JSON.stringify(run), run.status, run.leaseUntil, run.updatedAt)
   }
 
   async getRun(runId: string) {
@@ -133,6 +147,29 @@ export class SqliteAgentRepository implements AgentRepository {
   async listRuns() {
     return this.#database.query<JsonRow, []>('SELECT data FROM agent_runs ORDER BY rowid ASC')
       .all().map((row) => JSON.parse(row.data) as RunRecord)
+  }
+
+  async listRunnableRuns(input: Readonly<{ now: string; limit: number }>) {
+    return this.#database.query<JsonRow, [string, number]>(`
+      SELECT data
+      FROM agent_runs
+      WHERE status IN ('PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING')
+        AND (lease_until IS NULL OR lease_until <= ?)
+      ORDER BY updated_at ASC, id ASC
+      LIMIT ?
+    `).all(input.now, input.limit).map((row) => JSON.parse(row.data) as RunRecord)
+  }
+
+  async listRunsWithPendingMedia(limit: number) {
+    return this.#database.query<{ id: string }, [number]>(`
+      SELECT DISTINCT agent_runs.id
+      FROM agent_steps
+      JOIN agent_runs ON agent_runs.id = agent_steps.run_id
+      WHERE json_extract(agent_steps.data, '$.tool') = 'generate_slide_image'
+        AND json_extract(agent_steps.data, '$.status') = 'WAITING'
+      ORDER BY agent_runs.updated_at ASC, agent_runs.id ASC
+      LIMIT ?
+    `).all(limit).map((row) => row.id)
   }
 
   async listSteps(runId: string) {
@@ -335,8 +372,11 @@ export class SqliteAgentRepository implements AgentRepository {
       }
 
       const result = operation(transaction)
-      this.#database.query<unknown, [string, string]>('UPDATE agent_runs SET data = ? WHERE id = ?')
-        .run(JSON.stringify(nextRun), runId)
+      this.#database.query<unknown, [string, string, string | null, string, string]>(`
+        UPDATE agent_runs
+        SET data = ?, status = ?, lease_until = ?, updated_at = ?
+        WHERE id = ?
+      `).run(JSON.stringify(nextRun), nextRun.status, nextRun.leaseUntil, nextRun.updatedAt, runId)
       const upsertStep = this.#database.query<unknown, [string, string, string, string]>(`
         INSERT INTO agent_steps (id, run_id, idempotency_key, data) VALUES (?, ?, ?, ?)
         ON CONFLICT(run_id, idempotency_key) DO UPDATE SET
@@ -386,6 +426,13 @@ export class SqliteAgentRepository implements AgentRepository {
         'DELETE FROM agent_progress WHERE run_id = ? AND step_id = ?',
       ).run(event.runId, event.payload.stepId)
     }
+  }
+
+  private ensureRunColumns() {
+    const columns = new Set(this.#database.query<TableColumnRow, []>('PRAGMA table_info(agent_runs)').all().map((row) => row.name))
+    if (!columns.has('status')) this.#database.exec("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'PLANNING'")
+    if (!columns.has('lease_until')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN lease_until TEXT')
+    if (!columns.has('updated_at')) this.#database.exec("ALTER TABLE agent_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
   }
 
   private backfillEventSnapshots() {

@@ -280,4 +280,45 @@ describe('SQLite repository', () => {
     })
     repository.close()
   })
+
+  test('queries a bounded runnable set without returning 10,000 terminal runs', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    for (let index = 0; index < 10_000; index += 1) {
+      await repository.createRun({
+        ...run(),
+        id: `terminal-${index.toString().padStart(5, '0')}`,
+        creationKey: `terminal-create-${index}`,
+        status: 'COMPLETED',
+      })
+    }
+    for (const id of ['runnable-a', 'runnable-b', 'runnable-c']) {
+      await repository.createRun({ ...run(), id, creationKey: `create-${id}` })
+    }
+
+    const candidates = await repository.listRunnableRuns({
+      now: '2026-07-22T00:00:00.000Z',
+      limit: 2,
+    })
+    expect(candidates.map((candidate) => candidate.id)).toEqual(['runnable-a', 'runnable-b'])
+    repository.close()
+  })
+
+  test('keeps terminal runs with pending media visible to reconciliation', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({ ...run(), status: 'CANCELLED' })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'waiting-step', runId: 'run-1', idempotencyKey: 'waiting-step-key', inputHash: 'waiting-input',
+        tool: 'generate_slide_image', status: 'WAITING', budgetUnits: 1, budgetReservationId: 'reservation-1',
+        externalOperationId: 'operation-1', errorCode: null, output: {},
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    expect(await repository.listRunnableRuns({ now: '2026-07-22T00:00:00.000Z', limit: 10 })).toEqual([])
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    repository.close()
+  })
 })
