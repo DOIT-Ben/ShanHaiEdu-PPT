@@ -240,6 +240,7 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     const jpeg = await sharp(artifact.bytes)
       .rotate()
       .resize({ width: 1_600, height: 1_600, fit: 'inside', withoutEnlargement: true })
+      .flatten({ background: '#F3F6F9' })
       .jpeg({ quality: 82, mozjpeg: true })
       .toBuffer()
     return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: 'auto' as const } }
@@ -249,6 +250,7 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     const jpeg = await sharp(asset.bytes)
       .rotate()
       .resize({ width: 1_600, height: 1_600, fit: 'inside', withoutEnlargement: true })
+      .flatten({ background: '#F3F6F9' })
       .jpeg({ quality: 82, mozjpeg: true })
       .toBuffer()
     return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: 'auto' as const } }

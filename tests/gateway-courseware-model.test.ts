@@ -165,7 +165,13 @@ describe('gateway courseware model', () => {
 
   test('sends the controlled image to the vision reviewer and parses streamed tool arguments', async () => {
     const artifacts = new MockArtifactPort()
-    const png = await sharp({ create: { width: 80, height: 60, channels: 3, background: '#f4f0e8' } }).png().toBuffer()
+    const png = await sharp({
+      create: { width: 80, height: 60, channels: 4, background: { r: 24, g: 24, b: 24, alpha: 0 } },
+    }).composite([{
+      input: await sharp({ create: { width: 40, height: 30, channels: 4, background: '#D24A3A' } }).png().toBuffer(),
+      left: 20,
+      top: 15,
+    }]).png().toBuffer()
     const stored = await artifacts.put({
       tenantId: 'frameflow', runId: 'run-1', name: 'page.png', mimeType: 'image/png', bytes: png,
       idempotencyKey: 'page-source',
@@ -194,7 +200,10 @@ describe('gateway courseware model', () => {
     expect(requestBody).not.toBeNull()
     const messages = (requestBody! as unknown as { messages: { content: unknown }[] }).messages
     const userContent = messages[1]!.content as { type: string; image_url?: { url: string } }[]
-    expect(userContent.some((part) => part.image_url?.url.startsWith('data:image/jpeg;base64,'))).toBe(true)
+    const imageUrl = userContent.find((part) => part.image_url)?.image_url?.url
+    expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)
+    const { data } = await sharp(Buffer.from(imageUrl!.split(',')[1]!, 'base64')).raw().toBuffer({ resolveWithObject: true })
+    expect([...data.subarray(0, 3)].every((channel) => channel >= 240)).toBe(true)
   })
 
   test('rejects insecure public endpoints and hides network failure details', async () => {
