@@ -178,7 +178,7 @@ export class SlideGenerationCoordinator {
 
     const steps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image')
-    for (const step of steps.filter((candidate) => candidate.status === 'WAITING')) {
+    for (const step of steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
       await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
       const latest = await this.dependencies.repository.getRun(runId)
       if (!latest || latest.status === 'NEEDS_HUMAN') break

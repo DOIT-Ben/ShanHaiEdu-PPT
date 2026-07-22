@@ -32,9 +32,16 @@ export interface FrameFlowBackendClient {
 
   reserveCredits(input: Readonly<{
     externalUserId: string
+    model: string
     units: number
     idempotencyKey: string
   }>): Promise<Readonly<{ reservationId: string }>>
+
+  settleCredits(input: Readonly<{
+    externalUserId: string
+    reservationId: string
+    idempotencyKey: string
+  }>): Promise<void>
 
   releaseCredits(input: Readonly<{
     externalUserId: string
@@ -185,7 +192,17 @@ export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
     if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
     return this.client.reserveCredits({
       externalUserId: input.host.externalUserId,
+      model: input.model,
       units: input.units,
+      idempotencyKey: input.idempotencyKey,
+    })
+  }
+
+  async settle(input: Parameters<BudgetPort['settle']>[0]) {
+    if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
+    await this.client.settleCredits({
+      externalUserId: input.host.externalUserId,
+      reservationId: input.reservationId,
       idempotencyKey: input.idempotencyKey,
     })
   }

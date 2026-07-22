@@ -143,10 +143,25 @@ export class AdminOperationsService implements AdminOperationsPort {
     if (!charged && run.committedBudgetUnits < step.budgetUnits) {
       throw new AdminOperationsError(409, 'BUDGET_RECONCILIATION_CONFLICT', 'committed budget is lower than the step amount')
     }
-    if (!charged && step.budgetReservationId) {
+    let reservationId = step.budgetReservationId
+    if (!reservationId) {
+      reservationId = (await this.dependencies.budget.reserve({
+        host: run.host,
+        model: run.imageModel,
+        units: step.budgetUnits,
+        idempotencyKey: step.idempotencyKey,
+      })).reservationId
+    }
+    if (charged) {
+      await this.dependencies.budget.settle({
+        host: run.host,
+        reservationId,
+        idempotencyKey: `admin-settle:${step.idempotencyKey}`,
+      })
+    } else {
       await this.dependencies.budget.release({
         host: run.host,
-        reservationId: step.budgetReservationId,
+        reservationId,
         idempotencyKey: `admin-release:${step.idempotencyKey}`,
       })
     }
@@ -159,7 +174,7 @@ export class AdminOperationsService implements AdminOperationsPort {
         ? { ...transaction.run, version: transaction.run.version + 1 }
         : releaseBudget(transaction.run, current.budgetUnits)
       transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-      const updated = { ...current, status: desiredStatus, updatedAt: now } as StepRecord
+      const updated = { ...current, status: desiredStatus, budgetReservationId: reservationId, updatedAt: now } as StepRecord
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION, type: 'issue.resolved',

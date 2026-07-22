@@ -80,6 +80,7 @@ export class MediaStepRunner {
       try {
         const reservation = await this.dependencies.budget.reserve({
           host: prepared.run.host,
+          model: input.model,
           units: input.budgetUnits,
           idempotencyKey: input.idempotencyKey,
         })
@@ -134,6 +135,22 @@ export class MediaStepRunner {
     const step = (await this.dependencies.repository.listSteps(runId))
       .find((candidate) => candidate.idempotencyKey === idempotencyKey)
     if (!step || step.tool !== 'generate_slide_image') throw new Error('STEP_NOT_FOUND')
+    if (step.status === 'RELEASING') {
+      if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
+      await this.dependencies.budget.release({
+        host: run.host,
+        reservationId: step.budgetReservationId,
+        idempotencyKey: `release:${idempotencyKey}`,
+      })
+      return {
+        step: await this.markDefiniteFailure(
+          this.reconstructInput(step, run.imageModel),
+          step.budgetReservationId,
+          step.errorCode ?? 'MEDIA_NOT_SUBMITTED',
+        ),
+        changed: true,
+      }
+    }
     if (step.status !== 'WAITING') return { step, changed: false }
     if (!step.externalOperationId) throw new Error('MEDIA_OPERATION_ID_MISSING')
 
@@ -143,11 +160,17 @@ export class MediaStepRunner {
     })
     if (status.state === 'QUEUED' || status.state === 'PROCESSING') return { step, changed: false }
     if (status.state === 'COMPLETED') {
+      if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
+      await this.dependencies.budget.settle({
+        host: run.host,
+        reservationId: step.budgetReservationId,
+        idempotencyKey: `settle:${idempotencyKey}`,
+      })
       return { step: await this.markCompleted(runId, idempotencyKey, status.artifactId), changed: true }
     }
     if (status.state !== 'FAILED') return { step, changed: false }
     if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId) {
-      const input = this.reconstructInput(step)
+      const input = this.reconstructInput(step, run.imageModel)
       await this.markReleasing(input, step.budgetReservationId, status.errorCode)
       await this.dependencies.budget.release({
         host: run.host,
@@ -159,6 +182,14 @@ export class MediaStepRunner {
         changed: true,
       }
     }
+    if (status.billingState === 'CHARGED') {
+      if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
+      await this.dependencies.budget.settle({
+        host: run.host,
+        reservationId: step.budgetReservationId,
+        idempotencyKey: `settle:${idempotencyKey}`,
+      })
+    }
     return {
       step: await this.markResultFailure(runId, idempotencyKey, status.errorCode, status.billingState),
       changed: true,
@@ -167,7 +198,7 @@ export class MediaStepRunner {
 
   async reconcilePendingRun(runId: string) {
     const pending = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image' && step.status === 'WAITING')
+      .filter((step) => step.tool === 'generate_slide_image' && ['WAITING', 'RELEASING'].includes(step.status))
     let changed = 0
     for (const step of pending) {
       if ((await this.refreshSlideImage(runId, step.idempotencyKey)).changed) changed += 1
@@ -289,7 +320,7 @@ export class MediaStepRunner {
     })
   }
 
-  private reconstructInput(step: StepRecord): SubmitSlideImageInput {
+  private reconstructInput(step: StepRecord, model: string): SubmitSlideImageInput {
     const output = step.output as { slideId?: unknown; versionId?: unknown } | null
     if (!output || typeof output.slideId !== 'string' || typeof output.versionId !== 'string') {
       throw new Error('MEDIA_STEP_OUTPUT_INVALID')
@@ -301,7 +332,7 @@ export class MediaStepRunner {
       slideId: output.slideId,
       versionId: output.versionId,
       prompt: '',
-      model: '',
+      model,
       budgetUnits: step.budgetUnits,
     }
   }
@@ -352,10 +383,9 @@ export class MediaStepRunner {
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updated: StepRecord = {
         ...step,
-        status: cancelled
-          ? billingState === 'CHARGED' ? 'FAILED_CHARGED'
-            : billingState === 'NOT_CHARGED' ? 'FAILED_NOT_CHARGED' : 'BILLING_UNKNOWN'
-          : 'FAILED',
+        status: billingState === 'CHARGED'
+          ? 'FAILED_CHARGED'
+          : billingState === 'NOT_CHARGED' ? 'FAILED_NOT_CHARGED' : 'BILLING_UNKNOWN',
         errorCode,
         updatedAt: now,
       }

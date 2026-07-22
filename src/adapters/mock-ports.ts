@@ -22,8 +22,11 @@ export class FixedClock implements ClockPort {
 
 export class MockBudgetPort implements BudgetPort {
   readonly reservations = new Map<string, string>()
+  readonly settled = new Set<string>()
   readonly released = new Set<string>()
   nextFailure: BudgetReservationError | null = null
+  nextSettlementFailure: Error | null = null
+  nextReleaseFailure: Error | null = null
 
   async reserve(input: Parameters<BudgetPort['reserve']>[0]) {
     const existing = this.reservations.get(input.idempotencyKey)
@@ -39,11 +42,33 @@ export class MockBudgetPort implements BudgetPort {
   }
 
   async release(input: Parameters<BudgetPort['release']>[0]) {
+    if (this.nextReleaseFailure) {
+      const failure = this.nextReleaseFailure
+      this.nextReleaseFailure = null
+      throw failure
+    }
     this.released.add(input.reservationId)
+  }
+
+  async settle(input: Parameters<BudgetPort['settle']>[0]) {
+    if (this.nextSettlementFailure) {
+      const failure = this.nextSettlementFailure
+      this.nextSettlementFailure = null
+      throw failure
+    }
+    this.settled.add(input.reservationId)
   }
 
   failNext(code: string, reservationState: 'NOT_RESERVED' | 'UNKNOWN') {
     this.nextFailure = new BudgetReservationError(code, reservationState, code)
+  }
+
+  failNextSettlement(code = 'HOST_SETTLEMENT_UNKNOWN') {
+    this.nextSettlementFailure = new Error(code)
+  }
+
+  failNextRelease(code = 'HOST_RELEASE_UNKNOWN') {
+    this.nextReleaseFailure = new Error(code)
   }
 }
 

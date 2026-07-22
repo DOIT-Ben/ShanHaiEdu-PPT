@@ -71,7 +71,7 @@ export class RevisionMediaCoordinator {
     if (run.status === 'PAGE_REVIEW') return this.summary(run)
     if (run.status !== 'REVISING') return this.summary(run)
     const steps = await this.currentSteps(run, targets)
-    for (const step of steps.filter((candidate) => candidate.status === 'WAITING')) {
+    for (const step of steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
       await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
       const latest = await this.requireRun(runId)
       if (latest.status === 'NEEDS_HUMAN') break

@@ -74,7 +74,7 @@ export async function acquireMediaReconciliationLease(input: Readonly<{
   return input.repository.transact(input.runId, (transaction) => {
     const now = input.clock.now()
     const hasPendingMedia = transaction.listSteps()
-      .some((step) => step.tool === 'generate_slide_image' && step.status === 'WAITING')
+      .some((step) => step.tool === 'generate_slide_image' && ['WAITING', 'RELEASING'].includes(step.status))
     if (!hasPendingMedia || isLeaseActive(transaction.run, now)) return null
     const lease: RunLease = {
       token: input.token,

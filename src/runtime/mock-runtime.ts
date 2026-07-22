@@ -55,6 +55,7 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
   async reserveCredits(input: Parameters<FrameFlowBackendClient['reserveCredits']>[0]) {
     return { reservationId: `mock-budget:${input.idempotencyKey}` }
   }
+  async settleCredits() {}
   async releaseCredits() {}
 }
 

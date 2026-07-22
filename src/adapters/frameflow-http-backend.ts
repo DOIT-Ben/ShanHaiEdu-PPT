@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { FrameFlowBackendClient } from './frameflow-host'
+import { BudgetReservationError } from '../core/ports'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -49,6 +50,17 @@ const readySchema = z.object({
   }).strict()).max(80),
 }).strict()
 const envelopeSchema = z.object({ data: z.union([readySchema, failedSchema]) }).strict()
+const creditEnvelopeSchema = z.object({
+  data: z.object({
+    reservationId: identifierSchema,
+    status: z.enum(['RESERVED', 'SETTLED', 'RELEASED']),
+    reservedCredits: z.number().nonnegative(),
+    settledCredits: z.number().nonnegative().nullable(),
+  }).strict(),
+}).strict()
+const errorEnvelopeSchema = z.object({
+  error: z.object({ code: z.string().trim().min(1).max(160) }).passthrough(),
+}).passthrough()
 
 function normalizedLoopbackUrl(value: string) {
   const url = new URL(value)
@@ -152,8 +164,88 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
   }
 
   async reserveCredits(input: Parameters<FrameFlowBackendClient['reserveCredits']>[0]) {
-    return { reservationId: `frameflow-budget:${input.idempotencyKey}` }
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/api/internal/ppt-agent/credits/reservations`, {
+        method: 'POST',
+        headers: this.creditHeaders(input.externalUserId, input.idempotencyKey, true),
+        body: JSON.stringify({ model: input.model, units: input.units }),
+        signal: AbortSignal.timeout(15_000),
+      })
+    } catch {
+      throw new BudgetReservationError(
+        'HOST_BUDGET_RESERVATION_UNKNOWN',
+        'UNKNOWN',
+        'FrameFlow credit reservation result is unknown',
+      )
+    }
+    if (!response.ok) {
+      const code = await this.errorCode(response, `HOST_BUDGET_HTTP_${response.status}`)
+      throw new BudgetReservationError(
+        code,
+        response.status >= 500 ? 'UNKNOWN' : 'NOT_RESERVED',
+        code,
+      )
+    }
+    const parsed = creditEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success || parsed.data.data.status !== 'RESERVED') {
+      throw new BudgetReservationError(
+        'HOST_BUDGET_RESPONSE_INVALID',
+        'UNKNOWN',
+        'FrameFlow credit reservation response is invalid',
+      )
+    }
+    return { reservationId: parsed.data.data.reservationId }
   }
 
-  async releaseCredits() {}
+  async settleCredits(input: Parameters<FrameFlowBackendClient['settleCredits']>[0]) {
+    await this.completeCreditOperation('settle', input, 'SETTLED')
+  }
+
+  async releaseCredits(input: Parameters<FrameFlowBackendClient['releaseCredits']>[0]) {
+    await this.completeCreditOperation('release', input, 'RELEASED')
+  }
+
+  private creditHeaders(userId: string, idempotencyKey: string, json = false) {
+    return {
+      Authorization: `Bearer ${this.dependencies.token}`,
+      'X-PPT-Agent-User': userId,
+      'Idempotency-Key': idempotencyKey,
+      Accept: 'application/json',
+      ...(json ? { 'Content-Type': 'application/json' } : {}),
+    }
+  }
+
+  private async completeCreditOperation(
+    operation: 'settle' | 'release',
+    input: Readonly<{ externalUserId: string; reservationId: string; idempotencyKey: string }>,
+    expectedStatus: 'SETTLED' | 'RELEASED',
+  ) {
+    let response: Response
+    try {
+      response = await this.fetchImpl(
+        `${this.baseUrl}/api/internal/ppt-agent/credits/reservations/${encodeURIComponent(input.reservationId)}/${operation}`,
+        {
+          method: 'POST',
+          headers: this.creditHeaders(input.externalUserId, input.idempotencyKey),
+          signal: AbortSignal.timeout(15_000),
+        },
+      )
+    } catch {
+      throw new Error(`HOST_BUDGET_${operation.toUpperCase()}_UNKNOWN`)
+    }
+    if (!response.ok) {
+      throw new Error(await this.errorCode(response, `HOST_BUDGET_${operation.toUpperCase()}_HTTP_${response.status}`))
+    }
+    const parsed = creditEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success || parsed.data.data.reservationId !== input.reservationId
+      || parsed.data.data.status !== expectedStatus) {
+      throw new Error(`HOST_BUDGET_${operation.toUpperCase()}_RESPONSE_INVALID`)
+    }
+  }
+
+  private async errorCode(response: Response, fallback: string) {
+    const parsed = errorEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    return parsed.success ? parsed.data.error.code : fallback
+  }
 }

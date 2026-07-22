@@ -231,9 +231,16 @@ export interface RevisionApplicationPort {
 export interface BudgetPort {
   reserve(input: Readonly<{
     host: HostContext
+    model: string
     units: number
     idempotencyKey: string
   }>): Promise<Readonly<{ reservationId: string }>>
+
+  settle(input: Readonly<{
+    host: HostContext
+    reservationId: string
+    idempotencyKey: string
+  }>): Promise<void>
 
   release(input: Readonly<{
     host: HostContext
