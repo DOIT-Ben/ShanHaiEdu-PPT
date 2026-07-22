@@ -30,19 +30,22 @@ export class RevisionMediaCoordinator {
     const targets = await this.targets(run)
     if (targets.length === 0) throw new Error('REVISION_MEDIA_NOT_REQUIRED')
     const steps = await this.currentSteps(run, targets)
-    const keys = new Set(steps.map((step) => step.idempotencyKey))
-    const pending = targets.filter((target) => !keys.has(target.idempotencyKey))
-    const decision = evaluateBudget(run, pending.length * unitBudgetUnits)
-    if (pending.length > 0 && !decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
-      await this.pauseForBudget(run, pending.length * unitBudgetUnits)
+    const stepsByKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
+    const pending = targets.filter((target) => {
+      const existing = stepsByKey.get(target.idempotencyKey)
+      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status)
+    })
+    const newTargetCount = pending.filter((target) => !stepsByKey.has(target.idempotencyKey)).length
+    const decision = evaluateBudget(run, newTargetCount * unitBudgetUnits)
+    if (newTargetCount > 0 && !decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
+      await this.pauseForBudget(run, newTargetCount * unitBudgetUnits)
       return { status: 'PAUSED', completed: 0, submitted: steps.length, total: targets.length }
     }
-    if (pending.length > 0 && !decision.allowed) throw new Error(decision.reason)
+    if (newTargetCount > 0 && !decision.allowed) throw new Error(decision.reason)
 
-    let submitted = steps.length
     for (const target of pending) {
       const key = target.idempotencyKey
-      const result = await this.dependencies.media.submitSlideImage({
+      await this.dependencies.media.submitSlideImage({
         runId,
         stepId: target.stepId,
         idempotencyKey: key,
@@ -57,12 +60,16 @@ export class RevisionMediaCoordinator {
         ...(target.elementId ? { elementId: target.elementId } : {}),
         ...(target.assetReuseKey ? { assetReuseKey: target.assetReuseKey } : {}),
       })
-      if (['WAITING', 'COMPLETED'].includes(result.step.status)) submitted += 1
       const latest = await this.dependencies.repository.getRun(runId)
       if (!latest || latest.status === 'NEEDS_HUMAN' || latest.status === 'PAUSED') break
     }
     const latest = await this.requireRun(runId)
-    return { status: latest.status, completed: 0, submitted, total: targets.length }
+    return {
+      status: latest.status,
+      completed: 0,
+      submitted: (await this.currentSteps(latest, targets)).length,
+      total: targets.length,
+    }
   }
 
   async refresh(runId: string): Promise<RevisionMediaResult> {

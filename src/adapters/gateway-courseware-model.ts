@@ -25,6 +25,7 @@ type ToolContent = string | readonly (
 )[]
 
 export const MAX_GATEWAY_TOOL_ARGUMENT_BYTES = 4 * 1024 * 1024
+const MAX_GATEWAY_STREAM_BUFFER_BYTES = MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 256 * 1024
 
 const streamChunkSchema = z.object({
   choices: z.array(z.object({
@@ -494,6 +495,9 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
         buffer += decoder.decode(value, { stream: !done })
         const events = buffer.split(/\r?\n\r?\n/)
         buffer = events.pop() ?? ''
+        if (Buffer.byteLength(buffer) > MAX_GATEWAY_STREAM_BUFFER_BYTES) {
+          throw new Error('GATEWAY_MODEL_ARGUMENTS_TOO_LARGE')
+        }
         for (const event of events) {
           for (const line of event.split(/\r?\n/)) {
             if (!line.startsWith('data:')) continue

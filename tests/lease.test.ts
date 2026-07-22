@@ -155,4 +155,23 @@ describe('run lease', () => {
     ])
     expect(leases.filter(Boolean)).toHaveLength(1)
   })
+
+  test('discovers and leases a terminal Run whose host release must be retried', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await seed(repository, run('cancelled-release', 'CANCELLED'))
+    await repository.transact('cancelled-release', (transaction) => {
+      transaction.putStep({
+        id: 'releasing-step', runId: 'cancelled-release', idempotencyKey: 'releasing-key', inputHash: 'releasing-input',
+        tool: 'generate_slide_image', status: 'RELEASING', budgetUnits: 1, budgetReservationId: 'reservation-1',
+        externalOperationId: 'operation-1', errorCode: 'PROVIDER_REJECTED', output: {},
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['cancelled-release'])
+    expect(await acquireMediaReconciliationLease({
+      repository, clock, runId: 'cancelled-release', token: 'worker-a', ttlMs: 5_000,
+    })).not.toBeNull()
+  })
 })

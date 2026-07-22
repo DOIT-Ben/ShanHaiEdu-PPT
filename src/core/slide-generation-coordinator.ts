@@ -62,8 +62,11 @@ export class SlideGenerationCoordinator {
       await this.requireHuman(runId, blockingStep)
       return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
     }
-    const existingKeys = new Set(existingSteps.map((step) => step.idempotencyKey))
-    const pendingRequirements = requirements.filter((requirement) => !existingKeys.has(requirement.idempotencyKey))
+    const existingByKey = new Map(existingSteps.map((step) => [step.idempotencyKey, step]))
+    const pendingRequirements = requirements.filter((requirement) => {
+      const existing = existingByKey.get(requirement.idempotencyKey)
+      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status)
+    })
 
     if (pendingRequirements.length === 0) {
       return {
@@ -81,7 +84,8 @@ export class SlideGenerationCoordinator {
         unresolvedRequirements.push(requirement)
         continue
       }
-      const completed = run.assetAcquisitionPolicy === 'SEARCH_FIRST'
+      const completed = !existingByKey.has(requirement.idempotencyKey)
+        && run.assetAcquisitionPolicy === 'SEARCH_FIRST'
         ? await this.tryCompleteWebAsset(run, requirement)
         : null
       if (!completed) {
@@ -92,7 +96,9 @@ export class SlideGenerationCoordinator {
       await this.appendProgress(runId, completed.id, steps.length, requirements.length, '已获取网络素材')
     }
 
-    const chargeableCount = unresolvedRequirements.filter((requirement) => requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
+    const chargeableCount = unresolvedRequirements.filter((requirement) =>
+      !existingByKey.has(requirement.idempotencyKey)
+      && requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
     if (chargeableCount > 0) {
       const decision = evaluateBudget(run, chargeableCount * unitBudgetUnits)
       if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
@@ -148,7 +154,9 @@ export class SlideGenerationCoordinator {
           sha256: sourceAsset.sha256,
         } } : {}),
       })
-      if (!steps.some((step) => step.idempotencyKey === result.step.idempotencyKey)) steps.push(result.step)
+      const existingIndex = steps.findIndex((step) => step.idempotencyKey === result.step.idempotencyKey)
+      if (existingIndex === -1) steps.push(result.step)
+      else steps[existingIndex] = result.step
       const latestRun = await this.dependencies.repository.getRun(runId)
       if (!latestRun || latestRun.status === 'NEEDS_HUMAN' || latestRun.status === 'PAUSED') break
       if (result.step.status === 'FAILED') {
@@ -473,12 +481,18 @@ export class SlideGenerationCoordinator {
     await this.dependencies.repository.transact(runId, (transaction) => {
       if (transaction.run.status === 'NEEDS_HUMAN') return
       const now = this.dependencies.clock.now().toISOString()
+      const fromStatus = transaction.run.status
       const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
       transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason: step.errorCode ?? 'IMAGE_SUBMISSION_FAILED' },
+        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: step.errorCode ?? 'IMAGE_SUBMISSION_FAILED' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'approval.required',
+        payload: { kind: 'HUMAN_REVIEW', summary: '图片任务需要人工核对后才能继续。' },
       })
     })
   }

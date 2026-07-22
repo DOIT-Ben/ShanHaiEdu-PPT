@@ -7,6 +7,8 @@ import {
   MockBudgetPort,
   MockImageGenerationPort,
 } from '../src/adapters/mock-ports'
+import { getActiveBlueprint } from '../src/core/active-blueprint'
+import { blueprintImageRequirements } from '../src/core/blueprint-assets'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { planningStepKey } from '../src/core/planning-runner'
@@ -117,7 +119,7 @@ candidateReviewer?: AssetCandidateReviewPort) {
     ...(discovery ? { discovery } : {}),
     ...(webReviewer ? { candidateReviewer: webReviewer } : {}),
   })
-  return { repository, budget, images, artifacts, coordinator, candidateReviewer: webReviewer }
+  return { repository, budget, images, artifacts, media, coordinator, candidateReviewer: webReviewer }
 }
 
 function webSearchBlueprint() {
@@ -251,6 +253,55 @@ describe('slide generation coordinator', () => {
     expect((await repository.listEvents('run-1')).length).toBe(eventCount)
   })
 
+  test('recovers reserved and submitting steps with the original host and Provider keys', async () => {
+    for (const crashStatus of ['RESERVED', 'SUBMITTING'] as const) {
+      const { repository, budget, images, media, coordinator } = await fixture()
+      const currentRun = (await repository.getRun('run-1'))!
+      const activeBlueprint = await getActiveBlueprint(repository, 'run-1', currentRun.revisionRound)
+      const requirement = blueprintImageRequirements(currentRun, activeBlueprint)[0]!
+      const versionId = 'run-1:slide:1:r0:v1'
+      const request = {
+        runId: 'run-1',
+        stepId: `step-run-1-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r0`,
+        idempotencyKey: requirement.idempotencyKey,
+        slideId: requirement.slideId,
+        versionId,
+        prompt: requirement.prompt,
+        model: currentRun.imageModel,
+        budgetUnits: 10,
+        aspectRatio: requirement.aspectRatio,
+        backgroundMode: requirement.backgroundMode,
+      } as const
+      await media.submitSlideImage(request)
+      const operationId = images.operations.get(requirement.idempotencyKey)!
+      await repository.transact('run-1', (transaction) => {
+        const step = transaction.getStep(requirement.idempotencyKey)!
+        transaction.putStep({
+          ...step,
+          status: crashStatus,
+          budgetReservationId: crashStatus === 'RESERVED' ? null : step.budgetReservationId,
+          externalOperationId: null,
+        })
+      })
+      if (crashStatus === 'RESERVED') {
+        images.operations.delete(requirement.idempotencyKey)
+        images.requests.delete(requirement.idempotencyKey)
+        images.statuses.delete(operationId)
+      }
+
+      const recovered = await coordinator.submitBlueprintImages('run-1', 10)
+
+      expect(recovered).toMatchObject({ submitted: 3, total: 3 })
+      expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image'))
+        .toHaveLength(3)
+      expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')
+        .every((step) => step.status === 'WAITING')).toBe(true)
+      expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 30 })
+      expect(budget.reservations.size).toBe(3)
+      expect(images.operations.size).toBe(3)
+    }
+  })
+
   test('pauses before any submission when total initial budget is insufficient', async () => {
     const { repository, budget, images, coordinator } = await fixture(20)
     const result = await coordinator.submitBlueprintImages('run-1', 10)
@@ -305,6 +356,10 @@ describe('slide generation coordinator', () => {
 
     expect(result.status).toBe('NEEDS_HUMAN')
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 20 })
+    const events = await repository.listEvents('run-1')
+    expect(events.find((event) => event.type === 'phase.changed')?.payload)
+      .toMatchObject({ from: 'EXECUTING', to: 'NEEDS_HUMAN' })
+    expect(events.map((event) => event.type)).toContain('approval.required')
   })
 
   test('reuses an original source image without image-provider calls or budget charge', async () => {

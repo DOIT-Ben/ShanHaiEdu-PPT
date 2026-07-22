@@ -149,23 +149,31 @@ export class VisualReviewRunner {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transaction.run.status === 'NEEDS_HUMAN'
-        ? transaction.run
-        : transitionRun(transaction.run, 'NEEDS_HUMAN')
-      const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
+      const fromStatus = transaction.run.status
+      const transitionRequired = ['EXECUTING', 'PAGE_REVIEW', 'REVISING'].includes(fromStatus)
+      const run: RunRecord = transitionRequired
+        ? { ...transaction.run, ...transitionRun(transaction.run, 'NEEDS_HUMAN'), updatedAt: now }
+        : transaction.run
       const updated: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
-      transaction.putRun(run)
+      if (transitionRequired) transaction.putRun(run)
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
         payload: { stepId: step.id, errorCode, retryable: false },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason: errorCode },
-      })
+      if (transitionRequired) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: errorCode },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '视觉审查执行失败，需要人工处理后重试。' },
+        })
+      }
       return updated
     })
   }

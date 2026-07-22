@@ -451,4 +451,26 @@ describe('gateway courseware model', () => {
     })
     expect(cancelled).toBe(true)
   })
+
+  test('cancels an unframed SSE event before its buffer can grow without bound', async () => {
+    let cancelled = false
+    const payload = new TextEncoder().encode(
+      `data: ${'x'.repeat(MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 256 * 1024 + 1)}`,
+    )
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) { controller.enqueue(payload) },
+        cancel() { cancelled = true },
+      }), { headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'request-unframed-1' } }),
+    })
+
+    await expect(model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-unframed',
+    })).rejects.toMatchObject({
+      code: 'MODEL_JSON_INVALID', retryable: true, requestId: 'request-unframed-1', model: 'gpt-5.6',
+    })
+    expect(cancelled).toBe(true)
+  })
 })

@@ -149,12 +149,13 @@ export class PageReviewCoordinator {
     await this.dependencies.repository.transact(runId, (transaction) => {
       if (transaction.run.status === 'NEEDS_HUMAN') return
       const now = this.dependencies.clock.now().toISOString()
+      const fromStatus = transaction.run.status
       const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
       transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason },
+        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,

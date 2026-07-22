@@ -175,6 +175,24 @@ describe('revision media coordinator', () => {
     expect(reviewerPort.reviews.size).toBe(4)
   })
 
+  test('recovers a revision image left in submitting without double-reserving budget', async () => {
+    const { repository, images, coordinator } = await fixture()
+    await coordinator.submit('run-1', 5)
+    const key = 'run-1:slide:2:image:r1:v1'
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(key)!
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    const recovered = await coordinator.submit('run-1', 5)
+
+    expect(recovered).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(images.operations.size).toBe(1)
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 25 })
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === key))
+      .toMatchObject({ status: 'WAITING', externalOperationId: expect.any(String) })
+  })
+
   test('pauses before any redraw when the remaining budget is insufficient', async () => {
     const { images, coordinator } = await fixture({ budgetUnits: 20, committedBudgetUnits: 20 })
     const result = await coordinator.submit('run-1', 5)

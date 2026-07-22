@@ -430,4 +430,21 @@ describe('SQLite repository', () => {
     expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
     repository.close()
   })
+
+  test('keeps terminal runs with interrupted host releases visible to reconciliation', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({ ...run(), status: 'CANCELLED' })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        ...waitingStep(),
+        status: 'RELEASING',
+        errorCode: 'PROVIDER_REJECTED',
+      })
+    })
+
+    expect(await repository.listRunnableRuns({ now: '2026-07-22T00:00:00.000Z', limit: 10 })).toEqual([])
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    repository.close()
+  })
 })

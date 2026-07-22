@@ -194,22 +194,29 @@ export class DeckReviewRunner {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transaction.run.status === 'NEEDS_HUMAN'
-        ? transaction.run
-        : transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const fromStatus = transaction.run.status
+      const transitionRequired = fromStatus !== 'NEEDS_HUMAN'
+      const policy = transitionRequired ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
       const updatedStep: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
       transaction.putStep(updatedStep)
-      transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      if (transitionRequired) transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
         payload: { stepId: step.id, errorCode, retryable: false },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason: errorCode },
-      })
+      if (transitionRequired) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: errorCode },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '整套课件审查失败，需要人工处理后重试。' },
+        })
+      }
       return { step: updatedStep, review: null, passed: false, replayed: false }
     })
   }

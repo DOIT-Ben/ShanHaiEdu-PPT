@@ -183,6 +183,7 @@ export class RevisionPlanningRunner {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
+      const fromStatus = transaction.run.status
       const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedStep: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
@@ -196,7 +197,12 @@ export class RevisionPlanningRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason: errorCode },
+        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: errorCode },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'approval.required',
+        payload: { kind: 'HUMAN_REVIEW', summary: '修订规划失败，需要人工处理后重试。' },
       })
       return { status: updatedRun.status, step: updatedStep, plan: null, replayed: false }
     })
@@ -206,13 +212,14 @@ export class RevisionPlanningRunner {
     if (run.status === 'NEEDS_HUMAN') return { status: run.status, step: null, plan: null, replayed: true }
     const updated = await this.dependencies.repository.transact(run.id, (transaction) => {
       const now = this.dependencies.clock.now().toISOString()
+      const fromStatus = transaction.run.status
       const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
       const next: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       transaction.putRun(next)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason },
+        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,

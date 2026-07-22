@@ -64,7 +64,8 @@ const errorEnvelopeSchema = z.object({
 
 function normalizedLoopbackUrl(value: string) {
   const url = new URL(value)
-  if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) {
+  if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+    || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
     throw new Error('FRAMEFLOW_INTERNAL_URL_MUST_BE_LOOPBACK')
   }
   return url.toString().replace(/\/$/, '')
@@ -80,7 +81,8 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
     fetchImpl?: Fetch
   }>) {
     this.baseUrl = normalizedLoopbackUrl(dependencies.baseUrl)
-    if (dependencies.token.length < 16) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
+    if (dependencies.token.length < 16 || dependencies.token.length > 512
+      || dependencies.token !== dependencies.token.trim()) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
     this.fetchImpl = dependencies.fetchImpl ?? fetch
   }
 
@@ -183,7 +185,9 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
       const code = await this.errorCode(response, `HOST_BUDGET_HTTP_${response.status}`)
       throw new BudgetReservationError(
         code,
-        response.status >= 500 ? 'UNKNOWN' : 'NOT_RESERVED',
+        [400, 401, 402, 403, 404, 405, 413, 415, 422, 429].includes(response.status)
+          ? 'NOT_RESERVED'
+          : 'UNKNOWN',
         code,
       )
     }

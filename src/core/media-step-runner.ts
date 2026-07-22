@@ -377,7 +377,9 @@ export class MediaStepRunner {
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
       const cancelled = transaction.run.status === 'CANCELLED'
-      const policy = cancelled || transaction.run.status === 'NEEDS_HUMAN'
+      const fromStatus = transaction.run.status
+      const transitionRequired = !cancelled && fromStatus !== 'NEEDS_HUMAN'
+      const policy = !transitionRequired
         ? transaction.run
         : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
@@ -419,6 +421,18 @@ export class MediaStepRunner {
           status: 'OPEN',
         },
       })
+      if (transitionRequired) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: errorCode },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: 'Provider 结果或费用状态需要人工核对。' },
+        })
+      }
       return updated
     })
   }
@@ -481,9 +495,9 @@ export class MediaStepRunner {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transaction.run.status === 'NEEDS_HUMAN'
-        ? transaction.run
-        : transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const fromStatus = transaction.run.status
+      const transitionRequired = !['NEEDS_HUMAN', 'CANCELLED'].includes(fromStatus)
+      const policy = transitionRequired ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updated: StepRecord = {
         ...step,
@@ -492,7 +506,7 @@ export class MediaStepRunner {
         errorCode,
         updatedAt: now,
       }
-      transaction.putRun(run)
+      if (transitionRequired) transaction.putRun(run)
       transaction.putStep(updated)
       const issueId = `${input.stepId}:submission-unknown`
       transaction.appendEvent({
@@ -510,11 +524,18 @@ export class MediaStepRunner {
           status: 'OPEN',
         },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: transaction.run.status, to: 'NEEDS_HUMAN', reason: errorCode },
-      })
+      if (transitionRequired) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: errorCode },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '媒体提交或宿主额度状态未知，需要人工核对。' },
+        })
+      }
       return updated
     })
   }

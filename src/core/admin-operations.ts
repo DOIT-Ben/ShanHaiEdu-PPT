@@ -1,5 +1,5 @@
 import { CONTRACT_VERSION, type HostContext } from '../contracts'
-import type { AgentRepository, BudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
+import { BudgetReservationError, type AgentRepository, type BudgetPort, type ClockPort, type RunRecord, type StepRecord } from './ports'
 import type { MediaStepRunner } from './media-step-runner'
 import { hashInput } from './hash'
 import { releaseBudget } from './policy'
@@ -28,6 +28,13 @@ export interface AdminOperationsPort {
 const ACCOUNTING_STATUSES = new Set<StepRecord['status']>([
   'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN', 'BILLING_UNKNOWN', 'FAILED_CHARGED',
 ])
+
+function canResolveAccounting(status: StepRecord['status'], charged: boolean) {
+  if (!ACCOUNTING_STATUSES.has(status)) return false
+  if (status === 'RESERVATION_UNKNOWN') return !charged
+  if (status === 'FAILED_CHARGED') return charged
+  return true
+}
 
 export class AdminOperationsService implements AdminOperationsPort {
   constructor(private readonly dependencies: Readonly<{
@@ -77,7 +84,8 @@ export class AdminOperationsService implements AdminOperationsPort {
       if (input.action === 'REINSPECT' && (currentTarget.status !== 'WAITING' || !currentTarget.externalOperationId)) {
         throw new AdminOperationsError(409, 'STEP_NOT_REINSPECTABLE', 'step cannot be reinspected')
       }
-      if (input.action !== 'REINSPECT' && !ACCOUNTING_STATUSES.has(currentTarget.status)) {
+      if (input.action !== 'REINSPECT'
+        && !canResolveAccounting(currentTarget.status, input.action === 'MARK_CHARGED')) {
         throw new AdminOperationsError(409, 'STEP_NOT_RECONCILABLE', 'step cannot be manually reconciled')
       }
       const actionStep: StepRecord = {
@@ -137,7 +145,7 @@ export class AdminOperationsService implements AdminOperationsPort {
     if (!run || !step) throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
     const desiredStatus = charged ? 'FAILED_CHARGED' : 'FAILED_NOT_CHARGED'
     if (step.status === desiredStatus) return step
-    if (!ACCOUNTING_STATUSES.has(step.status)) {
+    if (!canResolveAccounting(step.status, charged)) {
       throw new AdminOperationsError(409, 'STEP_NOT_RECONCILABLE', 'step cannot be manually reconciled')
     }
     if (!charged && run.committedBudgetUnits < step.budgetUnits) {
@@ -145,20 +153,27 @@ export class AdminOperationsService implements AdminOperationsPort {
     }
     let reservationId = step.budgetReservationId
     if (!reservationId) {
-      reservationId = (await this.dependencies.budget.reserve({
-        host: run.host,
-        model: run.imageModel,
-        units: step.budgetUnits,
-        idempotencyKey: step.idempotencyKey,
-      })).reservationId
+      try {
+        reservationId = (await this.dependencies.budget.reserve({
+          host: run.host,
+          model: run.imageModel,
+          units: step.budgetUnits,
+          idempotencyKey: step.idempotencyKey,
+        })).reservationId
+      } catch (error) {
+        if (!(step.status === 'RESERVATION_UNKNOWN'
+          && error instanceof BudgetReservationError
+          && error.reservationState === 'NOT_RESERVED')) throw error
+      }
     }
     if (charged) {
+      if (!reservationId) throw new AdminOperationsError(409, 'BUDGET_RESERVATION_MISSING', 'host reservation is unavailable')
       await this.dependencies.budget.settle({
         host: run.host,
         reservationId,
         idempotencyKey: `admin-settle:${step.idempotencyKey}`,
       })
-    } else {
+    } else if (reservationId) {
       await this.dependencies.budget.release({
         host: run.host,
         reservationId,
@@ -174,7 +189,7 @@ export class AdminOperationsService implements AdminOperationsPort {
         ? { ...transaction.run, version: transaction.run.version + 1 }
         : releaseBudget(transaction.run, current.budgetUnits)
       transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-      const updated = { ...current, status: desiredStatus, budgetReservationId: reservationId, updatedAt: now } as StepRecord
+      const updated = { ...current, status: desiredStatus, budgetReservationId: reservationId ?? null, updatedAt: now } as StepRecord
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION, type: 'issue.resolved',

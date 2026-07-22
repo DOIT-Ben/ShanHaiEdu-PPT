@@ -179,6 +179,10 @@ describe('revision planning runner', () => {
 
     expect(result).toMatchObject({ status: 'NEEDS_HUMAN', plan: null, step: { status: 'FAILED' } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    const events = await repository.listEvents('run-1')
+    expect(events.find((event) => event.type === 'phase.changed')?.payload)
+      .toMatchObject({ from: 'DECK_REVIEW', to: 'NEEDS_HUMAN' })
+    expect(events.map((event) => event.type)).toContain('approval.required')
   })
 
   test('replays a completed supervised plan without another planner call', async () => {

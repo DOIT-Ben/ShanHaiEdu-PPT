@@ -60,6 +60,10 @@ describe('FrameFlow internal source backend', () => {
 
   test('rejects non-loopback source endpoints', () => {
     expect(() => new HttpFrameFlowBackend({ baseUrl: 'https://frameflow.example.com', token })).toThrow('MUST_BE_LOOPBACK')
+    expect(() => new HttpFrameFlowBackend({ baseUrl: 'http://user@127.0.0.1:3010', token })).toThrow('MUST_BE_LOOPBACK')
+    expect(() => new HttpFrameFlowBackend({ baseUrl: 'http://127.0.0.1:3010/internal', token })).toThrow('MUST_BE_LOOPBACK')
+    expect(() => new HttpFrameFlowBackend({ baseUrl: 'http://127.0.0.1:3010?target=other', token })).toThrow('MUST_BE_LOOPBACK')
+    expect(() => new HttpFrameFlowBackend({ baseUrl: 'http://127.0.0.1:3010', token: `${token} ` })).toThrow('TOKEN_REQUIRED')
   })
 
   test('reserves catalog-priced FrameFlow credits with authenticated idempotent context', async () => {
@@ -107,6 +111,11 @@ describe('FrameFlow internal source backend', () => {
       token,
       fetchImpl: async () => Response.json({ error: { code: 'CREDIT_SERVICE_UNAVAILABLE' } }, { status: 503 }),
     })
+    const conflict = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010',
+      token,
+      fetchImpl: async () => Response.json({ error: { code: 'IDEMPOTENCY_CONFLICT' } }, { status: 409 }),
+    })
 
     const input = {
       externalUserId: 'teacher-1', model: 'image-2', units: 1, idempotencyKey: 'step-1',
@@ -117,6 +126,10 @@ describe('FrameFlow internal source backend', () => {
     })
     await expect(unavailable.reserveCredits(input)).rejects.toMatchObject({
       code: 'CREDIT_SERVICE_UNAVAILABLE',
+      reservationState: 'UNKNOWN',
+    })
+    await expect(conflict.reserveCredits(input)).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_CONFLICT',
       reservationState: 'UNKNOWN',
     })
   })

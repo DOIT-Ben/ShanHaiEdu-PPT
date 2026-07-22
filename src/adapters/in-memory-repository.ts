@@ -65,7 +65,8 @@ export class InMemoryAgentRepository implements AgentRepository {
 
   async listRunsWithPendingMedia(limit: number) {
     return [...this.#runs.values()]
-      .filter((stored) => [...stored.steps.values()].some((step) => step.tool === 'generate_slide_image' && step.status === 'WAITING'))
+      .filter((stored) => [...stored.steps.values()].some((step) =>
+        step.tool === 'generate_slide_image' && ['WAITING', 'RELEASING'].includes(step.status)))
       .sort((left, right) => left.run.updatedAt.localeCompare(right.run.updatedAt) || left.run.id.localeCompare(right.run.id))
       .slice(0, limit)
       .map((stored) => stored.run.id)

@@ -29,13 +29,13 @@ function target(status: StepRecord['status']): StepRecord {
   }
 }
 
-async function fixture(status: StepRecord['status']) {
+async function fixture(status: StepRecord['status'], overrides: Partial<StepRecord> = {}) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
   const clock = new FixedClock()
   await repository.createRun(run())
-  await repository.transact('run-1', (transaction) => transaction.putStep(target(status)))
+  await repository.transact('run-1', (transaction) => transaction.putStep({ ...target(status), ...overrides }))
   const media = new MediaStepRunner({ repository, budget, images, clock })
   const service = new AdminOperationsService({ repository, budget, media, clock })
   const base = {
@@ -68,6 +68,40 @@ describe('admin operations service', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 4, version: 2 })
     expect(budget.settled).toEqual(new Set(['reservation-1']))
     expect(budget.released.size).toBe(0)
+  })
+
+  test('rejects charging a reservation that never reached the Provider', async () => {
+    const { service, base } = await fixture('RESERVATION_UNKNOWN', { budgetReservationId: null })
+
+    await expect(service.act({ ...base, action: 'MARK_CHARGED' }))
+      .rejects.toMatchObject({ code: 'STEP_NOT_RECONCILABLE' })
+  })
+
+  test('releases only Agent budget when the host proves no reservation exists', async () => {
+    const { repository, budget, service, base } = await fixture('RESERVATION_UNKNOWN', { budgetReservationId: null })
+    budget.failNext('INSUFFICIENT_CREDITS', 'NOT_RESERVED')
+
+    const result = await service.act({ ...base, action: 'MARK_NOT_CHARGED' })
+
+    expect(result.step).toMatchObject({ status: 'FAILED_NOT_CHARGED', budgetReservationId: null })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect(budget.released.size).toBe(0)
+  })
+
+  test('recovers and releases a host reservation whose response was lost', async () => {
+    const { repository, budget, service, base } = await fixture('RESERVATION_UNKNOWN', { budgetReservationId: null })
+    const recovered = await budget.reserve({
+      host: run().host,
+      model: run().imageModel,
+      units: 4,
+      idempotencyKey: 'run-1:image-1',
+    })
+
+    const result = await service.act({ ...base, action: 'MARK_NOT_CHARGED' })
+
+    expect(result.step).toMatchObject({ status: 'FAILED_NOT_CHARGED', budgetReservationId: recovered.reservationId })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect(budget.released).toEqual(new Set([recovered.reservationId]))
   })
 
   test('reinspects a late Provider result and records an audited completion', async () => {

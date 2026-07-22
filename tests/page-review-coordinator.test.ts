@@ -189,4 +189,21 @@ describe('page review coordinator', () => {
     expect(calls).toBe(6)
     expect(maximumActive).toBe(2)
   })
+
+  test('emits one human-review transition when concurrent visual reviews fail', async () => {
+    const reviewerPort: VisualReviewPort = {
+      async review() {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        throw new Error('injected review failure')
+      },
+    }
+    const { repository, coordinator } = await fixture({ reviewerPort, reviewConcurrency: 3 })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    const events = await repository.listEvents('run-1')
+    const transitions = events.filter((event) => event.type === 'phase.changed')
+    expect(transitions).toHaveLength(1)
+    expect(transitions[0]?.payload).toMatchObject({ from: 'PAGE_REVIEW', to: 'NEEDS_HUMAN' })
+    expect(events.filter((event) => event.type === 'approval.required')).toHaveLength(1)
+  })
 })

@@ -108,7 +108,11 @@ describe('media step runner', () => {
     expect(result.step).toMatchObject({ status: 'SUBMISSION_UNKNOWN', errorCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' })
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10, status: 'NEEDS_HUMAN' })
     expect(budget.released.size).toBe(0)
-    expect((await repository.listEvents('run-1')).map((event) => event.type)).toContain('issue.detected')
+    const events = await repository.listEvents('run-1')
+    expect(events.map((event) => event.type)).toContain('issue.detected')
+    expect(events.find((event) => event.type === 'phase.changed')?.payload)
+      .toMatchObject({ from: 'EXECUTING', to: 'NEEDS_HUMAN' })
+    expect(events.map((event) => event.type)).toContain('approval.required')
   })
 
   test('releases Agent budget when the host proves no credits were reserved', async () => {

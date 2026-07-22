@@ -196,6 +196,10 @@ describe('deck review runner', () => {
 
     expect(result).toMatchObject({ review: null, passed: false, step: { status: 'FAILED' } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    const events = await repository.listEvents('run-1')
+    expect(events.find((event) => event.type === 'phase.changed')?.payload)
+      .toMatchObject({ from: 'DECK_REVIEW', to: 'NEEDS_HUMAN' })
+    expect(events.map((event) => event.type)).toContain('approval.required')
   })
 
   test('replays a completed deck review without another evaluator call', async () => {

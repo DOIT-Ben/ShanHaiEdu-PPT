@@ -120,5 +120,8 @@ describe('side-effect-free visual review runner', () => {
 
     expect(result).toMatchObject({ review: null, step: { status: 'FAILED', errorCode: 'VISUAL_REVIEW_FAILED' } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
+      'tool.started', 'tool.failed', 'phase.changed', 'approval.required',
+    ])
   })
 })

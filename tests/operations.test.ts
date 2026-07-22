@@ -90,4 +90,20 @@ describe('operations report', () => {
     expect(report.totalRuns).toBe(1)
     expect(report.runs).toEqual([expect.objectContaining({ id: 'run-failed', lastErrorCode: 'PROVIDER_TIMEOUT' })])
   })
+
+  test('offers only a no-charge resolution when host reservation is unknown', () => {
+    const report = buildOperationsReport({
+      runs: [run('run-reservation', 'NEEDS_HUMAN', 'teacher-1')],
+      steps: [step({
+        id: 'step-reservation', runId: 'run-reservation', status: 'RESERVATION_UNKNOWN',
+        budgetReservationId: null, externalOperationId: null, errorCode: 'HOST_BUDGET_RESERVATION_UNKNOWN',
+      })],
+      events: [],
+      filters,
+    })
+
+    expect(report.reconciliation).toEqual([
+      expect.objectContaining({ status: 'RESERVATION_UNKNOWN', allowedActions: ['MARK_NOT_CHARGED'] }),
+    ])
+  })
 })

@@ -40,9 +40,11 @@ function reconciliationItem(step: OperationalStep, now: number, filters: Operati
     errorCode = 'STEP_SLA_EXCEEDED'
   } else if (UNKNOWN_BILLING_STATUSES.has(step.status)) {
     errorCode = step.errorCode ?? step.status
-    allowedActions = step.status === 'SUBMISSION_UNKNOWN' && step.externalOperationId
-      ? ['REINSPECT', 'MARK_NOT_CHARGED', 'MARK_CHARGED']
-      : ['MARK_NOT_CHARGED', 'MARK_CHARGED']
+    allowedActions = step.status === 'RESERVATION_UNKNOWN'
+      ? ['MARK_NOT_CHARGED']
+      : step.status === 'SUBMISSION_UNKNOWN' && step.externalOperationId
+        ? ['REINSPECT', 'MARK_NOT_CHARGED', 'MARK_CHARGED']
+        : ['MARK_NOT_CHARGED', 'MARK_CHARGED']
   } else if (step.status === 'FAILED_CHARGED') {
     errorCode = step.errorCode ?? 'FAILED_CHARGED'
     allowedActions = ['MARK_CHARGED']
