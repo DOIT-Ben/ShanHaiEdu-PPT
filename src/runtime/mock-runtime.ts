@@ -7,6 +7,7 @@ import { createHttpHandler } from '../http/handler'
 import { FrameFlowHostAdapter, type FrameFlowBackendClient } from '../adapters/frameflow-host'
 import { SharpPptxPresentationRenderer } from '../adapters/presentation-renderer'
 import { DeckReviewRunner } from '../core/deck-review-runner'
+import { AdminOperationsService } from '../core/admin-operations'
 import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
@@ -285,6 +286,8 @@ type RuntimeInput = Readonly<{
   appVersion?: string
   heartbeatStaleMs?: number
   tickStaleMs?: number
+  waitingSlaMs?: number
+  stepSlaMs?: number
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -306,6 +309,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     clock,
   })
   const media = new MediaStepRunner({ repository: input.repository, budget, images, clock })
+  const operations = new AdminOperationsService({ repository: input.repository, budget, media, clock })
   const generation = new SlideGenerationCoordinator({
     repository: input.repository,
     media,
@@ -418,6 +422,9 @@ export function createAgentRuntime(input: RuntimeInput) {
       artifacts: input.artifacts,
       authentication: new SharedTokenAuthentication(input.apiToken),
       health,
+      operations,
+      ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
+      ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
     }),
     tick,
     health,

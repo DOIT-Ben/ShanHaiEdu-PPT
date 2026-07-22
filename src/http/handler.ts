@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { HostContext } from '../contracts'
-import { apiErrorSchema, MAX_PLANNING_RETRIES } from '../contracts'
+import { apiErrorSchema, MAX_PLANNING_RETRIES, runStatusSchema } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
+import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-operations'
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
@@ -18,6 +19,9 @@ type HandlerDependencies = Readonly<{
   authentication: HostAuthenticationPort
   health: RuntimeHealthMonitor
   eventPollMs?: number
+  waitingSlaMs?: number
+  stepSlaMs?: number
+  operations?: AdminOperationsPort
 }>
 
 function publicRun(run: RunRecord) {
@@ -187,6 +191,83 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         return json({ data: report.groups, totalFailures: report.totalFailures })
       }
 
+      if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'operations' && request.method === 'GET') {
+        if ((host.role ?? 'USER') !== 'ADMIN') {
+          return errorResponse(403, 'ADMIN_REQUIRED', 'administrator role is required', requestId)
+        }
+        const statusValue = url.searchParams.get('status')
+        const status = statusValue ? runStatusSchema.safeParse(statusValue) : null
+        const externalUserId = url.searchParams.get('externalUserId')
+        const errorCode = url.searchParams.get('errorCode')
+        const createdFrom = url.searchParams.get('createdFrom')
+        const createdTo = url.searchParams.get('createdTo')
+        const offset = Number(url.searchParams.get('offset') ?? 0)
+        const limit = Number(url.searchParams.get('limit') ?? 50)
+        const validDate = (value: string | null) => value === null || (!Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value)
+        if ((status && !status.success)
+          || (externalUserId !== null && (externalUserId.length < 1 || externalUserId.length > 160 || externalUserId !== externalUserId.trim()))
+          || (errorCode !== null && (errorCode.length < 1 || errorCode.length > 100 || errorCode !== errorCode.trim()))
+          || !validDate(createdFrom) || !validDate(createdTo)
+          || (createdFrom !== null && createdTo !== null && createdFrom > createdTo)
+          || !Number.isSafeInteger(offset) || offset < 0
+          || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+          return errorResponse(422, 'INVALID_OPERATIONS_FILTER', 'operations filter is invalid', requestId)
+        }
+        const report = await dependencies.repository.getOperationsReport({
+          tenantId: host.tenantId,
+          status: status?.success ? status.data : null,
+          externalUserId,
+          errorCode,
+          createdFrom,
+          createdTo,
+          offset,
+          limit,
+          now: new Date().toISOString(),
+          waitingSlaMs: dependencies.waitingSlaMs ?? 15 * 60_000,
+          stepSlaMs: dependencies.stepSlaMs ?? 30 * 60_000,
+        })
+        return json({ data: report })
+      }
+
+      if (parts.length === 5 && parts[1] === 'admin' && parts[2] === 'operations' && parts[4] === 'actions' && request.method === 'POST') {
+        if ((host.role ?? 'USER') !== 'ADMIN') {
+          return errorResponse(403, 'ADMIN_REQUIRED', 'administrator role is required', requestId)
+        }
+        if (!dependencies.operations) return errorResponse(503, 'ADMIN_OPERATIONS_UNAVAILABLE', 'admin operations are unavailable', requestId)
+        const idempotencyKey = request.headers.get('Idempotency-Key')?.trim()
+        if (!idempotencyKey || idempotencyKey.length > 160) {
+          return errorResponse(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key is required', requestId)
+        }
+        const body = await request.json().catch(() => null) as Record<string, unknown> | null
+        const action = body?.action
+        const stepId = body?.stepId
+        const expectedVersion = body?.expectedVersion
+        const reason = body?.reason
+        if (!body || !['REINSPECT', 'MARK_NOT_CHARGED', 'MARK_CHARGED'].includes(String(action))
+          || typeof stepId !== 'string' || stepId.length < 1 || stepId.length > 160 || stepId !== stepId.trim()
+          || !Number.isSafeInteger(expectedVersion) || Number(expectedVersion) < 0
+          || typeof reason !== 'string' || reason.trim().length < 8 || reason.trim().length > 500
+          || Object.keys(body).some((key) => !['action', 'stepId', 'expectedVersion', 'reason'].includes(key))) {
+          return errorResponse(422, 'INVALID_ADMIN_ACTION', 'admin action is invalid', requestId)
+        }
+        const result = await dependencies.operations.act({
+          host,
+          runId: parts[3]!,
+          stepId,
+          action: action as 'REINSPECT' | 'MARK_NOT_CHARGED' | 'MARK_CHARGED',
+          expectedVersion: expectedVersion as number,
+          idempotencyKey,
+          reason: reason.trim(),
+        })
+        return json({
+          data: {
+            run: publicRun(result.run),
+            step: { id: result.step.id, status: result.step.status, errorCode: result.step.errorCode, updatedAt: result.step.updatedAt },
+          },
+          replayed: result.replayed,
+        })
+      }
+
       if (parts[1] !== 'runs') return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
 
       if (parts.length === 2 && request.method === 'POST') {
@@ -291,6 +372,9 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
     } catch (error) {
       if (error instanceof RunServiceError) {
+        return errorResponse(error.status, error.code, error.message, requestId)
+      }
+      if (error instanceof AdminOperationsError) {
         return errorResponse(error.status, error.code, error.message, requestId)
       }
       return errorResponse(500, 'INTERNAL_ERROR', 'an internal error occurred', requestId)

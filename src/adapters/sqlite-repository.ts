@@ -10,6 +10,7 @@ import type {
   StepRecord,
 } from '../core/ports'
 import type { DeliveryRecord } from '../presentation-contracts'
+import { buildOperationsReport, type OperationalRun, type OperationalStep } from '../core/operations'
 
 type JsonRow = { data: string }
 type SequenceRow = { sequence: number | null }
@@ -19,6 +20,27 @@ type PlanningFailureAggregateRow = {
   contractVersion: string
   count: number
   lastOccurredAt: string
+}
+type OperationalRunRow = {
+  id: string
+  tenantId: string
+  externalUserId: string
+  status: RunRecord['status']
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+type OperationalStepRow = {
+  id: string
+  runId: string
+  idempotencyKey: string
+  tool: string
+  status: StepRecord['status']
+  budgetUnits: number
+  externalOperationId: string | null
+  errorCode: string | null
+  createdAt: string
+  updatedAt: string
 }
 type CountRow = { count: number }
 type PlanningFailureQueryParameters = [
@@ -155,6 +177,54 @@ export class SqliteAgentRepository implements AgentRepository {
     return { openIssues, progress }
   }
 
+  async getOperationsReport(filters: Parameters<AgentRepository['getOperationsReport']>[0]) {
+    const runs = this.#database.query<OperationalRunRow, [string]>(`
+      SELECT
+        id,
+        json_extract(data, '$.host.tenantId') AS tenantId,
+        json_extract(data, '$.host.externalUserId') AS externalUserId,
+        json_extract(data, '$.status') AS status,
+        json_extract(data, '$.version') AS version,
+        json_extract(data, '$.createdAt') AS createdAt,
+        json_extract(data, '$.updatedAt') AS updatedAt
+      FROM agent_runs
+      WHERE json_extract(data, '$.host.tenantId') = ?
+    `).all(filters.tenantId).map((row): OperationalRun => ({
+      id: row.id,
+      host: { tenantId: row.tenantId, externalUserId: row.externalUserId },
+      status: row.status,
+      version: row.version,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }))
+    const steps = this.#database.query<OperationalStepRow, [string]>(`
+      SELECT
+        json_extract(agent_steps.data, '$.id') AS id,
+        agent_steps.run_id AS runId,
+        agent_steps.idempotency_key AS idempotencyKey,
+        json_extract(agent_steps.data, '$.tool') AS tool,
+        json_extract(agent_steps.data, '$.status') AS status,
+        json_extract(agent_steps.data, '$.budgetUnits') AS budgetUnits,
+        json_extract(agent_steps.data, '$.externalOperationId') AS externalOperationId,
+        json_extract(agent_steps.data, '$.errorCode') AS errorCode,
+        json_extract(agent_steps.data, '$.createdAt') AS createdAt,
+        json_extract(agent_steps.data, '$.updatedAt') AS updatedAt
+      FROM agent_steps
+      JOIN agent_runs ON agent_runs.id = agent_steps.run_id
+      WHERE json_extract(agent_runs.data, '$.host.tenantId') = ?
+    `).all(filters.tenantId).map((row): OperationalStep => row)
+    const events = this.#database.query<JsonRow, [string]>(`
+      SELECT agent_events.data
+      FROM agent_events
+      JOIN agent_runs ON agent_runs.id = agent_events.run_id
+      WHERE json_extract(agent_runs.data, '$.host.tenantId') = ?
+        AND json_extract(agent_events.data, '$.type') IN ('run.started', 'phase.changed', 'tool.started', 'tool.progress')
+      ORDER BY agent_events.rowid DESC
+      LIMIT 50000
+    `).all(filters.tenantId).map((row) => JSON.parse(row.data) as AgentEvent)
+    return buildOperationsReport({ runs, steps, events, filters })
+  }
+
   async listDeliveries(runId: string) {
     return this.#database.query<JsonRow, [string]>(
       'SELECT data FROM agent_deliveries WHERE run_id = ? ORDER BY rowid ASC',
@@ -224,6 +294,14 @@ export class SqliteAgentRepository implements AgentRepository {
             'SELECT data FROM agent_steps WHERE run_id = ? AND idempotency_key = ?',
           ).get(runId, idempotencyKey)
           return parseJson<StepRecord>(row)
+        },
+        listSteps: () => {
+          const stored = this.#database.query<JsonRow, [string]>(
+            'SELECT data FROM agent_steps WHERE run_id = ? ORDER BY rowid ASC',
+          ).all(runId).map((row) => JSON.parse(row.data) as StepRecord)
+          const merged = new Map(stored.map((step) => [step.idempotencyKey, step]))
+          for (const [key, step] of touchedSteps) merged.set(key, step)
+          return [...merged.values()].map((step) => structuredClone(step))
         },
         listEvents: () => {
           const stored = this.#database.query<JsonRow, [string]>(

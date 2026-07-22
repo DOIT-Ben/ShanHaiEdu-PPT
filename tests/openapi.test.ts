@@ -22,6 +22,8 @@ describe('OpenAPI v1 contract', () => {
     expect(Object.keys(document.paths).sort()).toEqual([
       '/health/live',
       '/health/ready',
+      '/v1/admin/operations',
+      '/v1/admin/operations/{runId}/actions',
       '/v1/admin/planning-failures',
       '/v1/runs',
       '/v1/runs/{runId}',
@@ -33,6 +35,8 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(document.paths['/v1/runs/{runId}/events'])).toContain('100 events')
     expect(JSON.stringify(document.paths['/v1/runs/{runId}/events'])).toContain('terminal')
     expect(document.paths['/v1/admin/planning-failures']?.get).toBeDefined()
+    expect(document.paths['/v1/admin/operations']?.get).toBeDefined()
+    expect(document.paths['/v1/admin/operations/{runId}/actions']?.post).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
     expect(document.paths['/health/ready']?.get).toBeDefined()
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)

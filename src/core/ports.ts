@@ -343,9 +343,60 @@ export type RunEventSnapshot = Readonly<{
   progress: readonly Extract<AgentEvent, { type: 'tool.progress' }>['payload'][]
 }>
 
+export type OperationsFilters = Readonly<{
+  tenantId: string
+  status: RunStatus | null
+  externalUserId: string | null
+  errorCode: string | null
+  createdFrom: string | null
+  createdTo: string | null
+  offset: number
+  limit: number
+  now: string
+  waitingSlaMs: number
+  stepSlaMs: number
+}>
+
+export type OperationsPercentiles = Readonly<{ p50: number | null; p95: number | null; p99: number | null }>
+
+export type OperationsReport = Readonly<{
+  runs: readonly Readonly<{
+    id: string
+    externalUserId: string
+    status: RunStatus
+    version: number
+    lastErrorCode: string | null
+    reconciliationCount: number
+    createdAt: string
+    updatedAt: string
+  }>[]
+  totalRuns: number
+  totalReconciliation: number
+  reconciliation: readonly Readonly<{
+    id: string
+    runId: string
+    runVersion: number
+    stepId: string
+    stepKey: string
+    status: StepStatus
+    errorCode: string
+    ageMs: number
+    allowedActions: readonly ('REINSPECT' | 'MARK_NOT_CHARGED' | 'MARK_CHARGED')[]
+    updatedAt: string
+  }>[]
+  metrics: Readonly<{
+    successRate: number | null
+    phaseLatencyMs: Readonly<Record<string, OperationsPercentiles>>
+    queueWaitMs: OperationsPercentiles
+    providerFailureRate: number | null
+    unknownBillingCount: number
+  }>
+}>
+
 export interface AgentTransaction {
   readonly run: RunRecord
   getStep(idempotencyKey: string): StepRecord | null
+  listSteps(): readonly StepRecord[]
   listEvents(): readonly AgentEvent[]
   getDelivery(deliveryId: string): DeliveryRecord | null
   putRun(run: RunRecord): void
@@ -363,6 +414,7 @@ export interface AgentRepository {
   listEvents(runId: string, afterSequence?: number): Promise<readonly AgentEvent[]>
   readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>): Promise<EventPage>
   getRunEventSnapshot(runId: string): Promise<RunEventSnapshot>
+  getOperationsReport(filters: OperationsFilters): Promise<OperationsReport>
   aggregatePlanningFailures(filters: PlanningFailureFilters): Promise<Readonly<{
     groups: readonly PlanningFailureAggregate[]
     totalFailures: number

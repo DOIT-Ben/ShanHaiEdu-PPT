@@ -46,6 +46,61 @@
         }
       }
     },
+    "/v1/admin/operations": {
+      "get": {
+        "operationId": "getOperationsReport",
+        "description": "Tenant-scoped administrator report with filtered Runs, SLA watchdog findings, reconciliation queue, and service metrics.",
+        "parameters": [
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "externalUserId", "in": "query", "schema": { "type": "string", "maxLength": 160 } },
+          { "name": "errorCode", "in": "query", "schema": { "type": "string", "maxLength": 100 } },
+          { "name": "createdFrom", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "createdTo", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Operations report" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/admin/operations/{runId}/actions": {
+      "post": {
+        "operationId": "applyOperationsAction",
+        "description": "Idempotently reinspects or manually reconciles one Step with an administrator audit event.",
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["stepId", "action", "expectedVersion", "reason"],
+                "properties": {
+                  "stepId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                  "action": { "enum": ["REINSPECT", "MARK_NOT_CHARGED", "MARK_CHARGED"] },
+                  "expectedVersion": { "type": "integer", "minimum": 0 },
+                  "reason": { "type": "string", "minLength": 8, "maxLength": 500 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Applied or replayed administrator action" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/runs": {
       "post": {
         "operationId": "createRun",

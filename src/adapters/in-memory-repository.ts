@@ -9,6 +9,7 @@ import type {
   StepRecord,
 } from '../core/ports'
 import type { DeliveryRecord } from '../presentation-contracts'
+import { buildOperationsReport } from '../core/operations'
 
 type StoredRun = {
   run: RunRecord
@@ -81,6 +82,13 @@ export class InMemoryAgentRepository implements AgentRepository {
     return { openIssues: [...issues.values()].map(clone), progress: [...progress.values()].map(clone) }
   }
 
+  async getOperationsReport(filters: Parameters<AgentRepository['getOperationsReport']>[0]) {
+    const runs = [...this.#runs.values()].map((stored) => clone(stored.run))
+    const steps = [...this.#runs.values()].flatMap((stored) => [...stored.steps.values()].map(clone))
+    const events = [...this.#runs.values()].flatMap((stored) => stored.events.map(clone))
+    return buildOperationsReport({ runs, steps, events, filters })
+  }
+
   async listDeliveries(runId: string) {
     const stored = this.#runs.get(runId)
     if (!stored) return []
@@ -142,6 +150,7 @@ export class InMemoryAgentRepository implements AgentRepository {
       const transaction: AgentTransaction = {
         get run() { return nextRun },
         getStep(idempotencyKey) { return clone(nextSteps.get(idempotencyKey) ?? null) },
+        listSteps() { return [...nextSteps.values()].map(clone) },
         listEvents() { return nextEvents.map(clone) },
         getDelivery(deliveryId) { return clone(nextDeliveries.get(deliveryId) ?? null) },
         putRun(run) { nextRun = clone(run) },

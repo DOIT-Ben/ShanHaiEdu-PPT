@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { CONTRACT_VERSION, type HostContext } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock, MockArtifactPort } from '../src/adapters/mock-ports'
+import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
+import { AdminOperationsService } from '../src/core/admin-operations'
+import { MediaStepRunner } from '../src/core/media-step-runner'
 import { RunService } from '../src/core/run-service'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
 import { RuntimeHealthMonitor } from '../src/observability/runtime-health'
@@ -34,6 +36,10 @@ function fixture() {
   const clock = new FixedClock()
   const runs = new RunService({ repository, clock })
   const artifacts = new MockArtifactPort()
+  const budget = new MockBudgetPort()
+  const images = new MockImageGenerationPort()
+  const media = new MediaStepRunner({ repository, budget, images, clock })
+  const operations = new AdminOperationsService({ repository, budget, media, clock })
   const health = new RuntimeHealthMonitor(clock, { version: 'test' })
   const handle = createHttpHandler({
     repository,
@@ -41,9 +47,10 @@ function fixture() {
     runs,
     authentication: new HeaderAuthentication(),
     health,
+    operations,
     eventPollMs: 10,
   })
-  return { repository, runs, artifacts, health, handle }
+  return { repository, runs, artifacts, budget, images, health, handle }
 }
 
 function request(path: string, init: RequestInit = {}) {
@@ -231,6 +238,64 @@ describe('HTTP v1 handler', () => {
     })
     expect(JSON.stringify(body)).not.toContain(createBody.source.text)
     expect(JSON.stringify(body)).not.toContain('request-safe-1')
+  })
+
+  test('lets only tenant administrators query filtered operations without private Run input', async () => {
+    const { repository, handle } = fixture()
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      transaction.putStep({
+        id: 'step-timeout', runId, idempotencyKey: 'step-timeout-key', inputHash: 'safe-hash',
+        tool: 'generate_slide_image', status: 'FAILED', budgetUnits: 1, budgetReservationId: null,
+        externalOperationId: null, errorCode: 'PROVIDER_TIMEOUT', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    expect((await handle(request('/v1/admin/operations'))).status).toBe(403)
+    const invalid = await handle(request('/v1/admin/operations?status=UNKNOWN', { headers: { 'X-Test-Role': 'ADMIN' } }))
+    expect(invalid.status).toBe(422)
+    const response = await handle(request('/v1/admin/operations?externalUserId=user-1&errorCode=PROVIDER_TIMEOUT', {
+      headers: { 'X-Test-Role': 'ADMIN' },
+    }))
+    const body = await response.json() as { data: { runs: Array<Record<string, unknown>>; totalRuns: number } }
+    expect(response.status).toBe(200)
+    expect(body.data.totalRuns).toBe(1)
+    expect(body.data.runs[0]).toMatchObject({ id: runId, externalUserId: 'user-1', lastErrorCode: 'PROVIDER_TIMEOUT' })
+    expect(JSON.stringify(body)).not.toContain(createBody.source.text)
+  })
+
+  test('applies and replays an audited administrator accounting action', async () => {
+    const { repository, budget, handle } = fixture()
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 1, committedBudgetUnits: 1 })
+      transaction.putStep({
+        id: 'step-unknown', runId, idempotencyKey: 'step-unknown-key', inputHash: 'safe-hash',
+        tool: 'generate_slide_image', status: 'SUBMISSION_UNKNOWN', budgetUnits: 1,
+        budgetReservationId: 'reservation-1', externalOperationId: null,
+        errorCode: 'PROVIDER_SUBMISSION_UNKNOWN', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+    const action = JSON.stringify({
+      stepId: 'step-unknown', action: 'MARK_NOT_CHARGED', expectedVersion: 1,
+      reason: '已核对供应商后台，确认没有产生费用。',
+    })
+    const send = () => handle(request(`/v1/admin/operations/${runId}/actions`, {
+      method: 'POST',
+      headers: { 'X-Test-Role': 'ADMIN', 'Content-Type': 'application/json', 'Idempotency-Key': 'admin-http-1' },
+      body: action,
+    }))
+    const first = await send()
+    const replay = await send()
+
+    expect(first.status).toBe(200)
+    expect(await first.json()).toMatchObject({ data: { step: { status: 'FAILED_NOT_CHARGED' } }, replayed: false })
+    expect(await replay.json()).toMatchObject({ data: { step: { status: 'FAILED_NOT_CHARGED' } }, replayed: true })
+    expect(budget.released).toEqual(new Set(['reservation-1']))
   })
 
   test('returns owned delivery metadata and streams only the selected controlled artifact', async () => {
