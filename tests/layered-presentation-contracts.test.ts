@@ -159,4 +159,27 @@ describe('layered courseware v3 contract', () => {
     Object.assign(element, { sourceAssetIds: [] })
     expect(() => presentationBlueprintSchema.parse(reusable)).toThrow('source asset reuse requires a source asset id')
   })
+
+  test('requires a complete search intent for web-discovered assets', () => {
+    const searchable = layeredBlueprint()
+    const element = searchable.slides[1]!.layeredDesign.elements[1]!
+    if (element.kind !== 'IMAGE') throw new Error('expected image element')
+    Object.assign(element, {
+      sourceAssetStrategy: 'SEARCH_WEB',
+      assetIntent: {
+        searchQueries: ['three red apples isolated', '三个红苹果'],
+        mediaType: 'PHOTO',
+        styleKeywords: ['bright classroom', 'clean lighting'],
+        transparencyPreference: 'PREFER_TRANSPARENT',
+      },
+    })
+    expect(presentationBlueprintSchema.parse(searchable).slides[1]!.layeredDesign!.elements[1])
+      .toMatchObject({ sourceAssetStrategy: 'SEARCH_WEB' })
+
+    const invalid = layeredBlueprint()
+    const invalidElement = invalid.slides[1]!.layeredDesign.elements[1]!
+    if (invalidElement.kind !== 'IMAGE') throw new Error('expected image element')
+    Object.assign(invalidElement, { sourceAssetStrategy: 'SEARCH_WEB' })
+    expect(() => presentationBlueprintSchema.parse(invalid)).toThrow('web asset search requires an explicit asset intent')
+  })
 })

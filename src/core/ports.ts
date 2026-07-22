@@ -1,5 +1,5 @@
 import type { AgentEvent, CreateRunRequest, HostContext, RunStatus } from '../contracts'
-import type { DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } from '../presentation-contracts'
+import type { AssetIntent, DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } from '../presentation-contracts'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -117,6 +117,44 @@ export interface ImageGenerationPort {
     | Readonly<{ state: 'COMPLETED'; artifactId: string }>
     | Readonly<{ state: 'FAILED'; errorCode: string; billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN' }>
   >
+}
+
+export type AssetLicense = 'PUBLIC_DOMAIN' | 'CC0' | 'CC_BY'
+
+export type AssetCandidate = Readonly<{
+  provider: 'WIKIMEDIA_COMMONS' | 'OPENVERSE'
+  providerAssetId: string
+  title: string
+  sourceUrl: string
+  downloadUrl: string
+  creator: string | null
+  license: AssetLicense
+  licenseUrl: string
+  attribution: string | null
+  mimeType: SourceAsset['mimeType']
+  width: number
+  height: number
+}>
+
+export type AcquiredWebAsset = Readonly<{
+  candidate: AssetCandidate
+  bytes: Uint8Array
+  sha256: string
+}>
+
+export interface AssetDiscoveryPort {
+  search(input: Readonly<{
+    tenantId: string
+    intent: AssetIntent
+    aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+    idempotencyKey: string
+  }>): Promise<readonly AssetCandidate[]>
+
+  acquire(input: Readonly<{
+    tenantId: string
+    candidate: AssetCandidate
+    idempotencyKey: string
+  }>): Promise<AcquiredWebAsset>
 }
 
 export interface VisualReviewPort {

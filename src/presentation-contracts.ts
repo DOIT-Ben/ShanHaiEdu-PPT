@@ -5,6 +5,13 @@ const sourceChunkIdsSchema = z.array(identifierSchema).min(1).max(200)
 const sourceAssetIdsSchema = z.array(identifierSchema).max(200).optional()
 const hexColorSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/)
 
+export const assetIntentSchema = z.object({
+  searchQueries: z.array(z.string().trim().min(2).max(160)).min(1).max(6),
+  mediaType: z.enum(['PHOTO', 'ILLUSTRATION', 'ICON', 'DIAGRAM', 'TEXTURE']),
+  styleKeywords: z.array(z.string().trim().min(2).max(80)).min(1).max(8),
+  transparencyPreference: z.enum(['PREFER_TRANSPARENT', 'PREFER_OPAQUE', 'EITHER']),
+}).strict()
+
 export const slideElementPlacementSchema = z.object({
   x: z.number().min(0).max(1),
   y: z.number().min(0).max(1),
@@ -25,7 +32,8 @@ export const layeredImageElementSchema = z.object({
   negativePrompt: z.string().trim().min(3).max(1_000),
   sourceChunkIds: sourceChunkIdsSchema,
   sourceAssetIds: sourceAssetIdsSchema,
-  sourceAssetStrategy: z.enum(['REUSE_ORIGINAL', 'REFERENCE_GENERATION', 'REGENERATE']).optional(),
+  sourceAssetStrategy: z.enum(['REUSE_ORIGINAL', 'REFERENCE_GENERATION', 'SEARCH_WEB', 'REGENERATE']).optional(),
+  assetIntent: assetIntentSchema.optional(),
   placement: slideElementPlacementSchema,
   zIndex: z.number().int().min(0).max(100),
   fit: z.enum(['COVER', 'CONTAIN']),
@@ -33,11 +41,17 @@ export const layeredImageElementSchema = z.object({
   backgroundMode: z.enum(['OPAQUE', 'TRANSPARENT']),
   reuseKey: identifierSchema.optional(),
 }).strict().superRefine((value, context) => {
-  if (value.sourceAssetStrategy && value.sourceAssetStrategy !== 'REGENERATE' && (value.sourceAssetIds?.length ?? 0) === 0) {
+  if (value.sourceAssetStrategy && !['REGENERATE', 'SEARCH_WEB'].includes(value.sourceAssetStrategy) && (value.sourceAssetIds?.length ?? 0) === 0) {
     context.addIssue({ code: 'custom', path: ['sourceAssetIds'], message: 'source asset reuse requires a source asset id' })
   }
-  if (value.sourceAssetStrategy && value.sourceAssetStrategy !== 'REGENERATE' && (value.sourceAssetIds?.length ?? 0) > 1) {
+  if (value.sourceAssetStrategy && !['REGENERATE', 'SEARCH_WEB'].includes(value.sourceAssetStrategy) && (value.sourceAssetIds?.length ?? 0) > 1) {
     context.addIssue({ code: 'custom', path: ['sourceAssetIds'], message: 'one image element must reference exactly one source asset' })
+  }
+  if (value.sourceAssetStrategy === 'SEARCH_WEB' && !value.assetIntent) {
+    context.addIssue({ code: 'custom', path: ['assetIntent'], message: 'web asset search requires an explicit asset intent' })
+  }
+  if (value.sourceAssetStrategy === 'SEARCH_WEB' && (value.sourceAssetIds?.length ?? 0) > 0) {
+    context.addIssue({ code: 'custom', path: ['sourceAssetIds'], message: 'web asset search cannot reference source assets' })
   }
 })
 
@@ -373,6 +387,7 @@ export const deliveryRecordSchema = z.object({
 
 export type BlueprintDraft = z.infer<typeof blueprintDraftSchema>
 export type PresentationBlueprint = z.infer<typeof presentationBlueprintSchema>
+export type AssetIntent = z.infer<typeof assetIntentSchema>
 export type SlideVisualReview = z.infer<typeof slideVisualReviewSchema>
 export type DeckReviewIssue = z.infer<typeof deckReviewIssueSchema>
 export type DeckReviewDraft = z.infer<typeof deckReviewDraftSchema>

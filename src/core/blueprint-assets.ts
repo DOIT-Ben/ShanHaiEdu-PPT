@@ -13,8 +13,9 @@ export type BlueprintImageRequirement = Readonly<{
   negativePrompt: string | null
   aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
   backgroundMode: 'OPAQUE' | 'TRANSPARENT'
+  assetIntent: Extract<NonNullable<PresentationBlueprint['slides'][number]['layeredDesign']>['elements'][number], { kind: 'IMAGE' }>['assetIntent'] | null
   sourceAssetIds: readonly string[]
-  sourceAssetStrategy: 'REUSE_ORIGINAL' | 'REFERENCE_GENERATION' | 'REGENERATE'
+  sourceAssetStrategy: 'REUSE_ORIGINAL' | 'REFERENCE_GENERATION' | 'SEARCH_WEB' | 'REGENERATE'
 }>
 
 export function blueprintElementAssetKey(
@@ -44,6 +45,7 @@ export function blueprintImageRequirements(
       negativePrompt: null,
       aspectRatio: '16:9',
       backgroundMode: 'OPAQUE',
+      assetIntent: null,
       sourceAssetIds: [],
       sourceAssetStrategy: 'REGENERATE',
     }))
@@ -69,6 +71,7 @@ export function blueprintImageRequirements(
         negativePrompt: element.negativePrompt,
         aspectRatio: element.aspectRatio,
         backgroundMode: element.backgroundMode,
+        assetIntent: element.assetIntent ?? null,
         sourceAssetIds: element.sourceAssetIds ?? [],
         sourceAssetStrategy,
       })
