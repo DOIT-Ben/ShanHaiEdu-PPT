@@ -61,12 +61,13 @@ bun run check
 
 - 发布目录：`/opt/ppt-agent/releases/<timestamp>`，当前版本由 `/opt/ppt-agent/current` 原子软链接指向。
 - 持久化目录：`/opt/ppt-agent/shared/data`，环境文件为 `/opt/ppt-agent/shared/ppt-agent.env`，权限 `600`。
+- `ppt-agent-backup.timer` 每日一致性备份 SQLite 与受控产物到 `/opt/ppt-agent/shared/data-backups`，默认保留 14 天。
 - 服务只监听 `127.0.0.1:4310`，由 FrameFlow 服务端调用，不经 Nginx 暴露公网。
 - systemd 模板和环境示例位于 `deploy/aliyun/`。
-- 本轮代码尚未发布生产；首次启动新版本会对 SQLite 增加可回退的查询列和索引，发布前必须停服备份数据目录并验证快照。
+- 2026-07-23 加固版本已发布生产；SQLite 查询列和索引迁移已在停服备份及完整性校验后完成。
 - FrameFlow 必须先接受新的 `FRAMEFLOW_INTERNAL_TOKEN`；回退窗口内保留旧出站凭据兼容，避免旧版本回退后无法读取附件或结算预算。
 
-发布、验证和数据回退条件见 `docs/deployment-20260723-hardening-plan.md`。真实 Provider 预检和正式上线仍需单独授权。
+发布、验证和数据回退条件见 `docs/deployment-20260723-hardening-plan.md`。真实计费 Provider 预检仍需单独授权，正式验收不以产生费用为前提。
 
 回退时把 `current` 指回上一版本并重启：
 

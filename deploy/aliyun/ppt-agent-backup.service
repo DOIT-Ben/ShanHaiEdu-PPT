@@ -1,0 +1,19 @@
+[Unit]
+Description=PPT Agent SQLite and artifact backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=ppt-agent
+Group=ppt-agent
+WorkingDirectory=/opt/ppt-agent/current
+EnvironmentFile=/opt/ppt-agent/shared/ppt-agent.env
+Environment=PPT_AGENT_BACKUP_ROOT=/opt/ppt-agent/shared/data-backups
+Environment=PPT_AGENT_BACKUP_RETENTION_DAYS=14
+ExecStart=/usr/local/bin/bun scripts/backup-ppt-agent-data.mjs
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ppt-agent/shared/data-backups
