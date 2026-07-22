@@ -11,7 +11,9 @@ describe('OpenAPI v1 contract', () => {
       security: unknown[]
       paths: Record<string, Record<string, unknown>>
       components: {
-        parameters: Record<string, { required?: boolean }>
+        parameters: Record<string, { name?: string; required?: boolean }>
+        responses: Record<string, { headers?: Record<string, unknown> }>
+        securitySchemes: Record<string, { description?: string }>
         schemas: Record<string, { oneOf?: Array<{ properties?: Record<string, { const?: string }> }>; properties?: Record<string, { enum?: string[] }> }>
       }
     }
@@ -42,6 +44,19 @@ describe('OpenAPI v1 contract', () => {
     expect(document.paths['/health/live']?.get).toBeDefined()
     expect(document.paths['/health/ready']?.get).toBeDefined()
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
+    expect(document.components.parameters.TenantId).toMatchObject({ name: 'X-PPT-Agent-Tenant', required: true })
+    expect(document.components.parameters.ExternalUserId).toMatchObject({ name: 'X-PPT-Agent-User', required: true })
+    expect(document.components.parameters.ExternalProjectId).toMatchObject({ name: 'X-PPT-Agent-Project', required: false })
+    expect(document.components.responses.RateLimited?.headers?.['Retry-After']).toBeDefined()
+    expect(document.components.securitySchemes.bearerAuth?.description).toContain('administrator')
+    for (const path of ['/v1/runs', '/v1/runs/{runId}/actions', '/v1/admin/operations/{runId}/actions']) {
+      expect(JSON.stringify(document.paths[path]?.parameters)).toContain('#/components/parameters/TenantId')
+      expect(JSON.stringify(document.paths[path]?.parameters)).toContain('#/components/parameters/ExternalUserId')
+    }
+    expect(JSON.stringify(document.paths['/v1/runs']?.post)).toContain('#/components/responses/RateLimited')
+    expect(JSON.stringify(document.paths['/v1/runs/{runId}/actions']?.post)).toContain('#/components/responses/RateLimited')
+    expect(JSON.stringify(document.paths['/v1/admin/operations/{runId}/actions']?.post)).toContain('#/components/responses/RateLimited')
+    expect(JSON.stringify(document.paths['/v1/runs']?.get)).toContain('keyset')
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
     expect(document.components.schemas.CreateRunRequest?.properties?.assetAcquisitionPolicy?.enum)

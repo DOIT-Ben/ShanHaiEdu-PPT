@@ -3,7 +3,7 @@
   "info": {
     "title": "PPT Agent API",
     "version": "1.0.0",
-    "description": "Host-independent API for durable PPT Agent runs."
+    "description": "Host-independent API for durable PPT Agent runs. Bearer credentials are tenant-bound; user and administrator credentials are distinct, and host identity headers are canonicalized by the service."
   },
   "servers": [{ "url": "/" }],
   "security": [{ "bearerAuth": [] }],
@@ -30,6 +30,11 @@
       }
     },
     "/v1/admin/planning-failures": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "get": {
         "operationId": "aggregatePlanningFailures",
         "description": "Tenant-scoped, administrator-only aggregation of redacted planning failures.",
@@ -47,6 +52,11 @@
       }
     },
     "/v1/admin/operations": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "get": {
         "operationId": "getOperationsReport",
         "description": "Tenant-scoped administrator report with filtered Runs, SLA watchdog findings, reconciliation queue, and service metrics.",
@@ -68,6 +78,11 @@
       }
     },
     "/v1/admin/operations/{runId}/actions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "post": {
         "operationId": "applyOperationsAction",
         "description": "Idempotently reinspects or manually reconciles one Step with an administrator audit event.",
@@ -95,6 +110,7 @@
         },
         "responses": {
           "200": { "description": "Applied or replayed administrator action" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
           "403": { "$ref": "#/components/responses/Error" },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
@@ -102,8 +118,14 @@
       }
     },
     "/v1/runs": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "post": {
         "operationId": "createRun",
+        "description": "Creates a Run for the authenticated tenant and user. Explicit role or project fields in the body must match the authenticated context; the persisted host context is always taken from authentication.",
         "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
@@ -112,14 +134,16 @@
         "responses": {
           "201": { "description": "Run created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } } },
           "200": { "description": "Idempotent replay", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } } },
+          "429": { "$ref": "#/components/responses/RateLimited" },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }
       },
       "get": {
         "operationId": "listRuns",
+        "description": "Returns owner-scoped Runs using a stable updatedAt/id keyset cursor. A cursor remains usable even if its source row is no longer present.",
         "parameters": [
-          { "name": "cursor", "in": "query", "schema": { "type": "string" } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "maxLength": 512 } },
           { "name": "pageSize", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
         ],
         "responses": {
@@ -130,6 +154,11 @@
       }
     },
     "/v1/runs/{runId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "get": {
         "operationId": "getRun",
         "parameters": [{ "$ref": "#/components/parameters/RunId" }],
@@ -141,6 +170,11 @@
       }
     },
     "/v1/runs/{runId}/actions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "post": {
         "operationId": "applyRunAction",
         "parameters": [
@@ -153,12 +187,18 @@
         },
         "responses": {
           "200": { "description": "Updated Run" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }
       }
     },
     "/v1/runs/{runId}/events": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "get": {
         "operationId": "streamRunEvents",
         "description": "Replays durable events after the supplied cursor in batches of at most 100 events and 256 KiB, then shares one live poller per Run. The stream closes after a terminal run.completed, run.failed, or run.cancelled event. Clients reconnect with Last-Event-ID or after and must ignore event ids they have already applied.",
@@ -178,6 +218,11 @@
       }
     },
     "/v1/runs/{runId}/events/history": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "get": {
         "operationId": "listRunEventHistory",
         "description": "Returns durable Run events after the supplied cursor as a JSON page bounded to at most 100 events and 256 KiB. Clients follow pagination.nextAfter while pagination.hasMore is true before opening the live SSE stream.",
@@ -214,6 +259,11 @@
       }
     },
     "/v1/runs/{runId}/deliveries/{deliveryId}/content": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
       "get": {
         "operationId": "downloadDeliveryContent",
         "parameters": [
@@ -231,15 +281,33 @@
   },
   "components": {
     "securitySchemes": {
-      "bearerAuth": { "type": "http", "scheme": "bearer" }
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Tenant-bound service credential. User credentials cannot request administrator role; administrator endpoints require the tenant's distinct administrator credential."
+      }
     },
     "parameters": {
       "RunId": { "name": "runId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
-      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" } }
+      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" } },
+      "TenantId": { "name": "X-PPT-Agent-Tenant", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+      "ExternalUserId": { "name": "X-PPT-Agent-User", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+      "ExternalProjectId": { "name": "X-PPT-Agent-Project", "in": "header", "required": false, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
     },
     "responses": {
       "Error": {
         "description": "Structured error",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "RateLimited": {
+        "description": "The authenticated tenant/user write quota is exhausted for the current fixed window.",
+        "headers": {
+          "Retry-After": {
+            "required": true,
+            "description": "Whole seconds until the principal can retry.",
+            "schema": { "type": "integer", "minimum": 1 }
+          }
+        },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
       }
     },
@@ -307,7 +375,7 @@
           "tenantId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "externalUserId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "externalProjectId": { "type": "string", "minLength": 1, "maxLength": 160 },
-          "role": { "enum": ["USER", "ADMIN"], "default": "USER" }
+          "role": { "enum": ["USER", "ADMIN"], "default": "USER", "description": "Derived from the authenticated service credential. Supplying this field in a create body cannot grant a different role." }
         }
       },
       "DocumentSource": {
