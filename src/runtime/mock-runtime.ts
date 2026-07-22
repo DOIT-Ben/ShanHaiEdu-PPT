@@ -303,6 +303,7 @@ type RuntimeInput = Readonly<{
   stepSlaMs?: number
   workerId?: string
   workerConcurrency?: number
+  reviewConcurrency?: number
   runLeaseTtlMs?: number
 }>
 
@@ -355,6 +356,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     artifacts: input.artifacts,
     renderer,
     clock,
+    ...(input.reviewConcurrency === undefined ? {} : { reviewConcurrency: input.reviewConcurrency }),
   })
   const deck = new DeckReviewRunner({
     repository: input.repository,

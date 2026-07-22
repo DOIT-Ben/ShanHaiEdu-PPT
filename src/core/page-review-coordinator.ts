@@ -1,4 +1,5 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { mapWithConcurrency } from './concurrency'
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
 import { renderAndStoreSlidePreviews, requirePresentationArtifactReferences } from './presentation-render-input'
@@ -15,13 +16,21 @@ export type ReviewAllPagesResult = Readonly<{
 }>
 
 export class PageReviewCoordinator {
+  private readonly reviewConcurrency: number
+
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     reviewer: VisualReviewRunner
     artifacts: ArtifactPort
     renderer: PresentationRendererPort
     clock: ClockPort
-  }>) {}
+    reviewConcurrency?: number
+  }>) {
+    this.reviewConcurrency = dependencies.reviewConcurrency ?? 3
+    if (!Number.isSafeInteger(this.reviewConcurrency) || this.reviewConcurrency < 1 || this.reviewConcurrency > 8) {
+      throw new Error('REVIEW_CONCURRENCY_INVALID')
+    }
+  }
 
   async reviewAll(runId: string): Promise<ReviewAllPagesResult> {
     const run = await this.dependencies.repository.getRun(runId)
@@ -37,7 +46,9 @@ export class PageReviewCoordinator {
     if (imageSteps.some((step) => step === null)) throw new Error('PAGE_ARTIFACTS_INCOMPLETE')
 
     const reviews: ReviewSlideResult[] = []
-    for (const [index, requirement] of requirements.entries()) {
+    let stopReviews = false
+    const assetReviews = await mapWithConcurrency(requirements, this.reviewConcurrency, async (requirement, index) => {
+      if (stopReviews) return null
       const slide = blueprint.slides.find((candidate) => candidate.pageNumber === requirement.pageNumber)
       if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
       const imageStep = imageSteps[index]
@@ -54,10 +65,10 @@ export class PageReviewCoordinator {
         layout: requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
       })
-      reviews.push(result)
-      const latest = await this.dependencies.repository.getRun(runId)
-      if (!latest || latest.status === 'NEEDS_HUMAN') break
-    }
+      if (result.review === null) stopReviews = true
+      return result
+    })
+    reviews.push(...assetReviews.filter((result): result is ReviewSlideResult => result !== null))
 
     let rejected = reviews.filter((result) => result.review && !result.review.approved).length
     if (!reviews.some((result) => result.review === null) && rejected === 0) {
@@ -71,11 +82,13 @@ export class PageReviewCoordinator {
           references,
           idempotencyPrefix: `${run.id}:page-review:r${run.revisionRound}`,
         })
-        for (const preview of previews) {
+        stopReviews = false
+        const compositeReviews = await mapWithConcurrency(previews, this.reviewConcurrency, async (preview) => {
+          if (stopReviews) return null
           const slide = blueprint.slides.find((candidate) => candidate.pageNumber === preview.pageNumber)
           if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
           const key = `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review`
-          reviews.push(await this.dependencies.reviewer.review({
+          const result = await this.dependencies.reviewer.review({
             runId,
             stepId: `step-${run.id}-slide-${slide.pageNumber}-composite-review-r${run.revisionRound}`,
             idempotencyKey: key,
@@ -85,10 +98,11 @@ export class PageReviewCoordinator {
             visualIntent: `${slide.visualIntent}；审查完整组装页面的知识相关性、文字可读性、遮挡、层级和越界`,
             layout: `COMPOSITE:${slide.layout}`,
             visualDirection: blueprint.visualDirection,
-          }))
-          const latest = await this.dependencies.repository.getRun(runId)
-          if (!latest || latest.status === 'NEEDS_HUMAN') break
-        }
+          })
+          if (result.review === null) stopReviews = true
+          return result
+        })
+        reviews.push(...compositeReviews.filter((result): result is ReviewSlideResult => result !== null))
       } catch {
         await this.moveToHuman(runId, 'PAGE_COMPOSITE_REVIEW_FAILED')
       }

@@ -8,7 +8,7 @@ import {
 } from '../src/adapters/mock-ports'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { planningStepKey } from '../src/core/planning-runner'
-import type { RunRecord } from '../src/core/ports'
+import type { RunRecord, VisualReviewPort } from '../src/core/ports'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 
 function run(): RunRecord {
@@ -65,9 +65,12 @@ function blueprint() {
   }
 }
 
-async function fixture() {
+async function fixture(options: Readonly<{
+  reviewerPort?: VisualReviewPort
+  reviewConcurrency?: number
+}> = {}) {
   const repository = new InMemoryAgentRepository()
-  const reviewerPort = new MockVisualReviewPort({
+  const reviewerPort = options.reviewerPort ?? new MockVisualReviewPort({
     approved: true,
     textDetected: false,
     visualScore: 90,
@@ -116,7 +119,14 @@ async function fixture() {
     repository,
     reviewerPort,
     renderer,
-    coordinator: new PageReviewCoordinator({ repository, reviewer, artifacts, renderer, clock }),
+    coordinator: new PageReviewCoordinator({
+      repository,
+      reviewer,
+      artifacts,
+      renderer,
+      clock,
+      ...(options.reviewConcurrency === undefined ? {} : { reviewConcurrency: options.reviewConcurrency }),
+    }),
   }
 }
 
@@ -126,7 +136,7 @@ describe('page review coordinator', () => {
     const result = await coordinator.reviewAll('run-1')
 
     expect(result).toMatchObject({ status: 'DECK_REVIEW', approved: 6, rejected: 0, total: 6 })
-    expect(reviewerPort.reviews.size).toBe(6)
+    expect((reviewerPort as MockVisualReviewPort).reviews.size).toBe(6)
     expect(renderer.slidePreviewCalls).toBe(1)
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'DECK_REVIEW', version: 6 })
   })
@@ -135,7 +145,7 @@ describe('page review coordinator', () => {
     const { repository, reviewerPort, coordinator } = await fixture()
     const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
     const artifactId = (imageStep.output as { artifactId: string }).artifactId
-    reviewerPort.respondToArtifact(artifactId, {
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(artifactId, {
       approved: false,
       textDetected: true,
       visualScore: 35,
@@ -156,6 +166,27 @@ describe('page review coordinator', () => {
 
     expect(replay).toMatchObject({ status: 'DECK_REVIEW', approved: 6, total: 6 })
     expect(first.approved).toBe(replay.approved)
-    expect(reviewerPort.reviews.size).toBe(6)
+    expect((reviewerPort as MockVisualReviewPort).reviews.size).toBe(6)
+  })
+
+  test('runs visual reviews with configured bounded concurrency', async () => {
+    let active = 0
+    let maximumActive = 0
+    let calls = 0
+    const reviewerPort: VisualReviewPort = {
+      async review() {
+        calls += 1
+        active += 1
+        maximumActive = Math.max(maximumActive, active)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        active -= 1
+        return { approved: true, textDetected: false, visualScore: 90, reasons: [], retryInstruction: null }
+      },
+    }
+    const { coordinator } = await fixture({ reviewerPort, reviewConcurrency: 2 })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', approved: 6 })
+    expect(calls).toBe(6)
+    expect(maximumActive).toBe(2)
   })
 })

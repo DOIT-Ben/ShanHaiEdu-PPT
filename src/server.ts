@@ -35,6 +35,7 @@ const tickStaleMs = boundedMilliseconds('PPT_AGENT_TICK_STALE_MS', 15 * 60_000, 
 const waitingSlaMs = boundedMilliseconds('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
 const stepSlaMs = boundedMilliseconds('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
 const workerConcurrency = boundedMilliseconds('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
+const reviewConcurrency = boundedMilliseconds('PPT_AGENT_REVIEW_CONCURRENCY', 3, 1, 8)
 const runLeaseTtlMs = boundedMilliseconds('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
 if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
 function loopbackProxy(value: string | undefined) {
@@ -86,12 +87,13 @@ const runtime = runtimeMode === 'gateway'
         waitingSlaMs,
         stepSlaMs,
         workerConcurrency,
+        reviewConcurrency,
         runLeaseTtlMs,
       })
     })()
   : createMockRuntime({
       repository, artifacts, apiToken, appVersion, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
-      workerConcurrency, runLeaseTtlMs,
+      workerConcurrency, reviewConcurrency, runLeaseTtlMs,
     })
 let ticking = false
 const timer = setInterval(async () => {
