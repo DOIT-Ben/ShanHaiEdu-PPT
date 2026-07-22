@@ -77,7 +77,9 @@ export class SlideGenerationCoordinator {
         unresolvedRequirements.push(requirement)
         continue
       }
-      const completed = await this.tryCompleteWebAsset(run, requirement)
+      const completed = run.assetAcquisitionPolicy === 'SEARCH_FIRST'
+        ? await this.tryCompleteWebAsset(run, requirement)
+        : null
       if (!completed) {
         unresolvedRequirements.push(requirement)
         continue

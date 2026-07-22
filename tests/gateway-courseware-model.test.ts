@@ -80,6 +80,7 @@ describe('gateway courseware model', () => {
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', idempotencyKey: 'plan-1',
       payload: {
         slideCount: 2, presentationMode: 'LAYERED_COURSEWARE_V3', coverDesignMode: 'INDEPENDENT',
+        assetAcquisitionPolicy: 'SEARCH_FIRST',
         document: { name: '数学教材.txt', chunks: [{ id: 'chunk-1', text: '三个苹果表示数量三。' }] },
       },
     })

@@ -378,7 +378,7 @@
           "caption": { "type": "string", "minLength": 1, "maxLength": 500 },
           "ocrText": { "type": "string", "minLength": 1, "maxLength": 2000 }
         },
-        "description": "Persisted source lineage metadata. Raw image bytes are intentionally excluded. Slides and editable IMAGE/TEXT elements reference these records through sourceAssetIds; IMAGE elements use REUSE_ORIGINAL, REFERENCE_GENERATION, or REGENERATE."
+        "description": "Persisted source lineage metadata. Raw image bytes are intentionally excluded. Slides and editable IMAGE/TEXT elements reference these records through sourceAssetIds; IMAGE elements use REUSE_ORIGINAL, REFERENCE_GENERATION, SEARCH_WEB, or REGENERATE."
       },
       "CreateRunRequest": {
         "type": "object",
@@ -396,6 +396,7 @@
           "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 },
           "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "LAYERED_COURSEWARE_V3"], "default": "SLIDE_IMAGE_V2" },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"], "default": "INDEPENDENT" },
+          "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"], "default": "AI_FIRST" },
           "maxVisualAssetsPerSlide": { "type": "integer", "minimum": 1, "maximum": 4, "default": 4 }
         }
       },
@@ -420,7 +421,7 @@
       },
       "PublicRun": {
         "type": "object",
-        "required": ["id", "host", "status", "version", "slideCount", "presentationMode", "coverDesignMode", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityOverride", "createdAt", "updatedAt"],
+        "required": ["id", "host", "status", "version", "slideCount", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityOverride", "createdAt", "updatedAt"],
         "properties": {
           "id": { "type": "string" },
           "host": { "$ref": "#/components/schemas/HostContext" },
@@ -432,6 +433,7 @@
           "maxPlanningRetries": { "const": 2 },
           "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "LAYERED_COURSEWARE_V3"] },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"] },
+          "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"] },
           "maxVisualAssetsPerSlide": { "type": "integer" },
           "budgetUnits": { "type": "integer" },
           "committedBudgetUnits": { "type": "integer" },

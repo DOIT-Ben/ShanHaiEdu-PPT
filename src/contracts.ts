@@ -32,6 +32,7 @@ export const runStatusSchema = z.enum([
 export const automationLevelSchema = z.enum(['SUPERVISED', 'BOUNDED_AUTO'])
 export const presentationModeSchema = z.enum(['SLIDE_IMAGE_V2', 'LAYERED_COURSEWARE_V3'])
 export const coverDesignModeSchema = z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE'])
+export const assetAcquisitionPolicySchema = z.enum(['AI_FIRST', 'SEARCH_FIRST'])
 
 export const documentSourceSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -85,6 +86,7 @@ export const createRunRequestSchema = z.object({
   maxRevisionRounds: z.number().int().min(0).max(2).default(2),
   presentationMode: presentationModeSchema.default('SLIDE_IMAGE_V2'),
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
+  assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
 }).strict()
 
@@ -225,6 +227,7 @@ export const runSnapshotSchema = z.object({
   qualityOverride: z.boolean(),
   presentationMode: presentationModeSchema.default('SLIDE_IMAGE_V2'),
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
+  assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
   issues: z.array(issueSummarySchema),
   createdAt: z.string().datetime(),
@@ -291,6 +294,7 @@ export type HostContext = z.infer<typeof hostContextSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
 export type PresentationMode = z.infer<typeof presentationModeSchema>
 export type CoverDesignMode = z.infer<typeof coverDesignModeSchema>
+export type AssetAcquisitionPolicy = z.infer<typeof assetAcquisitionPolicySchema>
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>
 export type RunAction = z.infer<typeof runActionSchema>
 export type PlanningFailure = z.infer<typeof planningFailureSchema>

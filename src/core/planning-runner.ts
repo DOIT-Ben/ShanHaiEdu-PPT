@@ -39,6 +39,7 @@ export type PlanPresentationInput = Readonly<{
   visualDirection: string
   presentationMode?: CreateRunRequest['presentationMode']
   coverDesignMode?: CreateRunRequest['coverDesignMode']
+  assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
   attempt?: number
 }>
@@ -92,6 +93,7 @@ export class PlanningRunner {
       visualDirection: input.visualDirection,
       presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+      assetAcquisitionPolicy: input.assetAcquisitionPolicy ?? 'AI_FIRST',
       maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
       document: {
         name: document.name,
@@ -325,6 +327,7 @@ export class PlanningRunner {
       visualDirection: input.visualDirection,
       presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+      assetAcquisitionPolicy: input.assetAcquisitionPolicy ?? 'AI_FIRST',
       maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
       document: {
         name: document.name,

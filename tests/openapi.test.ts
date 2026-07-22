@@ -42,6 +42,10 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
+    expect(document.components.schemas.CreateRunRequest?.properties?.assetAcquisitionPolicy?.enum)
+      .toEqual(['AI_FIRST', 'SEARCH_FIRST'])
+    expect(document.components.schemas.PublicRun?.properties?.assetAcquisitionPolicy?.enum)
+      .toEqual(['AI_FIRST', 'SEARCH_FIRST'])
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
       'RETRY_PLANNING', 'RETRY_DELIVERY', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
     ]))

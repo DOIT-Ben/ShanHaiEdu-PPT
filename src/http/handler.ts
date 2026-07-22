@@ -37,6 +37,7 @@ function publicRun(run: RunRecord) {
     automationLevel: run.automationLevel,
     presentationMode: run.presentationMode ?? 'SLIDE_IMAGE_V2',
     coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
+    assetAcquisitionPolicy: run.assetAcquisitionPolicy ?? 'AI_FIRST',
     maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
     maxRevisionRounds: run.maxRevisionRounds,
     revisionRound: run.revisionRound,

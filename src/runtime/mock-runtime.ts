@@ -74,6 +74,7 @@ class DeterministicPlanningModel implements StructuredModelPort {
       slideCount: number
       presentationMode?: 'SLIDE_IMAGE_V2' | 'LAYERED_COURSEWARE_V3'
       coverDesignMode?: 'INDEPENDENT' | 'FOLLOW_TEMPLATE'
+      assetAcquisitionPolicy?: 'AI_FIRST' | 'SEARCH_FIRST'
       maxVisualAssetsPerSlide?: number
       document: { name: string; chunks: { id: string; text: string }[] }
     }
@@ -384,6 +385,7 @@ export function createAgentRuntime(input: RuntimeInput) {
           visualDirection: run.visualDirection,
           presentationMode: run.presentationMode ?? 'SLIDE_IMAGE_V2',
           coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
+          assetAcquisitionPolicy: run.assetAcquisitionPolicy ?? 'AI_FIRST',
           maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
           attempt: planningAttempt,
         })

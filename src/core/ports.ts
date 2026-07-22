@@ -308,6 +308,7 @@ export type RunRecord = Readonly<{
   automationLevel: CreateRunRequest['automationLevel']
   presentationMode?: CreateRunRequest['presentationMode']
   coverDesignMode?: CreateRunRequest['coverDesignMode']
+  assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
   maxRevisionRounds: number
   revisionRound: number

@@ -70,6 +70,7 @@ export class RunService {
       automationLevel: parsed.data.automationLevel,
       presentationMode: parsed.data.presentationMode,
       coverDesignMode: parsed.data.coverDesignMode,
+      assetAcquisitionPolicy: parsed.data.assetAcquisitionPolicy,
       maxVisualAssetsPerSlide: parsed.data.maxVisualAssetsPerSlide,
       maxRevisionRounds: parsed.data.maxRevisionRounds,
       revisionRound: 0,

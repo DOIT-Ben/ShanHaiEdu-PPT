@@ -67,14 +67,14 @@ function blueprint() {
 
 async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blueprint> | Record<string, unknown> = blueprint(), documentResult: DocumentResult = {
   name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [],
-}, discovery?: AssetDiscoveryPort) {
+}, discovery?: AssetDiscoveryPort, assetAcquisitionPolicy: RunRecord['assetAcquisitionPolicy'] = 'AI_FIRST') {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
   const clock = new FixedClock()
   const artifacts = new MockArtifactPort()
   const documents = { resolve: async () => structuredClone(documentResult) }
-  await repository.createRun(run(budgetUnits))
+  await repository.createRun({ ...run(budgetUnits), assetAcquisitionPolicy })
   await repository.transact('run-1', (transaction) => {
     const key = planningStepKey('run-1')
     transaction.putStep({
@@ -313,7 +313,7 @@ describe('slide generation coordinator', () => {
 
   test('uses discovered web assets without image generation or budget charge', async () => {
     const found = discovery()
-    const { repository, images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), found.port)
+    const { repository, images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), found.port, 'SEARCH_FIRST')
     const result = await coordinator.submitBlueprintImages('run-1', 10)
 
     expect(result).toMatchObject({ submitted: 3, total: 3 })
@@ -328,11 +328,22 @@ describe('slide generation coordinator', () => {
 
   test('falls back to AI only for web searches without an acceptable candidate', async () => {
     const missing = discovery(false)
-    const { images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), missing.port)
+    const { images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), missing.port, 'SEARCH_FIRST')
     const result = await coordinator.submitBlueprintImages('run-1', 10)
 
     expect(result).toMatchObject({ submitted: 3, total: 3 })
     expect(missing.searches).toHaveLength(3)
+    expect(images.operations.size).toBe(3)
+    expect(budget.reservations.size).toBe(3)
+  })
+
+  test('does not search web assets for AI-first runs', async () => {
+    const found = discovery()
+    const { images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), found.port)
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ submitted: 3, total: 3 })
+    expect(found.searches).toHaveLength(0)
     expect(images.operations.size).toBe(3)
     expect(budget.reservations.size).toBe(3)
   })

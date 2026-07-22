@@ -25,6 +25,7 @@ describe('public v1 contracts', () => {
     expect(result.maxRevisionRounds).toBe(2)
     expect(result.presentationMode).toBe('SLIDE_IMAGE_V2')
     expect(result.coverDesignMode).toBe('INDEPENDENT')
+    expect(result.assetAcquisitionPolicy).toBe('AI_FIRST')
     expect(result.maxVisualAssetsPerSlide).toBe(4)
     expect(result.host.tenantId).toBe('frameflow')
   })
@@ -41,12 +42,14 @@ describe('public v1 contracts', () => {
       budgetUnits: 200,
       presentationMode: 'LAYERED_COURSEWARE_V3',
       coverDesignMode: 'FOLLOW_TEMPLATE',
+      assetAcquisitionPolicy: 'SEARCH_FIRST',
       maxVisualAssetsPerSlide: 3,
     })
 
     expect(result).toMatchObject({
       presentationMode: 'LAYERED_COURSEWARE_V3',
       coverDesignMode: 'FOLLOW_TEMPLATE',
+      assetAcquisitionPolicy: 'SEARCH_FIRST',
       maxVisualAssetsPerSlide: 3,
     })
   })
