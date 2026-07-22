@@ -92,6 +92,8 @@ describe('gateway courseware model', () => {
     expect(requestBody).not.toBeNull()
     const messages = (requestBody! as unknown as { messages: { content: string }[] }).messages
     expect(messages[0]!.content).toContain('封面构图')
+    expect(messages[0]!.content).toContain('素材检索优先策略')
+    expect(messages[0]!.content).toContain('不得把地球、太阳、箭头和标签预先合成一张图片')
     const parameters = (requestBody! as unknown as {
       tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
     }).tools[0]!.function.parameters

@@ -136,7 +136,9 @@ export class GatewayCoursewareModel implements
     const layered = z.object({ presentationMode: z.literal('LAYERED_COURSEWARE_V3') }).passthrough().safeParse(input.payload).success
     const system = `你是学校采购场景的资深课件总设计师。根据教材创建完整教学蓝图，知识正确优先于视觉效果。
 V3 要求每页 elements 必须且只能有一个 kind=IMAGE、role=BASE_LAYER 的可编辑底图对象，包括封面和所有内容页；另可有最多四个与知识点直接相关的独立图片素材、原生文字和原生形状。所有素材必须引用真实 sourceChunkIds。
-输入可能包含带真实 sourceAssetId 的教材图片或 PDF 页图。必须把每个来源图片映射到 curriculum、目标 slide 和相关 IMAGE/TEXT 元素；需要原样保留时用 REUSE_ORIGINAL，作为指定生图参考时用 REFERENCE_GENERATION，仅在不采用原图时用 REGENERATE。不得虚构 sourceAssetIds。
+V3 采用素材检索优先策略。苹果、香蕉、地球、太阳、人物、器材、照片、插画和纹理等现实中可找到的素材，sourceAssetStrategy 必须使用 SEARCH_WEB，并填写完整 assetIntent：中英文 searchQueries、mediaType、整套一致的 styleKeywords 和透明度偏好。执行器找不到合规素材时会自动用 prompt 进行 AI 补缺，因此不得为了省事直接选择 REGENERATE。
+可分别移动或添加动画的知识对象必须拆成不同 IMAGE 元素；不得把地球、太阳、箭头和标签预先合成一张图片。文字、箭头、连线、色块和简单几何图必须使用原生 TEXT/SHAPE 元素。透明背景只在对象确实需要自由叠放时使用，不得把所有素材统一设计成孤立抠图。
+输入可能包含带真实 sourceAssetId 的教材图片或 PDF 页图。必须把每个来源图片映射到 curriculum、目标 slide 和相关 IMAGE/TEXT 元素；需要原样保留时用 REUSE_ORIGINAL，作为指定生图参考时用 REFERENCE_GENERATION。不得虚构 sourceAssetIds。
 当 coverDesignMode=INDEPENDENT 时，第一页必须采用与正文明显不同的封面构图，以课程主题、标题和单一强主视觉建立冲击力；不得套用正文内容面板。当值为 FOLLOW_TEMPLATE 时才允许跟随正文结构。
 如果输入包含 contractRepairIssues，必须重新生成完整蓝图并逐项修正这些合同问题。
 只提交工具参数，不输出解释或思维过程。`

@@ -18,6 +18,7 @@ import { RevisionPlanningRunner } from '../core/revision-planning-runner'
 import type {
   AgentRepository,
   ArtifactPort,
+  AssetDiscoveryPort,
   BudgetPort,
   ClockPort,
   DeckReviewPort,
@@ -273,6 +274,7 @@ class UnsupportedRevisionApplication implements RevisionApplicationPort {
 type RuntimeInput = Readonly<{
   repository: AgentRepository
   artifacts: ArtifactPort
+  discovery?: AssetDiscoveryPort
   apiToken: string
   model: StructuredModelPort
   visualReviewer: VisualReviewPort
@@ -315,6 +317,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     media,
     documents,
     artifacts: input.artifacts,
+    ...(input.discovery ? { discovery: input.discovery } : {}),
     clock,
   })
   const visual = new VisualReviewRunner({

@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
+import { PublicAssetDiscoveryPort } from './adapters/public-asset-discovery'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
 import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
@@ -27,12 +28,24 @@ await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
+const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const appVersion = process.env.PPT_AGENT_APP_VERSION?.trim() || '0.1.0'
 const heartbeatStaleMs = boundedMilliseconds('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
 const tickStaleMs = boundedMilliseconds('PPT_AGENT_TICK_STALE_MS', 15 * 60_000, 10_000, 60 * 60_000)
 const waitingSlaMs = boundedMilliseconds('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
 const stepSlaMs = boundedMilliseconds('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
 if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
+function loopbackProxy(value: string | undefined) {
+  if (!value) return undefined
+  const url = new URL(value)
+  if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+    || url.username || url.password) throw new Error('PPT_AGENT_ASSET_HTTP_PROXY_INVALID')
+  return url.toString()
+}
+const assetProxy = loopbackProxy(process.env.PPT_AGENT_ASSET_HTTP_PROXY?.trim())
+const discovery = assetSearchEnabled
+  ? new PublicAssetDiscoveryPort(assetProxy ? { proxyUrl: assetProxy } : {})
+  : undefined
 const images = runtimeMode === 'gateway'
   ? new GatewayImageGenerationPort({
       baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
@@ -52,6 +65,7 @@ const runtime = runtimeMode === 'gateway'
       return createAgentRuntime({
         repository,
         artifacts,
+        ...(discovery ? { discovery } : {}),
         apiToken,
         images: images!,
         model,
