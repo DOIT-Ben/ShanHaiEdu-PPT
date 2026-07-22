@@ -71,6 +71,8 @@ export class SqliteAgentRepository implements AgentRepository {
       CREATE TABLE IF NOT EXISTS agent_runs (
         id TEXT PRIMARY KEY,
         data TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        external_user_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'PLANNING',
         lease_until TEXT,
         updated_at TEXT NOT NULL DEFAULT ''
@@ -80,6 +82,8 @@ export class SqliteAgentRepository implements AgentRepository {
         run_id TEXT NOT NULL,
         idempotency_key TEXT NOT NULL,
         data TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        status TEXT NOT NULL,
         FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
         UNIQUE (run_id, idempotency_key)
       ) STRICT;
@@ -117,14 +121,16 @@ export class SqliteAgentRepository implements AgentRepository {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS agent_progress_run_idx ON agent_progress(run_id, sequence);
     `)
-    this.ensureRunColumns()
+    this.ensureQueryColumns()
     this.#database.exec(`
-      UPDATE agent_runs
-      SET status = json_extract(data, '$.status'),
-          lease_until = json_extract(data, '$.leaseUntil'),
-          updated_at = json_extract(data, '$.updatedAt');
       CREATE INDEX IF NOT EXISTS agent_runs_runnable_idx
         ON agent_runs(status, lease_until, updated_at, id);
+      CREATE INDEX IF NOT EXISTS agent_runs_owner_page_idx
+        ON agent_runs(tenant_id, external_user_id, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS agent_runs_tenant_status_idx
+        ON agent_runs(tenant_id, status, updated_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS agent_steps_tool_status_run_idx
+        ON agent_steps(tool, status, run_id);
     `)
     if (!hasEventSnapshots) this.backfillEventSnapshots()
   }
@@ -134,9 +140,18 @@ export class SqliteAgentRepository implements AgentRepository {
   }
 
   async createRun(run: RunRecord) {
-    this.#database.query<unknown, [string, string, string, string | null, string]>(
-      'INSERT INTO agent_runs (id, data, status, lease_until, updated_at) VALUES (?, ?, ?, ?, ?)',
-    ).run(run.id, JSON.stringify(run), run.status, run.leaseUntil, run.updatedAt)
+    this.#database.query<unknown, [string, string, string, string, string, string | null, string]>(`
+      INSERT INTO agent_runs (id, data, tenant_id, external_user_id, status, lease_until, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      run.id,
+      JSON.stringify(run),
+      run.host.tenantId,
+      run.host.externalUserId,
+      run.status,
+      run.leaseUntil,
+      run.updatedAt,
+    )
   }
 
   async getRun(runId: string) {
@@ -147,6 +162,38 @@ export class SqliteAgentRepository implements AgentRepository {
   async listRuns() {
     return this.#database.query<JsonRow, []>('SELECT data FROM agent_runs ORDER BY rowid ASC')
       .all().map((row) => JSON.parse(row.data) as RunRecord)
+  }
+
+  async listOwnedRuns(input: Parameters<AgentRepository['listOwnedRuns']>[0]) {
+    const rows = input.after
+      ? this.#database.query<JsonRow, [string, string, string, string, string, number]>(`
+          SELECT data
+          FROM agent_runs
+          WHERE tenant_id = ?
+            AND external_user_id = ?
+            AND (updated_at < ? OR (updated_at = ? AND id < ?))
+          ORDER BY updated_at DESC, id DESC
+          LIMIT ?
+        `).all(
+          input.host.tenantId,
+          input.host.externalUserId,
+          input.after.updatedAt,
+          input.after.updatedAt,
+          input.after.id,
+          input.limit + 1,
+        )
+      : this.#database.query<JsonRow, [string, string, number]>(`
+          SELECT data
+          FROM agent_runs
+          WHERE tenant_id = ?
+            AND external_user_id = ?
+          ORDER BY updated_at DESC, id DESC
+          LIMIT ?
+        `).all(input.host.tenantId, input.host.externalUserId, input.limit + 1)
+    return {
+      runs: rows.slice(0, input.limit).map((row) => JSON.parse(row.data) as RunRecord),
+      hasMore: rows.length > input.limit,
+    }
   }
 
   async listRunnableRuns(input: Readonly<{ now: string; limit: number }>) {
@@ -165,8 +212,8 @@ export class SqliteAgentRepository implements AgentRepository {
       SELECT DISTINCT agent_runs.id
       FROM agent_steps
       JOIN agent_runs ON agent_runs.id = agent_steps.run_id
-      WHERE json_extract(agent_steps.data, '$.tool') = 'generate_slide_image'
-        AND json_extract(agent_steps.data, '$.status') = 'WAITING'
+      WHERE agent_steps.tool = 'generate_slide_image'
+        AND agent_steps.status = 'WAITING'
       ORDER BY agent_runs.updated_at ASC, agent_runs.id ASC
       LIMIT ?
     `).all(limit).map((row) => row.id)
@@ -218,14 +265,14 @@ export class SqliteAgentRepository implements AgentRepository {
     const runs = this.#database.query<OperationalRunRow, [string]>(`
       SELECT
         id,
-        json_extract(data, '$.host.tenantId') AS tenantId,
-        json_extract(data, '$.host.externalUserId') AS externalUserId,
-        json_extract(data, '$.status') AS status,
+        tenant_id AS tenantId,
+        external_user_id AS externalUserId,
+        status,
         json_extract(data, '$.version') AS version,
         json_extract(data, '$.createdAt') AS createdAt,
-        json_extract(data, '$.updatedAt') AS updatedAt
+        updated_at AS updatedAt
       FROM agent_runs
-      WHERE json_extract(data, '$.host.tenantId') = ?
+      WHERE tenant_id = ?
     `).all(filters.tenantId).map((row): OperationalRun => ({
       id: row.id,
       host: { tenantId: row.tenantId, externalUserId: row.externalUserId },
@@ -236,11 +283,11 @@ export class SqliteAgentRepository implements AgentRepository {
     }))
     const steps = this.#database.query<OperationalStepRow, [string]>(`
       SELECT
-        json_extract(agent_steps.data, '$.id') AS id,
+        agent_steps.id AS id,
         agent_steps.run_id AS runId,
         agent_steps.idempotency_key AS idempotencyKey,
-        json_extract(agent_steps.data, '$.tool') AS tool,
-        json_extract(agent_steps.data, '$.status') AS status,
+        agent_steps.tool AS tool,
+        agent_steps.status AS status,
         json_extract(agent_steps.data, '$.budgetUnits') AS budgetUnits,
         json_extract(agent_steps.data, '$.externalOperationId') AS externalOperationId,
         json_extract(agent_steps.data, '$.errorCode') AS errorCode,
@@ -248,13 +295,13 @@ export class SqliteAgentRepository implements AgentRepository {
         json_extract(agent_steps.data, '$.updatedAt') AS updatedAt
       FROM agent_steps
       JOIN agent_runs ON agent_runs.id = agent_steps.run_id
-      WHERE json_extract(agent_runs.data, '$.host.tenantId') = ?
+      WHERE agent_runs.tenant_id = ?
     `).all(filters.tenantId).map((row): OperationalStep => row)
     const events = this.#database.query<JsonRow, [string]>(`
       SELECT agent_events.data
       FROM agent_events
       JOIN agent_runs ON agent_runs.id = agent_events.run_id
-      WHERE json_extract(agent_runs.data, '$.host.tenantId') = ?
+      WHERE agent_runs.tenant_id = ?
         AND json_extract(agent_events.data, '$.type') IN ('run.started', 'phase.changed', 'tool.started', 'tool.progress')
       ORDER BY agent_events.rowid DESC
       LIMIT 50000
@@ -276,7 +323,7 @@ export class SqliteAgentRepository implements AgentRepository {
       filters.contractVersion, filters.contractVersion,
     ]
     const where = `
-      json_extract(agent_runs.data, '$.host.tenantId') = ?
+      agent_runs.tenant_id = ?
       AND json_extract(agent_events.data, '$.type') = 'issue.detected'
       AND json_type(agent_events.data, '$.payload.planningFailure') = 'object'
       AND (? IS NULL OR json_extract(agent_events.data, '$.payload.planningFailure.errorCode') = ?)
@@ -372,19 +419,29 @@ export class SqliteAgentRepository implements AgentRepository {
       }
 
       const result = operation(transaction)
-      this.#database.query<unknown, [string, string, string | null, string, string]>(`
+      this.#database.query<unknown, [string, string, string, string, string | null, string, string]>(`
         UPDATE agent_runs
-        SET data = ?, status = ?, lease_until = ?, updated_at = ?
+        SET data = ?, tenant_id = ?, external_user_id = ?, status = ?, lease_until = ?, updated_at = ?
         WHERE id = ?
-      `).run(JSON.stringify(nextRun), nextRun.status, nextRun.leaseUntil, nextRun.updatedAt, runId)
-      const upsertStep = this.#database.query<unknown, [string, string, string, string]>(`
-        INSERT INTO agent_steps (id, run_id, idempotency_key, data) VALUES (?, ?, ?, ?)
+      `).run(
+        JSON.stringify(nextRun),
+        nextRun.host.tenantId,
+        nextRun.host.externalUserId,
+        nextRun.status,
+        nextRun.leaseUntil,
+        nextRun.updatedAt,
+        runId,
+      )
+      const upsertStep = this.#database.query<unknown, [string, string, string, string, string, string]>(`
+        INSERT INTO agent_steps (id, run_id, idempotency_key, data, tool, status) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id, idempotency_key) DO UPDATE SET
           id = excluded.id,
-          data = excluded.data
+          data = excluded.data,
+          tool = excluded.tool,
+          status = excluded.status
       `)
       for (const step of touchedSteps.values()) {
-        upsertStep.run(step.id, runId, step.idempotencyKey, JSON.stringify(step))
+        upsertStep.run(step.id, runId, step.idempotencyKey, JSON.stringify(step), step.tool, step.status)
       }
       const upsertDelivery = this.#database.query<unknown, [string, string, string]>(`
         INSERT INTO agent_deliveries (id, run_id, data) VALUES (?, ?, ?)
@@ -428,11 +485,41 @@ export class SqliteAgentRepository implements AgentRepository {
     }
   }
 
-  private ensureRunColumns() {
-    const columns = new Set(this.#database.query<TableColumnRow, []>('PRAGMA table_info(agent_runs)').all().map((row) => row.name))
-    if (!columns.has('status')) this.#database.exec("ALTER TABLE agent_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'PLANNING'")
-    if (!columns.has('lease_until')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN lease_until TEXT')
-    if (!columns.has('updated_at')) this.#database.exec("ALTER TABLE agent_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+  private ensureQueryColumns() {
+    const migrate = this.#database.transaction(() => {
+      const runColumns = new Set(this.#database.query<TableColumnRow, []>(
+        'PRAGMA table_info(agent_runs)',
+      ).all().map((row) => row.name))
+      if (!runColumns.has('tenant_id')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN tenant_id TEXT')
+      if (!runColumns.has('external_user_id')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN external_user_id TEXT')
+      if (!runColumns.has('status')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN status TEXT')
+      if (!runColumns.has('lease_until')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN lease_until TEXT')
+      if (!runColumns.has('updated_at')) this.#database.exec('ALTER TABLE agent_runs ADD COLUMN updated_at TEXT')
+
+      const stepColumns = new Set(this.#database.query<TableColumnRow, []>(
+        'PRAGMA table_info(agent_steps)',
+      ).all().map((row) => row.name))
+      if (!stepColumns.has('tool')) this.#database.exec('ALTER TABLE agent_steps ADD COLUMN tool TEXT')
+      if (!stepColumns.has('status')) this.#database.exec('ALTER TABLE agent_steps ADD COLUMN status TEXT')
+
+      this.#database.exec(`
+        UPDATE agent_runs
+        SET tenant_id = json_extract(data, '$.host.tenantId'),
+            external_user_id = json_extract(data, '$.host.externalUserId'),
+            status = json_extract(data, '$.status'),
+            lease_until = json_extract(data, '$.leaseUntil'),
+            updated_at = json_extract(data, '$.updatedAt')
+        WHERE tenant_id IS NULL OR tenant_id = ''
+          OR external_user_id IS NULL OR external_user_id = ''
+          OR status IS NULL OR status = ''
+          OR updated_at IS NULL OR updated_at = '';
+        UPDATE agent_steps
+        SET tool = json_extract(data, '$.tool'),
+            status = json_extract(data, '$.status')
+        WHERE tool IS NULL OR tool = '' OR status IS NULL OR status = '';
+      `)
+    })
+    migrate.immediate()
   }
 
   private backfillEventSnapshots() {

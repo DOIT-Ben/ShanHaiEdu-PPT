@@ -11,7 +11,7 @@ import { revisionBlueprintStepKey } from './active-blueprint'
 import { deliveryStepKey } from './delivery-runner'
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
-import type { AgentRepository, AgentTransaction, ClockPort, RunRecord } from './ports'
+import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRecord } from './ports'
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 
@@ -114,10 +114,8 @@ export class RunService {
     return run
   }
 
-  async listOwned(host: HostContext) {
-    return (await this.dependencies.repository.listRuns())
-      .filter((run) => owns(run, host))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))
+  async listOwnedPage(host: HostContext, input: Readonly<{ after: RunListCursor | null; limit: number }>) {
+    return this.dependencies.repository.listOwnedRuns({ host, ...input })
   }
 
   async act(runId: string, host: HostContext, request: unknown, idempotencyKey: string) {

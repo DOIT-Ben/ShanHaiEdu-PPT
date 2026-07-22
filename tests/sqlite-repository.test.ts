@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { CONTRACT_VERSION } from '../src/contracts'
 import { SqliteAgentRepository } from '../src/adapters/sqlite-repository'
-import type { RunRecord } from '../src/core/ports'
+import type { RunRecord, StepRecord } from '../src/core/ports'
 
 const cleanupPaths: string[] = []
 
@@ -39,6 +40,24 @@ function run(): RunRecord {
     leaseVersion: 0,
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z',
+  }
+}
+
+function waitingStep(): StepRecord {
+  return {
+    id: 'waiting-step',
+    runId: 'run-1',
+    idempotencyKey: 'waiting-step-key',
+    inputHash: 'waiting-input',
+    tool: 'generate_slide_image',
+    status: 'WAITING',
+    budgetUnits: 1,
+    budgetReservationId: 'reservation-1',
+    externalOperationId: 'operation-1',
+    errorCode: null,
+    output: {},
+    createdAt: run().createdAt,
+    updatedAt: run().updatedAt,
   }
 }
 
@@ -304,17 +323,107 @@ describe('SQLite repository', () => {
     repository.close()
   })
 
+  test('uses the owner index for stable keyset pages', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({ ...run(), id: 'run-a', creationKey: 'create-a' })
+    await repository.createRun({ ...run(), id: 'run-b', creationKey: 'create-b' })
+    await repository.createRun({
+      ...run(), id: 'run-c', creationKey: 'create-c', updatedAt: '2026-07-22T00:00:00.000Z',
+    })
+    await repository.createRun({
+      ...run(), id: 'other-user', creationKey: 'create-other', host: { ...run().host, externalUserId: 'user-2' },
+    })
+
+    const first = await repository.listOwnedRuns({ host: run().host, after: null, limit: 2 })
+    expect(first.runs.map((item) => item.id)).toEqual(['run-c', 'run-b'])
+    expect(first.hasMore).toBe(true)
+    const second = await repository.listOwnedRuns({
+      host: run().host,
+      after: { id: first.runs[1]!.id, updatedAt: first.runs[1]!.updatedAt },
+      limit: 2,
+    })
+    expect(second.runs.map((item) => item.id)).toEqual(['run-a'])
+    expect(second.hasMore).toBe(false)
+    repository.close()
+
+    const database = new Database(filename, { readonly: true, strict: true })
+    const plan = database.query<{ detail: string }, [string, string, number]>(`
+      EXPLAIN QUERY PLAN
+      SELECT data FROM agent_runs
+      WHERE tenant_id = ? AND external_user_id = ?
+      ORDER BY updated_at DESC, id DESC
+      LIMIT ?
+    `).all('frameflow', 'user-1', 3)
+    expect(plan.map((row) => row.detail).join('\n')).toContain('agent_runs_owner_page_idx')
+    database.close(true)
+  })
+
+  test('backfills legacy query columns once without rewriting complete rows on reopen', async () => {
+    const filename = await databasePath()
+    const legacy = new Database(filename, { create: true, readwrite: true, strict: true })
+    legacy.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE agent_runs (id TEXT PRIMARY KEY, data TEXT NOT NULL) STRICT;
+      CREATE TABLE agent_steps (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        data TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES agent_runs(id) ON DELETE CASCADE,
+        UNIQUE (run_id, idempotency_key)
+      ) STRICT;
+    `)
+    const legacyRun = run()
+    const legacyStep = waitingStep()
+    legacy.query<unknown, [string, string]>('INSERT INTO agent_runs (id, data) VALUES (?, ?)')
+      .run(legacyRun.id, JSON.stringify(legacyRun))
+    legacy.query<unknown, [string, string, string, string]>(
+      'INSERT INTO agent_steps (id, run_id, idempotency_key, data) VALUES (?, ?, ?, ?)',
+    ).run(legacyStep.id, legacyStep.runId, legacyStep.idempotencyKey, JSON.stringify(legacyStep))
+    legacy.close(true)
+
+    const migrated = new SqliteAgentRepository(filename)
+    expect(await migrated.listOwnedRuns({ host: legacyRun.host, after: null, limit: 10 }))
+      .toMatchObject({ runs: [{ id: 'run-1' }], hasMore: false })
+    expect(await migrated.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    migrated.close()
+
+    const audit = new Database(filename, { readwrite: true, strict: true })
+    audit.exec(`
+      CREATE TABLE migration_update_audit (
+        table_name TEXT PRIMARY KEY,
+        update_count INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO migration_update_audit VALUES ('agent_runs', 0), ('agent_steps', 0);
+      CREATE TRIGGER audit_agent_runs_update AFTER UPDATE ON agent_runs BEGIN
+        UPDATE migration_update_audit SET update_count = update_count + 1 WHERE table_name = 'agent_runs';
+      END;
+      CREATE TRIGGER audit_agent_steps_update AFTER UPDATE ON agent_steps BEGIN
+        UPDATE migration_update_audit SET update_count = update_count + 1 WHERE table_name = 'agent_steps';
+      END;
+    `)
+    audit.close(true)
+
+    const reopened = new SqliteAgentRepository(filename)
+    reopened.close()
+    const verified = new Database(filename, { readonly: true, strict: true })
+    const updates = verified.query<{ table_name: string; update_count: number }, []>(
+      'SELECT table_name, update_count FROM migration_update_audit ORDER BY table_name',
+    ).all()
+    expect(updates).toEqual([
+      { table_name: 'agent_runs', update_count: 0 },
+      { table_name: 'agent_steps', update_count: 0 },
+    ])
+    verified.close(true)
+  })
+
   test('keeps terminal runs with pending media visible to reconciliation', async () => {
     const filename = await databasePath()
     const repository = new SqliteAgentRepository(filename)
     await repository.createRun({ ...run(), status: 'CANCELLED' })
     await repository.transact('run-1', (transaction) => {
-      transaction.putStep({
-        id: 'waiting-step', runId: 'run-1', idempotencyKey: 'waiting-step-key', inputHash: 'waiting-input',
-        tool: 'generate_slide_image', status: 'WAITING', budgetUnits: 1, budgetReservationId: 'reservation-1',
-        externalOperationId: 'operation-1', errorCode: null, output: {},
-        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
-      })
+      transaction.putStep(waitingStep())
     })
 
     expect(await repository.listRunnableRuns({ now: '2026-07-22T00:00:00.000Z', limit: 10 })).toEqual([])

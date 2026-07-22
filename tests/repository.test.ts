@@ -124,4 +124,24 @@ describe('in-memory repository contract', () => {
     expect(await repository.listEvents('run-1')).toEqual([])
     expect(await repository.listDeliveries('run-1')).toEqual([])
   })
+
+  test('returns stable owner-scoped keyset pages', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun({ ...run(), id: 'run-a', creationKey: 'create-a' })
+    await repository.createRun({ ...run(), id: 'run-b', creationKey: 'create-b' })
+    await repository.createRun({
+      ...run(), id: 'run-c', creationKey: 'create-c', updatedAt: '2026-07-22T00:00:00.000Z',
+    })
+    await repository.createRun({
+      ...run(), id: 'other-user', creationKey: 'create-other', host: { ...run().host, externalUserId: 'user-2' },
+    })
+
+    const first = await repository.listOwnedRuns({ host: run().host, after: null, limit: 2 })
+    expect(first.runs.map((item) => item.id)).toEqual(['run-c', 'run-b'])
+    expect(first.hasMore).toBe(true)
+    const cursor = { id: first.runs[1]!.id, updatedAt: first.runs[1]!.updatedAt }
+    const second = await repository.listOwnedRuns({ host: run().host, after: cursor, limit: 2 })
+    expect(second.runs.map((item) => item.id)).toEqual(['run-a'])
+    expect(second.hasMore).toBe(false)
+  })
 })

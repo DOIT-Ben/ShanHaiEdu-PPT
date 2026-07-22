@@ -79,7 +79,10 @@ describe('run service', () => {
 
     await expect(service.getOwned(created.run.id, { tenantId: 'frameflow', externalUserId: 'user-2' }))
       .rejects.toBeInstanceOf(RunServiceError)
-    expect(await service.listOwned({ tenantId: 'shanhaiedu', externalUserId: 'user-1' })).toEqual([])
+    expect(await service.listOwnedPage(
+      { tenantId: 'shanhaiedu', externalUserId: 'user-1' },
+      { after: null, limit: 20 },
+    )).toEqual({ runs: [], hasMore: false })
   })
 
   test('requires a completed persisted blueprint before approval', async () => {

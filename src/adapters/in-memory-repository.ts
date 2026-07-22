@@ -39,6 +39,19 @@ export class InMemoryAgentRepository implements AgentRepository {
     return [...this.#runs.values()].map((stored) => clone(stored.run))
   }
 
+  async listOwnedRuns(input: Parameters<AgentRepository['listOwnedRuns']>[0]) {
+    const candidates = [...this.#runs.values()]
+      .map((stored) => stored.run)
+      .filter((run) => run.host.tenantId === input.host.tenantId
+        && run.host.externalUserId === input.host.externalUserId)
+      .filter((run) => !input.after
+        || run.updatedAt < input.after.updatedAt
+        || (run.updatedAt === input.after.updatedAt && run.id < input.after.id))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))
+      .slice(0, input.limit + 1)
+    return { runs: candidates.slice(0, input.limit).map(clone), hasMore: candidates.length > input.limit }
+  }
+
   async listRunnableRuns(input: Readonly<{ now: string; limit: number }>) {
     const now = Date.parse(input.now)
     return [...this.#runs.values()]

@@ -359,6 +359,13 @@ export type RunRecord = Readonly<{
   updatedAt: string
 }>
 
+export type RunListCursor = Readonly<Pick<RunRecord, 'updatedAt' | 'id'>>
+
+export type OwnedRunPage = Readonly<{
+  runs: readonly RunRecord[]
+  hasMore: boolean
+}>
+
 export type StepStatus =
   | 'RUNNING' | 'RESERVED' | 'SUBMITTING' | 'WAITING' | 'COMPLETED' | 'RELEASING' | 'FAILED'
   | 'RESERVATION_UNKNOWN' | 'SUBMISSION_UNKNOWN'
@@ -475,6 +482,11 @@ export interface AgentRepository {
   createRun(run: RunRecord): Promise<void>
   getRun(runId: string): Promise<RunRecord | null>
   listRuns(): Promise<readonly RunRecord[]>
+  listOwnedRuns(input: Readonly<{
+    host: Pick<HostContext, 'tenantId' | 'externalUserId'>
+    after: RunListCursor | null
+    limit: number
+  }>): Promise<OwnedRunPage>
   listRunnableRuns(input: Readonly<{ now: string; limit: number }>): Promise<readonly RunRecord[]>
   listRunsWithPendingMedia(limit: number): Promise<readonly string[]>
   listSteps(runId: string): Promise<readonly StepRecord[]>

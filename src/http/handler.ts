@@ -91,9 +91,12 @@ function encodeCursor(run: RunRecord) {
 }
 
 function decodeCursor(cursor: string) {
+  if (cursor.length > 512) return null
   try {
     const value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { updatedAt?: unknown; id?: unknown }
     if (typeof value.updatedAt !== 'string' || typeof value.id !== 'string') return null
+    if (Number.isNaN(Date.parse(value.updatedAt)) || new Date(value.updatedAt).toISOString() !== value.updatedAt) return null
+    if (value.id.length < 1 || value.id.length > 160 || value.id !== value.id.trim()) return null
     return { updatedAt: value.updatedAt, id: value.id }
   } catch {
     return null
@@ -310,21 +313,16 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         if (!Number.isSafeInteger(pageSizeValue) || pageSizeValue < 1 || pageSizeValue > 100) {
           return errorResponse(422, 'INVALID_PAGE_SIZE', 'pageSize must be between 1 and 100', requestId)
         }
-        const runs = await dependencies.runs.listOwned(host)
         const cursorValue = url.searchParams.get('cursor')
-        let start = 0
+        let cursor = null
         if (cursorValue) {
-          const cursor = decodeCursor(cursorValue)
+          cursor = decodeCursor(cursorValue)
           if (!cursor) return errorResponse(422, 'INVALID_CURSOR', 'cursor is invalid', requestId)
-          const index = runs.findIndex((run) => run.id === cursor.id && run.updatedAt === cursor.updatedAt)
-          if (index < 0) return errorResponse(422, 'INVALID_CURSOR', 'cursor is no longer valid', requestId)
-          start = index + 1
         }
-        const page = runs.slice(start, start + pageSizeValue)
-        const hasMore = start + page.length < runs.length
+        const page = await dependencies.runs.listOwnedPage(host, { after: cursor, limit: pageSizeValue })
         return json({
-          data: page.map(publicRun),
-          pagination: { pageSize: pageSizeValue, nextCursor: hasMore ? encodeCursor(page.at(-1)!) : null },
+          data: page.runs.map(publicRun),
+          pagination: { pageSize: pageSizeValue, nextCursor: page.hasMore ? encodeCursor(page.runs.at(-1)!) : null },
         })
       }
 
