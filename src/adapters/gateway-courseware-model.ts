@@ -320,7 +320,9 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
         : [408, 504].includes(response.status)
           ? 'PROVIDER_TIMEOUT'
           : 'PROVIDER_UNAVAILABLE'
-      throw new StructuredModelError(code, response.status === 429 || response.status === 408 || response.status >= 500, input.model, requestId)
+      const retryable = response.status === 429 || response.status === 408 || response.status >= 500 ||
+        rejection.providerType === 'upstream_error'
+      throw new StructuredModelError(code, retryable, input.model, requestId)
     }
     let raw: string
     try {

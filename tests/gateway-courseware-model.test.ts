@@ -273,6 +273,28 @@ describe('gateway courseware model', () => {
     expect(records[0]).not.toContain('private provider response')
   })
 
+  test('treats a gateway upstream error as retryable even when wrapped in HTTP 404', async () => {
+    const original = console.error
+    console.error = () => undefined
+    try {
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({ error: { code: '404', type: 'upstream_error' } }, {
+          status: 404,
+          headers: { 'x-request-id': 'request-upstream-404' },
+        }),
+      })
+      await expect(model.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-upstream',
+      })).rejects.toMatchObject({
+        code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-upstream-404', model: 'gpt-5.6',
+      })
+    } finally {
+      console.error = original
+    }
+  })
+
   test('classifies an aborted gateway request as a provider timeout', async () => {
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
