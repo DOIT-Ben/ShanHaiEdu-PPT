@@ -76,6 +76,20 @@ describe('run transition policy', () => {
       expectedVersion: 3,
     })).toThrow('planning retry requires human-review state')
   })
+
+  test('returns a failed delivery run to delivery through its recovery action', () => {
+    const recovered = applyRunAction(state({ status: 'NEEDS_HUMAN' }), {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 3,
+    })
+    expect(recovered).toMatchObject({ status: 'DELIVERING', version: 4 })
+    expect(() => applyRunAction(state({ status: 'DELIVERING' }), {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 3,
+    })).toThrow('delivery retry requires human-review state')
+  })
 })
 
 describe('media budget policy', () => {

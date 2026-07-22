@@ -43,7 +43,7 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
-      'RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
+      'RETRY_PLANNING', 'RETRY_DELIVERY', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
     ]))
     expect(document.components.schemas.DocumentSource?.oneOf?.map((source) => source.properties?.kind?.const)).toContain('SOURCE_PACKAGE')
     expect(document.components.schemas.BlueprintSourceManifestEntry).toBeDefined()

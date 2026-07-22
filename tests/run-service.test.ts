@@ -3,6 +3,7 @@ import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
+import { deliveryStepKey } from '../src/core/delivery-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { RunService, RunServiceError } from '../src/core/run-service'
@@ -340,6 +341,29 @@ describe('run service', () => {
       status: 422,
       code: 'PLANNING_RETRY_LIMIT_REACHED',
     })
+  })
+
+  test('retries delivery only when the current delivery step failed', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-delivery-retry-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 1 })
+      transaction.putStep({
+        id: 'step-delivery-failed', runId: created.run.id,
+        idempotencyKey: deliveryStepKey(transaction.run), inputHash: 'delivery-input',
+        tool: 'deliver_presentation', status: 'FAILED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: 'DELIVERY_FAILED', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const retried = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 1,
+    }, 'retry-delivery-0001')
+
+    expect(retried).toMatchObject({ status: 'DELIVERING', version: 2 })
   })
 
   test('replays the same user action without duplicate events', async () => {

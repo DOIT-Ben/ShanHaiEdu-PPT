@@ -75,6 +75,11 @@ export function applyRunAction(state: RunPolicyState, action: RunAction): RunPol
         throw new PolicyError('PLANNING_RETRY_NOT_ALLOWED', 'planning retry requires human-review state')
       }
       return transitionRun(state, 'PLANNING')
+    case 'RETRY_DELIVERY':
+      if (state.status !== 'NEEDS_HUMAN') {
+        throw new PolicyError('DELIVERY_RETRY_NOT_ALLOWED', 'delivery retry requires human-review state')
+      }
+      return transitionRun(state, 'DELIVERING')
     case 'REQUEST_BLUEPRINT_REVISION':
       return transitionRun(state, 'PLANNING')
     case 'PAUSE':

@@ -96,6 +96,7 @@ const actionBase = {
 export const runActionSchema = z.discriminatedUnion('type', [
   z.object({ ...actionBase, type: z.literal('APPROVE_BLUEPRINT') }).strict(),
   z.object({ ...actionBase, type: z.literal('RETRY_PLANNING') }).strict(),
+  z.object({ ...actionBase, type: z.literal('RETRY_DELIVERY') }).strict(),
   z.object({
     ...actionBase,
     type: z.literal('REPLAN'),

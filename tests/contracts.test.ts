@@ -134,6 +134,14 @@ describe('public v1 contracts', () => {
     })).toMatchObject({ type: 'REPLAN', slideCount: 8 })
   })
 
+  test('accepts an explicit delivery recovery action', () => {
+    expect(runActionSchema.parse({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 8,
+    }).type).toBe('RETRY_DELIVERY')
+  })
+
   test('makes cancellation semantics explicit without breaking legacy callers', () => {
     expect(runActionSchema.parse({
       schemaVersion: CONTRACT_VERSION,

@@ -8,6 +8,7 @@ import {
 } from '../contracts'
 import { presentationBlueprintSchema, revisionPlanSchema } from '../presentation-contracts'
 import { revisionBlueprintStepKey } from './active-blueprint'
+import { deliveryStepKey } from './delivery-runner'
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
 import type { AgentRepository, AgentTransaction, ClockPort, RunRecord } from './ports'
@@ -236,6 +237,13 @@ export class RunService {
       }
       return null
     }
+    if (action.type === 'RETRY_DELIVERY') {
+      const failed = transaction.getStep(deliveryStepKey(transaction.run))
+      if (!failed || failed.tool !== 'deliver_presentation' || failed.status !== 'FAILED') {
+        throw new RunServiceError(409, 'DELIVERY_FAILURE_NOT_READY', 'failed delivery attempt is not available')
+      }
+      return null
+    }
     if (action.type === 'APPROVE_BLUEPRINT') {
       const step = transaction.getStep(planningStepKey(transaction.run.id))
       if (!step || step.status !== 'COMPLETED') {
@@ -368,7 +376,7 @@ export class RunService {
         type: 'budget.updated',
         payload: { budgetUnits: updated.budgetUnits, committedBudgetUnits: updated.committedBudgetUnits },
       })
-    } else if (['APPROVE_BLUEPRINT', 'RETRY_PLANNING', 'REPLAN', 'APPROVE_REVISION', 'SUBMIT_LIMITED_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
+    } else if (['APPROVE_BLUEPRINT', 'RETRY_PLANNING', 'REPLAN', 'RETRY_DELIVERY', 'APPROVE_REVISION', 'SUBMIT_LIMITED_REVISION', 'REJECT_REVISION', 'ACCEPT_WITH_OVERRIDE'].includes(action.type)) {
       if (action.type === 'ACCEPT_WITH_OVERRIDE') {
         for (const issueId of action.issueIds) {
           transaction.appendEvent({
@@ -383,7 +391,7 @@ export class RunService {
         type: 'approval.resolved',
         payload: {
           kind: action.type === 'APPROVE_BLUEPRINT' ? 'BLUEPRINT'
-            : ['RETRY_PLANNING', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'SUBMIT_LIMITED_REVISION'].includes(action.type) ? 'HUMAN_REVIEW' : 'REVISION',
+            : ['RETRY_PLANNING', 'REPLAN', 'RETRY_DELIVERY', 'ACCEPT_WITH_OVERRIDE', 'SUBMIT_LIMITED_REVISION'].includes(action.type) ? 'HUMAN_REVIEW' : 'REVISION',
           actionType: action.type,
           ...(action.type === 'ACCEPT_WITH_OVERRIDE' ? {
             actorId: updated.qualityOverrideBy!,

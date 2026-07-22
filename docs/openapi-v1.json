@@ -404,7 +404,7 @@
         "required": ["schemaVersion", "type", "expectedVersion"],
         "properties": {
           "schemaVersion": { "const": "1" },
-          "type": { "enum": ["APPROVE_BLUEPRINT", "RETRY_PLANNING", "REPLAN", "REQUEST_BLUEPRINT_REVISION", "PAUSE", "RESUME", "CANCEL", "ADD_BUDGET", "APPROVE_REVISION", "SUBMIT_LIMITED_REVISION", "REJECT_REVISION", "ACCEPT_WITH_OVERRIDE"] },
+          "type": { "enum": ["APPROVE_BLUEPRINT", "RETRY_PLANNING", "RETRY_DELIVERY", "REPLAN", "REQUEST_BLUEPRINT_REVISION", "PAUSE", "RESUME", "CANCEL", "ADD_BUDGET", "APPROVE_REVISION", "SUBMIT_LIMITED_REVISION", "REJECT_REVISION", "ACCEPT_WITH_OVERRIDE"] },
           "expectedVersion": { "type": "integer", "minimum": 0 },
           "instruction": { "type": "string", "minLength": 3, "maxLength": 2000 },
           "reason": { "type": "string", "minLength": 3, "maxLength": 2000 },
