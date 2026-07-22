@@ -82,8 +82,13 @@ function enforceRateLimit(
   return response
 }
 
-function samePrincipal(left: HostContext, right: HostContext) {
-  return left.tenantId === right.tenantId && left.externalUserId === right.externalUserId
+function matchesAuthenticatedHost(requestHost: HostContext, authenticatedHost: HostContext) {
+  return requestHost.tenantId === authenticatedHost.tenantId
+    && requestHost.externalUserId === authenticatedHost.externalUserId
+    && (requestHost.externalProjectId === undefined
+      || requestHost.externalProjectId === authenticatedHost.externalProjectId)
+    && (requestHost.role === undefined
+      || requestHost.role === (authenticatedHost.role ?? 'USER'))
 }
 
 function encodeCursor(run: RunRecord) {
@@ -301,10 +306,10 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         if (!idempotencyKey) return errorResponse(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key is required', requestId)
         const body = await request.json().catch(() => null) as { host?: HostContext } | null
         if (!body) return errorResponse(400, 'INVALID_JSON', 'request body must be valid JSON', requestId)
-        if (!body.host || !samePrincipal(body.host, host)) {
+        if (!body.host || !matchesAuthenticatedHost(body.host, host)) {
           return errorResponse(403, 'HOST_CONTEXT_MISMATCH', 'request host does not match authenticated principal', requestId)
         }
-        const created = await dependencies.runs.create(body, idempotencyKey)
+        const created = await dependencies.runs.create({ ...body, host: { ...body.host, ...host } }, idempotencyKey)
         return json({ data: publicRun(created.run), replayed: created.replayed }, created.replayed ? 200 : 201)
       }
 

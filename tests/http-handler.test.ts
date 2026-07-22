@@ -25,9 +25,15 @@ class HeaderAuthentication implements HostAuthenticationPort {
   async authenticate(request: Request): Promise<HostContext | null> {
     const tenantId = request.headers.get('X-Test-Tenant')
     const externalUserId = request.headers.get('X-Test-User')
+    const externalProjectId = request.headers.get('X-Test-Project')
     const role = request.headers.get('X-Test-Role')
     return tenantId && externalUserId
-      ? { tenantId, externalUserId, ...(role === 'ADMIN' ? { role } : {}) }
+      ? {
+          tenantId,
+          externalUserId,
+          ...(externalProjectId ? { externalProjectId } : {}),
+          ...(role === 'ADMIN' ? { role } : {}),
+        }
       : null
   }
 }
@@ -114,10 +120,42 @@ describe('HTTP v1 handler', () => {
       body: JSON.stringify({ ...createBody, host: { tenantId: 'frameflow', externalUserId: 'user-2' } }),
     }))
     const unauthenticated = await handle(new Request('http://ppt-agent.test/v1/runs'))
+    const roleSpoofed = await handle(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'http-role-spoof-0001' },
+      body: JSON.stringify({ ...createBody, host: { ...host, role: 'ADMIN' } }),
+    }))
+    const projectSpoofed = await handle(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'http-project-spoof-0001' },
+      body: JSON.stringify({ ...createBody, host: { ...host, externalProjectId: 'project-spoofed' } }),
+    }))
 
     expect(spoofed.status).toBe(403)
     expect((await spoofed.json() as { error: { code: string } }).error.code).toBe('HOST_CONTEXT_MISMATCH')
+    expect(roleSpoofed.status).toBe(403)
+    expect(projectSpoofed.status).toBe(403)
     expect(unauthenticated.status).toBe(401)
+  })
+
+  test('persists the authenticated project and role instead of body-supplied identity', async () => {
+    const { repository, handle } = fixture()
+    const response = await handle(request('/v1/runs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'http-authenticated-host-0001',
+        'X-Test-Project': 'project-1',
+        'X-Test-Role': 'ADMIN',
+      },
+      body: JSON.stringify(createBody),
+    }))
+    const runId = (await response.json() as { data: { id: string } }).data.id
+
+    expect(response.status).toBe(201)
+    expect((await repository.getRun(runId))?.host).toEqual({
+      tenantId: 'frameflow', externalUserId: 'user-1', externalProjectId: 'project-1', role: 'ADMIN',
+    })
   })
 
   test('lists only authenticated host runs with cursor pagination', async () => {
