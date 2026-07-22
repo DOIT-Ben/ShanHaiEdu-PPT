@@ -365,6 +365,18 @@ export const deliveryArtifactSchema = z.object({
   byteLength: z.number().int().positive(),
 }).strict()
 
+export const webAssetProvenanceSchema = z.object({
+  provider: z.enum(['WIKIMEDIA_COMMONS', 'OPENVERSE']),
+  providerAssetId: identifierSchema,
+  title: z.string().trim().min(1).max(1_000),
+  sourceUrl: z.string().url().max(2_000),
+  creator: z.string().trim().min(1).max(500).nullable(),
+  license: z.enum(['PUBLIC_DOMAIN', 'CC0', 'CC_BY']),
+  licenseUrl: z.string().url().max(2_000),
+  attribution: z.string().trim().min(1).max(2_000).nullable(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict()
+
 export const deliveryRecordSchema = z.object({
   id: identifierSchema,
   runId: identifierSchema,
@@ -382,6 +394,7 @@ export const deliveryRecordSchema = z.object({
   pptx: deliveryArtifactSchema.extend({
     mimeType: z.literal('application/vnd.openxmlformats-officedocument.presentationml.presentation'),
   }).strict(),
+  sources: deliveryArtifactSchema.extend({ mimeType: z.literal('application/json') }).strict().optional(),
   createdAt: z.string().datetime(),
 }).strict()
 

@@ -183,10 +183,10 @@
         "parameters": [
           { "$ref": "#/components/parameters/RunId" },
           { "name": "deliveryId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
-          { "name": "format", "in": "query", "schema": { "enum": ["preview", "pptx"], "default": "pptx" } }
+          { "name": "format", "in": "query", "schema": { "enum": ["preview", "pptx", "sources"], "default": "pptx" } }
         ],
         "responses": {
-          "200": { "description": "Owned PNG preview or editable PPTX content" },
+          "200": { "description": "Owned PNG preview, editable PPTX, or JSON asset source manifest" },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }

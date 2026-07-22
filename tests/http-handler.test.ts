@@ -304,6 +304,7 @@ describe('HTTP v1 handler', () => {
     const runId = (await created.json() as { data: { id: string } }).data.id
     const previewBytes = new TextEncoder().encode('preview-bytes')
     const pptxBytes = new TextEncoder().encode('pptx-bytes')
+    const sourcesBytes = new TextEncoder().encode('{"assets":[]}')
     const preview = await artifacts.put({
       tenantId: 'frameflow', runId, name: 'preview.png', mimeType: 'image/png',
       bytes: previewBytes, idempotencyKey: `${runId}:preview`,
@@ -312,6 +313,10 @@ describe('HTTP v1 handler', () => {
       tenantId: 'frameflow', runId, name: 'lesson.pptx',
       mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       bytes: pptxBytes, idempotencyKey: `${runId}:pptx`,
+    })
+    const sources = await artifacts.put({
+      tenantId: 'frameflow', runId, name: 'asset-sources.json', mimeType: 'application/json',
+      bytes: sourcesBytes, idempotencyKey: `${runId}:sources`,
     })
     const deliveryId = `${runId}:delivery:r0`
     await repository.transact(runId, (transaction) => {
@@ -330,6 +335,10 @@ describe('HTTP v1 handler', () => {
           mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
           sha256: pptx.sha256, byteLength: pptxBytes.length,
         },
+        sources: {
+          artifactId: sources.artifactId, name: 'asset-sources.json', mimeType: 'application/json',
+          sha256: sources.sha256, byteLength: sourcesBytes.length,
+        },
         createdAt: transaction.run.createdAt,
       })
     })
@@ -342,6 +351,12 @@ describe('HTTP v1 handler', () => {
     expect(previewResponse.status).toBe(200)
     expect(previewResponse.headers.get('Content-Type')).toBe('image/png')
     expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(previewBytes)
+    const sourcesResponse = await handle(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=sources`,
+    ))
+    expect(sourcesResponse.status).toBe(200)
+    expect(sourcesResponse.headers.get('Content-Type')).toBe('application/json')
+    expect(new Uint8Array(await sourcesResponse.arrayBuffer())).toEqual(sourcesBytes)
 
     const otherHeaders = { 'X-Test-Tenant': 'frameflow', 'X-Test-User': 'user-2' }
     const hidden = await handle(new Request(

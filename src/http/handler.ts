@@ -349,10 +349,11 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           .find((candidate) => candidate.id === deliveryId)
         if (!delivery) return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId)
         const format = url.searchParams.get('format') ?? 'pptx'
-        if (format !== 'preview' && format !== 'pptx') {
-          return errorResponse(422, 'INVALID_DELIVERY_FORMAT', 'format must be preview or pptx', requestId)
+        if (format !== 'preview' && format !== 'pptx' && format !== 'sources') {
+          return errorResponse(422, 'INVALID_DELIVERY_FORMAT', 'format must be preview, pptx or sources', requestId)
         }
-        const reference = format === 'preview' ? delivery.preview : delivery.pptx
+        const reference = format === 'preview' ? delivery.preview : format === 'sources' ? delivery.sources : delivery.pptx
+        if (!reference) return errorResponse(404, 'DELIVERY_CONTENT_NOT_FOUND', 'delivery content was not found', requestId)
         const artifact = await dependencies.artifacts.get({
           tenantId: run.host.tenantId,
           artifactId: reference.artifactId,

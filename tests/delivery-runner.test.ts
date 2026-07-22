@@ -100,6 +100,12 @@ async function fixture(runOverrides: Partial<RunRecord> = {}) {
           slideId: `run-1:slide:${pageNumber}`,
           versionId: `run-1:slide:${pageNumber}:r0:v1`,
           artifactId: artifact.artifactId,
+          ...(pageNumber === 1 ? { provenance: {
+            provider: 'OPENVERSE', providerAssetId: 'earth-1', title: 'Earth from space',
+            sourceUrl: 'https://example.org/earth', creator: 'Example Author', license: 'CC_BY',
+            licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+            attribution: 'Earth from space by Example Author', sha256: 'c'.repeat(64),
+          } } : {}),
         },
         createdAt: transaction.run.createdAt,
         updatedAt: transaction.run.updatedAt,
@@ -125,7 +131,12 @@ describe('delivery runner', () => {
     expect(await repository.listDeliveries('run-1')).toHaveLength(1)
     expect(result.delivery?.preview.mimeType).toBe('image/png')
     expect(result.delivery?.pptx.mimeType).toContain('presentationml.presentation')
+    expect(result.delivery?.sources?.mimeType).toBe('application/json')
     expect(artifacts.artifacts.has(result.delivery!.preview.artifactId)).toBe(true)
+    const sources = await artifacts.get({ tenantId: 'frameflow', artifactId: result.delivery!.sources!.artifactId })
+    expect(JSON.parse(new TextDecoder().decode(sources!.bytes))).toMatchObject({
+      assets: [{ provider: 'OPENVERSE', license: 'CC_BY', title: 'Earth from space' }],
+    })
     expect(renderer).toMatchObject({ previewCalls: 1, pptxCalls: 1 })
   })
 

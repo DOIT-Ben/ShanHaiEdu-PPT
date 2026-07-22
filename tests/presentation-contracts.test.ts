@@ -151,10 +151,15 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
       sha256: 'b'.repeat(64),
       byteLength: 1024,
     },
+    sources: {
+      artifactId: 'artifact-sources', name: 'asset-sources.json', mimeType: 'application/json',
+      sha256: 'c'.repeat(64), byteLength: 256,
+    },
     createdAt: '2026-07-21T00:00:00.000Z',
   })
 
   expect(delivery.preview.mimeType).toBe('image/png')
+  expect(delivery.sources?.mimeType).toBe('application/json')
   expect(deliveryRecordSchema.safeParse({
     ...delivery,
     pptx: { ...delivery.pptx, mimeType: 'application/zip' },

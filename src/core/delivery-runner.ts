@@ -1,6 +1,7 @@
 import { CONTRACT_VERSION } from '../contracts'
 import {
   deliveryRecordSchema,
+  webAssetProvenanceSchema,
   type DeliveryRecord,
 } from '../presentation-contracts'
 import { hashInput } from './hash'
@@ -55,6 +56,14 @@ export class DeliveryRunner {
 
       const previewName = 'presentation-preview.png'
       const pptxName = 'presentation.pptx'
+      const sourcesName = 'asset-sources.json'
+      const provenances = await this.webAssetProvenances(runId)
+      const sourcesBytes = new TextEncoder().encode(JSON.stringify({
+        schemaVersion: CONTRACT_VERSION,
+        runId,
+        generatedAt: this.dependencies.clock.now().toISOString(),
+        assets: provenances,
+      }, null, 2))
       const preview = await this.dependencies.artifacts.put({
         tenantId: run.host.tenantId,
         runId,
@@ -70,6 +79,14 @@ export class DeliveryRunner {
         mimeType: PPTX_MIME,
         bytes: pptxBytes,
         idempotencyKey: `${idempotencyKey}:pptx`,
+      })
+      const sources = await this.dependencies.artifacts.put({
+        tenantId: run.host.tenantId,
+        runId,
+        name: sourcesName,
+        mimeType: 'application/json',
+        bytes: sourcesBytes,
+        idempotencyKey: `${idempotencyKey}:sources`,
       })
       const delivery = deliveryRecordSchema.parse({
         id: `${run.id}:delivery:r${run.revisionRound}`,
@@ -104,6 +121,13 @@ export class DeliveryRunner {
           mimeType: PPTX_MIME,
           sha256: pptx.sha256,
           byteLength: pptxBytes.length,
+        },
+        sources: {
+          artifactId: sources.artifactId,
+          name: sourcesName,
+          mimeType: 'application/json',
+          sha256: sources.sha256,
+          byteLength: sourcesBytes.length,
         },
         createdAt: this.dependencies.clock.now().toISOString(),
       })
@@ -221,6 +245,15 @@ export class DeliveryRunner {
     const run = await this.dependencies.repository.getRun(runId)
     if (!run) throw new Error('RUN_NOT_FOUND')
     return run
+  }
+
+  private async webAssetProvenances(runId: string) {
+    const values = (await this.dependencies.repository.listSteps(runId)).flatMap((step) => {
+      const output = step.output as { provenance?: unknown } | null
+      const parsed = webAssetProvenanceSchema.safeParse(output?.provenance)
+      return parsed.success ? [parsed.data] : []
+    })
+    return [...new Map(values.map((value) => [value.sha256, value])).values()]
   }
 
 }
