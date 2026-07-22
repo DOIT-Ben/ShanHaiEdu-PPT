@@ -1,9 +1,11 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import sharp from 'sharp'
 import type { HostContext } from '../contracts'
 import type { BlueprintDraft } from '../presentation-contracts'
 import type { HostAuthenticationPort } from '../http/handler'
 import { createHttpHandler } from '../http/handler'
+import { SharedTokenAuthentication } from '../http/service-token-authentication'
+export { ServiceTokenAuthentication, SharedTokenAuthentication } from '../http/service-token-authentication'
 import { FrameFlowHostAdapter, type FrameFlowBackendClient } from '../adapters/frameflow-host'
 import { SharpPptxPresentationRenderer } from '../adapters/presentation-renderer'
 import { DeckReviewRunner } from '../core/deck-review-runner'
@@ -45,28 +47,6 @@ import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../o
 
 export class SystemClock implements ClockPort {
   now() { return new Date() }
-}
-
-export class SharedTokenAuthentication implements HostAuthenticationPort {
-  constructor(private readonly token: string) {
-    if (token.length < 16) throw new Error('PPT_AGENT_API_TOKEN_TOO_SHORT')
-  }
-
-  async authenticate(request: Request): Promise<HostContext | null> {
-    const authorization = request.headers.get('Authorization')
-    const provided = authorization?.startsWith('Bearer ') ? authorization.slice(7) : ''
-    const expectedBytes = Buffer.from(this.token)
-    const providedBytes = Buffer.from(provided)
-    if (providedBytes.length !== expectedBytes.length || !timingSafeEqual(providedBytes, expectedBytes)) return null
-    const tenantId = request.headers.get('X-PPT-Agent-Tenant')?.trim()
-    const externalUserId = request.headers.get('X-PPT-Agent-User')?.trim()
-    const externalProjectId = request.headers.get('X-PPT-Agent-Project')?.trim()
-    const role = request.headers.get('X-PPT-Agent-Role')?.trim() ?? 'USER'
-    if (tenantId !== 'frameflow' || !externalUserId || externalUserId.length > 160) return null
-    if (externalProjectId && externalProjectId.length > 160) return null
-    if (role !== 'USER' && role !== 'ADMIN') return null
-    return { tenantId, externalUserId, role, ...(externalProjectId ? { externalProjectId } : {}) }
-  }
 }
 
 class MockFrameFlowBackend implements FrameFlowBackendClient {
@@ -287,6 +267,7 @@ type RuntimeInput = Readonly<{
   discovery?: AssetDiscoveryPort
   candidateReviewer?: AssetCandidateReviewPort
   apiToken: string
+  authentication?: HostAuthenticationPort
   model: StructuredModelPort
   visualReviewer: VisualReviewPort
   deckReviewer: DeckReviewPort
@@ -507,7 +488,7 @@ export function createAgentRuntime(input: RuntimeInput) {
       runs,
       repository: input.repository,
       artifacts: input.artifacts,
-      authentication: new SharedTokenAuthentication(input.apiToken),
+      authentication: input.authentication ?? new SharedTokenAuthentication(input.apiToken),
       health,
       operations,
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),

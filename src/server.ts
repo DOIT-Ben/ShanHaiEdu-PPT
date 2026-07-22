@@ -7,6 +7,7 @@ import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
+import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 
 const hostname = process.env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
@@ -17,6 +18,13 @@ const port = Number(process.env.PPT_AGENT_PORT ?? 4310)
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error('PPT_AGENT_PORT_INVALID')
 const apiToken = process.env.PPT_AGENT_API_TOKEN?.trim()
 if (!apiToken) throw new Error('PPT_AGENT_API_TOKEN_REQUIRED')
+const adminApiToken = process.env.PPT_AGENT_ADMIN_API_TOKEN?.trim()
+const tenantId = process.env.PPT_AGENT_TENANT_ID?.trim() || 'frameflow'
+const authentication = new ServiceTokenAuthentication([{
+  tenantId,
+  userToken: apiToken,
+  ...(adminApiToken ? { adminToken: adminApiToken } : {}),
+}])
 function boundedMilliseconds(name: string, fallback: number, minimum: number, maximum: number) {
   const value = Number(process.env[name] ?? fallback)
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${name}_INVALID`)
@@ -58,6 +66,8 @@ const images = runtimeMode === 'gateway'
   : undefined
 const runtime = runtimeMode === 'gateway'
   ? (() => {
+      const frameFlowInternalToken = process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
+      if (!frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
       const model = new GatewayCoursewareModel({
         baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
         apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
@@ -71,6 +81,7 @@ const runtime = runtimeMode === 'gateway'
         ...(discovery ? { discovery } : {}),
         ...(discovery ? { candidateReviewer: model } : {}),
         apiToken,
+        authentication,
         images: images!,
         model,
         visualReviewer: model,
@@ -79,7 +90,7 @@ const runtime = runtimeMode === 'gateway'
         revisionApplication: model,
         frameFlowBackend: new HttpFrameFlowBackend({
           baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
-          token: apiToken,
+          token: frameFlowInternalToken,
         }),
         appVersion,
         heartbeatStaleMs,
