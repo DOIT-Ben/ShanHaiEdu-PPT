@@ -3,6 +3,7 @@ import sharp from 'sharp'
 import type { z } from 'zod'
 import type { PresentationRendererPort } from '../core/ports'
 import { layeredSlideElementSchema } from '../presentation-contracts'
+import { layoutPresentationText } from '../presentation-text-layout'
 
 const SLIDE_WIDTH = 1600
 const SLIDE_HEIGHT = 900
@@ -110,12 +111,20 @@ function layeredSvg(element: Exclude<LayeredElement, { kind: 'IMAGE' }>) {
     return Buffer.from(`<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="${fill}"/></marker></defs>${shape}</svg>`)
   }
 
-  const fontSize = Math.max(15, Math.round(element.style.fontSize * 1.55))
-  const maxCharacters = Math.max(4, Math.floor(box.width / (fontSize * 0.95)))
-  const lines = wrapText(element.text, maxCharacters).slice(0, Math.max(1, Math.floor(box.height / (fontSize * 1.25))))
+  const layout = layoutPresentationText({
+    text: element.text,
+    fontSize: element.style.fontSize,
+    width: element.placement.width,
+    height: element.placement.height,
+  })
+  if (!layout.fits) throw new Error(`RENDER_TEXT_OVERFLOW:${element.elementId}`)
   const anchor = element.style.align === 'CENTER' ? 'middle' : element.style.align === 'RIGHT' ? 'end' : 'start'
-  const x = element.style.align === 'CENTER' ? box.left + box.width / 2 : element.style.align === 'RIGHT' ? box.left + box.width : box.left
-  const text = lines.map((line, index) => `<text x="${x}" y="${box.top + fontSize + index * fontSize * 1.25}" text-anchor="${anchor}" font-family="${FONT_FACE}" font-size="${fontSize}" font-weight="${element.style.bold ? 700 : 400}" fill="${element.style.color}">${escapeXml(line)}</text>`).join('')
+  const x = element.style.align === 'CENTER'
+    ? box.left + box.width / 2
+    : element.style.align === 'RIGHT'
+      ? box.left + box.width - layout.horizontalPaddingPixels
+      : box.left + layout.horizontalPaddingPixels
+  const text = layout.lines.map((line, index) => `<text x="${x}" y="${box.top + layout.verticalPaddingPixels + layout.fontSizePixels + index * layout.lineHeightPixels}" text-anchor="${anchor}" font-family="${FONT_FACE}" font-size="${layout.fontSizePixels}" font-weight="${element.style.bold ? 700 : 400}" fill="${element.style.color}">${escapeXml(line)}</text>`).join('')
   return Buffer.from(`<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">${text}</svg>`)
 }
 
@@ -247,7 +256,14 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
               objectName: element.elementId,
             })
           } else if (element.kind === 'TEXT') {
-            slide.addText(element.text, {
+            const textLayout = layoutPresentationText({
+              text: element.text,
+              fontSize: element.style.fontSize,
+              width: element.placement.width,
+              height: element.placement.height,
+            })
+            if (!textLayout.fits) throw new Error(`RENDER_TEXT_OVERFLOW:${element.elementId}`)
+            slide.addText(textLayout.lines.join('\n'), {
               x, y, w, h,
               fontFace: FONT_FACE,
               fontSize: element.style.fontSize,
@@ -255,7 +271,7 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
               color: element.style.color.slice(1),
               align: element.style.align.toLowerCase() as 'left' | 'center' | 'right',
               margin: 0.04,
-              fit: 'shrink',
+              breakLine: false,
               valign: element.role === 'TITLE' ? 'middle' : 'top',
               objectName: element.elementId,
             })

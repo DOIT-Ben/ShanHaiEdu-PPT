@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { layoutPresentationText } from './presentation-text-layout'
 
 const identifierSchema = z.string().trim().min(1).max(160)
 const sourceChunkIdsSchema = z.array(identifierSchema).min(1).max(200)
@@ -70,7 +71,21 @@ export const layeredTextElementSchema = z.object({
     color: hexColorSchema,
     align: z.enum(['LEFT', 'CENTER', 'RIGHT']),
   }).strict(),
-}).strict()
+}).strict().superRefine((value, context) => {
+  const layout = layoutPresentationText({
+    text: value.text,
+    fontSize: value.style.fontSize,
+    width: value.placement.width,
+    height: value.placement.height,
+  })
+  if (!layout.fits) {
+    context.addIssue({
+      code: 'custom',
+      path: ['text'],
+      message: 'text must fit its placement at the declared font size',
+    })
+  }
+})
 
 export const layeredShapeElementSchema = z.object({
   kind: z.literal('SHAPE'),

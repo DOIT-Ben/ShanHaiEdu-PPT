@@ -129,6 +129,17 @@ describe('layered courseware v3 contract', () => {
     expect(() => presentationBlueprintSchema.parse(ungrounded)).toThrow()
   })
 
+  test('rejects layered text that cannot fit at the declared font size', () => {
+    const overflow = layeredBlueprint()
+    const body = overflow.slides[1]!.layeredDesign.elements
+      .find((element) => element.kind === 'TEXT' && element.role === 'BODY')!
+    if (body.kind !== 'TEXT') throw new Error('test body element missing')
+    body.text = '不能通过截断或缩小字体隐藏的课堂正文。'.repeat(30)
+    body.placement = { x: 0.1, y: 0.1, width: 0.2, height: 0.1 }
+
+    expect(() => presentationBlueprintSchema.parse(overflow)).toThrow('text must fit its placement')
+  })
+
   test('allows one base layer and at most four knowledge visuals with unique element ids', () => {
     const duplicate = layeredBlueprint()
     duplicate.slides[1]!.layeredDesign.elements[1]!.elementId = 'base-2'
