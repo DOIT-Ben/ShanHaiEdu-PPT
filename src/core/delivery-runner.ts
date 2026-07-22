@@ -153,7 +153,17 @@ export class DeliveryRunner {
           }
         }
         if (existing.status === 'FAILED') {
-          return { status: transaction.run.status, step: existing, delivery: null, replayed: true }
+          if (transaction.run.status !== 'DELIVERING') {
+            return { status: transaction.run.status, step: existing, delivery: null, replayed: true }
+          }
+          const now = this.dependencies.clock.now().toISOString()
+          transaction.putStep({ ...existing, status: 'RUNNING', errorCode: null, updatedAt: now })
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'tool.started',
+            payload: { stepId: existing.id, tool: existing.tool, label: '重试生成 PNG 预览和可编辑 PPTX' },
+          })
+          return null
         }
         return null
       }

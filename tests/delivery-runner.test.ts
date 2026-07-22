@@ -190,4 +190,20 @@ describe('delivery runner', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
     expect(await repository.listDeliveries('run-1')).toEqual([])
   })
+
+  test('retries the same failed delivery step after the run re-enters delivery', async () => {
+    const { repository, renderer, runner } = await fixture()
+    renderer.nextFailure = new Error('injected render failure')
+    const failed = await runner.deliver('run-1')
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'DELIVERING', version: transaction.run.version + 1 })
+    })
+
+    const retried = await runner.deliver('run-1')
+
+    expect(failed).toMatchObject({ status: 'NEEDS_HUMAN', step: { status: 'FAILED' } })
+    expect(retried).toMatchObject({ status: 'COMPLETED', replayed: false, step: { status: 'COMPLETED' } })
+    expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'deliver_presentation')).toHaveLength(1)
+    expect(renderer).toMatchObject({ previewCalls: 2, pptxCalls: 1 })
+  })
 })
