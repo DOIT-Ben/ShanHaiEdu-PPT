@@ -111,6 +111,11 @@ describe('FrameFlow internal source backend', () => {
       token,
       fetchImpl: async () => Response.json({ error: { code: 'CREDIT_SERVICE_UNAVAILABLE' } }, { status: 503 }),
     })
+    const frozen = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010',
+      token,
+      fetchImpl: async () => Response.json({ error: { code: 'CREDIT_ACCOUNT_FROZEN' } }, { status: 423 }),
+    })
     const conflict = new HttpFrameFlowBackend({
       baseUrl: 'http://127.0.0.1:3010',
       token,
@@ -127,6 +132,10 @@ describe('FrameFlow internal source backend', () => {
     await expect(unavailable.reserveCredits(input)).rejects.toMatchObject({
       code: 'CREDIT_SERVICE_UNAVAILABLE',
       reservationState: 'UNKNOWN',
+    })
+    await expect(frozen.reserveCredits(input)).rejects.toMatchObject({
+      code: 'CREDIT_ACCOUNT_FROZEN',
+      reservationState: 'NOT_RESERVED',
     })
     await expect(conflict.reserveCredits(input)).rejects.toMatchObject({
       code: 'IDEMPOTENCY_CONFLICT',

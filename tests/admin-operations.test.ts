@@ -88,6 +88,19 @@ describe('admin operations service', () => {
     expect(budget.released.size).toBe(0)
   })
 
+  test('finishes a legacy unknown reservation after a frozen host account is classified as not reserved', async () => {
+    const { repository, budget, service, base } = await fixture('RESERVATION_UNKNOWN', { budgetReservationId: null })
+    budget.failNext('CREDIT_ACCOUNT_FROZEN', 'NOT_RESERVED')
+
+    const result = await service.act({ ...base, action: 'MARK_NOT_CHARGED' })
+
+    expect(result.step).toMatchObject({
+      status: 'FAILED_NOT_CHARGED', budgetReservationId: null, errorCode: 'PROVIDER_STATE_UNKNOWN',
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect(budget.released.size).toBe(0)
+  })
+
   test('recovers and releases a host reservation whose response was lost', async () => {
     const { repository, budget, service, base } = await fixture('RESERVATION_UNKNOWN', { budgetReservationId: null })
     const recovered = await budget.reserve({

@@ -185,7 +185,7 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
       const code = await this.errorCode(response, `HOST_BUDGET_HTTP_${response.status}`)
       throw new BudgetReservationError(
         code,
-        [400, 401, 402, 403, 404, 405, 413, 415, 422, 429].includes(response.status)
+        [400, 401, 402, 403, 404, 405, 413, 415, 422, 423, 429].includes(response.status)
           ? 'NOT_RESERVED'
           : 'UNKNOWN',
         code,

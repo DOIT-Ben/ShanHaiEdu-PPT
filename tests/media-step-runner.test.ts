@@ -115,12 +115,12 @@ describe('media step runner', () => {
     expect(events.map((event) => event.type)).toContain('approval.required')
   })
 
-  test('releases Agent budget when the host proves no credits were reserved', async () => {
+  test('releases Agent budget without calling Provider when the host account is frozen', async () => {
     const { repository, budget, images, runner } = await fixture()
-    budget.failNext('HOST_BUDGET_DENIED', 'NOT_RESERVED')
+    budget.failNext('CREDIT_ACCOUNT_FROZEN', 'NOT_RESERVED')
     const result = await runner.submitSlideImage(request)
 
-    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'HOST_BUDGET_DENIED' })
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'CREDIT_ACCOUNT_FROZEN' })
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0, status: 'EXECUTING' })
     expect(images.operations.size).toBe(0)
   })
