@@ -144,6 +144,21 @@ describe('layered courseware v3 contract', () => {
     expect(() => presentationBlueprintSchema.parse(crowded)).toThrow('at most four knowledge visual assets')
   })
 
+  test('allows a fully editable hundred grid without relaxing the image limit', () => {
+    const grid = layeredBlueprint()
+    grid.slides[1]!.layeredDesign.elements.push(...Array.from({ length: 100 }, (_, index) => ({
+      ...shape(`grid-cell-${index + 1}`),
+      placement: {
+        x: 0.02 + (index % 10) * 0.025,
+        y: 0.62 + Math.floor(index / 10) * 0.025,
+        width: 0.022,
+        height: 0.022,
+      },
+    })))
+
+    expect(presentationBlueprintSchema.parse(grid).slides[1]!.layeredDesign!.elements).toHaveLength(105)
+  })
+
   test('records source asset lineage and requires it for reuse or reference generation', () => {
     const reusable = layeredBlueprint()
     const element = reusable.slides[1]!.layeredDesign.elements[1]!

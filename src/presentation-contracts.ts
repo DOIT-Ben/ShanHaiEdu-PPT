@@ -92,7 +92,7 @@ export const layeredSlideElementSchema = z.discriminatedUnion('kind', [
 export const layeredSlideDesignSchema = z.object({
   designKind: z.enum(['COVER', 'CONTENT']),
   backgroundColor: hexColorSchema,
-  elements: z.array(layeredSlideElementSchema).min(3).max(16),
+  elements: z.array(layeredSlideElementSchema).min(3).max(140),
 }).strict().superRefine((value, context) => {
   const ids = value.elements.map((element) => element.elementId)
   if (new Set(ids).size !== ids.length) {
