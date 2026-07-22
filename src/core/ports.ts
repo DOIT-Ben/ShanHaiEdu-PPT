@@ -271,6 +271,16 @@ export interface ArtifactPort {
     bytes: Uint8Array
     sha256: string
   }> | null>
+
+  getByIdempotencyKey(input: Readonly<{
+    tenantId: string
+    idempotencyKey: string
+  }>): Promise<Readonly<{
+    artifactId: string
+    mimeType: string
+    bytes: Uint8Array
+    sha256: string
+  }> | null>
 }
 
 export interface PresentationRendererPort {
@@ -283,6 +293,10 @@ export interface PresentationRendererPort {
       assets?: readonly Readonly<{ elementId: string; image: Uint8Array; imageMimeType: string }>[]
     }>[]
   }>): Promise<readonly Readonly<{ pageNumber: number; image: Uint8Array }>[]>
+
+  renderPreviewFromSlidePreviews(input: Readonly<{
+    slides: readonly Readonly<{ pageNumber: number; image: Uint8Array }>[]
+  }>): Promise<Uint8Array>
 
   renderPreview(input: Readonly<{
     blueprint: PresentationBlueprint

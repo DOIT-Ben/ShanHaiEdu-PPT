@@ -151,10 +151,8 @@ describe('deck review runner', () => {
     expect(result).toMatchObject({ passed: true, replayed: false, review: { qualityScore: 88 } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'DELIVERING', qualityScore: 88, version: 6 })
     const request = [...reviewer.requests.values()][0]!
-    expect(request.slides.map((slide) => slide.artifactId)).toEqual([
-      'artifact:frameflow:run-1:deck-review:r0:slide:1:composite',
-      'artifact:frameflow:run-1:deck-review:r0:slide:2:composite',
-    ])
+    expect(request.slides.map((slide) => slide.artifactId))
+      .toEqual(request.slides.map((slide) => expect.stringMatching(/^artifact:frameflow:run-1:slide-previews:/)))
     expect(renderer.slidePreviewCalls).toBe(1)
     expect(request.sourceChunks.map((chunk) => chunk.id)).toEqual(['chunk-1', 'chunk-2'])
   })

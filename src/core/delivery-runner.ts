@@ -6,7 +6,11 @@ import {
 } from '../presentation-contracts'
 import { hashInput } from './hash'
 import { getActiveBlueprint } from './active-blueprint'
-import { loadPresentationSlides, requirePresentationArtifactReferences } from './presentation-render-input'
+import {
+  loadPresentationSlides,
+  renderAndStoreSlidePreviews,
+  requirePresentationArtifactReferences,
+} from './presentation-render-input'
 import type {
   AgentRepository,
   ArtifactPort,
@@ -50,7 +54,24 @@ export class DeliveryRunner {
 
     try {
       const slides = await loadPresentationSlides(this.dependencies.artifacts, run, slideArtifacts)
-      const previewBytes = await this.dependencies.renderer.renderPreview({ blueprint, slides })
+      const previewArtifacts = await renderAndStoreSlidePreviews({
+        artifacts: this.dependencies.artifacts,
+        renderer: this.dependencies.renderer,
+        run,
+        blueprint,
+        references: slideArtifacts,
+      })
+      const previewSlides = await Promise.all(previewArtifacts.map(async (preview) => {
+        const artifact = await this.dependencies.artifacts.get({
+          tenantId: run.host.tenantId,
+          artifactId: preview.artifactId,
+        })
+        if (!artifact || artifact.mimeType !== 'image/png' || artifact.bytes.length === 0) {
+          throw new Error('SLIDE_PREVIEW_ARTIFACT_MISSING')
+        }
+        return { pageNumber: preview.pageNumber, image: artifact.bytes }
+      }))
+      const previewBytes = await this.dependencies.renderer.renderPreviewFromSlidePreviews({ slides: previewSlides })
       const pptxBytes = await this.dependencies.renderer.renderPptx({ blueprint, slides })
       if (previewBytes.length === 0 || pptxBytes.length === 0) throw new Error('DELIVERY_RENDER_EMPTY')
 

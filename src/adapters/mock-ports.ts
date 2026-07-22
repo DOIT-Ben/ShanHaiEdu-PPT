@@ -210,6 +210,13 @@ export class MockArtifactPort implements ArtifactPort {
     const value = this.artifacts.get(input.artifactId)
     return value ? structuredClone(value) : null
   }
+
+  async getByIdempotencyKey(input: Parameters<ArtifactPort['getByIdempotencyKey']>[0]) {
+    const artifactId = this.keys.get(input.idempotencyKey)
+    if (!artifactId?.startsWith(`artifact:${input.tenantId}:`)) return null
+    const value = this.artifacts.get(artifactId)
+    return value ? { artifactId, ...structuredClone(value) } : null
+  }
 }
 
 export class MockPresentationRendererPort implements PresentationRendererPort {
@@ -228,9 +235,15 @@ export class MockPresentationRendererPort implements PresentationRendererPort {
   }
 
   async renderPreview(input: Parameters<PresentationRendererPort['renderPreview']>[0]) {
+    return this.renderPreviewFromSlidePreviews({
+      slides: input.slides.map((slide) => ({ pageNumber: slide.pageNumber, image: slide.image })),
+    })
+  }
+
+  async renderPreviewFromSlidePreviews(input: Parameters<PresentationRendererPort['renderPreviewFromSlidePreviews']>[0]) {
     this.previewCalls += 1
     this.throwIfNeeded()
-    return new TextEncoder().encode(`PNG:${input.blueprint.id}:${input.slides.length}`)
+    return new TextEncoder().encode(`PNG:${input.slides.length}`)
   }
 
   async renderPptx(input: Parameters<PresentationRendererPort['renderPptx']>[0]) {

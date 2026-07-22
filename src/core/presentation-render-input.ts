@@ -1,5 +1,6 @@
 import type { PresentationBlueprint } from '../presentation-contracts'
 import { blueprintElementAssetKey, blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
+import { hashInput } from './hash'
 import type { AgentRepository, ArtifactPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 
 export type PresentationArtifactReference = Readonly<{
@@ -86,8 +87,26 @@ export async function renderAndStoreSlidePreviews(input: Readonly<{
   run: RunRecord
   blueprint: PresentationBlueprint
   references: readonly PresentationArtifactReference[]
-  idempotencyPrefix: string
 }>) {
+  const cachePrefix = `${input.run.id}:slide-previews:${hashInput({
+    blueprint: input.blueprint,
+    references: input.references,
+  }).slice(0, 28)}`
+  const cached = await Promise.all(input.blueprint.slides.map(async (slide) => {
+    const idempotencyKey = `${cachePrefix}:slide:${slide.pageNumber}:composite`
+    const artifact = await input.artifacts.getByIdempotencyKey({
+      tenantId: input.run.host.tenantId,
+      idempotencyKey,
+    })
+    if (artifact && (artifact.mimeType !== 'image/png' || artifact.bytes.length === 0)) {
+      throw new Error('SLIDE_PREVIEW_CACHE_INVALID')
+    }
+    return { pageNumber: slide.pageNumber, idempotencyKey, artifact }
+  }))
+  if (cached.every((entry) => entry.artifact !== null)) {
+    return cached.map((entry) => ({ pageNumber: entry.pageNumber, artifactId: entry.artifact!.artifactId }))
+  }
+
   const slides = await loadPresentationSlides(input.artifacts, input.run, input.references)
   const previews = await input.renderer.renderSlidePreviews({ blueprint: input.blueprint, slides })
   const expectedPages = input.blueprint.slides.map((slide) => slide.pageNumber)
@@ -95,14 +114,16 @@ export async function renderAndStoreSlidePreviews(input: Readonly<{
     || previews.some((preview, index) => preview.pageNumber !== expectedPages[index] || preview.image.length === 0)) {
     throw new Error('SLIDE_PREVIEW_OUTPUT_INVALID')
   }
-  return Promise.all(previews.map(async (preview) => {
+  return Promise.all(previews.map(async (preview, index) => {
+    const existing = cached[index]?.artifact
+    if (existing) return { pageNumber: preview.pageNumber, artifactId: existing.artifactId }
     const stored = await input.artifacts.put({
       tenantId: input.run.host.tenantId,
       runId: input.run.id,
       name: `slide-${preview.pageNumber}-review.png`,
       mimeType: 'image/png',
       bytes: preview.image,
-      idempotencyKey: `${input.idempotencyPrefix}:slide:${preview.pageNumber}:composite`,
+      idempotencyKey: cached[index]!.idempotencyKey,
     })
     return { pageNumber: preview.pageNumber, artifactId: stored.artifactId }
   }))

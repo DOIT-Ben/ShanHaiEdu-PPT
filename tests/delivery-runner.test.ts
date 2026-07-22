@@ -204,6 +204,6 @@ describe('delivery runner', () => {
     expect(failed).toMatchObject({ status: 'NEEDS_HUMAN', step: { status: 'FAILED' } })
     expect(retried).toMatchObject({ status: 'COMPLETED', replayed: false, step: { status: 'COMPLETED' } })
     expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'deliver_presentation')).toHaveLength(1)
-    expect(renderer).toMatchObject({ previewCalls: 2, pptxCalls: 1 })
+    expect(renderer).toMatchObject({ slidePreviewCalls: 2, previewCalls: 1, pptxCalls: 1 })
   })
 })

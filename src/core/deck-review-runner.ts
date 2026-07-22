@@ -81,7 +81,6 @@ export class DeckReviewRunner {
         run,
         blueprint,
         references: artifactReferences,
-        idempotencyPrefix: idempotencyKey,
       })
       const previewByPage = new Map(previews.map((preview) => [preview.pageNumber, preview.artifactId]))
       const reviewSlides = slides.map((slide) => {

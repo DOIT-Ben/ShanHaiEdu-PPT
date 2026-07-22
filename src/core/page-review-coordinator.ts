@@ -80,7 +80,6 @@ export class PageReviewCoordinator {
           run,
           blueprint,
           references,
-          idempotencyPrefix: `${run.id}:page-review:r${run.revisionRound}`,
         })
         stopReviews = false
         const compositeReviews = await mapWithConcurrency(previews, this.reviewConcurrency, async (preview) => {

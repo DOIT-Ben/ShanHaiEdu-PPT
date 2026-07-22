@@ -72,6 +72,12 @@ export class LocalArtifactPort implements ArtifactPort {
     }
   }
 
+  async getByIdempotencyKey(input: Parameters<ArtifactPort['getByIdempotencyKey']>[0]) {
+    const artifactId = `artifact-${digest(`${input.tenantId}\0${input.idempotencyKey}`).slice(0, 40)}`
+    const artifact = await this.get({ tenantId: input.tenantId, artifactId })
+    return artifact ? { artifactId, ...artifact } : null
+  }
+
   private async readMetadata(directory: string) {
     try {
       const raw = JSON.parse(await readFile(path.join(directory, 'metadata.json'), 'utf8')) as Partial<ArtifactMetadata>

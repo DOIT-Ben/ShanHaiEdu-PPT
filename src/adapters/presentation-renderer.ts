@@ -207,7 +207,11 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
   }
 
   async renderPreview(input: RenderInput) {
-    const rendered = (await this.renderSlidePreviews(input)).map((slide) => slide.image)
+    return this.renderPreviewFromSlidePreviews({ slides: await this.renderSlidePreviews(input) })
+  }
+
+  async renderPreviewFromSlidePreviews(input: Parameters<PresentationRendererPort['renderPreviewFromSlidePreviews']>[0]) {
+    const rendered = input.slides.map((slide) => slide.image)
     const columns = Math.min(3, rendered.length)
     const rows = Math.ceil(rendered.length / columns)
     const thumbnailWidth = 480

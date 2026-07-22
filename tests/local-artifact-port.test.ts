@@ -31,11 +31,17 @@ describe('local artifact port', () => {
     const first = await artifacts.put(input)
     const replay = await artifacts.put(input)
     const stored = await artifacts.get({ tenantId: 'frameflow', artifactId: first.artifactId })
+    const resolved = await artifacts.getByIdempotencyKey({
+      tenantId: 'frameflow',
+      idempotencyKey: input.idempotencyKey,
+    })
 
     expect(first).toEqual(replay)
     expect(first.artifactId).toMatch(/^artifact-[a-f0-9]{40}$/)
     expect(stored?.bytes).toEqual(bytes)
     expect(stored?.sha256).toBe(first.sha256)
+    expect(resolved).toMatchObject({ artifactId: first.artifactId, mimeType: 'image/png', sha256: first.sha256 })
+    expect(resolved?.bytes).toEqual(bytes)
   })
 
   test('isolates tenant reads and rejects changed bytes under one idempotency key', async () => {
