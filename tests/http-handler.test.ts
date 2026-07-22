@@ -166,6 +166,41 @@ describe('HTTP v1 handler', () => {
     expect(text).not.toContain(createBody.source.text)
   })
 
+  test('returns bounded persisted event history for reconnect recovery', async () => {
+    const { repository, handle } = fixture()
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.started',
+        payload: { stepId: 'step-history-1', tool: 'source-loader', label: '解析教材' },
+      })
+    })
+
+    const response = await handle(request(`/v1/runs/${runId}/events/history?after=1`))
+    const body = await response.json() as {
+      data: Array<{ sequence: number; type: string }>
+      pagination: { nextAfter: number; hasMore: boolean }
+    }
+
+    expect(response.status).toBe(200)
+    expect(body.data).toEqual([expect.objectContaining({ sequence: 2, type: 'tool.started' })])
+    expect(body.pagination).toEqual({ nextAfter: 2, hasMore: false })
+  })
+
+  test('does not reveal another user event history', async () => {
+    const { handle } = fixture()
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    const response = await handle(new Request(
+      `http://ppt-agent.test/v1/runs/${runId}/events/history`,
+      { headers: { 'X-Test-Tenant': 'frameflow', 'X-Test-User': 'user-2' } },
+    ))
+
+    expect(response.status).toBe(404)
+  })
+
   test('returns 404 instead of revealing another user Run', async () => {
     const { handle } = fixture()
     const created = await createRun(handle)

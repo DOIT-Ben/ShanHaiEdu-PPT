@@ -177,6 +177,42 @@
         }
       }
     },
+    "/v1/runs/{runId}/events/history": {
+      "get": {
+        "operationId": "listRunEventHistory",
+        "description": "Returns durable Run events after the supplied cursor as a JSON page bounded to at most 100 events and 256 KiB. Clients follow pagination.nextAfter while pagination.hasMore is true before opening the live SSE stream.",
+        "parameters": [
+          { "$ref": "#/components/parameters/RunId" },
+          { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0, "default": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded persistent event history page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["data", "pagination"],
+                  "properties": {
+                    "data": { "type": "array", "maxItems": 100, "items": { "type": "object" } },
+                    "pagination": {
+                      "type": "object",
+                      "required": ["nextAfter", "hasMore"],
+                      "properties": {
+                        "nextAfter": { "type": "integer", "minimum": 0 },
+                        "hasMore": { "type": "boolean" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/runs/{runId}/deliveries/{deliveryId}/content": {
       "get": {
         "operationId": "downloadDeliveryContent",

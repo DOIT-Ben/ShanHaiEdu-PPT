@@ -30,8 +30,10 @@ describe('OpenAPI v1 contract', () => {
       '/v1/runs/{runId}/actions',
       '/v1/runs/{runId}/deliveries/{deliveryId}/content',
       '/v1/runs/{runId}/events',
+      '/v1/runs/{runId}/events/history',
     ])
     expect(document.paths['/v1/runs/{runId}/events']?.get).toBeDefined()
+    expect(document.paths['/v1/runs/{runId}/events/history']?.get).toBeDefined()
     expect(JSON.stringify(document.paths['/v1/runs/{runId}/events'])).toContain('100 events')
     expect(JSON.stringify(document.paths['/v1/runs/{runId}/events'])).toContain('terminal')
     expect(document.paths['/v1/admin/planning-failures']?.get).toBeDefined()

@@ -6,7 +6,7 @@ import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-op
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
-import { DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
+import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
 
 export interface HostAuthenticationPort {
   authenticate(request: Request): Promise<HostContext | null>
@@ -335,6 +335,24 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           runId,
           after,
           signal: request.signal,
+        })
+      }
+
+      if (parts.length === 5 && parts[3] === 'events' && parts[4] === 'history' && request.method === 'GET') {
+        await dependencies.runs.getOwned(runId, host)
+        const rawAfter = url.searchParams.get('after') ?? '0'
+        const after = Number(rawAfter)
+        if (!Number.isSafeInteger(after) || after < 0) {
+          return errorResponse(422, 'INVALID_EVENT_CURSOR', 'event cursor must be a non-negative integer', requestId)
+        }
+        const page = await dependencies.repository.readEvents(runId, {
+          afterSequence: after,
+          limit: DEFAULT_EVENT_BATCH_LIMIT,
+          maxBytes: DEFAULT_EVENT_BATCH_BYTES,
+        })
+        return json({
+          data: page.events,
+          pagination: { nextAfter: page.nextAfter, hasMore: page.hasMore },
         })
       }
 
