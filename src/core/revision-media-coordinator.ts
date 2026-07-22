@@ -1,7 +1,7 @@
 import { CONTRACT_VERSION } from '../contracts'
 import { revisionPlanSchema } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintImageRequirements } from './blueprint-assets'
+import { blueprintElementAssetKey, blueprintImageRequirements } from './blueprint-assets'
 import { hashInput } from './hash'
 import { MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
@@ -112,7 +112,7 @@ export class RevisionMediaCoordinator {
         const element = slide.layeredDesign.elements.find((candidate) => candidate.kind === 'IMAGE'
           && candidate.elementId === operation.targetElementId)
         if (!element || element.kind !== 'IMAGE') throw new Error('REVISION_TARGET_ELEMENT_INVALID')
-        const assetKey = element.reuseKey ? `reuse:${element.reuseKey}` : `slide:${pageNumber}:element:${element.elementId}`
+        const assetKey = blueprintElementAssetKey(slide, element)
         const requirement = requirements.find((candidate) => candidate.assetKey === assetKey)
         if (!requirement) throw new Error('REVISION_ASSET_REQUIREMENT_NOT_FOUND')
         return {

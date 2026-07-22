@@ -65,7 +65,61 @@ function revisionPlan() {
   }
 }
 
-async function fixture(overrides: Partial<RunRecord> = {}) {
+function layeredBlueprint() {
+  const base = blueprint('blueprint-r1', true)
+  return {
+    ...base,
+    renderMode: 'LAYERED_COURSEWARE_V3' as const,
+    coverDesignMode: 'FOLLOW_TEMPLATE' as const,
+    sourceManifest: [],
+    sourceAssets: [],
+    slides: base.slides.map((slide) => ({
+      ...slide,
+      sourceAssetIds: [],
+      layeredDesign: {
+        designKind: slide.pageNumber === 1 ? 'COVER' as const : 'CONTENT' as const,
+        backgroundColor: '#EAF7FF',
+        elements: [
+          {
+            kind: 'IMAGE' as const, elementId: `base-${slide.pageNumber}`, role: 'BASE_LAYER' as const,
+            knowledgePoint: '建立科学课堂背景', prompt: 'A clean wide science classroom background without text',
+            negativePrompt: 'text, logo, watermark', sourceChunkIds: ['chunk-1'], sourceAssetIds: [],
+            sourceAssetStrategy: 'REGENERATE' as const,
+            placement: { x: 0, y: 0, width: 1, height: 1 }, zIndex: 0,
+            fit: 'COVER' as const, aspectRatio: '16:9' as const, backgroundMode: 'OPAQUE' as const,
+          },
+          {
+            kind: 'IMAGE' as const, elementId: `knowledge-${slide.pageNumber}`, role: 'KNOWLEDGE_VISUAL' as const,
+            knowledgePoint: '展示光合作用知识对象', prompt: 'A transparent leaf explaining photosynthesis without text',
+            negativePrompt: 'text, logo, watermark', sourceChunkIds: ['chunk-1'], sourceAssetIds: [],
+            sourceAssetStrategy: 'REGENERATE' as const,
+            placement: { x: 0.6, y: 0.2, width: 0.3, height: 0.5 }, zIndex: 2,
+            fit: 'CONTAIN' as const, aspectRatio: '1:1' as const, backgroundMode: 'TRANSPARENT' as const,
+          },
+          {
+            kind: 'TEXT' as const, elementId: `title-${slide.pageNumber}`, role: 'TITLE' as const,
+            text: slide.title, sourceChunkIds: ['chunk-1'], sourceAssetIds: [],
+            placement: { x: 0.08, y: 0.15, width: 0.4, height: 0.15 }, zIndex: 3,
+            style: { fontSize: 30, bold: true, color: '#17365D', align: 'LEFT' as const },
+          },
+        ],
+      },
+    })),
+  }
+}
+
+function layeredRevisionPlan() {
+  const base = revisionPlan()
+  return {
+    ...base,
+    operations: [{ ...base.operations[0]!, targetElementId: 'knowledge-2' }],
+  }
+}
+
+async function fixture(
+  overrides: Partial<RunRecord> = {},
+  inputs: Readonly<{ blueprint?: ReturnType<typeof blueprint> | ReturnType<typeof layeredBlueprint>; plan?: ReturnType<typeof revisionPlan> }> = {},
+) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
@@ -81,8 +135,8 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
       createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
     })
     put('plan', planningStepKey('run-1'), 'create_blueprint', blueprint('blueprint-r0'))
-    put('apply-r1', revisionBlueprintStepKey('run-1', 1), 'apply_revision', blueprint('blueprint-r1', true))
-    put('revision-plan-r1', revisionPlanStepKey('run-1', 1), 'plan_revision', revisionPlan())
+    put('apply-r1', revisionBlueprintStepKey('run-1', 1), 'apply_revision', inputs.blueprint ?? blueprint('blueprint-r1', true))
+    put('revision-plan-r1', revisionPlanStepKey('run-1', 1), 'plan_revision', inputs.plan ?? revisionPlan())
     for (const pageNumber of [1, 2]) put(
       `image-r0-${pageNumber}`,
       `run-1:slide:${pageNumber}:image:r0:v1`,
@@ -127,5 +181,21 @@ describe('revision media coordinator', () => {
 
     expect(result).toMatchObject({ status: 'PAUSED', submitted: 0, total: 1 })
     expect(images.operations.size).toBe(0)
+  })
+
+  test('redraws one v3 element using the canonical strategy-aware asset key', async () => {
+    const { images, coordinator } = await fixture({}, {
+      blueprint: layeredBlueprint(),
+      plan: layeredRevisionPlan(),
+    })
+
+    const result = await coordinator.submit('run-1', 5)
+
+    expect(result).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(images.operations.size).toBe(1)
+    expect([...images.requests.values()][0]).toMatchObject({
+      backgroundMode: 'TRANSPARENT',
+      prompt: expect.stringContaining('transparent leaf'),
+    })
   })
 })
