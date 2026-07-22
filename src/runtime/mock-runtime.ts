@@ -4,6 +4,7 @@ import type { HostContext } from '../contracts'
 import type { BlueprintDraft } from '../presentation-contracts'
 import type { HostAuthenticationPort } from '../http/handler'
 import { createHttpHandler } from '../http/handler'
+import { InMemoryPrincipalRateLimiter, type PrincipalRateLimiterPort } from '../http/principal-rate-limiter'
 import { SharedTokenAuthentication } from '../http/service-token-authentication'
 export { ServiceTokenAuthentication, SharedTokenAuthentication } from '../http/service-token-authentication'
 import { FrameFlowHostAdapter, type FrameFlowBackendClient } from '../adapters/frameflow-host'
@@ -286,6 +287,9 @@ type RuntimeInput = Readonly<{
   workerConcurrency?: number
   reviewConcurrency?: number
   runLeaseTtlMs?: number
+  createRunRateLimitPerMinute?: number
+  runActionRateLimitPerMinute?: number
+  rateLimiter?: PrincipalRateLimiterPort
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -309,6 +313,11 @@ export function createAgentRuntime(input: RuntimeInput) {
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
   const runs = new RunService({ repository: input.repository, clock })
+  const rateLimiter = input.rateLimiter ?? new InMemoryPrincipalRateLimiter({
+    createRun: { limit: input.createRunRateLimitPerMinute ?? 10, windowMs: 60_000 },
+    runAction: { limit: input.runActionRateLimitPerMinute ?? 60, windowMs: 60_000 },
+    now: () => clock.now().getTime(),
+  })
   const planning = new PlanningRunner({
     repository: input.repository,
     documents,
@@ -491,6 +500,7 @@ export function createAgentRuntime(input: RuntimeInput) {
       authentication: input.authentication ?? new SharedTokenAuthentication(input.apiToken),
       health,
       operations,
+      rateLimiter,
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
     }),

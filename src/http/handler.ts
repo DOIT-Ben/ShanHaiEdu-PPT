@@ -6,6 +6,7 @@ import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-op
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
+import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
 
 export interface HostAuthenticationPort {
@@ -22,6 +23,7 @@ type HandlerDependencies = Readonly<{
   waitingSlaMs?: number
   stepSlaMs?: number
   operations?: AdminOperationsPort
+  rateLimiter?: PrincipalRateLimiterPort
 }>
 
 function publicRun(run: RunRecord) {
@@ -62,6 +64,22 @@ function errorResponse(status: number, code: string, message: string, requestId:
     error: { code, message, requestId, ...(details === undefined ? {} : { details }) },
   })
   return json(body, status)
+}
+
+function enforceRateLimit(
+  rateLimiter: PrincipalRateLimiterPort | undefined,
+  scope: PrincipalRateLimitScope,
+  host: HostContext,
+  requestId: string,
+) {
+  if (!rateLimiter) return null
+  const decision = rateLimiter.consume(scope, host)
+  if (decision.allowed) return null
+  const response = errorResponse(429, 'RATE_LIMITED', 'request rate limit exceeded', requestId, {
+    retryAfterSeconds: decision.retryAfterSeconds,
+  })
+  response.headers.set('Retry-After', String(decision.retryAfterSeconds))
+  return response
 }
 
 function samePrincipal(left: HostContext, right: HostContext) {
@@ -235,6 +253,8 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           return errorResponse(403, 'ADMIN_REQUIRED', 'administrator role is required', requestId)
         }
         if (!dependencies.operations) return errorResponse(503, 'ADMIN_OPERATIONS_UNAVAILABLE', 'admin operations are unavailable', requestId)
+        const rateLimited = enforceRateLimit(dependencies.rateLimiter, 'RUN_ACTION', host, requestId)
+        if (rateLimited) return rateLimited
         const idempotencyKey = request.headers.get('Idempotency-Key')?.trim()
         if (!idempotencyKey || idempotencyKey.length > 160) {
           return errorResponse(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key is required', requestId)
@@ -272,6 +292,8 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       if (parts[1] !== 'runs') return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
 
       if (parts.length === 2 && request.method === 'POST') {
+        const rateLimited = enforceRateLimit(dependencies.rateLimiter, 'CREATE_RUN', host, requestId)
+        if (rateLimited) return rateLimited
         const idempotencyKey = request.headers.get('Idempotency-Key')
         if (!idempotencyKey) return errorResponse(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key is required', requestId)
         const body = await request.json().catch(() => null) as { host?: HostContext } | null
@@ -315,6 +337,8 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       }
 
       if (parts.length === 4 && parts[3] === 'actions' && request.method === 'POST') {
+        const rateLimited = enforceRateLimit(dependencies.rateLimiter, 'RUN_ACTION', host, requestId)
+        if (rateLimited) return rateLimited
         const idempotencyKey = request.headers.get('Idempotency-Key')
         if (!idempotencyKey) return errorResponse(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key is required', requestId)
         const body = await request.json().catch(() => null)

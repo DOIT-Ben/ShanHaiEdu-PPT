@@ -25,7 +25,7 @@ const authentication = new ServiceTokenAuthentication([{
   userToken: apiToken,
   ...(adminApiToken ? { adminToken: adminApiToken } : {}),
 }])
-function boundedMilliseconds(name: string, fallback: number, minimum: number, maximum: number) {
+function boundedInteger(name: string, fallback: number, minimum: number, maximum: number) {
   const value = Number(process.env[name] ?? fallback)
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${name}_INVALID`)
   return value
@@ -38,13 +38,15 @@ const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const appVersion = process.env.PPT_AGENT_APP_VERSION?.trim() || '0.1.0'
-const heartbeatStaleMs = boundedMilliseconds('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
-const tickStaleMs = boundedMilliseconds('PPT_AGENT_TICK_STALE_MS', 15 * 60_000, 10_000, 60 * 60_000)
-const waitingSlaMs = boundedMilliseconds('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
-const stepSlaMs = boundedMilliseconds('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
-const workerConcurrency = boundedMilliseconds('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
-const reviewConcurrency = boundedMilliseconds('PPT_AGENT_REVIEW_CONCURRENCY', 3, 1, 8)
-const runLeaseTtlMs = boundedMilliseconds('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
+const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
+const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 15 * 60_000, 10_000, 60 * 60_000)
+const waitingSlaMs = boundedInteger('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
+const stepSlaMs = boundedInteger('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
+const workerConcurrency = boundedInteger('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
+const reviewConcurrency = boundedInteger('PPT_AGENT_REVIEW_CONCURRENCY', 3, 1, 8)
+const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
+const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
+const runActionRateLimitPerMinute = boundedInteger('PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE', 60, 1, 10_000)
 if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
 function loopbackProxy(value: string | undefined) {
   if (!value) return undefined
@@ -100,11 +102,13 @@ const runtime = runtimeMode === 'gateway'
         workerConcurrency,
         reviewConcurrency,
         runLeaseTtlMs,
+        createRunRateLimitPerMinute,
+        runActionRateLimitPerMinute,
       })
     })()
   : createMockRuntime({
       repository, artifacts, apiToken, appVersion, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
-      workerConcurrency, reviewConcurrency, runLeaseTtlMs,
+      workerConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
     })
 let ticking = false
 const timer = setInterval(async () => {

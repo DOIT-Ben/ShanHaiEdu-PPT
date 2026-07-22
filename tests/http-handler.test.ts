@@ -6,6 +6,7 @@ import { AdminOperationsService } from '../src/core/admin-operations'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { RunService } from '../src/core/run-service'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
+import { InMemoryPrincipalRateLimiter } from '../src/http/principal-rate-limiter'
 import { RuntimeHealthMonitor } from '../src/observability/runtime-health'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
@@ -31,7 +32,7 @@ class HeaderAuthentication implements HostAuthenticationPort {
   }
 }
 
-function fixture() {
+function fixture(rateLimits?: Readonly<{ createRun: number; runAction: number }>) {
   const repository = new InMemoryAgentRepository()
   const clock = new FixedClock()
   const runs = new RunService({ repository, clock })
@@ -41,6 +42,11 @@ function fixture() {
   const media = new MediaStepRunner({ repository, budget, images, clock })
   const operations = new AdminOperationsService({ repository, budget, media, clock })
   const health = new RuntimeHealthMonitor(clock, { version: 'test' })
+  const rateLimiter = rateLimits ? new InMemoryPrincipalRateLimiter({
+    createRun: { limit: rateLimits.createRun, windowMs: 60_000 },
+    runAction: { limit: rateLimits.runAction, windowMs: 60_000 },
+    now: () => clock.now().getTime(),
+  }) : undefined
   const handle = createHttpHandler({
     repository,
     artifacts,
@@ -49,8 +55,9 @@ function fixture() {
     health,
     operations,
     eventPollMs: 10,
+    ...(rateLimiter ? { rateLimiter } : {}),
   })
-  return { repository, runs, artifacts, budget, images, health, handle }
+  return { repository, runs, artifacts, budget, images, health, clock, handle }
 }
 
 function request(path: string, init: RequestInit = {}) {
@@ -146,6 +153,39 @@ describe('HTTP v1 handler', () => {
     expect(missingKey.status).toBe(400)
     expect(applied.status).toBe(200)
     expect((await applied.json() as { data: { status: string } }).data.status).toBe('PAUSED')
+  })
+
+  test('rate limits run creation and actions with a retry deadline', async () => {
+    const { repository, clock, handle } = fixture({ createRun: 1, runAction: 1 })
+    const created = await createRun(handle)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    const blockedCreate = await createRun(handle, 'http-create-rate-limited')
+
+    expect(blockedCreate.status).toBe(429)
+    expect(blockedCreate.headers.get('Retry-After')).toBe('60')
+    expect(await blockedCreate.json()).toMatchObject({
+      error: { code: 'RATE_LIMITED', details: { retryAfterSeconds: 60 } },
+    })
+
+    clock.advance(60_000)
+    expect((await createRun(handle, 'http-create-after-window')).status).toBe(201)
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'EXECUTING', version: 1 })
+    })
+    const paused = await handle(request(`/v1/runs/${runId}/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'pause-rate-limit-0001' },
+      body: JSON.stringify({ schemaVersion: CONTRACT_VERSION, type: 'PAUSE', expectedVersion: 1 }),
+    }))
+    const blockedAction = await handle(request(`/v1/runs/${runId}/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'resume-rate-limit-0001' },
+      body: JSON.stringify({ schemaVersion: CONTRACT_VERSION, type: 'RESUME', expectedVersion: 2 }),
+    }))
+
+    expect(paused.status).toBe(200)
+    expect(blockedAction.status).toBe(429)
+    expect(blockedAction.headers.get('Retry-After')).toBe('60')
   })
 
   test('replays persisted events as SSE without private Run input', async () => {
