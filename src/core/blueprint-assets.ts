@@ -9,6 +9,8 @@ export type BlueprintImageRequirement = Readonly<{
   pageNumber: number
   elementId: string | null
   reuseKey: string | null
+  role: string
+  knowledgePoint: string
   prompt: string
   negativePrompt: string | null
   aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
@@ -41,6 +43,8 @@ export function blueprintImageRequirements(
       pageNumber: slide.pageNumber,
       elementId: null,
       reuseKey: null,
+      role: 'BASE_LAYER',
+      knowledgePoint: slide.visualIntent,
       prompt: slide.visualPrompt,
       negativePrompt: null,
       aspectRatio: '16:9',
@@ -67,6 +71,8 @@ export function blueprintImageRequirements(
         pageNumber: slide.pageNumber,
         elementId: element.elementId,
         reuseKey: element.reuseKey ?? null,
+        role: element.role,
+        knowledgePoint: element.knowledgePoint,
         prompt: element.prompt,
         negativePrompt: element.negativePrompt,
         aspectRatio: element.aspectRatio,

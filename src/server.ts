@@ -68,6 +68,7 @@ const runtime = runtimeMode === 'gateway'
         repository,
         artifacts,
         ...(discovery ? { discovery } : {}),
+        ...(discovery ? { candidateReviewer: model } : {}),
         apiToken,
         images: images!,
         model,

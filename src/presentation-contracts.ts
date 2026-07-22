@@ -390,6 +390,10 @@ export const webAssetProvenanceSchema = z.object({
   licenseUrl: z.string().url().max(2_000),
   attribution: z.string().trim().min(1).max(2_000).nullable(),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  selectionReview: z.object({
+    visualScore: z.number().int().min(0).max(100),
+    reasons: z.array(z.string().trim().min(1).max(300)).max(6),
+  }).strict().optional(),
 }).strict()
 
 export const deliveryRecordSchema = z.object({

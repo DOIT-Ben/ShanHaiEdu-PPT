@@ -1,5 +1,6 @@
 import type {
   ArtifactPort,
+  AssetCandidateReviewPort,
   BudgetPort,
   ClockPort,
   DeckReviewPort,
@@ -124,6 +125,22 @@ export class MockVisualReviewPort implements VisualReviewPort {
 
   respondToArtifact(artifactId: string, response: unknown) {
     this.responsesByArtifact.set(artifactId, structuredClone(response))
+  }
+}
+
+export class MockAssetCandidateReviewPort implements AssetCandidateReviewPort {
+  readonly reviews: Parameters<AssetCandidateReviewPort['reviewCandidate']>[0][] = []
+  readonly responsesByCandidate = new Map<string, unknown>()
+
+  constructor(public response: unknown) {}
+
+  async reviewCandidate(input: Parameters<AssetCandidateReviewPort['reviewCandidate']>[0]) {
+    this.reviews.push(structuredClone(input))
+    return structuredClone(this.responsesByCandidate.get(input.candidate.providerAssetId) ?? this.response)
+  }
+
+  respondToCandidate(providerAssetId: string, response: unknown) {
+    this.responsesByCandidate.set(providerAssetId, structuredClone(response))
   }
 }
 

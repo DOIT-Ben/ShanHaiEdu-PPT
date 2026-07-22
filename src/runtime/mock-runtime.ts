@@ -25,6 +25,7 @@ import { RevisionPlanningRunner } from '../core/revision-planning-runner'
 import type {
   AgentRepository,
   ArtifactPort,
+  AssetCandidateReviewPort,
   AssetDiscoveryPort,
   BudgetPort,
   ClockPort,
@@ -284,6 +285,7 @@ type RuntimeInput = Readonly<{
   repository: AgentRepository
   artifacts: ArtifactPort
   discovery?: AssetDiscoveryPort
+  candidateReviewer?: AssetCandidateReviewPort
   apiToken: string
   model: StructuredModelPort
   visualReviewer: VisualReviewPort
@@ -339,6 +341,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     documents,
     artifacts: input.artifacts,
     ...(input.discovery ? { discovery: input.discovery } : {}),
+    ...(input.candidateReviewer ? { candidateReviewer: input.candidateReviewer } : {}),
     clock,
   })
   const visual = new VisualReviewRunner({

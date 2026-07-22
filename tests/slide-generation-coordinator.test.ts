@@ -1,10 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
+import {
+  FixedClock,
+  MockArtifactPort,
+  MockAssetCandidateReviewPort,
+  MockBudgetPort,
+  MockImageGenerationPort,
+} from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { planningStepKey } from '../src/core/planning-runner'
-import type { AssetCandidate, AssetDiscoveryPort, DocumentResult, RunRecord } from '../src/core/ports'
+import type { AssetCandidate, AssetCandidateReviewPort, AssetDiscoveryPort, DocumentResult, RunRecord } from '../src/core/ports'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 
 function run(budgetUnits = 100): RunRecord {
@@ -67,7 +73,8 @@ function blueprint() {
 
 async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blueprint> | Record<string, unknown> = blueprint(), documentResult: DocumentResult = {
   name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [],
-}, discovery?: AssetDiscoveryPort, assetAcquisitionPolicy: RunRecord['assetAcquisitionPolicy'] = 'AI_FIRST') {
+}, discovery?: AssetDiscoveryPort, assetAcquisitionPolicy: RunRecord['assetAcquisitionPolicy'] = 'AI_FIRST',
+candidateReviewer?: AssetCandidateReviewPort) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
@@ -94,8 +101,23 @@ async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blue
     })
   })
   const media = new MediaStepRunner({ repository, budget, images, clock })
-  const coordinator = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock, ...(discovery ? { discovery } : {}) })
-  return { repository, budget, images, artifacts, coordinator }
+  const webReviewer = candidateReviewer ?? (discovery ? new MockAssetCandidateReviewPort({
+    approved: true,
+    textDetected: false,
+    visualScore: 90,
+    reasons: [],
+    retryInstruction: null,
+  }) : undefined)
+  const coordinator = new SlideGenerationCoordinator({
+    repository,
+    media,
+    documents,
+    artifacts,
+    clock,
+    ...(discovery ? { discovery } : {}),
+    ...(webReviewer ? { candidateReviewer: webReviewer } : {}),
+  })
+  return { repository, budget, images, artifacts, coordinator, candidateReviewer: webReviewer }
 }
 
 function webSearchBlueprint() {
@@ -313,7 +335,9 @@ describe('slide generation coordinator', () => {
 
   test('uses discovered web assets without image generation or budget charge', async () => {
     const found = discovery()
-    const { repository, images, budget, coordinator } = await fixture(100, webSearchBlueprint(), sourceDocument(), found.port, 'SEARCH_FIRST')
+    const { repository, images, budget, coordinator, candidateReviewer } = await fixture(
+      100, webSearchBlueprint(), sourceDocument(), found.port, 'SEARCH_FIRST',
+    )
     const result = await coordinator.submitBlueprintImages('run-1', 10)
 
     expect(result).toMatchObject({ submitted: 3, total: 3 })
@@ -322,8 +346,32 @@ describe('slide generation coordinator', () => {
     expect(images.operations.size).toBe(0)
     expect(budget.reservations.size).toBe(0)
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect((candidateReviewer as MockAssetCandidateReviewPort).reviews).toHaveLength(3)
     expect(result.steps.every((step) => (step.output as { acquisition?: string })?.acquisition === 'SEARCH_WEB')).toBe(true)
     expect((result.steps[0]!.output as { provenance: { license: string } }).provenance.license).toBe('CC_BY')
+    expect((result.steps[0]!.output as { provenance: { selectionReview: { visualScore: number } } })
+      .provenance.selectionReview.visualScore).toBe(90)
+  })
+
+  test('falls back to AI when downloaded candidates fail the visual quality gate', async () => {
+    const found = discovery()
+    const reviewer = new MockAssetCandidateReviewPort({
+      approved: false,
+      textDetected: false,
+      visualScore: 45,
+      reasons: ['素材存在明显白底并与整套画风冲突'],
+      retryInstruction: 'Select a clean asset that matches the requested classroom style.',
+    })
+    const { images, budget, coordinator } = await fixture(
+      100, webSearchBlueprint(), sourceDocument(), found.port, 'SEARCH_FIRST', reviewer,
+    )
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ submitted: 3, total: 3 })
+    expect(found.acquisitions).toHaveLength(3)
+    expect(reviewer.reviews).toHaveLength(3)
+    expect(images.operations.size).toBe(3)
+    expect(budget.reservations.size).toBe(3)
   })
 
   test('falls back to AI only for web searches without an acceptable candidate', async () => {

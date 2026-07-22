@@ -1,5 +1,5 @@
 import { CONTRACT_VERSION } from '../contracts'
-import type { PresentationBlueprint } from '../presentation-contracts'
+import { slideVisualReviewSchema, type PresentationBlueprint, type SlideVisualReview } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
 import { hashInput } from './hash'
@@ -8,6 +8,7 @@ import type {
   AcquiredWebAsset,
   AgentRepository,
   ArtifactPort,
+  AssetCandidateReviewPort,
   AssetDiscoveryPort,
   ClockPort,
   DocumentPort,
@@ -31,6 +32,8 @@ export type RefreshBlueprintImagesResult = Readonly<{
   artifactIds: readonly string[]
 }>
 
+export const ASSET_CANDIDATE_QUALITY_THRESHOLD = 80
+
 export class SlideGenerationCoordinator {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
@@ -38,6 +41,7 @@ export class SlideGenerationCoordinator {
     documents: DocumentPort
     artifacts: ArtifactPort
     discovery?: AssetDiscoveryPort
+    candidateReviewer?: AssetCandidateReviewPort
     clock: ClockPort
   }>) {}
 
@@ -259,7 +263,8 @@ export class SlideGenerationCoordinator {
     requirement: ReturnType<typeof blueprintImageRequirements>[number],
   ): Promise<StepRecord | null> {
     const discovery = this.dependencies.discovery
-    if (!discovery || !requirement.assetIntent) return null
+    const reviewer = this.dependencies.candidateReviewer
+    if (!discovery || !reviewer || !requirement.assetIntent) return null
     const stepId = `search-${hashInput(requirement.assetKey).slice(0, 24)}`
     await this.appendSearchEvent(run.id, {
       type: 'tool.started',
@@ -272,14 +277,41 @@ export class SlideGenerationCoordinator {
         aspectRatio: requirement.aspectRatio,
         idempotencyKey: `${requirement.idempotencyKey}:search`,
       })
-      for (const candidate of candidates.slice(0, 5)) {
+      for (const [candidateIndex, candidate] of candidates.slice(0, 5).entries()) {
         try {
           const acquired = await discovery.acquire({
             tenantId: run.host.tenantId,
             candidate,
             idempotencyKey: `${requirement.idempotencyKey}:acquire:${candidate.provider}:${candidate.providerAssetId}`,
           })
-          const step = await this.completeWebAsset(run, requirement, acquired)
+          const rawReview = await reviewer.reviewCandidate({
+            tenantId: run.host.tenantId,
+            candidate,
+            bytes: acquired.bytes,
+            intent: requirement.assetIntent,
+            knowledgePoint: requirement.knowledgePoint,
+            role: requirement.role,
+            visualDirection: run.visualDirection,
+            idempotencyKey: `${requirement.idempotencyKey}:candidate-review:${hashInput({
+              provider: candidate.provider,
+              providerAssetId: candidate.providerAssetId,
+              sha256: acquired.sha256,
+            }).slice(0, 28)}`,
+          })
+          const review = slideVisualReviewSchema.parse(rawReview)
+          if (!review.approved || review.textDetected || review.visualScore < ASSET_CANDIDATE_QUALITY_THRESHOLD) {
+            await this.appendSearchEvent(run.id, {
+              type: 'tool.progress',
+              payload: {
+                stepId,
+                completed: candidateIndex + 1,
+                total: Math.min(candidates.length, 5),
+                summary: '候选素材未通过视觉门禁，继续筛选',
+              },
+            })
+            continue
+          }
+          const step = await this.completeWebAsset(run, requirement, acquired, review)
           await this.appendSearchEvent(run.id, {
             type: 'tool.completed',
             payload: { stepId, summary: `已选用 ${candidate.provider} 素材：${candidate.title}` },
@@ -307,6 +339,7 @@ export class SlideGenerationCoordinator {
     run: RunRecord,
     requirement: ReturnType<typeof blueprintImageRequirements>[number],
     acquired: AcquiredWebAsset,
+    review: SlideVisualReview,
   ) {
     const extension = acquired.candidate.mimeType.split('/')[1]
     const artifact = await this.dependencies.artifacts.put({
@@ -346,6 +379,10 @@ export class SlideGenerationCoordinator {
             licenseUrl: acquired.candidate.licenseUrl,
             attribution: acquired.candidate.attribution,
             sha256: acquired.sha256,
+            selectionReview: {
+              visualScore: review.visualScore,
+              reasons: review.reasons,
+            },
           },
         },
         createdAt: now,
@@ -360,6 +397,7 @@ export class SlideGenerationCoordinator {
     runId: string,
     event: Readonly<
       | { type: 'tool.started'; payload: { stepId: string; tool: string; label: string } }
+      | { type: 'tool.progress'; payload: { stepId: string; completed: number; total: number; summary: string } }
       | { type: 'tool.completed'; payload: { stepId: string; summary: string } }
       | { type: 'tool.failed'; payload: { stepId: string; errorCode: string; retryable: boolean } }
     >,

@@ -157,6 +157,19 @@ export interface AssetDiscoveryPort {
   }>): Promise<AcquiredWebAsset>
 }
 
+export interface AssetCandidateReviewPort {
+  reviewCandidate(input: Readonly<{
+    tenantId: string
+    candidate: AssetCandidate
+    bytes: Uint8Array
+    intent: AssetIntent
+    knowledgePoint: string
+    role: string
+    visualDirection: string
+    idempotencyKey: string
+  }>): Promise<unknown>
+}
+
 export interface VisualReviewPort {
   review(input: Readonly<{
     tenantId: string

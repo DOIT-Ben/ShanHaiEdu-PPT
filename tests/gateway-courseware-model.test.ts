@@ -209,6 +209,48 @@ describe('gateway courseware model', () => {
     expect([...data.subarray(0, 3)].every((channel) => channel >= 240)).toBe(true)
   })
 
+  test('reviews downloaded asset bytes against knowledge and style without sending source URLs', async () => {
+    const artifacts = new MockArtifactPort()
+    const png = await sharp({
+      create: { width: 120, height: 80, channels: 3, background: '#F4F7FA' },
+    }).png().toBuffer()
+    let requestBody: Record<string, unknown> | null = null
+    const review = { approved: true, textDetected: false, visualScore: 88, reasons: [], retryInstruction: null }
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts,
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return Response.json({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(review) } }] } }] })
+      },
+    })
+
+    expect(await model.reviewCandidate({
+      tenantId: 'frameflow',
+      candidate: {
+        provider: 'OPENVERSE', providerAssetId: 'asset-1', title: 'Classroom globe',
+        sourceUrl: 'https://example.org/private-source-path', downloadUrl: 'https://cdn.example.org/private-download-path',
+        creator: 'Example', license: 'CC_BY', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+        attribution: 'Classroom globe by Example', mimeType: 'image/png', width: 120, height: 80,
+      },
+      bytes: new Uint8Array(png),
+      intent: {
+        searchQueries: ['classroom globe'], mediaType: 'PHOTO',
+        styleKeywords: ['bright classroom', 'clean composition'], transparencyPreference: 'EITHER',
+      },
+      knowledgePoint: '使用地球仪解释地轴倾斜',
+      role: 'KNOWLEDGE_VISUAL',
+      visualDirection: '明亮、统一的儿童课堂视觉',
+      idempotencyKey: 'candidate-review-1',
+    })).toEqual(review)
+
+    const serialized = JSON.stringify(requestBody)
+    expect(serialized).toContain('使用地球仪解释地轴倾斜')
+    expect(serialized).toContain('bright classroom')
+    expect(serialized).not.toContain('private-source-path')
+    expect(serialized).not.toContain('private-download-path')
+    expect(serialized).toContain('data:image/jpeg;base64,')
+  })
+
   test('rejects insecure public endpoints and hides network failure details', async () => {
     expect(() => new GatewayCoursewareModel({
       baseUrl: 'http://example.com/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts: new MockArtifactPort(),
