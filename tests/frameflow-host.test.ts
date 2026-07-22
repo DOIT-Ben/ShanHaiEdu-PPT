@@ -16,6 +16,7 @@ function client(overrides: Partial<FrameFlowBackendClient> = {}): FrameFlowBacke
       }
     },
     async reserveCredits(input) { return { reservationId: `credit:${input.idempotencyKey}` } },
+    async settleCredits() {},
     async releaseCredits() {},
     ...overrides,
   }
@@ -145,14 +146,23 @@ describe('FrameFlow host adapter', () => {
   })
 
   test('maps budget operations without exposing FrameFlow internals to core', async () => {
+    const settlements: string[] = []
     const releases: string[] = []
     const adapter = new FrameFlowHostAdapter(client({
+      async settleCredits(input) { settlements.push(input.reservationId) },
       async releaseCredits(input) { releases.push(input.reservationId) },
     }))
-    const reservation = await adapter.reserve({ host, units: 10, idempotencyKey: 'run-1:slide-1' })
+    const reservation = await adapter.reserve({
+      host,
+      model: 'image-2',
+      units: 10,
+      idempotencyKey: 'run-1:slide-1',
+    })
+    await adapter.settle({ host, reservationId: reservation.reservationId, idempotencyKey: 'settle:run-1:slide-1' })
     await adapter.release({ host, reservationId: reservation.reservationId, idempotencyKey: 'release:run-1:slide-1' })
 
     expect(reservation.reservationId).toBe('credit:run-1:slide-1')
+    expect(settlements).toEqual(['credit:run-1:slide-1'])
     expect(releases).toEqual(['credit:run-1:slide-1'])
   })
 

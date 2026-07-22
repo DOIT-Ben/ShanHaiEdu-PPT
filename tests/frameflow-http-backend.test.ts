@@ -61,4 +61,97 @@ describe('FrameFlow internal source backend', () => {
   test('rejects non-loopback source endpoints', () => {
     expect(() => new HttpFrameFlowBackend({ baseUrl: 'https://frameflow.example.com', token })).toThrow('MUST_BE_LOOPBACK')
   })
+
+  test('reserves catalog-priced FrameFlow credits with authenticated idempotent context', async () => {
+    let url = ''
+    let request = new Request('http://localhost')
+    const backend = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010',
+      token,
+      fetchImpl: async (input, init) => {
+        url = String(input)
+        request = new Request(url, init)
+        return Response.json({
+          data: {
+            reservationId: 'reservation-1',
+            status: 'RESERVED',
+            reservedCredits: 10,
+            settledCredits: null,
+          },
+        })
+      },
+    })
+
+    await expect(backend.reserveCredits({
+      externalUserId: 'teacher-1',
+      model: 'image-2',
+      units: 1,
+      idempotencyKey: 'run-1:slide-1:image-v1',
+    })).resolves.toEqual({ reservationId: 'reservation-1' })
+    expect(url).toBe('http://127.0.0.1:3010/api/internal/ppt-agent/credits/reservations')
+    expect(request.method).toBe('POST')
+    expect(request.headers.get('Authorization')).toBe(`Bearer ${token}`)
+    expect(request.headers.get('X-PPT-Agent-User')).toBe('teacher-1')
+    expect(request.headers.get('Idempotency-Key')).toBe('run-1:slide-1:image-v1')
+    expect(await request.json()).toEqual({ model: 'image-2', units: 1 })
+  })
+
+  test('distinguishes definite reservation denial from an unknown host result', async () => {
+    const denied = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010',
+      token,
+      fetchImpl: async () => Response.json({ error: { code: 'INSUFFICIENT_CREDITS' } }, { status: 402 }),
+    })
+    const unavailable = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010',
+      token,
+      fetchImpl: async () => Response.json({ error: { code: 'CREDIT_SERVICE_UNAVAILABLE' } }, { status: 503 }),
+    })
+
+    const input = {
+      externalUserId: 'teacher-1', model: 'image-2', units: 1, idempotencyKey: 'step-1',
+    }
+    await expect(denied.reserveCredits(input)).rejects.toMatchObject({
+      code: 'INSUFFICIENT_CREDITS',
+      reservationState: 'NOT_RESERVED',
+    })
+    await expect(unavailable.reserveCredits(input)).rejects.toMatchObject({
+      code: 'CREDIT_SERVICE_UNAVAILABLE',
+      reservationState: 'UNKNOWN',
+    })
+  })
+
+  test('settles and releases reservations through distinct idempotent endpoints', async () => {
+    const requests: Request[] = []
+    const backend = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010',
+      token,
+      fetchImpl: async (input, init) => {
+        const request = new Request(input, init)
+        requests.push(request)
+        const status = request.url.endsWith('/settle') ? 'SETTLED' : 'RELEASED'
+        return Response.json({
+          data: {
+            reservationId: 'reservation/with space',
+            status,
+            reservedCredits: 10,
+            settledCredits: status === 'SETTLED' ? 10 : null,
+          },
+        })
+      },
+    })
+    const context = { externalUserId: 'teacher-1', reservationId: 'reservation/with space' }
+
+    await backend.settleCredits({ ...context, idempotencyKey: 'settle:step-1' })
+    await backend.releaseCredits({ ...context, idempotencyKey: 'release:step-1' })
+
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      '/api/internal/ppt-agent/credits/reservations/reservation%2Fwith%20space/settle',
+      '/api/internal/ppt-agent/credits/reservations/reservation%2Fwith%20space/release',
+    ])
+    expect(requests.map((request) => request.headers.get('Idempotency-Key'))).toEqual([
+      'settle:step-1',
+      'release:step-1',
+    ])
+  })
 })

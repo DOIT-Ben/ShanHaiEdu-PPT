@@ -135,6 +135,7 @@ describe('media step runner', () => {
     const { repository, budget, images, runner } = await fixture()
     const reservation = await budget.reserve({
       host: run().host,
+      model: request.model,
       units: request.budgetUnits,
       idempotencyKey: request.idempotencyKey,
     })
@@ -174,7 +175,7 @@ describe('media step runner', () => {
   })
 
   test('marks a submitted image complete only after a controlled artifact is available', async () => {
-    const { repository, images, runner } = await fixture()
+    const { repository, budget, images, runner } = await fixture()
     await runner.submitSlideImage(request)
     expect((await runner.refreshSlideImage('run-1', request.idempotencyKey)).changed).toBe(false)
     images.complete(request.idempotencyKey, 'artifact-slide-1-v1')
@@ -188,7 +189,24 @@ describe('media step runner', () => {
       artifactId: 'artifact-slide-1-v1',
     })
     expect(replay).toMatchObject({ changed: false, step: { status: 'COMPLETED' } })
+    expect(budget.settled.size).toBe(1)
     expect((await repository.listEvents('run-1')).map((event) => event.type).at(-1)).toBe('tool.completed')
+  })
+
+  test('retries an unknown host settlement before marking provider success complete', async () => {
+    const { repository, budget, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    images.complete(request.idempotencyKey, 'artifact-slide-1-v1')
+    budget.failNextSettlement()
+
+    await expect(runner.refreshSlideImage('run-1', request.idempotencyKey))
+      .rejects.toThrow('HOST_SETTLEMENT_UNKNOWN')
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({ status: 'WAITING' })
+    expect(budget.settled.size).toBe(0)
+
+    const completed = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+    expect(completed.step.status).toBe('COMPLETED')
+    expect(budget.settled.size).toBe(1)
   })
 
   test('releases budget when an inspected task failed without charge', async () => {
@@ -202,19 +220,40 @@ describe('media step runner', () => {
     expect(budget.released.size).toBe(1)
   })
 
+  test('retries an unknown host release without losing the reservation', async () => {
+    const { repository, budget, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    images.fail(request.idempotencyKey, 'PROVIDER_REJECTED', 'NOT_CHARGED')
+    budget.failNextRelease()
+
+    await expect(runner.refreshSlideImage('run-1', request.idempotencyKey))
+      .rejects.toThrow('HOST_RELEASE_UNKNOWN')
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({
+      status: 'RELEASING',
+      budgetReservationId: expect.any(String),
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10 })
+
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({ status: 'FAILED' })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect(budget.released.size).toBe(1)
+  })
+
   test('keeps charged failed work in budget and requires human review', async () => {
     const { repository, budget, images, runner } = await fixture()
     await runner.submitSlideImage(request)
     images.fail(request.idempotencyKey, 'PROVIDER_OUTPUT_INVALID', 'CHARGED')
     const result = await runner.refreshSlideImage('run-1', request.idempotencyKey)
 
-    expect(result).toMatchObject({ changed: true, step: { status: 'FAILED', errorCode: 'PROVIDER_OUTPUT_INVALID' } })
+    expect(result).toMatchObject({ changed: true, step: { status: 'FAILED_CHARGED', errorCode: 'PROVIDER_OUTPUT_INVALID' } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 10 })
+    expect(budget.settled.size).toBe(1)
     expect(budget.released.size).toBe(0)
   })
 
   test('reconciles a provider result that completes after run cancellation', async () => {
-    const { repository, images, runner } = await fixture()
+    const { repository, budget, images, runner } = await fixture()
     await runner.submitSlideImage(request)
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, status: 'CANCELLED', version: transaction.run.version + 1 })
@@ -227,6 +266,7 @@ describe('media step runner', () => {
       output: { artifactId: 'artifact-after-cancel' },
     })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 10 })
+    expect(budget.settled.size).toBe(1)
   })
 
   test('releases uncharged work that fails after cancellation', async () => {
@@ -257,6 +297,7 @@ describe('media step runner', () => {
     await runner.reconcilePendingRun('run-1')
     expect((await repository.listSteps('run-1'))[0]).toMatchObject({ status: expectedStatus })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 10 })
+    expect(budget.settled.size).toBe(billingState === 'CHARGED' ? 1 : 0)
     expect(budget.released.size).toBe(0)
   })
 })

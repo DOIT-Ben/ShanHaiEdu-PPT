@@ -66,15 +66,17 @@ describe('admin operations service', () => {
 
     expect(result.step.status).toBe('FAILED_CHARGED')
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 4, version: 2 })
+    expect(budget.settled).toEqual(new Set(['reservation-1']))
     expect(budget.released.size).toBe(0)
   })
 
   test('reinspects a late Provider result and records an audited completion', async () => {
-    const { repository, images, service, base } = await fixture('WAITING')
+    const { repository, budget, images, service, base } = await fixture('WAITING')
     images.statuses.set('operation-1', { state: 'COMPLETED', artifactId: 'artifact-1' })
     const result = await service.act({ ...base, action: 'REINSPECT' })
 
     expect(result.step).toMatchObject({ status: 'COMPLETED', output: { artifactId: 'artifact-1' } })
+    expect(budget.settled).toEqual(new Set(['reservation-1']))
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.resolved')).toBe(true)
   })
 
