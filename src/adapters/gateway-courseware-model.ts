@@ -85,6 +85,27 @@ function boundedJson(value: unknown, maxLength = 240_000) {
   return text
 }
 
+function safeProviderField(value: unknown) {
+  return typeof value === 'string' && /^[A-Za-z0-9._:/-]{1,160}$/.test(value) ? value : null
+}
+
+function providerRejectionMetadata(payload: unknown) {
+  const parsed = z.object({
+    error: z.object({
+      code: z.unknown().optional(),
+      type: z.unknown().optional(),
+      param: z.unknown().optional(),
+    }).passthrough().optional(),
+    detail: z.object({ code: z.unknown().optional() }).passthrough().optional(),
+  }).passthrough().safeParse(payload)
+  if (!parsed.success) return { providerCode: null, providerType: null, providerParam: null }
+  return {
+    providerCode: safeProviderField(parsed.data.error?.code ?? parsed.data.detail?.code),
+    providerType: safeProviderField(parsed.data.error?.type),
+    providerParam: safeProviderField(parsed.data.error?.param),
+  }
+}
+
 export class GatewayCoursewareModel implements
   StructuredModelPort,
   VisualReviewPort,
@@ -285,6 +306,15 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     }
     const requestId = this.requestId(response)
     if (!response.ok) {
+      const rejection = providerRejectionMetadata(await response.clone().json().catch(() => null))
+      console.error(JSON.stringify({
+        service: 'ppt-agent',
+        event: 'gateway_model_rejected',
+        status: response.status,
+        requestId,
+        model: input.model,
+        ...rejection,
+      }))
       const code = response.status === 429
         ? 'PROVIDER_RATE_LIMIT'
         : [408, 504].includes(response.status)

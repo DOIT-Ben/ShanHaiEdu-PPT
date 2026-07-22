@@ -241,6 +241,38 @@ describe('gateway courseware model', () => {
     })
   })
 
+  test('logs only allowlisted provider rejection metadata', async () => {
+    const records: string[] = []
+    const original = console.error
+    console.error = (...values) => records.push(values.join(' '))
+    try {
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({
+          error: {
+            code: 'invalid_tool_schema',
+            type: 'invalid_request_error',
+            param: 'tools.0.function.parameters',
+            message: 'private provider response must not be logged',
+          },
+        }, { status: 400, headers: { 'x-request-id': 'request-safe-400' } }),
+      })
+      await expect(model.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-rejected',
+      })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', retryable: false, requestId: 'request-safe-400' })
+    } finally {
+      console.error = original
+    }
+    expect(records).toHaveLength(1)
+    expect(JSON.parse(records[0]!)).toEqual({
+      service: 'ppt-agent', event: 'gateway_model_rejected', status: 400, requestId: 'request-safe-400',
+      model: 'gpt-5.6', providerCode: 'invalid_tool_schema', providerType: 'invalid_request_error',
+      providerParam: 'tools.0.function.parameters',
+    })
+    expect(records[0]).not.toContain('private provider response')
+  })
+
   test('classifies an aborted gateway request as a provider timeout', async () => {
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
