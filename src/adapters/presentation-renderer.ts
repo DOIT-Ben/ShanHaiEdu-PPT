@@ -21,9 +21,15 @@ function escapeXml(value: string) {
 }
 
 function wrapText(value: string, maxCharacters: number) {
-  const characters = [...value]
   const lines: string[] = []
-  while (characters.length > 0) lines.push(characters.splice(0, maxCharacters).join(''))
+  for (const paragraph of value.split(/\r?\n/)) {
+    const characters = [...paragraph]
+    if (characters.length === 0) {
+      lines.push('')
+      continue
+    }
+    while (characters.length > 0) lines.push(characters.splice(0, maxCharacters).join(''))
+  }
   return lines.length > 0 ? lines : ['']
 }
 
@@ -122,6 +128,24 @@ function requireLayeredAssets(source: SlideSource, elements: readonly LayeredEle
   return byId
 }
 
+async function pptxImageData(asset: NonNullable<SlideSource['assets']>[number]) {
+  if (asset.imageMimeType === 'image/png') {
+    return `data:image/png;base64,${Buffer.from(asset.image).toString('base64')}`
+  }
+  if (asset.imageMimeType === 'image/jpeg') {
+    const metadata = await sharp(asset.image).metadata()
+    const image = metadata.orientation && metadata.orientation !== 1
+      ? await sharp(asset.image).rotate().jpeg({ quality: 90 }).toBuffer()
+      : Buffer.from(asset.image)
+    return `data:image/jpeg;base64,${image.toString('base64')}`
+  }
+  if (asset.imageMimeType === 'image/webp') {
+    const image = await sharp(asset.image).rotate().png({ compressionLevel: 8 }).toBuffer()
+    return `data:image/png;base64,${image.toString('base64')}`
+  }
+  throw new Error(`RENDER_LAYER_ASSET_MIME_UNSUPPORTED:${asset.imageMimeType}`)
+}
+
 async function renderLayeredSlide(source: SlideSource, elements: readonly LayeredElement[], backgroundColor: string) {
   const assets = requireLayeredAssets(source, elements)
   const composites = await Promise.all([...elements].sort((left, right) => left.zIndex - right.zIndex).map(async (element) => {
@@ -214,9 +238,9 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
           const w = element.placement.width * PPTX_WIDTH
           const h = element.placement.height * PPTX_HEIGHT
           if (element.kind === 'IMAGE') {
-            const image = await sharp(assets.get(element.elementId)!.image).rotate().png().toBuffer()
+            const asset = assets.get(element.elementId)!
             slide.addImage({
-              data: `data:image/png;base64,${image.toString('base64')}`,
+              data: await pptxImageData(asset),
               x, y, w, h,
               sizing: { type: element.fit === 'CONTAIN' ? 'contain' : 'cover', w, h },
               altText: `${element.elementId} | ${element.role} | ${element.knowledgePoint}`,

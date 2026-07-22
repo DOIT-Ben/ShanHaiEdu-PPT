@@ -4,6 +4,7 @@ import {
   buildAssetSearchQueries,
   candidatePassesTextGate,
   isPublicAddress,
+  normalizeWebAssetBytes,
   PublicAssetDiscoveryPort,
 } from '../src/adapters/public-asset-discovery'
 import type { AssetCandidate } from '../src/core/ports'
@@ -52,7 +53,8 @@ describe('public asset discovery', () => {
     const result = await port.acquire({ tenantId: 'frameflow', candidate, idempotencyKey: 'acquire-1' })
 
     expect(result.candidate).toMatchObject({ width: 320, height: 240, mimeType: 'image/png' })
-    expect(result.bytes).toEqual(png)
+    expect(result.bytes).not.toEqual(png)
+    expect(await sharp(result.bytes).metadata()).toMatchObject({ format: 'png', width: 320, height: 240 })
     expect(result.sha256).toMatch(/^[a-f0-9]{64}$/)
   })
 
@@ -77,5 +79,17 @@ describe('public asset discovery', () => {
     })
     await expect(port.acquire({ tenantId: 'frameflow', candidate, idempotencyKey: 'acquire-3' }))
       .rejects.toThrow('ASSET_MIME_MISMATCH')
+  })
+
+  test('normalizes oversized photos for repeated PPTX placement', async () => {
+    const original = new Uint8Array(await sharp({
+      create: { width: 3_200, height: 2_400, channels: 3, background: '#2A78C5' },
+    }).jpeg({ quality: 95 }).toBuffer())
+    const normalized = await normalizeWebAssetBytes(original, 'image/jpeg')
+    const metadata = await sharp(normalized.bytes).metadata()
+
+    expect(metadata.width).toBe(2_048)
+    expect(metadata.height).toBe(1_536)
+    expect(normalized.bytes.length).toBeLessThan(original.length)
   })
 })

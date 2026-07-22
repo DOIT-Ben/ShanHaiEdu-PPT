@@ -122,14 +122,14 @@ describe('Sharp and PptxGenJS presentation renderer', () => {
       })),
     })
     const slides = await Promise.all(layeredBlueprint.slides.map(async (slide) => {
-      const base = new Uint8Array(await sharp({ create: { width: 1280, height: 720, channels: 3, background: '#CDEBE1' } }).png().toBuffer())
+      const base = new Uint8Array(await sharp({ create: { width: 1280, height: 720, channels: 3, background: '#CDEBE1' } }).jpeg().toBuffer())
       const knowledge = new Uint8Array(await sharp({ create: { width: 420, height: 420, channels: 4, background: { r: 63, g: 155, b: 92, alpha: 0.85 } } }).png().toBuffer())
       return {
         pageNumber: slide.pageNumber,
         image: base,
-        imageMimeType: 'image/png',
+        imageMimeType: 'image/jpeg',
         assets: [
-          { elementId: `base-${slide.pageNumber}`, image: base, imageMimeType: 'image/png' },
+          { elementId: `base-${slide.pageNumber}`, image: base, imageMimeType: 'image/jpeg' },
           { elementId: `knowledge-${slide.pageNumber}`, image: knowledge, imageMimeType: 'image/png' },
         ],
       }
@@ -152,6 +152,9 @@ describe('Sharp and PptxGenJS presentation renderer', () => {
       expect(xml).toContain('title-2')
       expect(xml).toContain('body-2')
       expect(xml).not.toContain('<p:bgPr><a:blipFill>')
+      const listing = await new Response(Bun.spawn(['unzip', '-l', path], { stdout: 'pipe' }).stdout).text()
+      expect(listing).toContain('.jpeg')
+      expect(pptx.length).toBeLessThan(5_000_000)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

@@ -10,6 +10,7 @@ type ResolveHost = (hostname: string) => Promise<readonly string[]>
 
 const MAX_BYTES = 24 * 1024 * 1024
 const MAX_PIXELS = 40_000_000
+const MAX_DELIVERY_EDGE = 2_048
 const MAX_REDIRECTS = 3
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp'])
 const QUERY_NOISE = new Set([
@@ -135,6 +136,30 @@ export function candidatePassesTextGate(candidate: Pick<AssetCandidate, 'title'>
   return title.includes(subject) || (subject.endsWith('s') && title.includes(subject.slice(0, -1)))
 }
 
+export async function normalizeWebAssetBytes(bytes: Uint8Array, expectedMime: AssetCandidate['mimeType']) {
+  const source = sharp(bytes, { limitInputPixels: MAX_PIXELS }).rotate()
+  const metadata = await source.metadata()
+  const actualMime = metadata.format === 'png' ? 'image/png'
+    : metadata.format === 'jpeg' ? 'image/jpeg'
+      : metadata.format === 'webp' ? 'image/webp' : null
+  if (!actualMime || actualMime !== expectedMime) throw new Error('ASSET_MIME_MISMATCH')
+  if (!metadata.width || !metadata.height || metadata.width * metadata.height > MAX_PIXELS) throw new Error('ASSET_DIMENSIONS_INVALID')
+  const resized = source.resize({
+    width: MAX_DELIVERY_EDGE,
+    height: MAX_DELIVERY_EDGE,
+    fit: 'inside',
+    withoutEnlargement: true,
+  })
+  const normalized = expectedMime === 'image/png'
+    ? await resized.png({ compressionLevel: 9 }).toBuffer()
+    : expectedMime === 'image/webp'
+      ? await resized.webp({ quality: 86 }).toBuffer()
+      : await resized.jpeg({ quality: 86, chromaSubsampling: '4:2:0' }).toBuffer()
+  const output = await sharp(normalized).metadata()
+  if (!output.width || !output.height) throw new Error('ASSET_DIMENSIONS_INVALID')
+  return { bytes: new Uint8Array(normalized), width: output.width, height: output.height }
+}
+
 export class PublicAssetDiscoveryPort implements AssetDiscoveryPort {
   private readonly fetchImpl: Fetch
   private readonly resolveHost: ResolveHost
@@ -168,16 +193,11 @@ export class PublicAssetDiscoveryPort implements AssetDiscoveryPort {
     if (contentLength > MAX_BYTES) throw new Error('ASSET_TOO_LARGE')
     const bytes = new Uint8Array(await response.arrayBuffer())
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_BYTES) throw new Error('ASSET_TOO_LARGE')
-    const metadata = await sharp(bytes, { limitInputPixels: MAX_PIXELS }).metadata()
-    const actualMime = metadata.format === 'png' ? 'image/png'
-      : metadata.format === 'jpeg' ? 'image/jpeg'
-        : metadata.format === 'webp' ? 'image/webp' : null
-    if (!actualMime || actualMime !== input.candidate.mimeType) throw new Error('ASSET_MIME_MISMATCH')
-    if (!metadata.width || !metadata.height || metadata.width * metadata.height > MAX_PIXELS) throw new Error('ASSET_DIMENSIONS_INVALID')
+    const normalized = await normalizeWebAssetBytes(bytes, input.candidate.mimeType)
     return {
-      candidate: { ...input.candidate, width: metadata.width, height: metadata.height },
-      bytes,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
+      candidate: { ...input.candidate, width: normalized.width, height: normalized.height },
+      bytes: normalized.bytes,
+      sha256: createHash('sha256').update(normalized.bytes).digest('hex'),
     }
   }
 
