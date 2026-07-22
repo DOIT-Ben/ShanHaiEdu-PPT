@@ -24,6 +24,8 @@ type ToolContent = string | readonly (
   | Readonly<{ type: 'image_url'; image_url: Readonly<{ url: string; detail: 'auto' }> }>
 )[]
 
+export const MAX_GATEWAY_TOOL_ARGUMENT_BYTES = 4 * 1024 * 1024
+
 const streamChunkSchema = z.object({
   choices: z.array(z.object({
     delta: z.object({
@@ -57,6 +59,83 @@ function normalizedBaseUrl(value: string) {
 function jsonSchema(schema: z.ZodType) {
   const value = z.toJSONSchema(schema, { target: 'draft-7' }) as Record<string, unknown>
   delete value.$schema
+  return value
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function strictToolSchema(schema: Record<string, unknown>) {
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit)
+    const node = record(value)
+    if (!node) return value
+    const result = Object.fromEntries(Object.entries(node).map(([key, child]) => [key, visit(child)]))
+    const properties = record(result.properties)
+    if (!properties) return result
+    const required = new Set(Array.isArray(node.required) ? node.required.filter((key): key is string => typeof key === 'string') : [])
+    for (const [key, property] of Object.entries(properties)) {
+      if (!required.has(key)) properties[key] = { anyOf: [property, { type: 'null' }] }
+    }
+    result.required = Object.keys(properties)
+    result.additionalProperties = false
+    return result
+  }
+  return visit(schema) as Record<string, unknown>
+}
+
+function schemaMatches(value: unknown, schema: Record<string, unknown>) {
+  if ('const' in schema && value !== schema.const) return false
+  if (schema.type === 'null') return value === null
+  if (schema.type === 'object' && !record(value)) return false
+  if (schema.type === 'array' && !Array.isArray(value)) return false
+  const properties = record(schema.properties)
+  const object = record(value)
+  if (properties && object) {
+    for (const [key, property] of Object.entries(properties)) {
+      const propertySchema = record(property)
+      if (propertySchema && 'const' in propertySchema && object[key] !== propertySchema.const) return false
+    }
+  }
+  return true
+}
+
+function omitOptionalNulls(value: unknown, schema: Record<string, unknown>): unknown {
+  for (const keyword of ['oneOf', 'anyOf'] as const) {
+    const variants = schema[keyword]
+    if (Array.isArray(variants)) {
+      const match = variants.map(record).find((candidate) => candidate && schemaMatches(value, candidate))
+      return match ? omitOptionalNulls(value, match) : value
+    }
+  }
+  if (Array.isArray(value)) {
+    const items = record(schema.items)
+    return items ? value.map((item) => omitOptionalNulls(item, items)) : value
+  }
+  const object = record(value)
+  const properties = record(schema.properties)
+  if (!object || !properties) return value
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === 'string') : [])
+  const normalized = { ...object }
+  for (const [key, property] of Object.entries(properties)) {
+    if (!(key in normalized)) continue
+    if (normalized[key] === null && !required.has(key)) {
+      delete normalized[key]
+      continue
+    }
+    const propertySchema = record(property)
+    if (propertySchema) normalized[key] = omitOptionalNulls(normalized[key], propertySchema)
+  }
+  return normalized
+}
+
+function boundedToolArguments(value: string) {
+  if (Buffer.byteLength(value) > MAX_GATEWAY_TOOL_ARGUMENT_BYTES) {
+    throw new Error('GATEWAY_MODEL_ARGUMENTS_TOO_LARGE')
+  }
   return value
 }
 
@@ -308,6 +387,10 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     idempotencyKey: string
     requireLayeredBaseImage?: boolean
   }>): Promise<z.output<T>> {
+    const outputSchema = jsonSchema(input.schema)
+    const parameters = strictToolSchema(input.requireLayeredBaseImage
+      ? requireLayeredBaseImage(structuredClone(outputSchema))
+      : structuredClone(outputSchema))
     let response: Response
     try {
       response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
@@ -326,10 +409,8 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
             function: {
               name: input.toolName,
               description: input.description,
-              strict: false,
-              parameters: input.requireLayeredBaseImage
-                ? requireLayeredBaseImage(jsonSchema(input.schema))
-                : jsonSchema(input.schema),
+              strict: true,
+              parameters,
             },
           }],
           tool_choice: { type: 'function', function: { name: input.toolName } },
@@ -371,9 +452,12 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     let raw: string
     try {
       raw = response.headers.get('content-type')?.includes('application/json')
-        ? completionSchema.parse(await response.json()).choices[0]!.message.tool_calls[0]!.function.arguments
+        ? boundedToolArguments(completionSchema.parse(await response.json()).choices[0]!.message.tool_calls[0]!.function.arguments)
         : await this.readStream(response)
     } catch (error) {
+      if (error instanceof Error && error.message === 'GATEWAY_MODEL_ARGUMENTS_TOO_LARGE') {
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
+      }
       if (error instanceof Error && ['GATEWAY_MODEL_STREAM_MISSING', 'GATEWAY_MODEL_STREAM_INCOMPLETE'].includes(error.message)) {
         throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, input.model, requestId)
       }
@@ -388,7 +472,7 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     } catch {
       throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
     }
-    return input.schema.parse(parsed)
+    return input.schema.parse(omitOptionalNulls(parsed, outputSchema))
   }
 
   private requestId(response: Response) {
@@ -401,28 +485,44 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-    let argumentsText = ''
+    const argumentFragments: string[] = []
+    let argumentBytes = 0
     let terminal = false
-    while (true) {
-      const { done, value } = await reader.read()
-      buffer += decoder.decode(value, { stream: !done })
-      const events = buffer.split(/\r?\n\r?\n/)
-      buffer = events.pop() ?? ''
-      for (const event of events) {
-        for (const line of event.split(/\r?\n/)) {
-          if (!line.startsWith('data:')) continue
-          const data = line.slice(5).trim()
-          if (!data) continue
-          if (data === '[DONE]') { terminal = true; continue }
-          const chunk = streamChunkSchema.parse(JSON.parse(data))
-          for (const choice of chunk.choices) {
-            if (choice.finish_reason) terminal = true
-            for (const call of choice.delta.tool_calls ?? []) argumentsText += call.function?.arguments ?? ''
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        buffer += decoder.decode(value, { stream: !done })
+        const events = buffer.split(/\r?\n\r?\n/)
+        buffer = events.pop() ?? ''
+        for (const event of events) {
+          for (const line of event.split(/\r?\n/)) {
+            if (!line.startsWith('data:')) continue
+            const data = line.slice(5).trim()
+            if (!data) continue
+            if (data === '[DONE]') { terminal = true; continue }
+            const chunk = streamChunkSchema.parse(JSON.parse(data))
+            for (const choice of chunk.choices) {
+              if (choice.finish_reason) terminal = true
+              for (const call of choice.delta.tool_calls ?? []) {
+                const fragment = call.function?.arguments ?? ''
+                argumentBytes += Buffer.byteLength(fragment)
+                if (argumentBytes > MAX_GATEWAY_TOOL_ARGUMENT_BYTES) {
+                  throw new Error('GATEWAY_MODEL_ARGUMENTS_TOO_LARGE')
+                }
+                if (fragment) argumentFragments.push(fragment)
+              }
+            }
           }
         }
+        if (done) break
       }
-      if (done) break
+    } catch (error) {
+      await reader.cancel().catch(() => undefined)
+      throw error
+    } finally {
+      reader.releaseLock()
     }
+    const argumentsText = argumentFragments.join('')
     if (!terminal || !argumentsText.trim()) throw new Error('GATEWAY_MODEL_STREAM_INCOMPLETE')
     return argumentsText
   }

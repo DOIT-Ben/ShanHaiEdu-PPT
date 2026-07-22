@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import sharp from 'sharp'
-import { GatewayCoursewareModel } from '../src/adapters/gateway-courseware-model'
+import { GatewayCoursewareModel, MAX_GATEWAY_TOOL_ARGUMENT_BYTES } from '../src/adapters/gateway-courseware-model'
 import { MockArtifactPort } from '../src/adapters/mock-ports'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
 
@@ -64,15 +64,53 @@ function completion(argumentsValue: unknown) {
   return Response.json({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(argumentsValue) } }] } }] })
 }
 
+function strictLayeredBlueprintDraft() {
+  const value = structuredClone(layeredBlueprintDraft()) as Record<string, any>
+  value.curriculum.sourceAssetIds = null
+  for (const slide of value.slides) {
+    slide.sourceAssetIds = null
+    for (const element of slide.layeredDesign.elements) {
+      if (element.kind === 'IMAGE') {
+        element.sourceAssetIds = null
+        element.sourceAssetStrategy = null
+        element.assetIntent = null
+        element.reuseKey = null
+      } else if (element.kind === 'TEXT') {
+        element.sourceAssetIds = null
+      }
+    }
+  }
+  return value
+}
+
+function expectStrictObjectSchemas(value: unknown) {
+  if (Array.isArray(value)) {
+    for (const item of value) expectStrictObjectSchemas(item)
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  const node = value as Record<string, unknown>
+  if (node.properties && typeof node.properties === 'object') {
+    const propertyNames = Object.keys(node.properties)
+    expect(new Set(node.required as string[])).toEqual(new Set(propertyNames))
+    expect(node.additionalProperties).toBe(false)
+  }
+  for (const child of Object.values(node)) expectStrictObjectSchemas(child)
+}
+
 describe('gateway courseware model', () => {
   test('requests a source-grounded blueprint through a typed tool', async () => {
     const artifacts = new MockArtifactPort()
     let requestBody: Record<string, unknown> | null = null
+    let requestUrl = ''
+    let requestInit: RequestInit | undefined
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts,
-      fetchImpl: async (_url, init) => {
+      fetchImpl: async (url, init) => {
+        requestUrl = String(url)
+        requestInit = init
         requestBody = JSON.parse(String(init?.body))
-        return completion(layeredBlueprintDraft())
+        return completion(strictLayeredBlueprintDraft())
       },
     })
 
@@ -86,8 +124,17 @@ describe('gateway courseware model', () => {
     })
 
     expect(result).toEqual(layeredBlueprintDraft())
+    expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
+    expect(requestInit?.method).toBe('POST')
+    const headers = new Headers(requestInit?.headers)
+    expect(headers.get('Accept')).toBe('text/event-stream')
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('Idempotency-Key')).toBe('plan-1')
+    expect(headers.get('Authorization')).toBe('Bearer test-text-key')
     expect(requestBody).toMatchObject({
-      model: 'gpt-5.6', stream: true,
+      model: 'gpt-5.6', stream: true, parallel_tool_calls: false,
+      stream_options: { include_usage: true },
+      tools: [{ type: 'function', function: { name: 'submit_courseware_blueprint', strict: true } }],
       tool_choice: { type: 'function', function: { name: 'submit_courseware_blueprint' } },
     })
     expect(requestBody).not.toBeNull()
@@ -98,6 +145,7 @@ describe('gateway courseware model', () => {
     const parameters = (requestBody! as unknown as {
       tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
     }).tools[0]!.function.parameters
+    expectStrictObjectSchemas(parameters)
     expect(parameters.properties.slides.items.required).toContain('layeredDesign')
     expect((parameters.properties.slides.items as unknown as {
       properties: { layeredDesign: { properties: { elements: { contains: unknown } } } }
@@ -105,6 +153,7 @@ describe('gateway courseware model', () => {
       type: 'object',
       properties: { kind: { const: 'IMAGE' }, role: { const: 'BASE_LAYER' } },
       required: ['kind', 'role'],
+      additionalProperties: false,
     })
   })
 
@@ -127,10 +176,14 @@ describe('gateway courseware model', () => {
       },
     })
 
-    const parameters = (requestBody! as unknown as {
-      tools: { function: { parameters: { properties: { slides: { items: { required?: string[] } } } } } }[]
-    }).tools[0]!.function.parameters
-    expect(parameters.properties.slides.items.required).not.toContain('layeredDesign')
+    const slide = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: { slides: { items: {
+        required: string[]
+        properties: { layeredDesign: { anyOf: { type?: string }[] } }
+      } } } } } }[]
+    }).tools[0]!.function.parameters.properties.slides.items
+    expect(slide.required).toContain('layeredDesign')
+    expect(slide.properties.layeredDesign.anyOf).toContainEqual({ type: 'null' })
   })
 
   test('sends source assets as labeled multimodal content without embedding bytes in JSON metadata', async () => {
@@ -372,5 +425,30 @@ describe('gateway courseware model', () => {
     })).rejects.toMatchObject({
       code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-stream-1', model: 'gpt-5.6',
     })
+  })
+
+  test('rejects streamed tool arguments above the bounded response size', async () => {
+    const privateOversizedArguments = 'x'.repeat(MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 1)
+    let cancelled = false
+    const payload = new TextEncoder().encode([
+      `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ function: { arguments: privateOversizedArguments } }] } }] })}`,
+      'data: [DONE]',
+      '',
+    ].join('\n\n'))
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) { controller.enqueue(payload) },
+        cancel() { cancelled = true },
+      }), { headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'request-oversized-1' } }),
+    })
+
+    await expect(model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-oversized',
+    })).rejects.toMatchObject({
+      code: 'MODEL_JSON_INVALID', retryable: true, requestId: 'request-oversized-1', model: 'gpt-5.6',
+    })
+    expect(cancelled).toBe(true)
   })
 })
