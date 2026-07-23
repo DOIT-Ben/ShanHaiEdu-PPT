@@ -1,8 +1,9 @@
-# PPT Agent 2026-07-23 加固待部署 Runbook
+# PPT Agent 2026-07-23 加固发布 Runbook
 
 ## 状态
 
-本文件是待执行计划，不是部署记录。当前代码未因此文档而发布、迁移或重启生产服务；真实 Provider 预检和正式上线需要另行明确授权。
+本文件保留发布前计划和回退步骤。加固已于 2026-07-23 正式执行，实际 Release、备份和验证证据见
+[`deployment-20260723-hardening.md`](./deployment-20260723-hardening.md)。真实计费 Provider 预检仍需单独授权。
 
 ## 变更范围
 

@@ -18,7 +18,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - Run 列表使用 SQLite Keyset 分页；宿主、状态和 Step 查询字段有显式索引，旧库只回填缺失查询列。
 - RevisionPlan 可限定页面执行内容更新、重排和预算保护的局部重绘，并重新进入逐页与整套审查。
 - 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
-- 下一阶段是以功能开关接入 FrameFlow Agent API Client 和工作台。
+- FrameFlow Agent API Client 与工作台已通过功能开关在生产受控启用；后续宿主继续复用同一公共合同。
 
 ## 目录
 
@@ -29,7 +29,8 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 | `src/adapters/` | 内存、FrameFlow、ShanHaiEdu 和 Provider 适配器 |
 | `tests/` | 合同、策略、恢复和宿主兼容测试 |
 | `docs/decisions/` | 架构决策 |
-| `docs/deployment-20260723-hardening-plan.md` | 本轮加固的待部署、备份、验证与回退 runbook |
+| `docs/deployment-20260723-hardening-plan.md` | 本轮加固的发布、备份、验证与回退 runbook |
+| `docs/deployment-20260723-hardening.md` | 本轮加固正式部署、备份与回退记录 |
 | `docs/shanhai-v1-integration.md` | ShanHaiEdu V1 节点、身份、制品与幂等接入规范 |
 | `tasks/` | 规格、计划和任务清单 |
 
