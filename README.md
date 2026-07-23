@@ -61,7 +61,7 @@ bun run check
 
 - 发布目录：`/opt/ppt-agent/releases/<timestamp>`，当前版本由 `/opt/ppt-agent/current` 原子软链接指向。
 - 持久化目录：`/opt/ppt-agent/shared/data`，环境文件为 `/opt/ppt-agent/shared/ppt-agent.env`，权限 `600`。
-- `ppt-agent-backup.timer` 每日一致性备份 SQLite 与受控产物到 `/opt/ppt-agent/shared/data-backups`，默认保留 14 天。
+- `ppt-agent-backup.timer` 通过 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs` 每日一致性备份 SQLite 与受控产物到 `/opt/ppt-agent/shared/data-backups`，默认保留 14 天且不受应用版本回退影响。
 - 服务只监听 `127.0.0.1:4310`，由 FrameFlow 服务端调用，不经 Nginx 暴露公网。
 - systemd 模板和环境示例位于 `deploy/aliyun/`。
 - 2026-07-23 加固版本已发布生产；SQLite 查询列和索引迁移已在停服备份及完整性校验后完成。
