@@ -183,9 +183,11 @@ if (phase === 'completed') {
   const deliveries = agent.query('SELECT data FROM agent_deliveries WHERE run_id = ?').all(RUN_ID)
   assert(deliveries.length === 1, 'VERIFY_COMPLETED_DELIVERY_COUNT_MISMATCH')
   const delivery = JSON.parse(deliveries[0].data)
-  const preview = delivery.artifacts.find((artifact) => artifact.kind === 'DECK_PREVIEW')
-  const pptx = delivery.artifacts.find((artifact) => artifact.kind === 'PPTX')
-  assert(preview && pptx, 'VERIFY_COMPLETED_DELIVERY_ARTIFACTS_MISSING')
+  const preview = delivery.preview
+  const pptx = delivery.pptx
+  assert(preview?.mimeType === 'image/png'
+    && pptx?.mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'VERIFY_COMPLETED_DELIVERY_ARTIFACTS_MISSING')
   artifacts = [
     verifyArtifact(artifactRoot, preview.artifactId, 'image/png'),
     verifyArtifact(artifactRoot, pptx.artifactId,
