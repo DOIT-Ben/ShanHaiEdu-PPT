@@ -55,8 +55,9 @@ export class SlideGenerationCoordinator {
     if (run.status !== 'EXECUTING') throw new Error('RUN_NOT_EXECUTING')
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const requirements = blueprintImageRequirements(run, blueprint)
+    const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image')
+      .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const sequentialPageExecution = run.source.kind === 'APPROVED_PAGE_DESIGN'
     const blockingStep = existingSteps.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
     if (blockingStep) {
@@ -192,11 +193,12 @@ export class SlideGenerationCoordinator {
     if (!run) throw new Error('RUN_NOT_FOUND')
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const requirements = blueprintImageRequirements(run, blueprint)
-    if (run.status === 'PAGE_REVIEW') return this.completedSummary(runId, requirements.length, run.status)
-    if (run.status !== 'EXECUTING') return this.completedSummary(runId, requirements.length, run.status)
+    if (run.status === 'PAGE_REVIEW') return this.completedSummary(runId, requirements, run.status)
+    if (run.status !== 'EXECUTING') return this.completedSummary(runId, requirements, run.status)
 
+    const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const steps = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image')
+      .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     for (const step of steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
       await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
       const latest = await this.dependencies.repository.getRun(runId)
@@ -204,7 +206,7 @@ export class SlideGenerationCoordinator {
     }
 
     const refreshed = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image')
+      .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const failed = refreshed.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
     if (failed) await this.requireHuman(runId, failed)
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step) !== null)
@@ -454,13 +456,21 @@ export class SlideGenerationCoordinator {
     })
   }
 
-  private async completedSummary(runId: string, total: number, status: RunRecord['status']) {
+  private async completedSummary(
+    runId: string,
+    requirements: ReturnType<typeof blueprintImageRequirements>,
+    status: RunRecord['status'],
+  ) {
+    const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const completed = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED' && this.artifactId(step))
+      .filter((step) => step.tool === 'generate_slide_image'
+        && requirementKeys.has(step.idempotencyKey)
+        && step.status === 'COMPLETED'
+        && this.artifactId(step))
     return {
       status,
       completed: completed.length,
-      total,
+      total: requirements.length,
       artifactIds: completed.map((step) => this.artifactId(step)!),
     }
   }

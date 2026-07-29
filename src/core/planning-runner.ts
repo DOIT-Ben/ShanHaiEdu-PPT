@@ -36,6 +36,50 @@ export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   return 'EDITORIAL' as const
 }
 
+type ApprovedPageDesignSource = Extract<CreateRunRequest['source'], { kind: 'APPROVED_PAGE_DESIGN' }>
+
+export function approvedPageVisualDirection(source: ApprovedPageDesignSource) {
+  return [
+    `适合${source.gradeBand}${source.subject}课堂投影的统一儿童友好教育插画风格`,
+    '明亮自然色，清晰主体，简洁背景，稳定材质与光线，不绘制任何文字或界面。',
+  ].join('；')
+}
+
+function approvedPageVisualRequirements(requirements: readonly string[]) {
+  const excluded = /(可编辑|标题|副标题|教材信息|文案|文字|数字|公式|算式|题面|句式|空格|任务卡|文本卡|问题卡|语言卡|提示)/i
+  const visual = requirements
+    .flatMap((requirement) => requirement.split(/[；;，,。]/))
+    .map((requirement) => requirement.trim())
+    .filter((requirement) => requirement && !excluded.test(requirement))
+  return visual.join('；') || '使用与本页视觉要求直接相关的单一课堂主视觉'
+}
+
+function approvedPageComposition(layout: ReturnType<typeof approvedPageLayout>) {
+  if (layout === 'HERO' || layout === 'IMAGE_FULL') return '使用沉浸式满版场景，保持一个明确主视觉焦点。'
+  if (layout === 'SPLIT') return '将主要视觉放在画面右侧，左侧保留自然、无边框的排版留白。'
+  if (layout === 'STATEMENT') return '将主要视觉放在右下区域，左上保留自然、无边框的排版留白。'
+  return '将主要视觉放在画面左侧，右侧保留自然、无边框的排版留白。'
+}
+
+export function approvedPageVisualPrompt(
+  source: ApprovedPageDesignSource,
+  page: ApprovedPageDesignSource['pages'][number],
+  pageIndex: number,
+) {
+  const layout = approvedPageLayout(page.layoutIntent, pageIndex)
+  const visualDirection = approvedPageVisualDirection(source)
+  const visualRequirements = approvedPageVisualRequirements(page.visualRequirements)
+  return [
+    `只为当前第 ${page.pageNumber} 页创作一张连续、无边框的 16:9 教育场景图片。`,
+    `统一视觉风格：${visualDirection}`,
+    `本页视觉要求：${visualRequirements}。`,
+    `构图与空间关系：${approvedPageComposition(layout)}`,
+    '只呈现一个完整画面和一个主要视觉焦点，不得绘制多格分镜、课件缩略图拼贴、其他页面内容或整套课程流程。',
+    '设计稿中提到的标题、文案、数字、公式、任务卡和可编辑区域只表示后续排版位置；图片中必须保持自然留白，不得绘制这些内容、占位框或界面组件。',
+    '不得绘制任何文字、字母、数字、公式、标志、水印或 logo。',
+  ].join(' ')
+}
+
 class PlanningFailureError extends Error {
   constructor(readonly failure: PlanningFailure) {
     super(failure.errorCode)
@@ -110,50 +154,47 @@ export class PlanningRunner {
     inputHash: string,
   ) {
     if (input.source.kind !== 'APPROVED_PAGE_DESIGN') throw new Error('APPROVED_PAGE_DESIGN_REQUIRED')
-    if (input.source.pages.length !== input.slideCount) throw new Error('BLUEPRINT_SLIDE_COUNT_MISMATCH')
+    const source = input.source
+    if (source.pages.length !== input.slideCount) throw new Error('BLUEPRINT_SLIDE_COUNT_MISMATCH')
     const chunksByPage = new Map(document.chunks.map((chunk) => [chunk.pageStart, chunk]))
     const sourceChunkIds = document.chunks.map((chunk) => chunk.id)
-    const slides = input.source.pages.map((page, index) => {
+    const visualDirection = approvedPageVisualDirection(source)
+    const slides = source.pages.map((page, index) => {
       const chunk = chunksByPage.get(page.pageNumber)
       if (!chunk || chunk.pageEnd !== page.pageNumber) throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
-      const visualRequirements = page.visualRequirements.join('；') || '使用与本页教学目标直接相关的课堂视觉'
+      const layout = approvedPageLayout(page.layoutIntent, index)
       return {
         pageNumber: page.pageNumber,
         title: page.title,
         body: page.editableCopy,
-        layout: approvedPageLayout(page.layoutIntent, index),
+        layout,
         visualIntent: `本页教学目标：${page.teachingPurpose}`,
-        visualPrompt: [
-          '创作一张连续、无边框的 16:9 教育场景图片，只呈现视觉内容，不绘制任何文字、字母、数字、公式、标志或水印。',
-          `本页视觉要求：${visualRequirements}。`,
-          `构图与空间关系：${page.layoutIntent}。`,
-          `整套视觉方向：${input.visualDirection}。`,
-        ].join(' '),
+        visualPrompt: approvedPageVisualPrompt(source, page, index),
         sourceChunkIds: [chunk.id],
         sourceAssetIds: [],
       }
     })
     const sourceSummary = [
-      `${input.source.gradeBand}${input.source.subject}《${input.source.title}》`,
-      `面向${input.source.audience}，课时 ${input.source.lessonDurationMinutes} 分钟。`,
-      `已由教师审核 ${input.source.pages.length} 页逐页设计稿，执行时不得重新规划或扩展审核范围。`,
+      `${source.gradeBand}${source.subject}《${source.title}》`,
+      `面向${source.audience}，课时 ${source.lessonDurationMinutes} 分钟。`,
+      `已由教师审核 ${source.pages.length} 页逐页设计稿，执行时不得重新规划或扩展审核范围。`,
     ].join(' ')
     return presentationBlueprintSchema.parse({
       id: `blueprint-${hashInput({ runId: input.runId, inputHash }).slice(0, 28)}`,
-      title: input.source.title,
+      title: source.title,
       curriculum: {
-        subject: input.source.subject,
-        grade: input.source.gradeBand,
-        lessonTitle: input.source.title,
+        subject: source.subject,
+        grade: source.gradeBand,
+        lessonTitle: source.title,
         sourceSummary,
-        learningObjectives: input.source.objectives,
+        learningObjectives: source.objectives,
         scopeBoundaries: ['以每一页已审核的教学目的、文案和视觉要求为唯一执行范围'],
         prohibitedExtensions: ['不得扩展到教师已审核逐页设计稿之外的教学内容'],
         sourceChunkIds,
         sourceAssetIds: [],
       },
       slides,
-      visualDirection: input.visualDirection,
+      visualDirection,
       renderMode: 'SLIDE_IMAGE_V2',
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
       sourceManifest: document.sources ?? [],

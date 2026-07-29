@@ -138,12 +138,14 @@ export class MockStructuredModelPort implements StructuredModelPort {
 
 export class MockVisualReviewPort implements VisualReviewPort {
   readonly reviews = new Map<string, unknown>()
+  readonly requests = new Map<string, Parameters<VisualReviewPort['review']>[0]>()
   readonly responsesByArtifact = new Map<string, unknown>()
   constructor(public response: unknown) {}
 
   async review(input: Parameters<VisualReviewPort['review']>[0]) {
     if (this.reviews.has(input.idempotencyKey)) return structuredClone(this.reviews.get(input.idempotencyKey))
     const response = this.responsesByArtifact.get(input.artifactId) ?? this.response
+    this.requests.set(input.idempotencyKey, structuredClone(input))
     this.reviews.set(input.idempotencyKey, structuredClone(response))
     return structuredClone(response)
   }

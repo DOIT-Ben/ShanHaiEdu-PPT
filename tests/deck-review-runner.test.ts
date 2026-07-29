@@ -179,6 +179,27 @@ describe('deck review runner', () => {
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toContain('issue.detected')
   })
 
+  test('blocks a high-scoring deck while any factual risk remains open', async () => {
+    const { repository, runner } = await fixture({
+      ...passingReview(),
+      qualityScore: 88,
+      issues: [{
+        id: 'issue-factual-warning',
+        category: 'FACTUAL_RISK',
+        severity: 'WARNING',
+        summary: '第二页对光合作用产物的数量关系存在事实性错误。',
+        slideIds: ['run-1:slide:2'],
+        sourceChunkIds: ['chunk-2'],
+        status: 'OPEN',
+      }],
+    })
+
+    const result = await runner.review('run-1')
+
+    expect(result).toMatchObject({ passed: false, review: { qualityScore: 88 } })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'DECK_REVIEW', qualityScore: 88 })
+  })
+
   test('moves to human review when the evaluator invents a source or slide reference', async () => {
     const { repository, runner } = await fixture({
       ...passingReview(),

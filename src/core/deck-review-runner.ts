@@ -321,4 +321,5 @@ export function deckReviewStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) 
 export function passesDeckQuality(review: DeckReview) {
   return review.qualityScore >= DECK_QUALITY_THRESHOLD
     && !review.issues.some((issue) => issue.severity === 'CRITICAL')
+    && !review.issues.some((issue) => issue.category === 'FACTUAL_RISK')
 }

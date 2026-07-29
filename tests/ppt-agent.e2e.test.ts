@@ -132,7 +132,7 @@ describe('PPT Agent mock end-to-end', () => {
       host,
       source,
       slideCount: pageCount,
-      visualDirection: '清晰、克制、适合六年级课堂的教育摄影风格',
+      visualDirection: '第一页导入百分数；第二页比较数量；其余十页逐页展开整套教学流程',
       imageModel: 'mock-image',
       automationLevel: 'BOUNDED_AUTO',
       budgetUnits: pageCount,
@@ -180,6 +180,12 @@ describe('PPT Agent mock end-to-end', () => {
     const visual = new VisualReviewRunner({ repository, reviewer: visualReviewer, clock })
     const pages = new PageReviewCoordinator({ repository, reviewer: visual, artifacts, renderer, clock })
     expect(await pages.reviewAll(runId)).toMatchObject({ status: 'DECK_REVIEW', rejected: 0 })
+    expect(planned.blueprint?.visualDirection).toContain('统一儿童友好教育插画风格')
+    expect(planned.blueprint?.visualDirection).not.toContain('第一页导入百分数')
+    expect([...visualReviewer.requests.values()].every((request) => (
+      request.visualDirection === planned.blueprint?.visualDirection
+      && !request.visualDirection.includes('第一页导入百分数')
+    ))).toBe(true)
     const deck = new DeckReviewRunner({
       repository,
       documents,

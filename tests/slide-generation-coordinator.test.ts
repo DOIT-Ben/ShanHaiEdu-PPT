@@ -7,7 +7,7 @@ import {
   MockBudgetPort,
   MockImageGenerationPort,
 } from '../src/adapters/mock-ports'
-import { getActiveBlueprint } from '../src/core/active-blueprint'
+import { getActiveBlueprint, revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { blueprintImageRequirements } from '../src/core/blueprint-assets'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
@@ -464,6 +464,70 @@ describe('slide generation coordinator', () => {
     await coordinator.refreshBlueprintImages('run-1')
     expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 2, total: 3 })
     expect(images.operations.size).toBe(2)
+  })
+
+  test('counts only current revision image steps when a recovered run preserves completed history', async () => {
+    const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        source: approvedRunSource(),
+        revisionRound: 1,
+        committedBudgetUnits: 30,
+      })
+      transaction.putStep({
+        id: 'step-revision-blueprint-1',
+        runId: 'run-1',
+        idempotencyKey: revisionBlueprintStepKey('run-1', 1),
+        inputHash: 'revision-blueprint-hash-1',
+        tool: 'apply_revision',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: { ...blueprint(), id: 'blueprint-r1' },
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+      for (const pageNumber of [1, 2, 3]) {
+        transaction.putStep({
+          id: `step-image-r0-${pageNumber}`,
+          runId: 'run-1',
+          idempotencyKey: `run-1:slide:${pageNumber}:image:r0:v1`,
+          inputHash: `image-r0-hash-${pageNumber}`,
+          tool: 'generate_slide_image',
+          status: 'COMPLETED',
+          budgetUnits: 10,
+          budgetReservationId: `budget-r0-${pageNumber}`,
+          externalOperationId: `operation-r0-${pageNumber}`,
+          errorCode: null,
+          output: {
+            slideId: `run-1:slide:${pageNumber}`,
+            versionId: `run-1:slide:${pageNumber}:r0:v1`,
+            artifactId: `artifact-r0-${pageNumber}`,
+          },
+          createdAt: transaction.run.createdAt,
+          updatedAt: transaction.run.updatedAt,
+        })
+      }
+    })
+
+    for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1) {
+      expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({
+        status: 'EXECUTING', submitted: pageNumber, total: 3,
+      })
+      const key = `run-1:slide:${pageNumber}:image:r1:v1`
+      images.complete(key, `artifact-r1-${pageNumber}`)
+      expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
+        status: pageNumber === 3 ? 'PAGE_REVIEW' : 'EXECUTING',
+        completed: pageNumber,
+        total: 3,
+      })
+    }
+
+    expect(images.operations.size).toBe(3)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 60 })
   })
 
   test('moves to human review when a completed provider operation failed', async () => {

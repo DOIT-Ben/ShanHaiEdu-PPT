@@ -291,6 +291,12 @@ describe('planning runner', () => {
       pages: approvedPageDesignSource.pages.map((page, index) => ({
         ...page,
         editableCopy: index === 1 ? exactBody : page.editableCopy,
+        layoutIntent: index === 0
+          ? '沉浸式封面；整套课程流程还包含密封钟罩实验'
+          : '左侧文字、右侧实验图；回顾第一页阳光情境',
+        visualRequirements: [index === 0
+          ? '只画阳光下的一片叶子；右侧可编辑标题卡'
+          : '只画密封钟罩中的实验叶片；左侧可编辑任务卡'],
       })),
     }
     await repository.createRun({
@@ -310,6 +316,7 @@ describe('planning runner', () => {
       ...request,
       source: executableSource,
       presentationMode: 'SLIDE_IMAGE_V2',
+      visualDirection: '第一页建立光照情境；第二页比较密封钟罩实验。',
     })
 
     expect(modelCalls).toBe(0)
@@ -322,6 +329,16 @@ describe('planning runner', () => {
       ],
     })
     expect(result.blueprint?.curriculum.learningObjectives).toEqual(exactObjectives)
+    expect(result.blueprint?.visualDirection).toBe('适合七年级生物课堂投影的统一儿童友好教育插画风格；明亮自然色，清晰主体，简洁背景，稳定材质与光线，不绘制任何文字或界面。')
+    expect(result.blueprint?.slides[0]?.visualPrompt).toContain('只画阳光下的一片叶子')
+    expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('密封钟罩')
+    expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('建立光合作用的基本心智模型')
+    expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('还包含密封钟罩实验')
+    expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('可编辑标题卡')
+    expect(result.blueprint?.slides[1]?.visualPrompt).toContain('只画密封钟罩中的实验叶片')
+    expect(result.blueprint?.slides[1]?.visualPrompt).not.toContain('第一页建立光照情境')
+    expect(result.blueprint?.slides[1]?.visualPrompt).not.toContain('回顾第一页阳光情境')
+    expect(result.blueprint?.slides[1]?.visualPrompt).not.toContain('可编辑任务卡')
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', version: 1 })
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
       'tool.started',
