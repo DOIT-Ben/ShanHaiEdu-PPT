@@ -163,9 +163,10 @@ if (phase === 'recovered') {
 if (phase === 'completed') {
   assert(runRow.status === 'COMPLETED' && run.status === 'COMPLETED' && runRow.lease_until === null,
     'VERIFY_COMPLETED_RUN_STATE_MISMATCH')
-  assert(run.qualityOverride === false && run.qualityOverrideBy === null
-    && run.qualityOverrideRole === null && run.qualityOverrideReason === null
-    && run.qualityOverrideIssueIds === null && run.qualityOverrideAt === null,
+  assert(run.qualityOverride === false && run.qualityOverrideBy == null
+    && run.qualityOverrideRole == null && run.qualityOverrideReason == null
+    && (run.qualityOverrideIssueIds == null || run.qualityOverrideIssueIds.length === 0)
+    && run.qualityOverrideAt == null,
   'VERIFY_COMPLETED_QUALITY_OVERRIDE_FORBIDDEN')
   assert(r1.length === 12 && r1.every((step) => step.status === 'COMPLETED'), 'VERIFY_R1_STEPS_MISMATCH')
   const deckReviewSteps = steps.filter((step) => step.tool === 'review_deck'
