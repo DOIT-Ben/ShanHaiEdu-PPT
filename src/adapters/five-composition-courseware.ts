@@ -187,10 +187,11 @@ function lessonElements(slide: BlueprintSlide): Element[] {
     ;[[155, 315], [300, 280], [445, 340], [600, 292], [735, 360]].forEach(([x, y], index) =>
       elements.push(...bird(x!, y!, [COLORS.coral, COLORS.blue, COLORS.yellow, COLORS.green, COLORS.purple][index]!, 0.72)))
     elements.push(...nest(270, 565, 0.65), ...nest(620, 565, 0.65))
+    elements.push(...arrow(245, 485, 145, COLORS.coral), ...arrow(600, 485, 145, COLORS.blue))
     elements.push(ellipse(457, 408, 110, 110, COLORS.green), triangle(501, 438, 38, 42, COLORS.white, 90))
     elements.push(rect(1050, 235, 470, 198, COLORS.white, 24, COLORS.line))
     elements.push(text('认真观察', 1090, 273, 380, 48, 31, COLORS.green, true))
-    elements.push(text('5只小鸟飞向两个鸟巢', 1090, 335, 380, 52, 27, COLORS.ink, true))
+    elements.push(text('5只小鸟陆续飞向\n两个鸟巢', 1090, 330, 380, 82, 27, COLORS.ink, true))
     elements.push(rect(1050, 465, 470, 220, '#FFF7E1', 24))
     elements.push(text('先想一想', 1090, 503, 380, 48, 31, '#A86420', true))
     elements.push(text('两个鸟巢里\n可能各有几只？', 1090, 565, 380, 92, 27, COLORS.ink, true))
@@ -256,18 +257,19 @@ function lessonElements(slide: BlueprintSlide): Element[] {
     elements.push(text('先自己摆，再和同桌说一说。', 400, 690, 800, 50, 30, COLORS.green, true, 'CENTER'))
   } else if (page === 10) {
     const questions = [
-      { y: 250, prompt: '3 和（  ）组成 5', solid: 3, empty: 2 },
-      { y: 500, prompt: '1 和（  ）组成 2', solid: 1, empty: 1 },
+      { y: 220, prompt: '3 可以分成 1 和（  ）', solid: 1, empty: 2, color: COLORS.coral },
+      { y: 410, prompt: '3 和（  ）组成 5', solid: 3, empty: 2, color: COLORS.blue },
+      { y: 600, prompt: '1 和（  ）组成 2', solid: 1, empty: 1, color: COLORS.green },
     ]
     questions.forEach((question, index) => {
-      elements.push(rect(120, question.y, 1360, 190, index === 0 ? COLORS.paleBlue : COLORS.paleGreen, 28))
-      elements.push(text(question.prompt, 180, question.y + 52, 470, 68, 38, COLORS.ink, true))
-      elements.push(...counterGroup(question.solid, 760, question.y + 60, index === 0 ? COLORS.blue : COLORS.green, 58, 5))
+      elements.push(rect(120, question.y, 1360, 150, index === 1 ? COLORS.paleBlue : COLORS.paleGreen, 28))
+      elements.push(text(question.prompt, 180, question.y + 39, 560, 62, 34, COLORS.ink, true))
+      elements.push(...counterGroup(question.solid, 815, question.y + 46, question.color, 54, 5))
       for (let i = 0; i < question.empty; i += 1) {
-        elements.push(ellipse(1045 + i * 85, question.y + 60, 58, 58, COLORS.white, COLORS.coral))
+        elements.push(ellipse(1115 + i * 78, question.y + 46, 54, 54, COLORS.white, COLORS.coral))
       }
     })
-    elements.push(text('先摆一摆或看清图意，再填一填。', 420, 735, 760, 48, 29, COLORS.green, true, 'CENTER'))
+    elements.push(text('先摆一摆或看清图意，再填一填。', 420, 790, 760, 40, 25, COLORS.green, true, 'CENTER'))
   } else if (page === 11) {
     elements.push(rect(70, 220, 820, 565, COLORS.paleBlue, 28))
     elements.push(...nest(145, 540, 0.85), ...nest(535, 540, 0.85))
