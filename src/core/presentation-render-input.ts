@@ -3,6 +3,8 @@ import { blueprintElementAssetKey, blueprintImageRequirements, latestCompletedAs
 import { hashInput } from './hash'
 import type { AgentRepository, ArtifactPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 
+const PRESENTATION_PREVIEW_FORMAT = 'classroom-v2'
+
 export type PresentationArtifactReference = Readonly<{
   pageNumber: number
   artifactId: string
@@ -89,6 +91,7 @@ export async function renderAndStoreSlidePreviews(input: Readonly<{
   references: readonly PresentationArtifactReference[]
 }>) {
   const cachePrefix = `${input.run.id}:slide-previews:${hashInput({
+    previewFormat: PRESENTATION_PREVIEW_FORMAT,
     blueprint: input.blueprint,
     references: input.references,
   }).slice(0, 28)}`
