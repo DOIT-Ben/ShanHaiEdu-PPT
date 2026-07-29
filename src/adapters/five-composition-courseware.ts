@@ -278,10 +278,10 @@ function lessonElements(slide: BlueprintSlide): Element[] {
     elements.push(text('2 只', 185, 690, 150, 40, 28, COLORS.coral, true, 'CENTER'))
     elements.push(text('3 只', 575, 690, 150, 40, 28, COLORS.blue, true, 'CENTER'))
     elements.push(rect(940, 250, 570, 405, COLORS.white, 26, COLORS.line))
-    elements.push(text('5 可以分成', 990, 290, 470, 48, 30, COLORS.ink, true))
-    elements.push(text('____ 和 ____', 990, 360, 470, 54, 34, COLORS.coral, true, 'CENTER'))
-    elements.push(text('____ 和 ____ 组成 5', 990, 475, 470, 60, 31, COLORS.green, true, 'CENTER'))
-    elements.push(text('用完整的话说一说。', 990, 585, 470, 42, 25, COLORS.muted, false, 'CENTER'))
+    elements.push(text('5 可以分成', 990, 285, 470, 48, 30, COLORS.ink, true))
+    elements.push(text('2 和 3', 990, 355, 470, 54, 36, COLORS.coral, true, 'CENTER'))
+    elements.push(text('2 和 3 组成 5', 990, 475, 470, 60, 32, COLORS.green, true, 'CENTER'))
+    elements.push(text('你还能想到其他分法吗？', 990, 585, 470, 42, 24, COLORS.muted, false, 'CENTER'))
   } else if (page === 12) {
     const cards = [
       ['分', '把一个数分成两个部分', COLORS.coral],

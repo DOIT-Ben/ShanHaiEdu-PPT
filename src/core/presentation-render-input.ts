@@ -3,7 +3,7 @@ import { blueprintElementAssetKey, blueprintImageRequirements, latestCompletedAs
 import { hashInput } from './hash'
 import type { AgentRepository, ArtifactPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 
-const PRESENTATION_PREVIEW_FORMAT = 'classroom-v3'
+const PRESENTATION_PREVIEW_FORMAT = 'classroom-v4'
 
 export type PresentationArtifactReference = Readonly<{
   pageNumber: number

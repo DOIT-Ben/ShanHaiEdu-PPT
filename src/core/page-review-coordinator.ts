@@ -7,7 +7,7 @@ import type { AgentRepository, ArtifactPort, ClockPort, PresentationRendererPort
 import { transitionRun } from './policy'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
 
-const COMPOSITE_REVIEW_VERSION = 'classroom-v3'
+const COMPOSITE_REVIEW_VERSION = 'classroom-v4'
 
 export type ReviewAllPagesResult = Readonly<{
   status: RunRecord['status']
