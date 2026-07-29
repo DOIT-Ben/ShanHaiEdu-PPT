@@ -2,6 +2,8 @@ import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { passesDeckQuality } from '../dist/core/deck-review-runner.js'
+import { deckReviewSchema } from '../dist/presentation-contracts.js'
 
 const RUN_ID = 'run-86529d771703468d4f4efd1e4439'
 const PARENT_RESERVATION_ID = 'd9a63ca4-9f7b-4295-9f3d-3ba2ecdc0ee5'
@@ -161,7 +163,18 @@ if (phase === 'recovered') {
 if (phase === 'completed') {
   assert(runRow.status === 'COMPLETED' && run.status === 'COMPLETED' && runRow.lease_until === null,
     'VERIFY_COMPLETED_RUN_STATE_MISMATCH')
+  assert(run.qualityOverride === false && run.qualityOverrideBy === null
+    && run.qualityOverrideRole === null && run.qualityOverrideReason === null
+    && run.qualityOverrideIssueIds === null && run.qualityOverrideAt === null,
+  'VERIFY_COMPLETED_QUALITY_OVERRIDE_FORBIDDEN')
   assert(r1.length === 12 && r1.every((step) => step.status === 'COMPLETED'), 'VERIFY_R1_STEPS_MISMATCH')
+  const deckReviewSteps = steps.filter((step) => step.tool === 'review_deck'
+    && step.value.idempotencyKey === `${RUN_ID}:deck-review:r1`)
+  assert(deckReviewSteps.length === 1 && deckReviewSteps[0].status === 'COMPLETED',
+    'VERIFY_COMPLETED_DECK_REVIEW_STEP_MISMATCH')
+  const deckReview = deckReviewSchema.parse(deckReviewSteps[0].value.output)
+  assert(passesDeckQuality(deckReview) && run.qualityScore === deckReview.qualityScore,
+    'VERIFY_COMPLETED_DECK_QUALITY_MISMATCH')
   assert(r1ReservationIds.length === 12 && new Set(r1ReservationIds).size === 12,
     'VERIFY_R1_RESERVATIONS_MISMATCH')
   const allReservationIds = [...r0ReservationIds, ...r1ReservationIds]
@@ -185,7 +198,9 @@ if (phase === 'completed') {
   const delivery = JSON.parse(deliveries[0].data)
   const preview = delivery.preview
   const pptx = delivery.pptx
-  assert(preview?.mimeType === 'image/png'
+  assert(delivery.revisionRound === 1 && delivery.qualityOverride === false
+    && delivery.qualityOverrideAudit === null && delivery.qualityScore === deckReview.qualityScore
+    && preview?.mimeType === 'image/png'
     && pptx?.mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'VERIFY_COMPLETED_DELIVERY_ARTIFACTS_MISSING')
   artifacts = [
