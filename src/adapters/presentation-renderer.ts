@@ -35,9 +35,9 @@ function wrapText(value: string, maxCharacters: number) {
 }
 
 function layout(slideLayout: string) {
-  if (slideLayout === 'SPLIT') return { x: 78, width: 680, panelWidth: 790 }
-  if (slideLayout === 'EDITORIAL') return { x: 820, width: 700, panelWidth: 800 }
-  return { x: 88, width: 920, panelWidth: 1040 }
+  if (slideLayout === 'SPLIT') return { x: 78, width: 680, panelX: 0, panelWidth: 790 }
+  if (slideLayout === 'EDITORIAL') return { x: 820, width: 700, panelX: 800, panelWidth: 800 }
+  return { x: 88, width: 920, panelX: 0, panelWidth: 1040 }
 }
 
 function typographySvg(input: Readonly<{
@@ -49,19 +49,18 @@ function typographySvg(input: Readonly<{
 }>) {
   const placement = layout(input.slideLayout)
   const titleLines = wrapText(input.title, placement.width > 800 ? 18 : 14).slice(0, 2)
-  const bodyLines = input.body.flatMap((item) => wrapText(item, placement.width > 800 ? 30 : 22)).slice(0, 7)
+  const bodyLines = input.body.flatMap((item) => wrapText(item, placement.width > 800 ? 30 : 22)
+    .map((line, index) => `${index === 0 ? '• ' : '  '}${line}`)).slice(0, 8)
   const titleSvg = titleLines.map((line, index) =>
     `<text x="${placement.x}" y="${216 + index * 74}" font-size="58" font-weight="700" fill="#17202a">${escapeXml(line)}</text>`
   ).join('')
   const bodySvg = bodyLines.map((line, index) =>
-    `<text x="${placement.x + 18}" y="${390 + index * 58}" font-size="30" font-weight="400" fill="#29343d">${escapeXml(`• ${line}`)}</text>`
+    `<text x="${placement.x + 18}" y="${342 + index * 58}" font-size="30" font-weight="400" fill="#29343d">${escapeXml(line)}</text>`
   ).join('')
   return Buffer.from(`<svg width="${SLIDE_WIDTH}" height="${SLIDE_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="${placement.panelWidth}" height="${SLIDE_HEIGHT}" fill="#ffffff" fill-opacity="0.90"/>
-    <text x="${placement.x}" y="92" font-size="24" font-weight="600" fill="#49616f">${escapeXml(input.deckTitle)}</text>
+    <rect x="${placement.panelX}" y="0" width="${placement.panelWidth}" height="${SLIDE_HEIGHT}" fill="#ffffff" fill-opacity="0.96"/>
     ${titleSvg}
     ${bodySvg}
-    <text x="1508" y="842" text-anchor="end" font-size="24" font-weight="600" fill="#344955">${String(input.pageNumber).padStart(2, '0')}</text>
   </svg>`)
 }
 
@@ -298,6 +297,8 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
       const image = await normalizedPng(source.image)
       const placement = layout(blueprint.layout)
       const x = placement.x / 120
+      const textWidth = placement.width / 120
+      const panelX = placement.panelX / 120
       const panelWidth = placement.panelWidth / 120
       const slide = pptx.addSlide()
       slide.addImage({
@@ -309,28 +310,19 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
         altText: `${blueprint.title}的原始无文字主视觉`,
       })
       slide.addShape(pptx.ShapeType.rect, {
-        x: 0, y: 0, w: panelWidth, h: PPTX_HEIGHT,
-        fill: { color: 'FFFFFF', transparency: 10 },
+        x: panelX, y: 0, w: panelWidth, h: PPTX_HEIGHT,
+        fill: { color: 'FFFFFF', transparency: 4 },
         line: { color: 'FFFFFF', transparency: 100 },
       })
-      slide.addText(input.blueprint.title, {
-        x, y: 0.42, w: Math.max(2, panelWidth - x - 0.3), h: 0.36,
-        fontFace: FONT_FACE, fontSize: 14, bold: true, color: '49616F', margin: 0,
-      })
       slide.addText(blueprint.title, {
-        x, y: 1.32, w: Math.max(2, panelWidth - x - 0.3), h: 1.05,
+        x, y: 0.92, w: textWidth, h: 1.2,
         fontFace: FONT_FACE, fontSize: 28, bold: true, color: '17202A', margin: 0,
         breakLine: false, fit: 'shrink', valign: 'middle',
       })
       slide.addText(blueprint.body.map((item) => `• ${item}`).join('\n'), {
-        x: x + 0.12, y: 3.05, w: Math.max(2, panelWidth - x - 0.5), h: 2.95,
-        fontFace: FONT_FACE, fontSize: 17, color: '29343D', margin: 0,
+        x: x + 0.12, y: 2.7, w: Math.max(1, textWidth - 0.2), h: 3.9,
+        fontFace: FONT_FACE, fontSize: 18, color: '29343D', margin: 0,
         breakLine: false, fit: 'shrink', valign: 'top', paraSpaceAfter: 8,
-      })
-      slide.addText(String(blueprint.pageNumber).padStart(2, '0'), {
-        x: 11.8, y: 6.82, w: 0.78, h: 0.3,
-        fontFace: FONT_FACE, fontSize: 13, bold: true, color: '344955',
-        margin: 0, align: 'right',
       })
     }
     const output = await pptx.write({ outputType: 'uint8array', compression: true })
