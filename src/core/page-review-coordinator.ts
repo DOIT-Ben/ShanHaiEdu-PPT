@@ -7,6 +7,8 @@ import type { AgentRepository, ArtifactPort, ClockPort, PresentationRendererPort
 import { transitionRun } from './policy'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
 
+const COMPOSITE_REVIEW_VERSION = 'classroom-v2'
+
 export type ReviewAllPagesResult = Readonly<{
   status: RunRecord['status']
   approved: number
@@ -86,10 +88,10 @@ export class PageReviewCoordinator {
           if (stopReviews) return null
           const slide = blueprint.slides.find((candidate) => candidate.pageNumber === preview.pageNumber)
           if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
-          const key = `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review`
+          const key = `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${COMPOSITE_REVIEW_VERSION}`
           const result = await this.dependencies.reviewer.review({
             runId,
-            stepId: `step-${run.id}-slide-${slide.pageNumber}-composite-review-r${run.revisionRound}`,
+            stepId: `step-${run.id}-slide-${slide.pageNumber}-composite-review-r${run.revisionRound}-${COMPOSITE_REVIEW_VERSION}`,
             idempotencyKey: key,
             slideId: `${run.id}:slide:${slide.pageNumber}`,
             versionId: `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:v1`,
@@ -172,7 +174,7 @@ export class PageReviewCoordinator {
       return imageStep ? `${imageStep.idempotencyKey}:review` : ''
     }))
     for (const slide of blueprint.slides) {
-      reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review`)
+      reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${COMPOSITE_REVIEW_VERSION}`)
     }
     const reviews = (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'review_slide_image' && step.status === 'COMPLETED' && reviewKeys.has(step.idempotencyKey))

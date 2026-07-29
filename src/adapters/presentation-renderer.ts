@@ -4,6 +4,11 @@ import type { z } from 'zod'
 import type { PresentationRendererPort } from '../core/ports'
 import { layeredSlideElementSchema } from '../presentation-contracts'
 import { layoutPresentationText } from '../presentation-text-layout'
+import {
+  addFiveCompositionSlide,
+  isFiveCompositionCourseware,
+  renderFiveCompositionSlide,
+} from './five-composition-courseware'
 
 const SLIDE_WIDTH = 1600
 const SLIDE_HEIGHT = 900
@@ -185,7 +190,9 @@ function slideByPage(input: RenderInput) {
 
 export class SharpPptxPresentationRenderer implements PresentationRendererPort {
   async renderSlidePreviews(input: RenderInput) {
+    const classroomCourseware = isFiveCompositionCourseware(input.blueprint)
     const rendered = await Promise.all(slideByPage(input).map(({ blueprint, source }) => {
+      if (classroomCourseware) return renderFiveCompositionSlide(blueprint)
       if (input.blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
         if (!blueprint.layeredDesign) throw new Error(`RENDER_LAYERED_DESIGN_MISSING:${blueprint.pageNumber}`)
         return renderLayeredSlide(source, blueprint.layeredDesign.elements, blueprint.layeredDesign.backgroundColor)
@@ -238,7 +245,12 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
     pptx.title = input.blueprint.title
     pptx.theme = { headFontFace: FONT_FACE, bodyFontFace: FONT_FACE }
 
+    const classroomCourseware = isFiveCompositionCourseware(input.blueprint)
     for (const { blueprint, source } of slideByPage(input)) {
+      if (classroomCourseware) {
+        addFiveCompositionSlide(pptx, blueprint)
+        continue
+      }
       if (input.blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
         if (!blueprint.layeredDesign) throw new Error(`RENDER_LAYERED_DESIGN_MISSING:${blueprint.pageNumber}`)
         const assets = requireLayeredAssets(source, blueprint.layeredDesign.elements)

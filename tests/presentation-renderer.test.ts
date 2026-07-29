@@ -74,6 +74,49 @@ describe('Sharp and PptxGenJS presentation renderer', () => {
     expect(pptx.length).toBeGreaterThan(20_000)
   })
 
+  test('renders the 12-page five-composition lesson as editable native classroom slides', async () => {
+    const base = blueprint()
+    const lessonBlueprint = {
+      ...base,
+      title: '《5以内数的分与合》公开课PPT逐页设计与制作确认稿',
+      slides: Array.from({ length: 12 }, (_, index) => ({
+        ...base.slides[index % base.slides.length]!,
+        pageNumber: index + 1,
+        title: index === 0 ? '5以内数的分与合' : `第${index + 1}页课堂活动`,
+      })),
+    }
+    const source = new Uint8Array(await sharp({
+      create: { width: 1280, height: 720, channels: 3, background: '#111111' },
+    }).png().toBuffer())
+    const lessonInput = {
+      blueprint: lessonBlueprint,
+      slides: lessonBlueprint.slides.map((slide) => ({
+        pageNumber: slide.pageNumber,
+        image: source,
+        imageMimeType: 'image/png',
+      })),
+    }
+    const renderer = new SharpPptxPresentationRenderer()
+    const previews = await renderer.renderSlidePreviews(lessonInput)
+    const pptx = await renderer.renderPptx(lessonInput)
+
+    expect(previews).toHaveLength(12)
+    expect(await sharp(previews[0]!.image).metadata()).toMatchObject({ width: 1600, height: 900 })
+    expect(new TextDecoder().decode(pptx.slice(0, 2))).toBe('PK')
+
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-five-composition-'))
+    try {
+      const path = join(directory, 'lesson.pptx')
+      await writeFile(path, pptx)
+      const xml = await new Response(Bun.spawn(['unzip', '-p', path, 'ppt/slides/slide1.xml'], { stdout: 'pipe' }).stdout).text()
+      expect(xml).toContain('5以内数的')
+      expect(xml.match(/<p:sp>/g)?.length ?? 0).toBeGreaterThan(20)
+      expect(xml).not.toContain('<p:pic>')
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('exports v3 base art, knowledge art, text and shapes as independent pptx objects', async () => {
     const baseBlueprint = blueprint()
     const layeredBlueprint = presentationBlueprintSchema.parse({
