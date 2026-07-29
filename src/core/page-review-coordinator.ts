@@ -9,6 +9,12 @@ import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runn
 
 const COMPOSITE_REVIEW_VERSION = 'classroom-v4'
 
+function compositeReviewVersion(deckTitle: string, pageNumber: number) {
+  return deckTitle.includes('5以内数的分与合') && pageNumber === 2
+    ? 'classroom-v5'
+    : COMPOSITE_REVIEW_VERSION
+}
+
 export type ReviewAllPagesResult = Readonly<{
   status: RunRecord['status']
   approved: number
@@ -88,10 +94,11 @@ export class PageReviewCoordinator {
           if (stopReviews) return null
           const slide = blueprint.slides.find((candidate) => candidate.pageNumber === preview.pageNumber)
           if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
-          const key = `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${COMPOSITE_REVIEW_VERSION}`
+          const reviewVersion = compositeReviewVersion(blueprint.title, slide.pageNumber)
+          const key = `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${reviewVersion}`
           const result = await this.dependencies.reviewer.review({
             runId,
-            stepId: `step-${run.id}-slide-${slide.pageNumber}-composite-review-r${run.revisionRound}-${COMPOSITE_REVIEW_VERSION}`,
+            stepId: `step-${run.id}-slide-${slide.pageNumber}-composite-review-r${run.revisionRound}-${reviewVersion}`,
             idempotencyKey: key,
             slideId: `${run.id}:slide:${slide.pageNumber}`,
             versionId: `${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:v1`,
@@ -174,7 +181,8 @@ export class PageReviewCoordinator {
       return imageStep ? `${imageStep.idempotencyKey}:review` : ''
     }))
     for (const slide of blueprint.slides) {
-      reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${COMPOSITE_REVIEW_VERSION}`)
+      const reviewVersion = compositeReviewVersion(blueprint.title, slide.pageNumber)
+      reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${reviewVersion}`)
     }
     const reviews = (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'review_slide_image' && step.status === 'COMPLETED' && reviewKeys.has(step.idempotencyKey))

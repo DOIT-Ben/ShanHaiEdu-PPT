@@ -172,6 +172,9 @@ function lessonElements(slide: BlueprintSlide): Element[] {
     elements.push(rect(70, 215, 700, 590, COLORS.paleBlue, 28))
     ;[[145, 285], [300, 255], [455, 300], [230, 420], [410, 445]].forEach(([x, y], index) =>
       elements.push(...bird(x!, y!, [COLORS.coral, COLORS.blue, COLORS.yellow, COLORS.green, COLORS.purple][index]!, 0.8)))
+    elements.push(line(260, 515, -40, 88, COLORS.coral, 6), triangle(205, 585, 28, 26, COLORS.coral, 180))
+    elements.push(line(500, 515, 42, 88, COLORS.blue, 6), triangle(528, 585, 28, 26, COLORS.blue, 180))
+    elements.push(text('观察飞行方向', 282, 548, 210, 36, 22, COLORS.green, true, 'CENTER'))
     elements.push(...nest(145, 625, 0.8), ...nest(445, 625, 0.8))
     const tasks = ['一共有几只小鸟？', '它们要飞进几个鸟巢？', '两个鸟巢里的数量会怎样变化？']
     tasks.forEach((task, index) => {
