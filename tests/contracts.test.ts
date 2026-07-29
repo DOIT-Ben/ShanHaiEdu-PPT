@@ -9,6 +9,33 @@ import {
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1', externalProjectId: 'deck-1' }
 
+const approvedPageDesignSource = {
+  kind: 'APPROVED_PAGE_DESIGN' as const,
+  schemaVersion: '1' as const,
+  artifactVersionId: 'page-design-version-1',
+  artifactContentHash: 'a'.repeat(64),
+  title: '光合作用公开课',
+  subject: '生物',
+  gradeBand: '七年级',
+  lessonDurationMinutes: 45,
+  audience: '七年级学生',
+  objectives: ['理解光合作用的条件与产物'],
+  pages: [1, 2].map((pageNumber) => ({
+    pageNumber,
+    title: pageNumber === 1 ? '光从哪里来' : '植物制造了什么',
+    teachingPurpose: '建立光合作用的基本心智模型',
+    editableCopy: ['观察叶片与光照', '归纳条件和产物'],
+    layoutIntent: '左侧保留标题和要点，右侧呈现完整的叶片实验场景',
+    visualRequirements: ['真实叶片、阳光和课堂实验器材'],
+    teacherNotes: '引导学生先观察再归纳',
+    teacherScript: '请观察叶片在光照条件下发生的变化，并说出你的判断。',
+    studentActivity: '小组观察并汇报条件和产物',
+    animationSequence: ['先出现叶片', '再出现光照关系'],
+    boardPlan: '板书光合作用的条件和产物',
+    evidence: [{ type: 'FACT' as const, text: '绿色植物通过光合作用制造有机物并释放氧气', source: '七年级生物教材' }],
+  })),
+}
+
 describe('public v1 contracts', () => {
   test('accepts a host-independent run request', () => {
     const result = createRunRequestSchema.parse({
@@ -54,6 +81,28 @@ describe('public v1 contracts', () => {
     })
   })
 
+  test('accepts the reflected slide-image mode with explicit audience and goal', () => {
+    const result = createRunRequestSchema.parse({
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: { kind: 'TEXT', text: '这是一段足够长的产品发布材料，用于生成面向管理层的演示文稿。' },
+      slideCount: 6,
+      visualDirection: '克制的编辑设计，清晰的信息层级和强视觉焦点',
+      targetAudience: '需要快速判断是否投资的公司管理层',
+      presentationGoal: '在十分钟内说明市场机会、产品差异和下一步决策',
+      imageModel: 'nanobanana',
+      automationLevel: 'SUPERVISED',
+      budgetUnits: 12,
+      presentationMode: 'SLIDE_IMAGE_V2_1',
+    })
+
+    expect(result).toMatchObject({
+      presentationMode: 'SLIDE_IMAGE_V2_1',
+      targetAudience: '需要快速判断是否投资的公司管理层',
+      presentationGoal: '在十分钟内说明市场机会、产品差异和下一步决策',
+    })
+  })
+
   test('accepts an ordered mixed source package and rejects duplicate attachments', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,
@@ -84,6 +133,52 @@ describe('public v1 contracts', () => {
         ],
       },
     })).toThrow('attachment ids must be unique')
+  })
+
+  test('accepts a versioned approved page design and rejects broken page order', () => {
+    const base = {
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: approvedPageDesignSource,
+      slideCount: 2,
+      visualDirection: '清晰克制的课堂编辑视觉',
+      imageModel: 'nanobanana',
+      automationLevel: 'SUPERVISED' as const,
+      budgetUnits: 2,
+      presentationMode: 'SLIDE_IMAGE_V2' as const,
+    }
+
+    expect(createRunRequestSchema.parse(base).source).toEqual(approvedPageDesignSource)
+    expect(() => createRunRequestSchema.parse({
+      ...base,
+      source: {
+        ...approvedPageDesignSource,
+        pages: approvedPageDesignSource.pages.map((page, index) => ({
+          ...page,
+          pageNumber: index === 1 ? 3 : page.pageNumber,
+        })),
+      },
+    })).toThrow('page numbers must be continuous')
+    expect(() => createRunRequestSchema.parse({
+      ...base,
+      source: {
+        ...approvedPageDesignSource,
+        pages: approvedPageDesignSource.pages.map((page, index) => ({
+          ...page,
+          editableCopy: index === 0 ? Array.from({ length: 9 }, (_, item) => `正文 ${item + 1}`) : page.editableCopy,
+        })),
+      },
+    })).toThrow()
+    expect(() => createRunRequestSchema.parse({
+      ...base,
+      source: {
+        ...approvedPageDesignSource,
+        pages: approvedPageDesignSource.pages.map((page, index) => ({
+          ...page,
+          editableCopy: index === 0 ? ['字'.repeat(301)] : page.editableCopy,
+        })),
+      },
+    })).toThrow()
   })
 
   test('rejects unknown fields and unsupported contract versions', () => {

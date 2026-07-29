@@ -61,9 +61,48 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
 
 class DeterministicPlanningModel implements StructuredModelPort {
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
+    if (input.operation === 'reflect_blueprint') {
+      const payload = input.payload as {
+        targetAudience?: string
+        presentationGoal?: string
+        originalBlueprint: BlueprintDraft
+      }
+      const dimensions = [
+        'AUDIENCE_FIT',
+        'GOAL_ALIGNMENT',
+        'NARRATIVE',
+        'INFORMATION_HIERARCHY',
+        'COMPOSITION',
+        'VISUAL_COHERENCE',
+        'PROMPT_EXECUTABILITY',
+      ] as const
+      return {
+        deckBrief: {
+          targetAudience: payload.targetAudience ?? '使用当前教材的课堂学习者',
+          presentationGoal: payload.presentationGoal ?? '帮助学习者理解并记住教材核心知识',
+          useContext: '教师在课堂上配合讲解使用',
+          audienceNeeds: ['用清晰叙事和直观视觉降低理解负担'],
+          narrativeArc: ['建立主题情境并提出核心问题', '逐步展开知识并形成总结'],
+          visualSystem: {
+            artDirection: '清晰、统一且适合课堂投影的教育编辑插画',
+            palette: '明亮主色、克制强调色和高对比中性色',
+            compositionRules: ['每页只保留一个视觉焦点', '文字区域使用自然留白'],
+            continuityRules: ['统一材质、光线和色彩逻辑', '相邻页面改变主体位置和镜位'],
+          },
+        },
+        findings: dimensions.map((dimension) => ({
+          dimension,
+          score: 4,
+          diagnosis: '初稿已经满足基础要求，仍需用统一规则强化该维度的执行一致性。',
+          revisionInstruction: '保持教材引用不变，并在最终蓝图中落实清晰、具体、可生成的页面约束。',
+        })),
+        revisedBlueprint: payload.originalBlueprint,
+      }
+    }
+    if (input.operation !== 'create_blueprint') throw new Error('MODEL_OPERATION_UNSUPPORTED')
     const payload = input.payload as {
       slideCount: number
-      presentationMode?: 'SLIDE_IMAGE_V2' | 'LAYERED_COURSEWARE_V3'
+      presentationMode?: 'SLIDE_IMAGE_V2' | 'SLIDE_IMAGE_V2_1' | 'LAYERED_COURSEWARE_V3'
       coverDesignMode?: 'INDEPENDENT' | 'FOLLOW_TEMPLATE'
       assetAcquisitionPolicy?: 'AI_FIRST' | 'SEARCH_FIRST'
       maxVisualAssetsPerSlide?: number
@@ -291,6 +330,7 @@ type RuntimeInput = Readonly<{
   createRunRateLimitPerMinute?: number
   runActionRateLimitPerMinute?: number
   rateLimiter?: PrincipalRateLimiterPort
+  budget?: BudgetPort
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -310,7 +350,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     ...(input.tickStaleMs === undefined ? {} : { tickStaleMs: input.tickStaleMs }),
   })
   const documents = new FrameFlowHostAdapter(input.frameFlowBackend ?? new MockFrameFlowBackend())
-  const budget: BudgetPort = documents
+  const budget = input.budget ?? documents
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
   const runs = new RunService({ repository: input.repository, clock })
@@ -393,6 +433,8 @@ export function createAgentRuntime(input: RuntimeInput) {
           source: run.source,
           slideCount: run.slideCount,
           visualDirection: run.visualDirection,
+          ...(run.targetAudience ? { targetAudience: run.targetAudience } : {}),
+          ...(run.presentationGoal ? { presentationGoal: run.presentationGoal } : {}),
           presentationMode: run.presentationMode ?? 'SLIDE_IMAGE_V2',
           coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
           assetAcquisitionPolicy: run.assetAcquisitionPolicy ?? 'AI_FIRST',

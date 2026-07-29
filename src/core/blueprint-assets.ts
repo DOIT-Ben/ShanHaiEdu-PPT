@@ -31,6 +31,37 @@ export function blueprintElementAssetKey(
     : `slide:${slide.pageNumber}:element:${element.elementId}:${strategy}${sourceIdentity}`
 }
 
+function slideImageCompositionInstruction(layout: PresentationBlueprint['slides'][number]['layout']) {
+  if (layout === 'SPLIT') {
+    return 'Place the primary visual subject in the right 46% of the frame and keep the left 48% naturally quiet for editable text.'
+  }
+  if (layout === 'EDITORIAL') {
+    return 'Place the primary visual subject in the left 46% of the frame and keep the right 48% naturally quiet for editable text.'
+  }
+  if (layout === 'STATEMENT') {
+    return 'Use one strong focal subject in the lower-right half and keep the upper-left area naturally quiet for a concise statement.'
+  }
+  if (layout === 'IMAGE_FULL') {
+    return 'Use an immersive full-frame scene with one unmistakable focal subject and low detail behind the later text area.'
+  }
+  return 'Place one strong focal subject in the right half and keep the left half naturally quiet for the title and key message.'
+}
+
+export function completeSlideImageV21Prompt(
+  blueprint: Pick<PresentationBlueprint, 'visualDirection'>,
+  slide: PresentationBlueprint['slides'][number],
+) {
+  return [
+    'STRICT PRESENTATION IMAGE: create visual imagery only, never typography or symbols.',
+    slide.visualPrompt.trim().slice(0, 1_600),
+    `Global art direction: ${blueprint.visualDirection.trim().slice(0, 500)}.`,
+    'Create one continuous, polished, unframed 16:9 image with a clear visual hierarchy and one primary focal idea.',
+    slideImageCompositionInstruction(slide.layout),
+    'The quiet area must be part of the natural scene; do not draw a text box, caption panel, card, collage, frame, border, gradient overlay, vignette, interface, poster layout or decorative chrome.',
+    'No text, no letters, no numbers, no formulas, no captions, no watermark, no logo.',
+  ].join(' ')
+}
+
 export function blueprintImageRequirements(
   run: Pick<RunRecord, 'id' | 'revisionRound'>,
   blueprint: PresentationBlueprint,
@@ -45,7 +76,9 @@ export function blueprintImageRequirements(
       reuseKey: null,
       role: 'BASE_LAYER',
       knowledgePoint: slide.visualIntent,
-      prompt: slide.visualPrompt,
+      prompt: blueprint.renderMode === 'SLIDE_IMAGE_V2_1'
+        ? completeSlideImageV21Prompt(blueprint, slide)
+        : slide.visualPrompt,
       negativePrompt: null,
       aspectRatio: '16:9',
       backgroundMode: 'OPAQUE',

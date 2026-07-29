@@ -24,7 +24,60 @@ function client(overrides: Partial<FrameFlowBackendClient> = {}): FrameFlowBacke
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 
+const approvedPageDesignSource = {
+  kind: 'APPROVED_PAGE_DESIGN' as const,
+  schemaVersion: '1' as const,
+  artifactVersionId: 'page-design-version-1',
+  artifactContentHash: 'b'.repeat(64),
+  title: '光合作用公开课',
+  subject: '生物',
+  gradeBand: '七年级',
+  lessonDurationMinutes: 45,
+  audience: '七年级学生',
+  objectives: ['理解光合作用的条件与产物'],
+  pages: [1, 2].map((pageNumber) => ({
+    pageNumber,
+    title: `第 ${pageNumber} 页`,
+    teachingPurpose: '建立光合作用的基本心智模型',
+    editableCopy: ['观察叶片与光照', '归纳条件和产物'],
+    layoutIntent: '左文右图，突出叶片实验关系',
+    visualRequirements: ['真实叶片、阳光和实验器材'],
+    teacherNotes: '先观察再归纳',
+    teacherScript: '请观察叶片在光照条件下发生的变化。',
+    studentActivity: '小组观察并汇报',
+    animationSequence: ['先出现叶片', '再出现光照关系'],
+    boardPlan: '板书条件和产物',
+    evidence: [{ type: 'FACT' as const, text: '绿色植物通过光合作用释放氧气', source: '七年级生物教材' }],
+  })),
+}
+
 describe('FrameFlow host adapter', () => {
+  test('resolves each approved page as one stable source chunk without a backend call', async () => {
+    let attachmentCalls = 0
+    const adapter = new FrameFlowHostAdapter(client({
+      async getDocumentAttachment() {
+        attachmentCalls += 1
+        throw new Error('must not fetch an approved page design')
+      },
+    }))
+
+    const first = await adapter.resolve({ host, source: approvedPageDesignSource })
+    const replay = await adapter.resolve({ host, source: approvedPageDesignSource })
+
+    expect(attachmentCalls).toBe(0)
+    expect(first).toEqual(replay)
+    expect(first).toMatchObject({ isComplete: true, missingRanges: [] })
+    expect(first.sources).toEqual([expect.objectContaining({
+      id: 'page-design-version-1', status: 'READY', kind: 'MARKDOWN', pageCount: 2,
+    })])
+    expect(first.chunks.map((chunk) => ({ pageStart: chunk.pageStart, pageEnd: chunk.pageEnd }))).toEqual([
+      { pageStart: 1, pageEnd: 1 },
+      { pageStart: 2, pageEnd: 2 },
+    ])
+    expect(first.chunks[0]?.text).toContain('观察叶片与光照')
+    expect(first.chunks[0]?.text).toContain('七年级生物教材')
+  })
+
   test('splits complete attachments into stable source chunks', async () => {
     const adapter = new FrameFlowHostAdapter(client())
     const result = await adapter.resolve({
@@ -166,11 +219,36 @@ describe('FrameFlow host adapter', () => {
     expect(releases).toEqual(['credit:run-1:slide-1'])
   })
 
-  test('rejects accidental cross-host use', async () => {
+  test('accepts host-neutral inline packages without calling the FrameFlow backend', async () => {
     const adapter = new FrameFlowHostAdapter(client())
+    const result = await adapter.resolve({
+      host: { tenantId: 'shanhai', externalUserId: 'task-1' },
+      source: {
+        kind: 'SOURCE_PACKAGE',
+        sources: [
+          { kind: 'TEXT', sourceId: 'textbook', text: '这是长度足够的教材证据文本，用于验证宿主无关的内联来源解析。' },
+          { kind: 'TEXT', sourceId: 'lesson', text: '这是长度足够的结构化教案文本，用于验证多来源顺序与血缘。' },
+        ],
+      },
+    })
+
+    expect(result.isComplete).toBe(true)
+    expect(result.sources?.map((source) => source.id)).toEqual(['textbook', 'lesson'])
+    expect(result.chunks.every((chunk) => chunk.sourceId === 'textbook' || chunk.sourceId === 'lesson')).toBe(true)
+  })
+
+  test('keeps FrameFlow attachments and budget operations tenant-scoped', async () => {
+    const adapter = new FrameFlowHostAdapter(client())
+    const shanhaiHost = { tenantId: 'shanhai', externalUserId: 'task-1' }
     await expect(adapter.resolve({
-      host: { tenantId: 'shanhaiedu', externalUserId: 'user-1' },
-      source: { kind: 'TEXT', text: '这是一个长度足够的教材文本，用于验证租户边界。' },
+      host: shanhaiHost,
+      source: { kind: 'HOST_ATTACHMENT', attachmentId: 'attachment-1' },
+    })).rejects.toThrow('FRAMEFLOW_TENANT_REQUIRED')
+    await expect(adapter.reserve({
+      host: shanhaiHost,
+      model: 'image-2',
+      units: 1,
+      idempotencyKey: 'shanhai-budget-1',
     })).rejects.toThrow('FRAMEFLOW_TENANT_REQUIRED')
   })
 })

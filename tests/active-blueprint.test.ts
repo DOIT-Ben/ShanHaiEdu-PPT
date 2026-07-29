@@ -81,4 +81,32 @@ describe('active blueprint', () => {
 
     expect((await getActiveBlueprint(repository, 'run-1', 1)).id).toBe('blueprint-r0')
   })
+
+  test('uses the latest completed planning retry when the initial attempt failed', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun({
+      ...run(),
+      status: 'AWAITING_BLUEPRINT_APPROVAL',
+      revisionRound: 0,
+      planningAttempt: 1,
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-plan-initial', runId: 'run-1', idempotencyKey: planningStepKey('run-1'), inputHash: 'hash-plan-initial',
+        tool: 'create_blueprint', status: 'FAILED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: 'BLUEPRINT_SOURCE_REFERENCE_INVALID', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: 'step-plan-retry-1', runId: 'run-1', idempotencyKey: planningStepKey('run-1', 1), inputHash: 'hash-plan-retry-1',
+        tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null, output: blueprint('blueprint-retry-1', '重试后的条件与产物'),
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const active = await getActiveBlueprint(repository, 'run-1', 0)
+    expect(active.id).toBe('blueprint-retry-1')
+    expect(active.slides[1]?.title).toBe('重试后的条件与产物')
+  })
 })

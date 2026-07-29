@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   blueprintDraftSchema,
+  blueprintReflectionSchema,
   deckReviewDraftSchema,
   deliveryRecordSchema,
   revisionPlanSchema,
@@ -61,6 +62,46 @@ describe('presentation blueprint contract', () => {
     const missingSources = draft()
     missingSources.slides[0]!.sourceChunkIds = []
     expect(() => blueprintDraftSchema.parse(missingSources)).toThrow()
+  })
+
+  test('requires reflection to cover every quality dimension exactly once', () => {
+    const dimensions = [
+      'AUDIENCE_FIT',
+      'GOAL_ALIGNMENT',
+      'NARRATIVE',
+      'INFORMATION_HIERARCHY',
+      'COMPOSITION',
+      'VISUAL_COHERENCE',
+      'PROMPT_EXECUTABILITY',
+    ] as const
+    const reflection = {
+      deckBrief: {
+        targetAudience: '七年级学生',
+        presentationGoal: '帮助学生建立光合作用条件与产物的基本心智模型',
+        useContext: '教师在课堂上配合讲解使用',
+        audienceNeeds: ['先建立直观情境，再区分条件和产物'],
+        narrativeArc: ['用生活化主视觉引出主题', '比较条件与产物并形成结论'],
+        visualSystem: {
+          artDirection: '自然科学编辑插画，以真实叶片结构和柔和日光建立清晰焦点',
+          palette: '叶绿、日光黄、氧气蓝和中性白',
+          compositionRules: ['每页只保留一个主要视觉焦点', '文字安全区保持自然留白'],
+          continuityRules: ['统一光线方向和插画材质', '相邻页面改变构图但复用核心色彩'],
+        },
+      },
+      findings: dimensions.map((dimension) => ({
+        dimension,
+        score: 4,
+        diagnosis: '当前方案方向正确，但还需要更具体地约束本维度的设计选择。',
+        revisionInstruction: '在修订稿中加入可执行的页面级约束并保持教材引用不变。',
+      })),
+      revisedBlueprint: draft(),
+    }
+
+    expect(blueprintReflectionSchema.parse(reflection).findings).toHaveLength(7)
+    expect(blueprintReflectionSchema.safeParse({
+      ...reflection,
+      findings: reflection.findings.map((finding) => ({ ...finding, dimension: 'AUDIENCE_FIT' })),
+    }).success).toBe(false)
   })
 })
 

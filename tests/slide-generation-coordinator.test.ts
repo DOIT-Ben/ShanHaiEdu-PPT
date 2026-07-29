@@ -14,6 +14,7 @@ import { MediaStepRunner } from '../src/core/media-step-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { AssetCandidate, AssetCandidateReviewPort, AssetDiscoveryPort, DocumentResult, RunRecord } from '../src/core/ports'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
+import { presentationBlueprintSchema } from '../src/presentation-contracts'
 
 function run(budgetUnits = 100): RunRecord {
   return {
@@ -42,6 +43,35 @@ function run(budgetUnits = 100): RunRecord {
     leaseVersion: 0,
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z',
+  }
+}
+
+function approvedRunSource() {
+  return {
+    kind: 'APPROVED_PAGE_DESIGN' as const,
+    schemaVersion: '1' as const,
+    artifactVersionId: 'page-design-version-1',
+    artifactContentHash: 'a'.repeat(64),
+    title: '光合作用',
+    subject: '生物',
+    gradeBand: '七年级',
+    lessonDurationMinutes: 45,
+    audience: '七年级学生',
+    objectives: ['理解光合作用'],
+    pages: [1, 2, 3].map((pageNumber) => ({
+      pageNumber,
+      title: `第 ${pageNumber} 页`,
+      teachingPurpose: '理解光合作用',
+      editableCopy: ['教材范围内的教学内容'],
+      layoutIntent: '左文右图',
+      visualRequirements: ['叶片和阳光'],
+      teacherNotes: '引导观察',
+      teacherScript: '请观察叶片和阳光之间的关系。',
+      studentActivity: '观察并回答',
+      animationSequence: ['先出现叶片'],
+      boardPlan: '板书光合作用',
+      evidence: [],
+    })),
   }
 }
 
@@ -227,6 +257,21 @@ function sourceDocument() {
 }
 
 describe('slide generation coordinator', () => {
+  test('compiles V2.1 visual prompts without changing legacy V2 prompts', () => {
+    const legacy = presentationBlueprintSchema.parse({ ...blueprint(), renderMode: 'SLIDE_IMAGE_V2' })
+    const reflected = presentationBlueprintSchema.parse({ ...blueprint(), renderMode: 'SLIDE_IMAGE_V2_1' })
+    const legacyPrompt = blueprintImageRequirements(run(), legacy)[0]!.prompt
+    const reflectedPrompt = blueprintImageRequirements(run(), reflected)[0]!.prompt
+
+    expect(legacyPrompt).toBe(legacy.slides[0]!.visualPrompt)
+    expect(reflectedPrompt).toContain(reflected.slides[0]!.visualPrompt)
+    expect(reflectedPrompt).toContain(`Global art direction: ${reflected.visualDirection}.`)
+    expect(reflectedPrompt).toContain('Place one strong focal subject in the right half')
+    expect(reflectedPrompt).toContain('No text, no letters, no numbers')
+    expect(reflectedPrompt).toContain('do not draw a text box')
+    expect(reflectedPrompt.length).toBeLessThanOrEqual(3_000)
+  })
+
   test('submits every blueprint slide with per-page budget accounting', async () => {
     const { repository, budget, images, coordinator } = await fixture()
     const result = await coordinator.submitBlueprintImages('run-1', 10)
@@ -302,6 +347,53 @@ describe('slide generation coordinator', () => {
     }
   })
 
+  test('recovers the current approved page from reserved and submitting without starting the next page', async () => {
+    for (const crashStatus of ['RESERVED', 'SUBMITTING'] as const) {
+      const { repository, images, media, coordinator } = await fixture()
+      await repository.transact('run-1', (transaction) => {
+        transaction.putRun({ ...transaction.run, source: approvedRunSource() })
+      })
+      const currentRun = (await repository.getRun('run-1'))!
+      const activeBlueprint = await getActiveBlueprint(repository, 'run-1', currentRun.revisionRound)
+      const requirement = blueprintImageRequirements(currentRun, activeBlueprint)[0]!
+      const request = {
+        runId: 'run-1',
+        stepId: `step-run-1-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r0`,
+        idempotencyKey: requirement.idempotencyKey,
+        slideId: requirement.slideId,
+        versionId: 'run-1:slide:1:r0:v1',
+        prompt: requirement.prompt,
+        model: currentRun.imageModel,
+        budgetUnits: 10,
+        aspectRatio: requirement.aspectRatio,
+        backgroundMode: requirement.backgroundMode,
+      } as const
+      await media.submitSlideImage(request)
+      const operationId = images.operations.get(requirement.idempotencyKey)!
+      await repository.transact('run-1', (transaction) => {
+        const step = transaction.getStep(requirement.idempotencyKey)!
+        transaction.putStep({
+          ...step,
+          status: crashStatus,
+          budgetReservationId: crashStatus === 'RESERVED' ? null : step.budgetReservationId,
+          externalOperationId: null,
+        })
+      })
+      if (crashStatus === 'RESERVED') {
+        images.operations.delete(requirement.idempotencyKey)
+        images.requests.delete(requirement.idempotencyKey)
+        images.statuses.delete(operationId)
+      }
+
+      const recovered = await coordinator.submitBlueprintImages('run-1', 10)
+
+      expect(recovered).toMatchObject({ submitted: 1, total: 3 })
+      expect(images.operations.size).toBe(1)
+      expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image'))
+        .toHaveLength(1)
+    }
+  })
+
   test('pauses before any submission when total initial budget is insufficient', async () => {
     const { repository, budget, images, coordinator } = await fixture(20)
     const result = await coordinator.submitBlueprintImages('run-1', 10)
@@ -334,6 +426,9 @@ describe('slide generation coordinator', () => {
     expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
       status: 'EXECUTING', completed: 1, total: 3,
     })
+    expect((await repository.getRunEventSnapshot('run-1')).progress).toContainEqual(expect.objectContaining({
+      stepId: 'run-1:completed-pages', completed: 1, total: 3,
+    }))
     images.complete(keys[1]!, 'artifact-2')
     images.complete(keys[2]!, 'artifact-3')
     const completed = await coordinator.refreshBlueprintImages('run-1')
@@ -345,6 +440,30 @@ describe('slide generation coordinator', () => {
       artifactIds: ['artifact-1', 'artifact-2', 'artifact-3'],
     })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', version: 5 })
+    expect((await repository.getRunEventSnapshot('run-1')).progress).toContainEqual(expect.objectContaining({
+      stepId: 'run-1:completed-pages', completed: 3, total: 3,
+    }))
+  })
+
+  test('submits approved page designs one page at a time and waits for completion before the next page', async () => {
+    const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        source: approvedRunSource(),
+      })
+    })
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 1, total: 3 })
+    expect(images.operations.size).toBe(1)
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 1, total: 3 })
+    expect(images.operations.size).toBe(1)
+
+    const firstKey = [...images.operations.keys()][0]!
+    images.complete(firstKey, 'artifact-1')
+    await coordinator.refreshBlueprintImages('run-1')
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 2, total: 3 })
+    expect(images.operations.size).toBe(2)
   })
 
   test('moves to human review when a completed provider operation failed', async () => {

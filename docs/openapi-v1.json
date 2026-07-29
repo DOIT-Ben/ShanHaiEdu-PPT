@@ -437,6 +437,49 @@
                 }
               }
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "schemaVersion", "artifactVersionId", "artifactContentHash", "title", "subject", "gradeBand", "lessonDurationMinutes", "audience", "objectives", "pages"],
+            "properties": {
+              "kind": { "const": "APPROVED_PAGE_DESIGN" },
+              "schemaVersion": { "const": "1" },
+              "artifactVersionId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "artifactContentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "subject": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "gradeBand": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "lessonDurationMinutes": { "type": "integer", "minimum": 1, "maximum": 300 },
+              "audience": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "objectives": {
+                "type": "array", "minItems": 1, "maxItems": 30,
+                "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+              },
+              "pages": {
+                "type": "array", "minItems": 2, "maxItems": 50,
+                "description": "Ordered, teacher-approved pages. pageNumber must be continuous from 1.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["pageNumber", "title", "teachingPurpose", "editableCopy", "layoutIntent", "visualRequirements", "teacherNotes", "teacherScript", "studentActivity", "animationSequence", "boardPlan", "evidence"],
+                  "properties": {
+                    "pageNumber": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "teachingPurpose": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "editableCopy": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+                    "layoutIntent": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "visualRequirements": { "type": "array", "maxItems": 30, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+                    "teacherNotes": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "teacherScript": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "studentActivity": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "animationSequence": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                    "boardPlan": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                    "evidence": { "type": "array", "maxItems": 50, "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
           }
         ]
       },
@@ -494,11 +537,13 @@
           "source": { "$ref": "#/components/schemas/DocumentSource" },
           "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
           "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
+          "targetAudience": { "type": "string", "minLength": 3, "maxLength": 500 },
+          "presentationGoal": { "type": "string", "minLength": 3, "maxLength": 1000 },
           "imageModel": { "type": "string", "minLength": 1, "maxLength": 120 },
           "automationLevel": { "enum": ["SUPERVISED", "BOUNDED_AUTO"] },
           "budgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
           "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 },
-          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "LAYERED_COURSEWARE_V3"], "default": "SLIDE_IMAGE_V2" },
+          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3"], "default": "SLIDE_IMAGE_V2" },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"], "default": "INDEPENDENT" },
           "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"], "default": "AI_FIRST" },
           "maxVisualAssetsPerSlide": { "type": "integer", "minimum": 1, "maximum": 4, "default": 4 }
@@ -533,9 +578,11 @@
           "version": { "type": "integer" },
           "slideCount": { "type": "integer" },
           "visualDirection": { "type": "string" },
+          "targetAudience": { "type": ["string", "null"] },
+          "presentationGoal": { "type": ["string", "null"] },
           "planningAttempt": { "type": "integer", "minimum": 0, "maximum": 2 },
           "maxPlanningRetries": { "const": 2 },
-          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "LAYERED_COURSEWARE_V3"] },
+          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3"] },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"] },
           "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"] },
           "maxVisualAssetsPerSlide": { "type": "integer" },

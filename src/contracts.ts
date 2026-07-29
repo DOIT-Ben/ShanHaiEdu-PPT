@@ -30,9 +30,58 @@ export const runStatusSchema = z.enum([
 ])
 
 export const automationLevelSchema = z.enum(['SUPERVISED', 'BOUNDED_AUTO'])
-export const presentationModeSchema = z.enum(['SLIDE_IMAGE_V2', 'LAYERED_COURSEWARE_V3'])
+export const presentationModeSchema = z.enum(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3'])
 export const coverDesignModeSchema = z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE'])
 export const assetAcquisitionPolicySchema = z.enum(['AI_FIRST', 'SEARCH_FIRST'])
+
+const approvedEvidenceSchema = z.object({
+  type: z.enum(['FACT', 'INFERENCE', 'SUGGESTION']),
+  text: z.string().trim().min(1).max(2_000),
+  source: z.string().trim().min(1).max(500).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.type === 'FACT' && !value.source) {
+    context.addIssue({ code: 'custom', path: ['source'], message: 'facts require a source' })
+  }
+})
+
+const approvedPageDesignPageSchema = z.object({
+  pageNumber: z.number().int().min(1).max(50),
+  title: z.string().trim().min(1).max(120),
+  teachingPurpose: z.string().trim().min(1).max(900),
+  editableCopy: z.array(z.string().trim().min(1).max(300)).min(1).max(8),
+  layoutIntent: z.string().trim().min(1).max(500),
+  visualRequirements: z.array(z.string().trim().min(1).max(200)).max(4),
+  teacherNotes: z.string().trim().min(1).max(2_000),
+  teacherScript: z.string().trim().min(1).max(4_000),
+  studentActivity: z.string().trim().min(1).max(2_000),
+  animationSequence: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
+  boardPlan: z.string().trim().min(1).max(2_000),
+  evidence: z.array(approvedEvidenceSchema).max(50),
+}).strict()
+
+export const approvedPageDesignSourceSchema = z.object({
+  kind: z.literal('APPROVED_PAGE_DESIGN'),
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  artifactVersionId: identifierSchema,
+  artifactContentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  title: z.string().trim().min(1).max(160),
+  subject: z.string().trim().min(1).max(100),
+  gradeBand: z.string().trim().min(1).max(100),
+  lessonDurationMinutes: z.number().int().min(1).max(300),
+  audience: z.string().trim().min(1).max(300),
+  objectives: z.array(z.string().trim().min(1).max(300)).min(1).max(10),
+  pages: z.array(approvedPageDesignPageSchema).min(2).max(50),
+}).strict().superRefine((value, context) => {
+  value.pages.forEach((page, index) => {
+    if (page.pageNumber !== index + 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['pages', index, 'pageNumber'],
+        message: 'page numbers must be continuous and start at 1',
+      })
+    }
+  })
+})
 
 export const documentSourceSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -72,6 +121,7 @@ export const documentSourceSchema = z.discriminatedUnion('kind', [
       context.addIssue({ code: 'custom', path: ['sources'], message: 'attachment ids must be unique' })
     }
   }),
+  approvedPageDesignSourceSchema,
 ])
 
 export const createRunRequestSchema = z.object({
@@ -80,6 +130,8 @@ export const createRunRequestSchema = z.object({
   source: documentSourceSchema,
   slideCount: z.number().int().min(2).max(50),
   visualDirection: z.string().trim().min(3).max(1_000),
+  targetAudience: z.string().trim().min(3).max(500).optional(),
+  presentationGoal: z.string().trim().min(3).max(1_000).optional(),
   imageModel: z.string().trim().min(1).max(120),
   automationLevel: automationLevelSchema,
   budgetUnits: z.number().int().positive().max(1_000_000),

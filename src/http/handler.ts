@@ -35,6 +35,8 @@ function publicRun(run: RunRecord) {
     version: run.version,
     slideCount: run.slideCount,
     visualDirection: run.visualDirection,
+    targetAudience: run.targetAudience ?? null,
+    presentationGoal: run.presentationGoal ?? null,
     imageModel: run.imageModel,
     automationLevel: run.automationLevel,
     presentationMode: run.presentationMode ?? 'SLIDE_IMAGE_V2',

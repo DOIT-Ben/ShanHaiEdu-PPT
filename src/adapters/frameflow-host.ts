@@ -60,6 +60,28 @@ function packageChunk(sourceId: string, chunk: SourceChunk) {
   return { ...chunk, id: `chunk-${digest.slice(0, 28)}`, sourceId }
 }
 
+function approvedPageText(
+  page: Extract<Parameters<DocumentPort['resolve']>[0]['source'], { kind: 'APPROVED_PAGE_DESIGN' }>['pages'][number],
+) {
+  const evidence = page.evidence.map((item) => [
+    `${item.type}: ${item.text}`,
+    item.source ? `来源: ${item.source}` : null,
+  ].filter(Boolean).join('；'))
+  return [
+    `# 第 ${page.pageNumber} 页 · ${page.title}`,
+    `教学目的：${page.teachingPurpose}`,
+    `可编辑文案：\n${page.editableCopy.map((item) => `- ${item}`).join('\n')}`,
+    `版式意图：${page.layoutIntent}`,
+    `视觉要求：\n${page.visualRequirements.map((item) => `- ${item}`).join('\n') || '- 无额外要求'}`,
+    `教师提示：${page.teacherNotes}`,
+    `教师讲稿：${page.teacherScript}`,
+    `学生活动：${page.studentActivity}`,
+    `动画顺序：\n${page.animationSequence.map((item) => `- ${item}`).join('\n')}`,
+    `板书设计：${page.boardPlan}`,
+    `依据：\n${evidence.map((item) => `- ${item}`).join('\n') || '- 无额外依据'}`,
+  ].join('\n\n')
+}
+
 export function chunkDocumentText(text: string, maxChunkChars = DEFAULT_CHUNK_CHARS): readonly SourceChunk[] {
   if (!Number.isSafeInteger(maxChunkChars) || maxChunkChars < 500) {
     throw new Error('maxChunkChars must be an integer of at least 500')
@@ -97,8 +119,6 @@ export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
   constructor(private readonly client: FrameFlowBackendClient) {}
 
   async resolve(input: Parameters<DocumentPort['resolve']>[0]): Promise<DocumentResult> {
-    if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
-
     if (input.source.kind === 'TEXT') {
       return {
         name: input.source.name ?? 'inline-material.txt',
@@ -109,6 +129,7 @@ export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
     }
 
     if (input.source.kind === 'HOST_ATTACHMENT') {
+      if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
       const attachment = await this.client.getDocumentAttachment({
         externalUserId: input.host.externalUserId,
         attachmentId: input.source.attachmentId,
@@ -137,6 +158,37 @@ export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
       }
     }
 
+    if (input.source.kind === 'APPROVED_PAGE_DESIGN') {
+      const source = input.source
+      const chunks = source.pages.map((page) => {
+        const text = approvedPageText(page)
+        const sha256 = createHash('sha256').update(text).digest('hex')
+        return {
+          id: `approved-page-${String(page.pageNumber).padStart(2, '0')}-${sha256.slice(0, 12)}`,
+          sourceId: source.artifactVersionId,
+          text,
+          sha256,
+          pageStart: page.pageNumber,
+          pageEnd: page.pageNumber,
+        }
+      })
+      return {
+        name: source.title,
+        chunks,
+        sources: [{
+          id: source.artifactVersionId,
+          name: `${source.title} · 已审核逐页设计稿`,
+          kind: 'MARKDOWN',
+          mimeType: 'text/markdown',
+          pageCount: source.pages.length,
+          status: 'READY',
+        }],
+        assets: [],
+        isComplete: true,
+        missingRanges: [],
+      }
+    }
+
 
     const chunks: SourceChunk[] = []
     const assets: SourceAsset[] = []
@@ -148,6 +200,7 @@ export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
         sources.push({ id: source.sourceId, name: source.name ?? 'inline-material.txt', kind: 'TEXT', status: 'READY' })
         continue
       }
+      if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
       const attachment = await this.client.getDocumentAttachment({
         externalUserId: input.host.externalUserId,
         attachmentId: source.attachmentId,

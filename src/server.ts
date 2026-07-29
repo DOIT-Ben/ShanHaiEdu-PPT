@@ -5,6 +5,7 @@ import { PublicAssetDiscoveryPort } from './adapters/public-asset-discovery'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
 import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
+import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
@@ -20,6 +21,9 @@ const apiToken = process.env.PPT_AGENT_API_TOKEN?.trim()
 if (!apiToken) throw new Error('PPT_AGENT_API_TOKEN_REQUIRED')
 const adminApiToken = process.env.PPT_AGENT_ADMIN_API_TOKEN?.trim()
 const tenantId = process.env.PPT_AGENT_TENANT_ID?.trim() || 'frameflow'
+const budgetMode = process.env.PPT_AGENT_BUDGET_MODE?.trim() || (tenantId === 'frameflow' ? 'frameflow' : '')
+if (tenantId === 'frameflow' && budgetMode !== 'frameflow') throw new Error('PPT_AGENT_BUDGET_MODE_INVALID')
+if (tenantId !== 'frameflow' && budgetMode !== 'external') throw new Error('PPT_AGENT_EXTERNAL_BUDGET_MODE_REQUIRED')
 const authentication = new ServiceTokenAuthentication([{
   tenantId,
   userToken: apiToken,
@@ -68,8 +72,10 @@ const images = runtimeMode === 'gateway'
   : undefined
 const runtime = runtimeMode === 'gateway'
   ? (() => {
-      const frameFlowInternalToken = process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
-      if (!frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
+      const frameFlowInternalToken = budgetMode === 'frameflow'
+        ? process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
+        : undefined
+      if (budgetMode === 'frameflow' && !frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
       const model = new GatewayCoursewareModel({
         baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
         apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
@@ -90,9 +96,13 @@ const runtime = runtimeMode === 'gateway'
         deckReviewer: model,
         revisionPlanner: model,
         revisionApplication: model,
-        frameFlowBackend: new HttpFrameFlowBackend({
-          baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
-          token: frameFlowInternalToken,
+        ...(budgetMode === 'frameflow' ? {
+          frameFlowBackend: new HttpFrameFlowBackend({
+            baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
+            token: frameFlowInternalToken!,
+          }),
+        } : {
+          budget: new ExternallyAuthorizedBudgetPort(tenantId),
         }),
         appVersion,
         heartbeatStaleMs,
@@ -137,7 +147,7 @@ const timer = setInterval(async () => {
   }
 }, 500)
 
-const server = Bun.serve({ hostname, port, fetch: runtime.handler })
+const server = Bun.serve({ hostname, port, idleTimeout: 30, fetch: runtime.handler })
 console.log(JSON.stringify({
   ...workerLogRecord({ event: 'service_started', version: appVersion }),
   runtimeMode,

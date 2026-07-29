@@ -61,12 +61,17 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
     expect(document.components.schemas.CreateRunRequest?.properties?.assetAcquisitionPolicy?.enum)
       .toEqual(['AI_FIRST', 'SEARCH_FIRST'])
+    expect(document.components.schemas.CreateRunRequest?.properties?.presentationMode?.enum)
+      .toEqual(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3'])
+    expect(document.components.schemas.CreateRunRequest?.properties?.targetAudience).toBeDefined()
+    expect(document.components.schemas.CreateRunRequest?.properties?.presentationGoal).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.assetAcquisitionPolicy?.enum)
       .toEqual(['AI_FIRST', 'SEARCH_FIRST'])
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
       'RETRY_PLANNING', 'RETRY_DELIVERY', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
     ]))
     expect(document.components.schemas.DocumentSource?.oneOf?.map((source) => source.properties?.kind?.const)).toContain('SOURCE_PACKAGE')
+    expect(document.components.schemas.DocumentSource?.oneOf?.map((source) => source.properties?.kind?.const)).toContain('APPROVED_PAGE_DESIGN')
     expect(document.components.schemas.BlueprintSourceManifestEntry).toBeDefined()
     expect(document.components.schemas.BlueprintSourceAsset).toBeDefined()
     expect(document.components.schemas.PlanningFailure?.properties?.errorCode?.enum).toEqual(expect.arrayContaining([

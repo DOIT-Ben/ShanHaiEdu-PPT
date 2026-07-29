@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockStructuredModelPort } from '../src/adapters/mock-ports'
-import { PlanningRunner } from '../src/core/planning-runner'
+import { approvedPageLayout, PlanningRunner } from '../src/core/planning-runner'
 import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
 import type { StructuredModelPort } from '../src/core/ports'
 import { StructuredModelError } from '../src/core/ports'
@@ -12,6 +12,33 @@ const source = {
   text: '绿色植物通过光合作用制造有机物并释放氧气。'.repeat(10),
 } as const
 
+const approvedPageDesignSource = {
+  kind: 'APPROVED_PAGE_DESIGN' as const,
+  schemaVersion: '1' as const,
+  artifactVersionId: 'page-design-version-1',
+  artifactContentHash: 'c'.repeat(64),
+  title: '光合作用公开课',
+  subject: '生物',
+  gradeBand: '七年级',
+  lessonDurationMinutes: 45,
+  audience: '七年级学生',
+  objectives: ['理解光合作用的条件与产物'],
+  pages: [1, 2].map((pageNumber) => ({
+    pageNumber,
+    title: pageNumber === 1 ? '光从哪里来' : '植物制造了什么',
+    teachingPurpose: '建立光合作用的基本心智模型',
+    editableCopy: ['观察叶片与光照', '归纳条件和产物'],
+    layoutIntent: pageNumber === 1 ? '沉浸式封面场景' : '左侧文字、右侧叶片实验场景',
+    visualRequirements: ['真实叶片、阳光和课堂实验器材'],
+    teacherNotes: '引导学生先观察再归纳',
+    teacherScript: '请观察叶片在光照条件下发生的变化。',
+    studentActivity: '小组观察并汇报',
+    animationSequence: ['先出现叶片', '再出现光照关系'],
+    boardPlan: '板书光合作用的条件和产物',
+    evidence: [{ type: 'FACT' as const, text: '绿色植物通过光合作用制造有机物并释放氧气', source: '七年级生物教材' }],
+  })),
+}
+
 const request = {
   runId: 'run-1',
   stepId: 'step-plan-1',
@@ -20,6 +47,13 @@ const request = {
   slideCount: 2,
   visualDirection: '清晰的课堂科学信息图风格',
 } as const
+
+test('maps both reviewed split directions and explicit cover layouts', () => {
+  expect(approvedPageLayout('左侧文字、右侧课堂插图', 1)).toBe('SPLIT')
+  expect(approvedPageLayout('左侧插图、右侧文字和要点', 1)).toBe('EDITORIAL')
+  expect(approvedPageLayout('右侧文字、左侧主视觉', 0)).toBe('EDITORIAL')
+  expect(approvedPageLayout('沉浸式全屏封面', 0)).toBe('HERO')
+})
 
 function run(): RunRecord {
   return {
@@ -127,6 +161,52 @@ function draft(overrides: Record<string, unknown> = {}) {
   }
 }
 
+const reflectionDimensions = [
+  'AUDIENCE_FIT',
+  'GOAL_ALIGNMENT',
+  'NARRATIVE',
+  'INFORMATION_HIERARCHY',
+  'COMPOSITION',
+  'VISUAL_COHERENCE',
+  'PROMPT_EXECUTABILITY',
+] as const
+
+function reflection(revisedBlueprint: unknown) {
+  return {
+    deckBrief: {
+      targetAudience: '七年级学生',
+      presentationGoal: '帮助学生理解光合作用的条件与产物',
+      useContext: '课堂讲授与投影展示',
+      audienceNeeds: ['先建立直观情境，再比较条件与产物'],
+      narrativeArc: ['用叶片和阳光引出主题', '比较条件与产物并完成总结'],
+      visualSystem: {
+        artDirection: '真实植物结构结合清晰教育编辑插画的统一方向',
+        palette: '叶绿、日光黄、氧气蓝和中性白',
+        compositionRules: ['每页只保留一个主要视觉焦点', '文字安全区使用自然留白'],
+        continuityRules: ['保持统一光线方向和插画材质', '相邻页面改变主体位置和景别'],
+      },
+    },
+    findings: reflectionDimensions.map((dimension) => ({
+      dimension,
+      score: 4,
+      diagnosis: '初稿方向基本正确，但该维度仍缺少足够具体的执行约束。',
+      revisionInstruction: '在修订蓝图中落实更明确的页面选择并保持来源引用不变。',
+    })),
+    revisedBlueprint,
+  }
+}
+
+class ReflectionPlanningModel implements StructuredModelPort {
+  readonly requests: Parameters<StructuredModelPort['execute']>[0][] = []
+
+  constructor(private readonly reflected: unknown) {}
+
+  async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
+    this.requests.push(structuredClone(input))
+    return structuredClone(input.operation === 'create_blueprint' ? draft() : this.reflected)
+  }
+}
+
 function layeredDraft(knowledgeAssets = 1) {
   const value = draft()
   return {
@@ -187,6 +267,75 @@ async function fixture(documentResult = document(), modelResponse: unknown = dra
 }
 
 describe('planning runner', () => {
+  test('turns an approved page design into an executable blueprint without calling the model', async () => {
+    const repository = new InMemoryAgentRepository()
+    const documentResult = document({
+      name: '光合作用公开课',
+      chunks: [
+        { id: 'approved-page-1', text: '第一页审核内容', sha256: '1'.repeat(64), pageStart: 1, pageEnd: 1 },
+        { id: 'approved-page-2', text: '第二页审核内容', sha256: '2'.repeat(64), pageStart: 2, pageEnd: 2 },
+      ],
+    })
+    let modelCalls = 0
+    const model: StructuredModelPort = {
+      async execute() {
+        modelCalls += 1
+        throw new Error('approved design must not call the planning model')
+      },
+    }
+    const exactObjectives = Array.from({ length: 10 }, (_, index) => `教学目标 ${index + 1}：${'理解'.repeat(20)}`)
+    const exactBody = Array.from({ length: 8 }, (_, index) => `第 ${index + 1} 条审核文案：${'内容'.repeat(30)}`)
+    const executableSource = {
+      ...approvedPageDesignSource,
+      objectives: exactObjectives,
+      pages: approvedPageDesignSource.pages.map((page, index) => ({
+        ...page,
+        editableCopy: index === 1 ? exactBody : page.editableCopy,
+      })),
+    }
+    await repository.createRun({
+      ...run(),
+      source: executableSource,
+      presentationMode: 'SLIDE_IMAGE_V2',
+      budgetUnits: 2,
+    })
+    const runner = new PlanningRunner({
+      repository,
+      documents: new MutableDocumentPort(documentResult),
+      model,
+      clock: new FixedClock(),
+    })
+
+    const result = await runner.plan({
+      ...request,
+      source: executableSource,
+      presentationMode: 'SLIDE_IMAGE_V2',
+    })
+
+    expect(modelCalls).toBe(0)
+    expect(result.blueprint).toMatchObject({
+      title: approvedPageDesignSource.title,
+      renderMode: 'SLIDE_IMAGE_V2',
+      slides: [
+        { pageNumber: 1, title: '光从哪里来', layout: 'HERO', sourceChunkIds: ['approved-page-1'] },
+        { pageNumber: 2, title: '植物制造了什么', body: exactBody, layout: 'SPLIT', sourceChunkIds: ['approved-page-2'] },
+      ],
+    })
+    expect(result.blueprint?.curriculum.learningObjectives).toEqual(exactObjectives)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', version: 1 })
+    expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
+      'tool.started',
+      'tool.completed',
+      'phase.changed',
+      'approval.resolved',
+    ])
+    await expect(runner.plan({
+      ...request,
+      source: { ...executableSource, artifactContentHash: 'd'.repeat(64) },
+      presentationMode: 'SLIDE_IMAGE_V2',
+    })).rejects.toThrow('STEP_IDEMPOTENCY_CONFLICT')
+  })
+
   test('plans a source-grounded blueprint and waits for approval', async () => {
     const { repository, model, runner } = await fixture()
     const result = await runner.plan(request)
@@ -202,6 +351,66 @@ describe('planning runner', () => {
       'phase.changed',
       'approval.required',
     ])
+  })
+
+  test('reflects a valid V2.1 draft once before persisting the revised blueprint', async () => {
+    const repository = new InMemoryAgentRepository()
+    const revised = draft()
+    revised.title = '光合作用：能量如何进入生命'
+    revised.slides[0]!.visualPrompt = 'A cinematic macro view of a green leaf receiving warm sunlight, subject on the right, no text'
+    const model = new ReflectionPlanningModel(reflection(revised))
+    await repository.createRun({
+      ...run(),
+      presentationMode: 'SLIDE_IMAGE_V2_1',
+      targetAudience: '七年级学生',
+      presentationGoal: '帮助学生理解光合作用的条件与产物',
+    })
+    const runner = new PlanningRunner({
+      repository,
+      documents: new MutableDocumentPort(document()),
+      model,
+      clock: new FixedClock(),
+    })
+
+    const result = await runner.plan({
+      ...request,
+      presentationMode: 'SLIDE_IMAGE_V2_1',
+      targetAudience: '七年级学生',
+      presentationGoal: '帮助学生理解光合作用的条件与产物',
+    })
+
+    expect(model.requests.map((item) => item.operation)).toEqual(['create_blueprint', 'reflect_blueprint'])
+    expect(model.requests[1]?.payload).toMatchObject({
+      targetAudience: '七年级学生',
+      presentationGoal: '帮助学生理解光合作用的条件与产物',
+      originalBlueprint: { title: '绿色植物的光合作用' },
+    })
+    expect(model.requests[1]?.idempotencyKey).not.toBe(model.requests[0]?.idempotencyKey)
+    expect(result.blueprint).toMatchObject({
+      title: '光合作用：能量如何进入生命',
+      renderMode: 'SLIDE_IMAGE_V2_1',
+    })
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'tool.progress' && event.payload.summary?.includes('反思修订'))).toBe(true)
+  })
+
+  test('fails V2.1 planning instead of silently using an invalid reflection', async () => {
+    const repository = new InMemoryAgentRepository()
+    const model = new ReflectionPlanningModel({})
+    await repository.createRun({ ...run(), presentationMode: 'SLIDE_IMAGE_V2_1' })
+    const runner = new PlanningRunner({
+      repository,
+      documents: new MutableDocumentPort(document()),
+      model,
+      clock: new FixedClock(),
+    })
+
+    const result = await runner.plan({ ...request, presentationMode: 'SLIDE_IMAGE_V2_1' })
+
+    expect(result.blueprint).toBeNull()
+    expect(model.requests.map((item) => item.operation)).toEqual(['create_blueprint', 'reflect_blueprint'])
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'BLUEPRINT_SCHEMA_INVALID' })
   })
 
   test('replays the persisted blueprint without another model execution', async () => {

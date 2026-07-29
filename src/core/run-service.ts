@@ -66,6 +66,8 @@ export class RunService {
       source: parsed.data.source,
       slideCount: parsed.data.slideCount,
       visualDirection: parsed.data.visualDirection,
+      ...(parsed.data.targetAudience ? { targetAudience: parsed.data.targetAudience } : {}),
+      ...(parsed.data.presentationGoal ? { presentationGoal: parsed.data.presentationGoal } : {}),
       imageModel: parsed.data.imageModel,
       automationLevel: parsed.data.automationLevel,
       presentationMode: parsed.data.presentationMode,
@@ -244,7 +246,7 @@ export class RunService {
       return null
     }
     if (action.type === 'APPROVE_BLUEPRINT') {
-      const step = transaction.getStep(planningStepKey(transaction.run.id))
+      const step = transaction.getStep(planningStepKey(transaction.run.id, transaction.run.planningAttempt ?? 0))
       if (!step || step.status !== 'COMPLETED') {
         throw new RunServiceError(409, 'BLUEPRINT_NOT_READY', 'blueprint is not ready for approval')
       }

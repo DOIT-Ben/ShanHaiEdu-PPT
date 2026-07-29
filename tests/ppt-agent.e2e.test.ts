@@ -75,7 +75,135 @@ class StaticDocumentPort implements DocumentPort {
   async resolve() { return structuredClone(document()) }
 }
 
-describe('PPT Agent 15-page mock end-to-end', () => {
+describe('PPT Agent mock end-to-end', () => {
+  test('delivers a 12-page approved design sequentially without replanning', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    const pageCount = 12
+    const source = {
+      kind: 'APPROVED_PAGE_DESIGN' as const,
+      schemaVersion: CONTRACT_VERSION,
+      artifactVersionId: 'approved-page-design-version-12',
+      artifactContentHash: 'a'.repeat(64),
+      title: '百分数的意义',
+      subject: '数学',
+      gradeBand: '六年级',
+      lessonDurationMinutes: 40,
+      audience: '六年级学生',
+      objectives: ['理解百分数表示两个量之间的关系'],
+      pages: Array.from({ length: pageCount }, (_, index) => ({
+        pageNumber: index + 1,
+        title: `百分数课堂第 ${index + 1} 页`,
+        teachingPurpose: `完成第 ${index + 1} 个课堂教学环节`,
+        editableCopy: [`第 ${index + 1} 页经教师审核的核心文案`],
+        layoutIntent: index === 0 ? '沉浸式封面' : '左侧文字、右侧课堂情境图',
+        visualRequirements: ['真实课堂、清晰主体、适合六年级学生'],
+        teacherNotes: '引导学生观察并表达数量关系',
+        teacherScript: '请观察画面中的数量关系，并说说百分数表达了什么。',
+        studentActivity: '独立思考后与同伴交流',
+        animationSequence: ['先呈现情境', '再呈现核心问题'],
+        boardPlan: '板书百分数及其对应数量关系',
+        evidence: [{ type: 'FACT' as const, text: '百分数表示一个数是另一个数的百分之几', source: '六年级数学教材' }],
+      })),
+    }
+    const approvedDocument: DocumentResult = {
+      name: source.title,
+      chunks: source.pages.map((page) => ({
+        id: `approved-page-${page.pageNumber}`,
+        text: page.editableCopy.join('\n'),
+        sha256: String(page.pageNumber).padStart(64, '0'),
+        pageStart: page.pageNumber,
+        pageEnd: page.pageNumber,
+      })),
+      sources: [{ id: source.artifactVersionId, name: source.title, kind: 'MARKDOWN', status: 'READY', pageCount }],
+      assets: [],
+      isComplete: true,
+      missingRanges: [],
+    }
+    const documents: DocumentPort = { async resolve() { return structuredClone(approvedDocument) } }
+    const planningModel = new MockStructuredModelPort(blueprintDraft())
+    const budget = new MockBudgetPort()
+    const images = new MockImageGenerationPort()
+    const artifacts = new MockArtifactPort()
+    const renderer = new MockPresentationRendererPort()
+    const runs = new RunService({ repository, clock })
+    const created = await runs.create({
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source,
+      slideCount: pageCount,
+      visualDirection: '清晰、克制、适合六年级课堂的教育摄影风格',
+      imageModel: 'mock-image',
+      automationLevel: 'BOUNDED_AUTO',
+      budgetUnits: pageCount,
+      maxRevisionRounds: 2,
+      presentationMode: 'SLIDE_IMAGE_V2',
+    }, 'e2e-approved-create-run-0001')
+    const runId = created.run.id
+    const planning = new PlanningRunner({ repository, documents, model: planningModel, clock })
+    const planned = await planning.plan({
+      runId,
+      stepId: `step-${runId}-plan`,
+      idempotencyKey: `${runId}:blueprint:v1`,
+      source,
+      slideCount: pageCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: 'SLIDE_IMAGE_V2',
+    })
+    expect(planned.blueprint?.slides).toHaveLength(pageCount)
+    expect(planningModel.executions.size).toBe(0)
+    expect(await repository.getRun(runId)).toMatchObject({ status: 'EXECUTING' })
+
+    const media = new MediaStepRunner({ repository, budget, images, clock })
+    const generation = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock })
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      expect(await generation.submitBlueprintImages(runId, 1)).toMatchObject({ submitted: pageNumber, total: pageCount })
+      expect(images.operations.size).toBe(pageNumber)
+      const key = `${runId}:slide:${pageNumber}:image:r0:v1`
+      const artifact = await artifacts.put({
+        tenantId: host.tenantId,
+        runId,
+        name: `slide-${pageNumber}.png`,
+        mimeType: 'image/png',
+        bytes: new TextEncoder().encode(`approved-slide-${pageNumber}`),
+        idempotencyKey: `${key}:source-artifact`,
+      })
+      images.complete(key, artifact.artifactId)
+      const refreshed = await generation.refreshBlueprintImages(runId)
+      expect(refreshed.completed).toBe(pageNumber)
+    }
+    expect(await repository.getRun(runId)).toMatchObject({ status: 'PAGE_REVIEW' })
+
+    const visualReviewer = new MockVisualReviewPort({
+      approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null,
+    })
+    const visual = new VisualReviewRunner({ repository, reviewer: visualReviewer, clock })
+    const pages = new PageReviewCoordinator({ repository, reviewer: visual, artifacts, renderer, clock })
+    expect(await pages.reviewAll(runId)).toMatchObject({ status: 'DECK_REVIEW', rejected: 0 })
+    const deck = new DeckReviewRunner({
+      repository,
+      documents,
+      reviewer: new MockDeckReviewPort({
+        qualityScore: 92,
+        curriculumCoverageScore: 94,
+        narrativeCoherenceScore: 91,
+        visualConsistencyScore: 90,
+        compositionScore: 92,
+        summary: '十二页审核稿按顺序完整生成，内容与视觉均达到课堂交付标准。',
+        reviewedSourceChunkIds: approvedDocument.chunks.map((chunk) => chunk.id),
+        issues: [],
+      }),
+      artifacts,
+      renderer,
+      clock,
+    })
+    expect(await deck.review(runId)).toMatchObject({ passed: true })
+    const delivered = await new DeliveryRunner({ repository, artifacts, renderer, clock }).deliver(runId)
+    expect(delivered).toMatchObject({ status: 'COMPLETED' })
+    expect(await repository.listDeliveries(runId)).toHaveLength(1)
+    expect(renderer).toMatchObject({ previewCalls: 1, pptxCalls: 1 })
+  })
+
   test('revises one rejected page before delivery without a real provider call', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock()

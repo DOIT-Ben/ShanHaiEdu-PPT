@@ -2,6 +2,8 @@
 
 PPT Agent 是一个宿主无关的课件智能体。它拥有自己的 Run、Step、Issue 和 Event 语义，通过版本化合同接收教材、规划页面、生成视觉素材、执行质量审查、有限修订并交付可编辑 PPTX。
 
+演示模式包括兼容的整页生图 `SLIDE_IMAGE_V2`、增加一次结构化 Reflection 与提示词编译的 `SLIDE_IMAGE_V2_1`，以及素材分层可编辑的 `LAYERED_COURSEWARE_V3`。V2.1 每页仍只生成一张图片，不增加图片调用次数。
+
 FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通过相同 API 和宿主端口接入。
 
 ## 当前阶段

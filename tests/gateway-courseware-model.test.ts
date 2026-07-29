@@ -60,6 +60,40 @@ function layeredBlueprintDraft() {
   }
 }
 
+function blueprintReflection() {
+  const dimensions = [
+    'AUDIENCE_FIT',
+    'GOAL_ALIGNMENT',
+    'NARRATIVE',
+    'INFORMATION_HIERARCHY',
+    'COMPOSITION',
+    'VISUAL_COHERENCE',
+    'PROMPT_EXECUTABILITY',
+  ] as const
+  return {
+    deckBrief: {
+      targetAudience: '一年级学生',
+      presentationGoal: '帮助学生建立数量三与具体物体的对应关系',
+      useContext: '教师课堂讲授与互动练习',
+      audienceNeeds: ['具体、直观、低信息负担的视觉表达'],
+      narrativeArc: ['用三个苹果建立直观认识', '通过课堂任务巩固数量对应'],
+      visualSystem: {
+        artDirection: '明亮自然的儿童教育编辑插画，主体真实且轮廓清晰',
+        palette: '苹果红、叶片绿、暖白和少量天蓝',
+        compositionRules: ['每页只突出一个数量关系', '文字区域保留自然留白'],
+        continuityRules: ['统一苹果造型和光线', '相邻页面改变景别和主体位置'],
+      },
+    },
+    findings: dimensions.map((dimension) => ({
+      dimension,
+      score: 4,
+      diagnosis: '初稿基础正确，但该维度还缺少清晰且可执行的页面约束。',
+      revisionInstruction: '在修订稿中补足具体设计选择，同时保持来源引用和事实不变。',
+    })),
+    revisedBlueprint: blueprintDraft(),
+  }
+}
+
 function completion(argumentsValue: unknown) {
   return Response.json({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(argumentsValue) } }] } }] })
 }
@@ -184,6 +218,115 @@ describe('gateway courseware model', () => {
     }).tools[0]!.function.parameters.properties.slides.items
     expect(slide.required).toContain('layeredDesign')
     expect(slide.properties.layeredDesign.anyOf).toContainEqual({ type: 'null' })
+  })
+
+  test('uses a V2.1-specific initial planning prompt', async () => {
+    let requestBody: Record<string, unknown> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return completion(blueprintDraft())
+      },
+    })
+
+    await model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', idempotencyKey: 'plan-v21',
+      payload: {
+        slideCount: 2,
+        presentationMode: 'SLIDE_IMAGE_V2_1',
+        targetAudience: '一年级学生',
+        presentationGoal: '建立数量三和具体物体的对应关系',
+        document: {
+          name: '数学教材.txt',
+          chunks: [
+            { id: 'chunk-1', text: '三个苹果表示数量三。' },
+            { id: 'chunk-2', text: '观察苹果并完成数量对应。' },
+          ],
+        },
+      },
+    })
+
+    const messages = (requestBody! as unknown as { messages: { content: string }[] }).messages
+    expect(messages[0]!.content).toContain('整页生图 V2.1')
+    expect(messages[0]!.content).toContain('目标受众')
+    expect(messages[0]!.content).toContain('自然留白')
+    expect(messages[0]!.content).toContain('不得绘制文字')
+    const initialSlide = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: { slides: { items: {
+        required: string[]
+        properties: Record<string, unknown>
+      } } } } } }[]
+    }).tools[0]!.function.parameters.properties.slides.items
+    expect(initialSlide.required).not.toContain('layeredDesign')
+    expect(initialSlide.properties).not.toHaveProperty('layeredDesign')
+    const initialParameters = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: {
+        curriculum: { properties: { sourceChunkIds: Record<string, any> } }
+        slides: { items: { properties: { sourceChunkIds: Record<string, any> } } }
+      } } } }[]
+    }).tools[0]!.function.parameters.properties
+    expect(initialParameters.curriculum.properties.sourceChunkIds).toMatchObject({
+      minItems: 2,
+      maxItems: 2,
+      uniqueItems: true,
+      items: { enum: ['chunk-1', 'chunk-2'] },
+    })
+    expect(initialParameters.slides.items.properties.sourceChunkIds.items.enum).toEqual(['chunk-1', 'chunk-2'])
+  })
+
+  test('returns a structured critique and revised blueprint for V2.1 reflection', async () => {
+    let requestBody: Record<string, unknown> | null = null
+    const expected = blueprintReflection()
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return completion(expected)
+      },
+    })
+
+    const result = await model.execute({
+      operation: 'reflect_blueprint', schemaName: 'ppt_agent_blueprint_reflection_v1', idempotencyKey: 'reflect-v21',
+      payload: {
+        presentationMode: 'SLIDE_IMAGE_V2_1',
+        slideCount: 2,
+        visualDirection: '明亮自然的儿童教育编辑插画',
+        originalBlueprint: blueprintDraft(),
+      },
+    })
+
+    expect(result).toEqual(expected)
+    expect(requestBody).toMatchObject({
+      tools: [{ type: 'function', function: { name: 'submit_blueprint_reflection', strict: true } }],
+      tool_choice: { type: 'function', function: { name: 'submit_blueprint_reflection' } },
+    })
+    const messages = (requestBody! as unknown as { messages: { content: string }[] }).messages
+    expect(messages[0]!.content).toContain('七个维度')
+    expect(messages[0]!.content).toContain('不得只做同义改写')
+    expect(messages[1]!.content).toContain('originalBlueprint')
+    const revisedSlide = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: { revisedBlueprint: {
+        properties: { slides: { items: { required: string[]; properties: Record<string, unknown> } } }
+      } } } } }[]
+    }).tools[0]!.function.parameters.properties.revisedBlueprint.properties.slides.items
+    expect(revisedSlide.required).not.toContain('layeredDesign')
+    expect(revisedSlide.properties).not.toHaveProperty('layeredDesign')
+    const reflectedParameters = (requestBody! as unknown as {
+      tools: { function: { parameters: { properties: { revisedBlueprint: { properties: {
+        curriculum: { properties: { sourceChunkIds: Record<string, any> } }
+        slides: { items: { properties: { sourceChunkIds: Record<string, any> } } }
+      } } } } } }[]
+    }).tools[0]!.function.parameters.properties.revisedBlueprint.properties
+    expect(reflectedParameters.curriculum.properties.sourceChunkIds).toMatchObject({
+      minItems: 1,
+      maxItems: 1,
+      uniqueItems: true,
+      items: { enum: ['chunk-1'] },
+    })
+    expect(reflectedParameters.slides.items.properties.sourceChunkIds.items.enum).toEqual(['chunk-1'])
   })
 
   test('sends source assets as labeled multimodal content without embedding bytes in JSON metadata', async () => {
@@ -424,6 +567,21 @@ describe('gateway courseware model', () => {
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream',
     })).rejects.toMatchObject({
       code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-stream-1', model: 'gpt-5.6',
+    })
+  })
+
+  test('classifies a response stream timeout as provider timeout', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) { controller.error(new DOMException('private stream timeout detail', 'TimeoutError')) },
+      }), { headers: { 'Content-Type': 'text/event-stream', 'x-request-id': 'request-stream-timeout-1' } }),
+    })
+    await expect(model.execute({
+      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream-timeout',
+    })).rejects.toMatchObject({
+      code: 'PROVIDER_TIMEOUT', retryable: true, requestId: 'request-stream-timeout-1', model: 'gpt-5.6',
     })
   })
 

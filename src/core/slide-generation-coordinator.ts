@@ -57,10 +57,20 @@ export class SlideGenerationCoordinator {
     const requirements = blueprintImageRequirements(run, blueprint)
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image')
+    const sequentialPageExecution = run.source.kind === 'APPROVED_PAGE_DESIGN'
     const blockingStep = existingSteps.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
     if (blockingStep) {
       await this.requireHuman(runId, blockingStep)
       return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
+    }
+    if (sequentialPageExecution && existingSteps.some((step) =>
+      ['WAITING', 'RELEASING'].includes(step.status))) {
+      return {
+        status: run.status,
+        submitted: existingSteps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
+        total: requirements.length,
+        steps: existingSteps,
+      }
     }
     const existingByKey = new Map(existingSteps.map((step) => [step.idempotencyKey, step]))
     const pendingRequirements = requirements.filter((requirement) => {
@@ -79,7 +89,8 @@ export class SlideGenerationCoordinator {
 
     const steps = [...existingSteps]
     const unresolvedRequirements = []
-    for (const requirement of pendingRequirements) {
+    const currentRequirements = sequentialPageExecution ? pendingRequirements.slice(0, 1) : pendingRequirements
+    for (const requirement of currentRequirements) {
       if (requirement.sourceAssetStrategy !== 'SEARCH_WEB') {
         unresolvedRequirements.push(requirement)
         continue
@@ -197,6 +208,7 @@ export class SlideGenerationCoordinator {
     const failed = refreshed.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
     if (failed) await this.requireHuman(runId, failed)
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step) !== null)
+    await this.appendCompletedPageProgress(runId, completed.length, requirements.length)
     const latest = await this.dependencies.repository.getRun(runId)
     if (!failed && completed.length === requirements.length && latest?.status === 'EXECUTING') {
       await this.dependencies.repository.transact(runId, (transaction) => {
@@ -503,6 +515,21 @@ export class SlideGenerationCoordinator {
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.progress',
         payload: { stepId, completed, total, summary: `${summary}（${completed}/${total}）` },
+      })
+    })
+  }
+
+  private async appendCompletedPageProgress(runId: string, completed: number, total: number) {
+    if (completed === 0) return
+    const stepId = `${runId}:completed-pages`
+    const current = (await this.dependencies.repository.getRunEventSnapshot(runId)).progress
+      .find((item) => item.stepId === stepId)
+    if (current?.completed === completed && current.total === total) return
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.progress',
+        payload: { stepId, completed, total, summary: `已完成 ${completed}/${total} 页` },
       })
     })
   }

@@ -338,6 +338,8 @@ export type RunRecord = Readonly<{
   source: CreateRunRequest['source']
   slideCount: number
   visualDirection: string
+  targetAudience?: string
+  presentationGoal?: string
   imageModel: string
   automationLevel: CreateRunRequest['automationLevel']
   presentationMode?: CreateRunRequest['presentationMode']

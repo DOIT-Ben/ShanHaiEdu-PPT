@@ -3,6 +3,7 @@ import { CONTRACT_VERSION } from '../contracts'
 import { ZodError } from 'zod'
 import {
   blueprintDraftSchema,
+  blueprintReflectionSchema,
   presentationBlueprintSchema,
   type PresentationBlueprint,
 } from '../presentation-contracts'
@@ -23,6 +24,18 @@ const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
 const PROVIDER_RETRY_DELAYS_MS = [250, 1_000] as const
 
+export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
+  const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
+  const copy = '(文|文字|标题|要点|文案|内容)'
+  if (new RegExp(`(右.{0,8}${copy}.{0,12}左.{0,8}${visual}|左.{0,8}${visual}.{0,12}右.{0,8}${copy})`, 'i').test(layoutIntent)) return 'EDITORIAL' as const
+  if (new RegExp(`(左.{0,8}${copy}.{0,12}右.{0,8}${visual}|右.{0,8}${visual}.{0,12}左.{0,8}${copy}|左右|split|双栏|两栏)`, 'i').test(layoutIntent)) return 'SPLIT' as const
+  if (/(封面|hero)/i.test(layoutIntent)) return 'HERO' as const
+  if (/(全屏|满版|沉浸|大图|full[ -]?bleed|image[ -]?full)/i.test(layoutIntent)) return 'IMAGE_FULL' as const
+  if (/(结论|金句|核心观点|强调|statement)/i.test(layoutIntent)) return 'STATEMENT' as const
+  if (pageIndex === 0) return 'HERO' as const
+  return 'EDITORIAL' as const
+}
+
 class PlanningFailureError extends Error {
   constructor(readonly failure: PlanningFailure) {
     super(failure.errorCode)
@@ -37,6 +50,8 @@ export type PlanPresentationInput = Readonly<{
   source: CreateRunRequest['source']
   slideCount: number
   visualDirection: string
+  targetAudience?: string
+  presentationGoal?: string
   presentationMode?: CreateRunRequest['presentationMode']
   coverDesignMode?: CreateRunRequest['coverDesignMode']
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
@@ -75,7 +90,9 @@ export class PlanningRunner {
     }
 
     try {
-      const blueprint = await this.createBlueprint(input, document, prepared.step.inputHash, run.host.tenantId)
+      const blueprint = input.source.kind === 'APPROVED_PAGE_DESIGN'
+        ? this.createApprovedBlueprint(input, document, prepared.step.inputHash)
+        : await this.createBlueprint(input, document, prepared.step.inputHash, run.host.tenantId)
       const step = await this.complete(input, blueprint)
       return { step, blueprint, replayed: false }
     } catch (error) {
@@ -87,10 +104,70 @@ export class PlanningRunner {
     }
   }
 
+  private createApprovedBlueprint(
+    input: PlanPresentationInput,
+    document: DocumentResult,
+    inputHash: string,
+  ) {
+    if (input.source.kind !== 'APPROVED_PAGE_DESIGN') throw new Error('APPROVED_PAGE_DESIGN_REQUIRED')
+    if (input.source.pages.length !== input.slideCount) throw new Error('BLUEPRINT_SLIDE_COUNT_MISMATCH')
+    const chunksByPage = new Map(document.chunks.map((chunk) => [chunk.pageStart, chunk]))
+    const sourceChunkIds = document.chunks.map((chunk) => chunk.id)
+    const slides = input.source.pages.map((page, index) => {
+      const chunk = chunksByPage.get(page.pageNumber)
+      if (!chunk || chunk.pageEnd !== page.pageNumber) throw new Error('BLUEPRINT_SOURCE_REFERENCE_INVALID')
+      const visualRequirements = page.visualRequirements.join('；') || '使用与本页教学目标直接相关的课堂视觉'
+      return {
+        pageNumber: page.pageNumber,
+        title: page.title,
+        body: page.editableCopy,
+        layout: approvedPageLayout(page.layoutIntent, index),
+        visualIntent: `本页教学目标：${page.teachingPurpose}`,
+        visualPrompt: [
+          '创作一张连续、无边框的 16:9 教育场景图片，只呈现视觉内容，不绘制任何文字、字母、数字、公式、标志或水印。',
+          `本页视觉要求：${visualRequirements}。`,
+          `构图与空间关系：${page.layoutIntent}。`,
+          `整套视觉方向：${input.visualDirection}。`,
+        ].join(' '),
+        sourceChunkIds: [chunk.id],
+        sourceAssetIds: [],
+      }
+    })
+    const sourceSummary = [
+      `${input.source.gradeBand}${input.source.subject}《${input.source.title}》`,
+      `面向${input.source.audience}，课时 ${input.source.lessonDurationMinutes} 分钟。`,
+      `已由教师审核 ${input.source.pages.length} 页逐页设计稿，执行时不得重新规划或扩展审核范围。`,
+    ].join(' ')
+    return presentationBlueprintSchema.parse({
+      id: `blueprint-${hashInput({ runId: input.runId, inputHash }).slice(0, 28)}`,
+      title: input.source.title,
+      curriculum: {
+        subject: input.source.subject,
+        grade: input.source.gradeBand,
+        lessonTitle: input.source.title,
+        sourceSummary,
+        learningObjectives: input.source.objectives,
+        scopeBoundaries: ['以每一页已审核的教学目的、文案和视觉要求为唯一执行范围'],
+        prohibitedExtensions: ['不得扩展到教师已审核逐页设计稿之外的教学内容'],
+        sourceChunkIds,
+        sourceAssetIds: [],
+      },
+      slides,
+      visualDirection: input.visualDirection,
+      renderMode: 'SLIDE_IMAGE_V2',
+      coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+      sourceManifest: document.sources ?? [],
+      sourceAssets: [],
+      createdAt: this.dependencies.clock.now().toISOString(),
+    })
+  }
+
   private async createBlueprint(input: PlanPresentationInput, document: DocumentResult, inputHash: string, tenantId: string) {
     const basePayload = {
       slideCount: input.slideCount,
       visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
       presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
       assetAcquisitionPolicy: input.assetAcquisitionPolicy ?? 'AI_FIRST',
@@ -111,6 +188,7 @@ export class PlanningRunner {
       },
     }
     let repairIssues: { path: string; message: string }[] = []
+    let initialDraft: ReturnType<typeof blueprintDraftSchema.parse> | null = null
     for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
       try {
         const modelKey = attempt === 0
@@ -132,16 +210,8 @@ export class PlanningRunner {
           input.presentationMode ?? 'SLIDE_IMAGE_V2',
           input.maxVisualAssetsPerSlide ?? 4,
         )
-        return presentationBlueprintSchema.parse({
-          ...draft,
-          id: `blueprint-${hashInput({ runId: input.runId, inputHash }).slice(0, 28)}`,
-          visualDirection: input.visualDirection,
-          renderMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
-          coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
-          sourceManifest: document.sources ?? [],
-          sourceAssets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
-          createdAt: this.dependencies.clock.now().toISOString(),
-        })
+        initialDraft = draft
+        break
       } catch (error) {
         if (error instanceof PlanningFailureError) throw error
         const issues = this.contractIssues(error)
@@ -158,7 +228,64 @@ export class PlanningRunner {
         repairIssues = issues
       }
     }
-    throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
+    if (!initialDraft) throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
+    const draft = input.presentationMode === 'SLIDE_IMAGE_V2_1'
+      ? await this.reflectBlueprint(input, initialDraft, tenantId)
+      : initialDraft
+    this.assertBlueprintCoverage(
+      draft,
+      document,
+      input.slideCount,
+      input.presentationMode ?? 'SLIDE_IMAGE_V2',
+      input.maxVisualAssetsPerSlide ?? 4,
+    )
+    return presentationBlueprintSchema.parse({
+      ...draft,
+      id: `blueprint-${hashInput({ runId: input.runId, inputHash }).slice(0, 28)}`,
+      visualDirection: input.visualDirection,
+      renderMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
+      coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
+      sourceManifest: document.sources ?? [],
+      sourceAssets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
+      createdAt: this.dependencies.clock.now().toISOString(),
+    })
+  }
+
+  private async reflectBlueprint(
+    input: PlanPresentationInput,
+    initialDraft: ReturnType<typeof blueprintDraftSchema.parse>,
+    tenantId: string,
+  ) {
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.progress',
+        payload: {
+          stepId: input.stepId,
+          completed: 1,
+          total: 2,
+          summary: '蓝图初稿已完成，正在按受众、叙事与视觉标准反思修订',
+        },
+      })
+    })
+    const raw = await this.executeWithProviderRetry(input, {
+      tenantId,
+      operation: 'reflect_blueprint',
+      schemaName: 'ppt_agent_blueprint_reflection_v1',
+      idempotencyKey: `blueprint-reflection-${hashInput({
+        idempotencyKey: input.idempotencyKey,
+        initialDraft,
+      })}`,
+      payload: {
+        presentationMode: 'SLIDE_IMAGE_V2_1',
+        slideCount: input.slideCount,
+        visualDirection: input.visualDirection,
+        ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+        ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+        originalBlueprint: initialDraft,
+      },
+    })
+    return blueprintReflectionSchema.parse(raw).revisedBlueprint
   }
 
   private async executeWithProviderRetry(
@@ -325,10 +452,23 @@ export class PlanningRunner {
       tool: 'create_blueprint',
       slideCount: input.slideCount,
       visualDirection: input.visualDirection,
+      targetAudience: input.targetAudience ?? null,
+      presentationGoal: input.presentationGoal ?? null,
       presentationMode: input.presentationMode ?? 'SLIDE_IMAGE_V2',
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
       assetAcquisitionPolicy: input.assetAcquisitionPolicy ?? 'AI_FIRST',
       maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
+      sourceIdentity: input.source.kind === 'APPROVED_PAGE_DESIGN' ? {
+        kind: input.source.kind,
+        artifactVersionId: input.source.artifactVersionId,
+        artifactContentHash: input.source.artifactContentHash,
+        title: input.source.title,
+        subject: input.source.subject,
+        gradeBand: input.source.gradeBand,
+        lessonDurationMinutes: input.source.lessonDurationMinutes,
+        audience: input.source.audience,
+        objectives: input.source.objectives,
+      } : null,
       document: {
         name: document.name,
         isComplete: document.isComplete,
@@ -376,7 +516,13 @@ export class PlanningRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.started',
-        payload: { stepId: step.id, tool: step.tool, label: '分析教材并规划逐页蓝图' },
+        payload: {
+          stepId: step.id,
+          tool: step.tool,
+          label: input.source.kind === 'APPROVED_PAGE_DESIGN'
+            ? '读取已审核逐页设计稿'
+            : '分析教材并规划逐页蓝图',
+        },
       })
       return { run: updatedRun, step, blueprint: null, replayed: false }
     })
@@ -424,7 +570,9 @@ export class PlanningRunner {
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'COMPLETED') return step
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transitionRun(transaction.run, 'AWAITING_BLUEPRINT_APPROVAL')
+      const approvedPageDesign = input.source.kind === 'APPROVED_PAGE_DESIGN'
+      const targetStatus = approvedPageDesign ? 'EXECUTING' as const : 'AWAITING_BLUEPRINT_APPROVAL' as const
+      const policy = transitionRun(transaction.run, targetStatus)
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updated: StepRecord = { ...step, status: 'COMPLETED', output: blueprint, errorCode: null, updatedAt: now }
       transaction.putRun(run)
@@ -432,7 +580,14 @@ export class PlanningRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
-        payload: { stepId: step.id, summary: `已生成 ${blueprint.slides.length} 页教学蓝图` },
+        payload: {
+          stepId: step.id,
+          summary: approvedPageDesign
+            ? `已载入教师审核的 ${blueprint.slides.length} 页设计稿，开始逐页生成`
+            : input.presentationMode === 'SLIDE_IMAGE_V2_1'
+            ? `已反思并修订 ${blueprint.slides.length} 页教学蓝图`
+            : `已生成 ${blueprint.slides.length} 页教学蓝图`,
+        },
       })
       const attempt = input.attempt ?? 0
       if (attempt > 0) {
@@ -448,13 +603,19 @@ export class PlanningRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: 'PLANNING', to: 'AWAITING_BLUEPRINT_APPROVAL' },
+        payload: { from: 'PLANNING', to: targetStatus },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'approval.required',
-        payload: { kind: 'BLUEPRINT', summary: `请确认《${blueprint.title}》的 ${blueprint.slides.length} 页蓝图` },
-      })
+      transaction.appendEvent(approvedPageDesign
+        ? {
+            schemaVersion: CONTRACT_VERSION,
+            type: 'approval.resolved',
+            payload: { kind: 'BLUEPRINT', actionType: 'APPROVED_PAGE_DESIGN' },
+          }
+        : {
+            schemaVersion: CONTRACT_VERSION,
+            type: 'approval.required',
+            payload: { kind: 'BLUEPRINT', summary: `请确认《${blueprint.title}》的 ${blueprint.slides.length} 页蓝图` },
+          })
       return updated
     })
   }

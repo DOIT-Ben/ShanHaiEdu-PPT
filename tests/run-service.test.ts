@@ -124,6 +124,42 @@ describe('run service', () => {
     expect((await repository.listEvents(created.run.id)).map((event) => event.type)).toContain('approval.resolved')
   })
 
+  test('approves the completed blueprint from the current planning retry', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-retry-approval-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'AWAITING_BLUEPRINT_APPROVAL',
+        planningAttempt: 1,
+        version: 3,
+      })
+      transaction.putStep({
+        id: 'step-plan-retry-1',
+        runId: created.run.id,
+        idempotencyKey: planningStepKey(created.run.id, 1),
+        inputHash: hashInput({ blueprint: 'retry-1' }),
+        tool: 'create_blueprint',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: blueprint(),
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const approved = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'APPROVE_BLUEPRINT',
+      expectedVersion: 3,
+    }, 'approve-retry-blueprint-0001')
+
+    expect(approved).toMatchObject({ status: 'EXECUTING', planningAttempt: 1, version: 4 })
+  })
+
   test('persists the actor and reason for manual quality override', async () => {
     const { repository, service } = fixture()
     const created = await service.create(request, 'frameflow-create-0001')

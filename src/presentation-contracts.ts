@@ -173,6 +173,56 @@ export const blueprintDraftSchema = z.object({
   })
 })
 
+const slideImageBlueprintSlideSchema = blueprintSlideSchema.omit({ layeredDesign: true }).strict()
+
+export const slideImageBlueprintDraftSchema = blueprintDraftSchema.safeExtend({
+  slides: z.array(slideImageBlueprintSlideSchema).min(2).max(50),
+}).strict()
+
+export const blueprintReflectionDimensionSchema = z.enum([
+  'AUDIENCE_FIT',
+  'GOAL_ALIGNMENT',
+  'NARRATIVE',
+  'INFORMATION_HIERARCHY',
+  'COMPOSITION',
+  'VISUAL_COHERENCE',
+  'PROMPT_EXECUTABILITY',
+])
+
+const blueprintReflectionFindingSchema = z.object({
+  dimension: blueprintReflectionDimensionSchema,
+  score: z.number().int().min(1).max(5),
+  diagnosis: z.string().trim().min(10).max(600),
+  revisionInstruction: z.string().trim().min(10).max(600),
+}).strict()
+
+export const blueprintReflectionSchema = z.object({
+  deckBrief: z.object({
+    targetAudience: z.string().trim().min(3).max(500),
+    presentationGoal: z.string().trim().min(3).max(1_000),
+    useContext: z.string().trim().min(3).max(500),
+    audienceNeeds: z.array(z.string().trim().min(3).max(300)).min(1).max(8),
+    narrativeArc: z.array(z.string().trim().min(3).max(500)).min(2).max(12),
+    visualSystem: z.object({
+      artDirection: z.string().trim().min(10).max(1_000),
+      palette: z.string().trim().min(3).max(500),
+      compositionRules: z.array(z.string().trim().min(3).max(300)).min(2).max(8),
+      continuityRules: z.array(z.string().trim().min(3).max(300)).min(2).max(8),
+    }).strict(),
+  }).strict(),
+  findings: z.array(blueprintReflectionFindingSchema).length(7),
+  revisedBlueprint: blueprintDraftSchema,
+}).strict().superRefine((value, context) => {
+  const dimensions = value.findings.map((finding) => finding.dimension)
+  if (new Set(dimensions).size !== blueprintReflectionDimensionSchema.options.length) {
+    context.addIssue({ code: 'custom', path: ['findings'], message: 'reflection must cover every rubric dimension exactly once' })
+  }
+})
+
+export const slideImageBlueprintReflectionSchema = blueprintReflectionSchema.safeExtend({
+  revisedBlueprint: slideImageBlueprintDraftSchema,
+}).strict()
+
 const layeredBlueprintSlideSchema = blueprintSlideSchema.extend({
   layeredDesign: layeredSlideDesignSchema,
 }).strict()
@@ -225,7 +275,7 @@ const sourceAssetSummarySchema = z.array(z.object({
 export const presentationBlueprintSchema = blueprintDraftSchema.extend({
   id: identifierSchema,
   visualDirection: z.string().trim().min(3).max(1_000),
-  renderMode: z.enum(['SLIDE_IMAGE_V2', 'LAYERED_COURSEWARE_V3']).optional(),
+  renderMode: z.enum(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3']).optional(),
   coverDesignMode: z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE']).optional(),
   sourceManifest: sourceManifestSchema,
   sourceAssets: sourceAssetSummarySchema,

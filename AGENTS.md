@@ -8,6 +8,14 @@
 - 后续宿主：ShanHaiEdu 课件系统。
 - 技术栈：TypeScript、Bun；HTTP、SSE、数据库和 UI 通过适配层接入。
 
+## 服务器路径
+
+- 阿里云开发仓库：`/srv/codex-workspace/PPT-Agent`，使用 `codex-dev` 开发、测试和构建。
+- 正式发布根：`/opt/ppt-agent`，当前版本由 `/opt/ppt-agent/current` 软链接确定。
+- 隔离测试根：`/opt/ppt-agent-test`，当前版本由 `/opt/ppt-agent-test/current` 软链接确定。
+- `/opt` 内 release、共享数据、环境文件和备份不是开发工作树，不得反向覆盖源码。
+- README 当前可能包含进行中的用户改动；修改前必须先检查 Git 状态并保留现场。
+
 ## 边界
 
 - `src/core/` 不得导入 FrameFlow、ShanHaiEdu、Next.js、Prisma 或具体 Provider SDK。

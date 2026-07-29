@@ -15,10 +15,13 @@ export async function getActiveBlueprint(
     .sort((left, right) => right.round - left.round)[0]
   if (revised) return presentationBlueprintSchema.parse(revised.step.output)
 
-  const initial = steps.find((step) =>
-    step.idempotencyKey === planningStepKey(runId) && step.status === 'COMPLETED')
-  if (!initial) throw new Error('BLUEPRINT_NOT_READY')
-  return presentationBlueprintSchema.parse(initial.output)
+  const planned = steps
+    .map((step) => ({ step, attempt: planningBlueprintAttempt(step, runId) }))
+    .filter((candidate): candidate is { step: StepRecord; attempt: number } =>
+      candidate.attempt !== null && candidate.step.status === 'COMPLETED')
+    .sort((left, right) => right.attempt - left.attempt)[0]
+  if (!planned) throw new Error('BLUEPRINT_NOT_READY')
+  return presentationBlueprintSchema.parse(planned.step.output)
 }
 
 export function revisionBlueprintStepKey(runId: string, revisionRound: number) {
@@ -31,4 +34,13 @@ function revisionBlueprintRound(step: StepRecord, runId: string) {
   if (!step.idempotencyKey.startsWith(prefix)) return null
   const round = Number(step.idempotencyKey.slice(prefix.length))
   return Number.isSafeInteger(round) && round >= 1 ? round : null
+}
+
+function planningBlueprintAttempt(step: StepRecord, runId: string) {
+  if (step.tool !== 'create_blueprint') return null
+  if (step.idempotencyKey === planningStepKey(runId)) return 0
+  const prefix = `${runId}:blueprint:retry:`
+  if (!step.idempotencyKey.startsWith(prefix)) return null
+  const attempt = Number(step.idempotencyKey.slice(prefix.length))
+  return Number.isSafeInteger(attempt) && attempt >= 1 ? attempt : null
 }
