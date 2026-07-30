@@ -22,11 +22,12 @@ import type {
 import { transitionRun } from './policy'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
 import {
-  createVisualDeckV4Blueprint,
+  createVisualDeckV4BlueprintFromProposal,
   type VisualDeckV4PlanningArtifact,
   visualDeckV4PlanningArtifactStepKey,
 } from './visual-deck-v4-planner'
 import type { VisualDeckV4Proposal } from '../visual-deck-v4-contracts'
+import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
@@ -86,6 +87,31 @@ export function approvedPageVisualPrompt(
     '设计稿中提到的标题、文案、数字、公式、任务卡和可编辑区域只表示后续排版位置；图片中必须保持自然留白，不得绘制这些内容、占位框或界面组件。',
     '不得绘制任何文字、字母、数字、公式、标志、水印或 logo。',
   ].join(' ')
+}
+
+function visualDeckV4SourceReferences(source: CreateRunRequest['source']) {
+  if (source.kind === 'SOURCE_PACKAGE') {
+    return source.sources.map((item) => ({
+      sourceId: item.sourceId,
+      name: item.kind === 'TEXT' ? item.name ?? item.sourceId : item.sourceId,
+      kind: item.kind,
+      roleHint: item.roleHint ?? 'AUTO',
+    }))
+  }
+  if (source.kind === 'APPROVED_PAGE_DESIGN') {
+    return [{
+      sourceId: source.artifactVersionId,
+      name: source.title,
+      kind: source.kind,
+      roleHint: 'DESIGN_REFERENCE' as const,
+    }]
+  }
+  return [{
+    sourceId: source.kind === 'TEXT' ? 'inline-source' : source.attachmentId,
+    name: source.kind === 'TEXT' ? source.name ?? 'inline-material.txt' : source.attachmentId,
+    kind: source.kind,
+    roleHint: source.roleHint ?? 'AUTO',
+  }]
 }
 
 class PlanningFailureError extends Error {
@@ -160,18 +186,13 @@ export class PlanningRunner {
 
     try {
       const blueprint = strategy.planningKind === 'VISUAL_DECK_COMPILER'
-        ? createVisualDeckV4Blueprint({
-            runId: effectiveInput.runId,
-            inputHash: prepared.step.inputHash,
-            source: effectiveInput.source,
+        ? await this.createVisualDeckV4Blueprint(
+            effectiveInput,
             document,
-            config: visualDeckV4!,
-            slideCount: effectiveInput.slideCount,
-            visualDirection: effectiveInput.visualDirection,
-            ...(effectiveInput.targetAudience ? { targetAudience: effectiveInput.targetAudience } : {}),
-            ...(effectiveInput.presentationGoal ? { presentationGoal: effectiveInput.presentationGoal } : {}),
-            createdAt: this.dependencies.clock.now().toISOString(),
-          })
+            prepared.step.inputHash,
+            run.host.tenantId,
+            visualDeckV4!,
+          )
         : effectiveInput.source.kind === 'APPROVED_PAGE_DESIGN'
           ? this.createApprovedBlueprint(effectiveInput, document, prepared.step.inputHash)
           : await this.createBlueprint(effectiveInput, document, prepared.step.inputHash, run.host.tenantId)
@@ -184,6 +205,61 @@ export class PlanningRunner {
       const step = await this.fail(effectiveInput, failure, 'PLANNING_FAILED', document)
       return { step, blueprint: null, replayed: false }
     }
+  }
+
+  private async createVisualDeckV4Blueprint(
+    input: PlanPresentationInput,
+    document: DocumentResult,
+    inputHash: string,
+    tenantId: string,
+    config: NonNullable<CreateRunRequest['visualDeckV4']>,
+  ) {
+    const raw = await this.executeWithProviderRetry(input, {
+      tenantId,
+      operation: 'create_visual_deck_v4_proposal',
+      schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      idempotencyKey: input.idempotencyKey,
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4',
+        instruction: config.instruction,
+        deckOptions: config.deckOptions,
+        sourceMode: config.sourceMode,
+        sourceReferences: visualDeckV4SourceReferences(input.source),
+        slideCount: input.slideCount,
+        visualDirection: input.visualDirection,
+        ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+        ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+        document: {
+          name: document.name,
+          sources: document.sources ?? [],
+          chunks: document.chunks.map((chunk) => ({
+            id: chunk.id,
+            sourceId: chunk.sourceId,
+            sha256: chunk.sha256,
+            text: chunk.text,
+            pageStart: chunk.pageStart,
+            pageEnd: chunk.pageEnd,
+            region: chunk.region,
+          })),
+          assets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
+          missingRanges: document.missingRanges,
+        },
+      },
+      sourceAssets: document.assets ?? [],
+    })
+    const draft = visualDeckV4ProposalDraftSchema.parse(raw)
+    return createVisualDeckV4BlueprintFromProposal({
+      runId: input.runId,
+      inputHash,
+      source: input.source,
+      document,
+      config,
+      slideCount: input.slideCount,
+      visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+      createdAt: this.dependencies.clock.now().toISOString(),
+    }, draft)
   }
 
   private createApprovedBlueprint(

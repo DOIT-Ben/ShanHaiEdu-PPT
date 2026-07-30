@@ -133,8 +133,7 @@ export const visualDeckV4VisualContractSchema = z.object({
   forbidden: z.array(boundedText(300)).max(20),
 }).strict()
 
-export const visualDeckV4ProposalSchema = z.object({
-  compilerVersion: identifierSchema,
+export const visualDeckV4ProposalDraftSchema = z.object({
   sourceUnderstanding: visualDeckV4SourceUnderstandingSchema,
   presentationSpec: visualDeckV4PresentationSpecSchema,
   deckPlan: visualDeckV4DeckPlanSchema,
@@ -163,6 +162,10 @@ export const visualDeckV4ProposalSchema = z.object({
   }
 })
 
+export const visualDeckV4ProposalSchema = visualDeckV4ProposalDraftSchema.safeExtend({
+  compilerVersion: identifierSchema,
+}).strict()
+
 export const visualDeckV4RenderedSlideSchema = z.object({
   pageNumber: z.number().int().min(1).max(50),
   strategy: z.enum(['FULL_GENERATIVE', 'CONTROLLED_RASTER']),
@@ -190,6 +193,7 @@ export const visualDeckV4DeckManifestSchema = z.object({
 
 export type VisualDeckV4Config = z.infer<typeof visualDeckV4ConfigSchema>
 export type VisualDeckV4SourceRole = z.infer<typeof visualDeckV4SourceRoleSchema>
+export type VisualDeckV4ProposalDraft = z.infer<typeof visualDeckV4ProposalDraftSchema>
 export type VisualDeckV4Proposal = z.infer<typeof visualDeckV4ProposalSchema>
 export type VisualDeckV4RenderedSlide = z.infer<typeof visualDeckV4RenderedSlideSchema>
 export type VisualDeckV4DeckManifest = z.infer<typeof visualDeckV4DeckManifestSchema>

@@ -6,6 +6,7 @@ import { CONTRACT_VERSION } from '../src/contracts'
 import { PlanningRunner, planningStepKey } from '../src/core/planning-runner'
 import { RunService } from '../src/core/run-service'
 import {
+  compileVisualDeckV4Proposal,
   type VisualDeckV4PlanningArtifact,
   visualDeckV4PlanningArtifactStepKey,
 } from '../src/core/visual-deck-v4-planner'
@@ -16,7 +17,7 @@ const artifacts: readonly VisualDeckV4PlanningArtifact[] = [
 ]
 
 describe('visual deck v4 planning runner', () => {
-  test('persists and replays the five-stage mock plan without calling a provider', async () => {
+  test('persists and replays one structured GPT plan across five workflow artifacts', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-07-30T00:00:00.000Z'))
     const service = new RunService({ repository, clock })
@@ -49,9 +50,29 @@ describe('visual deck v4 planning runner', () => {
     const created = await service.create(request, 'create-v4-planning-0001')
     let providerCalls = 0
     const model: StructuredModelPort = {
-      async execute() {
+      async execute(modelInput) {
         providerCalls += 1
-        throw new Error('v4 mock planning must not call a provider')
+        expect(modelInput.operation).toBe('create_visual_deck_v4_proposal')
+        const payload = modelInput.payload as {
+          document: {
+            name: string
+            sources: { id: string; name: string; kind: 'TEXT' | 'IMAGE' | 'PDF' | 'MARKDOWN'; status: 'READY' | 'FAILED' }[]
+            chunks: { id: string; sourceId?: string; text: string; sha256: string }[]
+            missingRanges: string[]
+          }
+        }
+        const proposal = compileVisualDeckV4Proposal({
+          runId: created.run.id,
+          inputHash: 'model-v4-plan',
+          source: created.run.source,
+          document: { ...payload.document, isComplete: true },
+          config: request.visualDeckV4,
+          slideCount: request.slideCount,
+          visualDirection: request.visualDirection,
+          createdAt: clock.now().toISOString(),
+        })
+        const { compilerVersion: _compilerVersion, ...draft } = proposal
+        return draft
       },
     }
     const documents = new FrameFlowHostAdapter({
@@ -78,7 +99,7 @@ describe('visual deck v4 planning runner', () => {
     const replay = await runner.plan(input)
     const proposal = first.blueprint?.visualDeckV4Proposal
 
-    expect(providerCalls).toBe(0)
+    expect(providerCalls).toBe(1)
     expect(first.replayed).toBe(false)
     expect(replay.replayed).toBe(true)
     expect(proposal?.slideBriefs).toHaveLength(12)

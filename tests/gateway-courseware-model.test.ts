@@ -3,6 +3,7 @@ import sharp from 'sharp'
 import { GatewayCoursewareModel, MAX_GATEWAY_TOOL_ARGUMENT_BYTES } from '../src/adapters/gateway-courseware-model'
 import { MockArtifactPort } from '../src/adapters/mock-ports'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
+import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
 
 function blueprintDraft() {
   return blueprintDraftSchema.parse({
@@ -133,6 +134,58 @@ function expectStrictObjectSchemas(value: unknown) {
 }
 
 describe('gateway courseware model', () => {
+  test('requests a source-grounded full-raster v4 proposal through a typed tool', async () => {
+    const source = { kind: 'TEXT' as const, name: '分数教材.txt', text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。'.repeat(4) }
+    const document = {
+      name: source.name,
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+      isComplete: true,
+      missingRanges: [] as string[],
+    }
+    const config = {
+      instruction: '为三年级学生制作一套认识二分之一的视觉演示',
+      sourceMode: 'SOURCE_GROUNDED' as const,
+      deckOptions: {
+        deckType: 'DETAILED_DECK' as const, language: 'zh-CN', length: { slideCount: 2 },
+        aspectRatio: '16:9' as const, audience: '小学三年级学生', focus: '平均分和二分之一',
+        styleHint: '温暖的儿童绘本课堂视觉',
+      },
+    }
+    const proposal = compileVisualDeckV4Proposal({
+      runId: 'run-v4-gateway', inputHash: 'input-v4-gateway', source, document, config,
+      slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', createdAt: '2026-07-30T00:00:00.000Z',
+    })
+    const { compilerVersion: _compilerVersion, ...draft } = proposal
+    let requestBody: Record<string, unknown> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return completion(draft)
+      },
+    })
+
+    expect(await model.execute({
+      operation: 'create_visual_deck_v4_proposal',
+      schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      idempotencyKey: 'v4-plan-1',
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', instruction: config.instruction, sourceMode: config.sourceMode,
+        deckOptions: config.deckOptions, slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', document,
+      },
+    })).toEqual(draft)
+    const body = requestBody! as unknown as {
+      messages: { content: string }[]
+      tools: { function: { name: string; parameters: unknown } }[]
+      tool_choice: { function: { name: string } }
+    }
+    expect(body.tools[0]?.function.name).toBe('submit_visual_deck_v4_proposal')
+    expect(body.tool_choice.function.name).toBe('submit_visual_deck_v4_proposal')
+    expect(body.messages[0]?.content).toContain('最终交付是一页一张完整16:9图片')
+    expect(JSON.stringify(body.tools[0]?.function.parameters)).toContain('chunk-1')
+  })
+
   test('requests a source-grounded blueprint through a typed tool', async () => {
     const artifacts = new MockArtifactPort()
     let requestBody: Record<string, unknown> | null = null

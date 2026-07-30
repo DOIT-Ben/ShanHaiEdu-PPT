@@ -4,6 +4,7 @@ import {
   visualDeckV4ProposalSchema,
   type VisualDeckV4Config,
   type VisualDeckV4Proposal,
+  type VisualDeckV4ProposalDraft,
   type VisualDeckV4SourceRole,
 } from '../visual-deck-v4-contracts'
 import { hashInput } from './hash'
@@ -196,8 +197,28 @@ export function compileVisualDeckV4Proposal(input: CompileVisualDeckV4Input): Vi
   })
 }
 
-export function createVisualDeckV4Blueprint(input: CompileVisualDeckV4Input): PresentationBlueprint {
-  const proposal = compileVisualDeckV4Proposal(input)
+export function createVisualDeckV4BlueprintFromProposal(
+  input: CompileVisualDeckV4Input,
+  draft: VisualDeckV4ProposalDraft,
+): PresentationBlueprint {
+  const proposal = visualDeckV4ProposalSchema.parse({
+    ...draft,
+    compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+  })
+  const availableChunkIds = new Set(input.document.chunks.map((chunk) => chunk.id))
+  const understoodChunkIds = new Set(proposal.sourceUnderstanding.sources.flatMap((source) => source.sourceChunkIds))
+  if (availableChunkIds.size !== understoodChunkIds.size
+    || [...availableChunkIds].some((chunkId) => !understoodChunkIds.has(chunkId))) {
+    throw new Error('VISUAL_DECK_V4_SOURCE_COVERAGE_INVALID')
+  }
+  const expectedSourceIds = new Set(
+    (input.document.sources?.length ? input.document.sources : [fallbackSource(input.source, input.document)])
+      .map((source) => source.id),
+  )
+  if (proposal.sourceUnderstanding.sources.some((source) => !expectedSourceIds.has(source.sourceId))
+    || proposal.slideBriefs.some((brief) => brief.sourceChunkIds.some((chunkId) => !availableChunkIds.has(chunkId)))) {
+    throw new Error('VISUAL_DECK_V4_SOURCE_REFERENCE_INVALID')
+  }
   const sourceChunkIds = input.document.chunks.map((chunk) => chunk.id)
   const sourceSummary = clipped(input.document.chunks.map((chunk) => chunk.text).join(' '), 4_000)
   return presentationBlueprintSchema.parse({
@@ -231,4 +252,9 @@ export function createVisualDeckV4Blueprint(input: CompileVisualDeckV4Input): Pr
     sourceAssets: (input.document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
     createdAt: input.createdAt,
   })
+}
+
+export function createVisualDeckV4Blueprint(input: CompileVisualDeckV4Input): PresentationBlueprint {
+  const { compilerVersion: _compilerVersion, ...draft } = compileVisualDeckV4Proposal(input)
+  return createVisualDeckV4BlueprintFromProposal(input, draft)
 }
