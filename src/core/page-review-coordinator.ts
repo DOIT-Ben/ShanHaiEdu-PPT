@@ -47,6 +47,7 @@ export class PageReviewCoordinator {
     if (run.status === 'DECK_REVIEW') return this.summary(run, blueprint)
     if (run.status !== 'PAGE_REVIEW') throw new Error('RUN_NOT_IN_PAGE_REVIEW')
     const requirements = blueprintImageRequirements(run, blueprint)
+    const fullPageRaster = blueprint.renderMode === 'VISUAL_DECK_V4'
     const completedImageSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
     const imageSteps = requirements.map((requirement) =>
@@ -62,6 +63,7 @@ export class PageReviewCoordinator {
       const imageStep = imageSteps[index]
       const output = imageStep ? this.imageOutput(imageStep) : null
       if (!imageStep || !output) throw new Error('PAGE_ARTIFACT_NOT_FOUND')
+      const v4Brief = blueprint.visualDeckV4Proposal?.slideBriefs.find((brief) => brief.pageNumber === slide.pageNumber)
       const result = await this.dependencies.reviewer.review({
         runId,
         stepId: `${imageStep.id}:review`,
@@ -69,8 +71,10 @@ export class PageReviewCoordinator {
         slideId: output.slideId,
         versionId: output.versionId,
         artifactId: output.artifactId,
-        visualIntent: requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
-        layout: requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
+        visualIntent: fullPageRaster && v4Brief
+          ? `${slide.visualIntent}；必须准确呈现锁定文案：${v4Brief.lockedCopy.join('｜')}；数字：${v4Brief.numbers.join('｜') || '无'}；公式：${v4Brief.formulas.join('｜') || '无'}`
+          : requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
+        layout: fullPageRaster ? 'VISUAL_DECK_V4' : requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
       })
       if (result.review === null) stopReviews = true
@@ -79,7 +83,7 @@ export class PageReviewCoordinator {
     reviews.push(...assetReviews.filter((result): result is ReviewSlideResult => result !== null))
 
     let rejected = reviews.filter((result) => result.review && !result.review.approved).length
-    if (!reviews.some((result) => result.review === null) && rejected === 0) {
+    if (!fullPageRaster && !reviews.some((result) => result.review === null) && rejected === 0) {
       try {
         const references = await requirePresentationArtifactReferences(this.dependencies.repository, run, blueprint)
         const previews = await renderAndStoreSlidePreviews({
@@ -118,7 +122,7 @@ export class PageReviewCoordinator {
 
     rejected = reviews.filter((result) => result.review && !result.review.approved).length
     const approved = reviews.filter((result) => result.review?.approved).length
-    const total = requirements.length + blueprint.slides.length
+    const total = requirements.length + (fullPageRaster ? 0 : blueprint.slides.length)
     if (reviews.some((result) => result.review === null) || rejected > 0 || reviews.length !== total) {
       await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED')
     } else if (approved === total) {
@@ -180,9 +184,11 @@ export class PageReviewCoordinator {
       const imageStep = latestCompletedAssetStep(imageSteps, requirement, run.revisionRound)
       return imageStep ? `${imageStep.idempotencyKey}:review` : ''
     }))
-    for (const slide of blueprint.slides) {
-      const reviewVersion = compositeReviewVersion(blueprint.title, slide.pageNumber)
-      reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${reviewVersion}`)
+    if (blueprint.renderMode !== 'VISUAL_DECK_V4') {
+      for (const slide of blueprint.slides) {
+        const reviewVersion = compositeReviewVersion(blueprint.title, slide.pageNumber)
+        reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${reviewVersion}`)
+      }
     }
     const reviews = (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'review_slide_image' && step.status === 'COMPLETED' && reviewKeys.has(step.idempotencyKey))
@@ -191,7 +197,8 @@ export class PageReviewCoordinator {
       status: run.status,
       approved: reviews.filter((result) => result.review?.approved).length,
       rejected: reviews.filter((result) => result.review && !result.review.approved).length,
-      total: blueprintImageRequirements(run, blueprint).length + blueprint.slides.length,
+      total: blueprintImageRequirements(run, blueprint).length
+        + (blueprint.renderMode === 'VISUAL_DECK_V4' ? 0 : blueprint.slides.length),
       reviews,
     }
   }

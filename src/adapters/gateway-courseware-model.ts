@@ -390,9 +390,14 @@ ${assetStrategyInstruction}
 
   async review(input: Parameters<VisualReviewPort['review']>[0]) {
     const image = await this.imageContent(input.tenantId, input.artifactId)
+    const visualDeckV4 = input.layout === 'VISUAL_DECK_V4'
     return this.request({
       model: this.dependencies.visionModel ?? this.dependencies.textModel,
-      system: `你是儿童课件视觉质检员。严格检查图片内错误文字、数字、公式、Logo、水印、知识不相关、年龄不适宜、主体残缺和低质量问题。
+      system: visualDeckV4
+        ? `你是整页视觉演示质检员。输入图片是最终16:9幻灯片，允许并且必须包含visualIntent中列出的锁定文案、数字和公式。
+严格检查锁定内容是否逐字准确、清楚可读，是否出现乱码、错字、错误数字、错误公式、无关文字、Logo或水印；同时检查知识相关性、主体残缺、裁切、遮挡、层级、对比度、构图和整体完成度。
+textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true。只有内容和视觉全部通过才可approved=true；拒绝时给出当前页可直接执行的修复指令。`
+        : `你是儿童课件视觉质检员。严格检查图片内错误文字、数字、公式、Logo、水印、知识不相关、年龄不适宜、主体残缺和低质量问题。
 当 layout 以 COMPOSITE: 开头时，还必须检查最终页面中的文字可读性、遮挡、越界、层级、留白和元素冲突；合成页中的原生课件文字允许存在，不得因此判 textDetected=true。
 只有所有检查通过才可 approved=true。拒绝时给出可直接用于重新生成或重新布局的明确指令。`,
       user: [
