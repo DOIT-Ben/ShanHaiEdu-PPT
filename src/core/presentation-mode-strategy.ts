@@ -35,7 +35,7 @@ const PRESENTATION_MODE_STRATEGIES = {
     planningKind: 'VISUAL_DECK_COMPILER',
     assetModel: 'COMPLETE_SLIDE_RASTER',
     deliveryModel: 'RASTER_SLIDES_IN_PPTX',
-    executionAvailability: 'NOT_IMPLEMENTED',
+    executionAvailability: 'AVAILABLE',
   },
 } as const satisfies Readonly<Record<PresentationMode, PresentationModeStrategy>>
 

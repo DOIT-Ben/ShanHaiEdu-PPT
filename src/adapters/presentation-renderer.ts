@@ -197,6 +197,7 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
         if (!blueprint.layeredDesign) throw new Error(`RENDER_LAYERED_DESIGN_MISSING:${blueprint.pageNumber}`)
         return renderLayeredSlide(source, blueprint.layeredDesign.elements, blueprint.layeredDesign.backgroundColor)
       }
+      if (input.blueprint.renderMode === 'VISUAL_DECK_V4') return normalizedPng(source.image)
       return renderSlide({
         image: source.image,
         deckTitle: input.blueprint.title,
@@ -241,7 +242,7 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
     pptx.layout = 'LAYOUT_WIDE'
     pptx.author = 'PPT Agent'
     pptx.company = 'PPT Agent'
-    pptx.subject = '可编辑教学课件'
+    pptx.subject = input.blueprint.renderMode === 'VISUAL_DECK_V4' ? '整页视觉演示' : '可编辑教学课件'
     pptx.title = input.blueprint.title
     pptx.theme = { headFontFace: FONT_FACE, bodyFontFace: FONT_FACE }
 
@@ -304,6 +305,20 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
             })
           }
         }
+        continue
+      }
+      if (input.blueprint.renderMode === 'VISUAL_DECK_V4') {
+        const image = await normalizedPng(source.image)
+        const slide = pptx.addSlide()
+        slide.addImage({
+          data: `data:image/png;base64,${image.toString('base64')}`,
+          x: 0,
+          y: 0,
+          w: PPTX_WIDTH,
+          h: PPTX_HEIGHT,
+          altText: `${blueprint.title}整页视觉`,
+          objectName: `visual-deck-page-${blueprint.pageNumber}`,
+        })
         continue
       }
       const image = await normalizedPng(source.image)

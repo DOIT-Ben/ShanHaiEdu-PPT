@@ -62,6 +62,37 @@ export function completeSlideImageV21Prompt(
   ].join(' ')
 }
 
+export function completeVisualDeckV4Prompt(
+  blueprint: Pick<PresentationBlueprint, 'visualDeckV4Proposal'>,
+  slide: PresentationBlueprint['slides'][number],
+) {
+  const proposal = blueprint.visualDeckV4Proposal
+  const brief = proposal?.slideBriefs.find((candidate) => candidate.pageNumber === slide.pageNumber)
+  if (!proposal || !brief) throw new Error('VISUAL_DECK_V4_BRIEF_MISSING')
+  return [
+    'Create one finished, full-bleed 16:9 presentation slide as a single raster image.',
+    `Slide role: ${brief.role}.`,
+    `Title: ${brief.title}.`,
+    `Core message: ${brief.keyClaim}.`,
+    `Audience takeaway: ${brief.audienceTakeaway}.`,
+    `Exact on-slide copy: ${brief.lockedCopy.join(' | ')}.`,
+    brief.facts.length > 0 ? `Facts that must remain accurate: ${brief.facts.join(' | ')}.` : '',
+    brief.numbers.length > 0 ? `Numbers that must appear exactly: ${brief.numbers.join(' | ')}.` : '',
+    brief.formulas.length > 0 ? `Formulas that must appear exactly: ${brief.formulas.join(' | ')}.` : '',
+    `Visual idea: ${brief.visualMetaphor}.`,
+    `Composition: ${brief.composition}.`,
+    `Information order: ${brief.informationHierarchy.join(' -> ')}.`,
+    `Global art direction: ${proposal.visualContract.artDirection}.`,
+    `Palette: ${proposal.visualContract.palette.join(', ')}.`,
+    `Typography: ${proposal.visualContract.typography}.`,
+    `Medium: ${proposal.visualContract.medium}.`,
+    `Composition rules: ${proposal.visualContract.compositionRules.join(' | ')}.`,
+    `Continuity rules: ${proposal.visualContract.continuityRules.join(' | ')}.`,
+    `Never include: ${[...proposal.visualContract.forbidden, ...proposal.presentationSpec.forbidden].join(' | ')}.`,
+    'Do not create a contact sheet, thumbnail grid, multi-slide collage, editor interface, frame, watermark, logo, or content from any other slide.',
+  ].filter(Boolean).join(' ')
+}
+
 export function blueprintImageRequirements(
   run: Pick<RunRecord, 'id' | 'revisionRound'>,
   blueprint: PresentationBlueprint,
@@ -76,9 +107,11 @@ export function blueprintImageRequirements(
       reuseKey: null,
       role: 'BASE_LAYER',
       knowledgePoint: slide.visualIntent,
-      prompt: blueprint.renderMode === 'SLIDE_IMAGE_V2_1'
-        ? completeSlideImageV21Prompt(blueprint, slide)
-        : slide.visualPrompt,
+      prompt: blueprint.renderMode === 'VISUAL_DECK_V4'
+        ? completeVisualDeckV4Prompt(blueprint, slide)
+        : blueprint.renderMode === 'SLIDE_IMAGE_V2_1'
+          ? completeSlideImageV21Prompt(blueprint, slide)
+          : slide.visualPrompt,
       negativePrompt: null,
       aspectRatio: '16:9',
       backgroundMode: 'OPAQUE',
