@@ -698,6 +698,11 @@ describe('planning runner', () => {
     },
   ])('classifies exhausted contract repair as $errorCode', async ({ errorCode, response, input, fieldPath }) => {
     const { repository, runner } = await fixture(document(), response)
+    if (input.presentationMode) {
+      await repository.transact('run-1', (transaction) => {
+        transaction.putRun({ ...transaction.run, presentationMode: input.presentationMode })
+      })
+    }
 
     const result = await runner.plan({ ...request, ...input })
     const issue = (await repository.listEvents('run-1')).find((event) => event.type === 'issue.detected')

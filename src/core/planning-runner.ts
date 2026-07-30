@@ -133,10 +133,22 @@ export class PlanningRunner {
 
   async plan(input: PlanPresentationInput): Promise<PlanPresentationResult> {
     const run = await this.requireRun(input.runId)
-    const strategy = getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2')
-    const visualDeckV4 = input.visualDeckV4 ?? run.visualDeckV4
+    const presentationMode = run.presentationMode ?? 'SLIDE_IMAGE_V2'
+    if (input.presentationMode && input.presentationMode !== presentationMode) {
+      throw new Error('RUN_PRESENTATION_MODE_MISMATCH')
+    }
+    if (input.visualDeckV4 && hashInput(input.visualDeckV4) !== hashInput(run.visualDeckV4 ?? null)) {
+      throw new Error('RUN_VISUAL_DECK_V4_CONFIG_MISMATCH')
+    }
+    const strategy = getPresentationModeStrategy(presentationMode)
+    const visualDeckV4 = run.visualDeckV4
     if (strategy.planningKind === 'VISUAL_DECK_COMPILER' && !visualDeckV4) throw new Error('VISUAL_DECK_V4_CONFIG_REQUIRED')
-    const effectiveInput = visualDeckV4 ? { ...input, visualDeckV4 } : input
+    const { visualDeckV4: _requestedVisualDeckV4, ...baseInput } = input
+    const effectiveInput: PlanPresentationInput = {
+      ...baseInput,
+      presentationMode,
+      ...(visualDeckV4 ? { visualDeckV4 } : {}),
+    }
     const document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
     const prepared = await this.prepare(effectiveInput, document)
     if (prepared.replayed) return prepared

@@ -72,6 +72,8 @@ describe('visual deck v4 planning runner', () => {
       visualDeckV4: request.visualDeckV4,
     } as const
 
+    await expect(runner.plan({ ...input, presentationMode: 'SLIDE_IMAGE_V2' }))
+      .rejects.toThrow('RUN_PRESENTATION_MODE_MISMATCH')
     const first = await runner.plan(input)
     const replay = await runner.plan(input)
     const proposal = first.blueprint?.visualDeckV4Proposal
