@@ -19,6 +19,7 @@ import type {
   StructuredModelPort,
 } from './ports'
 import { transitionRun } from './policy'
+import { getPresentationModeStrategy } from './presentation-mode-strategy'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
@@ -204,6 +205,7 @@ export class PlanningRunner {
   }
 
   private async createBlueprint(input: PlanPresentationInput, document: DocumentResult, inputHash: string, tenantId: string) {
+    const strategy = getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2')
     const basePayload = {
       slideCount: input.slideCount,
       visualDirection: input.visualDirection,
@@ -270,7 +272,7 @@ export class PlanningRunner {
       }
     }
     if (!initialDraft) throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
-    const draft = input.presentationMode === 'SLIDE_IMAGE_V2_1'
+    const draft = strategy.planningKind === 'BLUEPRINT_WITH_REFLECTION'
       ? await this.reflectBlueprint(input, initialDraft, tenantId)
       : initialDraft
     this.assertBlueprintCoverage(
@@ -595,10 +597,11 @@ export class PlanningRunner {
     if ([...availableAssets].some((id) => !curriculumAssets.includes(id) || !mappedAssets.has(id))) {
       throw new Error('BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE')
     }
-    if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) => !slide.layeredDesign)) {
+    const strategy = getPresentationModeStrategy(presentationMode)
+    if (strategy.assetModel === 'LAYERED_ELEMENTS' && draft.slides.some((slide) => !slide.layeredDesign)) {
       throw new Error('LAYERED_BLUEPRINT_SCHEMA_INVALID')
     }
-    if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) =>
+    if (strategy.assetModel === 'LAYERED_ELEMENTS' && draft.slides.some((slide) =>
       slide.layeredDesign!.elements.filter((element) =>
         element.kind === 'IMAGE' && element.role !== 'BASE_LAYER').length > maxVisualAssetsPerSlide)) {
       throw new Error('BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED')
@@ -625,7 +628,7 @@ export class PlanningRunner {
           stepId: step.id,
           summary: approvedPageDesign
             ? `已载入教师审核的 ${blueprint.slides.length} 页设计稿，开始逐页生成`
-            : input.presentationMode === 'SLIDE_IMAGE_V2_1'
+            : getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2').planningKind === 'BLUEPRINT_WITH_REFLECTION'
             ? `已反思并修订 ${blueprint.slides.length} 页教学蓝图`
             : `已生成 ${blueprint.slides.length} 页教学蓝图`,
         },

@@ -11,6 +11,7 @@ import { revisionBlueprintStepKey } from './active-blueprint'
 import { deliveryStepKey } from './delivery-runner'
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
+import { getPresentationModeStrategy } from './presentation-mode-strategy'
 import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRecord } from './ports'
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
@@ -247,6 +248,10 @@ export class RunService {
       return null
     }
     if (action.type === 'APPROVE_BLUEPRINT') {
+      const strategy = getPresentationModeStrategy(transaction.run.presentationMode ?? 'SLIDE_IMAGE_V2')
+      if (strategy.executionAvailability !== 'AVAILABLE') {
+        throw new RunServiceError(422, 'MODE_EXECUTION_NOT_IMPLEMENTED', `${strategy.mode} execution is not implemented`)
+      }
       const step = transaction.getStep(planningStepKey(transaction.run.id, transaction.run.planningAttempt ?? 0))
       if (!step || step.status !== 'COMPLETED') {
         throw new RunServiceError(409, 'BLUEPRINT_NOT_READY', 'blueprint is not ready for approval')
