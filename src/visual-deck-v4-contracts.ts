@@ -107,10 +107,10 @@ export const visualDeckV4SlideRoleSchema = z.enum([
 export const visualDeckV4SlideBriefSchema = z.object({
   pageNumber: z.number().int().min(1).max(50),
   role: visualDeckV4SlideRoleSchema,
-  title: boundedText(160),
+  title: boundedText(120),
   keyClaim: boundedText(1_000),
   audienceTakeaway: boundedText(1_000),
-  lockedCopy: z.array(boundedText(500)).min(1).max(12),
+  lockedCopy: z.array(boundedText(500)).min(1).max(8),
   facts: z.array(boundedText(500)).max(20),
   numbers: z.array(boundedText(200)).max(20),
   formulas: z.array(boundedText(300)).max(20),
@@ -148,6 +148,23 @@ export const visualDeckV4ProposalDraftSchema = z.object({
     if (slide.pageNumber !== index + 1) {
       context.addIssue({ code: 'custom', path: ['slideBriefs', index, 'pageNumber'], message: 'v4 slide pages must be continuous' })
     }
+    const visibleCopy = [slide.title, ...slide.lockedCopy].join('\n')
+    slide.numbers.forEach((number, numberIndex) => {
+      if (!visibleCopy.includes(number)) {
+        context.addIssue({
+          code: 'custom', path: ['slideBriefs', index, 'numbers', numberIndex],
+          message: 'v4 visible numbers must occur in title or lockedCopy',
+        })
+      }
+    })
+    slide.formulas.forEach((formula, formulaIndex) => {
+      if (!visibleCopy.includes(formula)) {
+        context.addIssue({
+          code: 'custom', path: ['slideBriefs', index, 'formulas', formulaIndex],
+          message: 'v4 visible formulas must occur in title or lockedCopy',
+        })
+      }
+    })
   })
   if (value.presentationSpec.sourceMode !== value.sourceUnderstanding.sourceMode) {
     context.addIssue({ code: 'custom', path: ['presentationSpec', 'sourceMode'], message: 'v4 source mode must be consistent' })

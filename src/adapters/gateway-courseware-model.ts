@@ -324,9 +324,11 @@ visualPrompt 只描述一张连续、无框的 16:9 主视觉背景：明确主�
 sourceUnderstanding必须逐字保留输入instruction并列出真实来源，CONTENT_SOURCE决定事实，TEACHING_GUIDE决定教学节奏，DESIGN_REFERENCE和BRAND_GUIDE只影响视觉，不得覆盖教材事实。所有真实sourceChunkIds必须且只能来自输入资料，并在资料理解中完整且不重复覆盖。
 presentationSpec必须原样采用输入的sourceMode、deckType、language、slideCount以及明确提供的audience和focus，并补全目标、风格、必须覆盖和禁止内容。deckPlan要有清楚的开场、展开、应用和收束，章节必须完整且不重复覆盖全部页面。
 slideBriefs必须严格等于指定页数，pageNumber从1连续。第一页建立主题，最后一页完成总结；中间页面根据内容使用情境、问题、解释、对比、过程、练习等不同作用。每页只承担一个主要任务，标题和核心观点不能重复。
-每页使用普通用户能理解的标题、keyClaim和audienceTakeaway。lockedCopy列出图片内必须准确出现的最终文字；facts、numbers、formulas分别保存不可改变的事实、数字和公式。每个SOURCE_GROUNDED页面必须引用支持本页内容的真实sourceChunkIds。
+每页使用普通用户能理解的标题、keyClaim和audienceTakeaway。title不超过120字；lockedCopy最多8条，列出除title之外图片内允许出现的全部最终文字，包括“分/合”“摆一摆”等短标签；不在title或lockedCopy中的标签禁止让图片模型自行补充。facts保存不可改变的知识事实；numbers和formulas只列图片中必须逐字出现的数字/公式，而且每一项必须已经原样出现在title或lockedCopy中。“两堆”等汉字数量不得另行写成数字2。每个SOURCE_GROUNDED页面必须引用支持本页内容的真实sourceChunkIds。
 visualMetaphor和composition必须具体说明当前页看见什么、视觉中心是什么、对象如何组织，不能只写“简洁、美观、信息图”。informationHierarchy写清阅读顺序。前后页关系必须形成连续讲述。
 visualContract统一整套配色、字体感觉、媒介、信息密度和连续性，但不得要求每页复制同一构图。最终交付是一页一张完整16:9图片，不规划可编辑文字层、组件层或多页拼贴。
+最终产物是静态图片型PPTX，不支持真正的视频、音频、动画、可点击控件或交互组件。来源中的“播放视频、点击、动画演示”等要求必须改编为可在一张静态页面中完成的观察情境、连续动作示意或关键帧，不得绘制播放按钮、编辑器控件或伪装成可操作界面的元素。
+如果输入包含contractRepairIssues，必须保持instruction、sourceMode、deckOptions、页数、受众、重点和全部真实来源不变，重新提交完整规划并逐项修正列出的字段合同问题。
 只提交工具参数，不输出解释、Markdown或思维过程。`,
         user: userContent,
         toolName: 'submit_visual_deck_v4_proposal',
@@ -394,9 +396,10 @@ ${assetStrategyInstruction}
     return this.request({
       model: this.dependencies.visionModel ?? this.dependencies.textModel,
       system: visualDeckV4
-        ? `你是整页视觉演示质检员。输入图片是最终16:9幻灯片，允许并且必须包含visualIntent中列出的锁定文案、数字和公式。
-严格检查锁定内容是否逐字准确、清楚可读，是否出现乱码、错字、错误数字、错误公式、无关文字、Logo或水印；同时检查知识相关性、主体残缺、裁切、遮挡、层级、对比度、构图和整体完成度。
-textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true。只有内容和视觉全部通过才可approved=true；拒绝时给出当前页可直接执行的修复指令。`
+        ? `你是整页视觉演示质检员。输入图片是最终16:9幻灯片，只允许包含visualIntent中列出的允许文字、数字和公式。
+严格检查允许内容是否准确、清楚可读，是否出现乱码、错字、错误数字、错误公式、未列入允许文字的标签、Logo或水印；同时检查知识相关性、主体残缺、裁切、遮挡、层级、对比度、构图和整体完成度。空格、换行以及不改变含义的普通标点差异可以接受；替换字词、改变数字或公式、增添标签、遗漏关键信息必须拒绝。
+只有阻断课堂使用的问题才可approved=false：错误或额外文字、数字、公式，错误对象数量，方向或知识关系矛盾，核心教学对象缺失，明显遮挡裁切、不可读或严重失衡。不得仅因装饰图标、卡片形状、放大镜/手势/虚线的精确位置、轻微间距、颜色或构图没有逐项复刻visualIntent而拒绝；核心含义正确且visualScore达到80时应approved=true，可在reasons中记录非阻断建议。
+textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true。拒绝时给出当前页可直接执行的修复指令。`
         : `你是儿童课件视觉质检员。严格检查图片内错误文字、数字、公式、Logo、水印、知识不相关、年龄不适宜、主体残缺和低质量问题。
 当 layout 以 COMPOSITE: 开头时，还必须检查最终页面中的文字可读性、遮挡、越界、层级、留白和元素冲突；合成页中的原生课件文字允许存在，不得因此判 textDetected=true。
 只有所有检查通过才可 approved=true。拒绝时给出可直接用于重新生成或重新布局的明确指令。`,

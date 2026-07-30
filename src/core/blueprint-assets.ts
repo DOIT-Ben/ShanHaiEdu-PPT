@@ -69,13 +69,14 @@ export function completeVisualDeckV4Prompt(
   const proposal = blueprint.visualDeckV4Proposal
   const brief = proposal?.slideBriefs.find((candidate) => candidate.pageNumber === slide.pageNumber)
   if (!proposal || !brief) throw new Error('VISUAL_DECK_V4_BRIEF_MISSING')
+  const allowedCopy = visualDeckV4AllowedCopy(brief)
   return [
     'Create one finished, full-bleed 16:9 presentation slide as a single raster image.',
     `Slide role: ${brief.role}.`,
     `Title: ${brief.title}.`,
     `Core message: ${brief.keyClaim}.`,
     `Audience takeaway: ${brief.audienceTakeaway}.`,
-    `Exact on-slide copy: ${brief.lockedCopy.join(' | ')}.`,
+    `Allowed on-slide copy (exact wording): ${allowedCopy.join(' | ')}.`,
     brief.facts.length > 0 ? `Facts that must remain accurate: ${brief.facts.join(' | ')}.` : '',
     brief.numbers.length > 0 ? `Numbers that must appear exactly: ${brief.numbers.join(' | ')}.` : '',
     brief.formulas.length > 0 ? `Formulas that must appear exactly: ${brief.formulas.join(' | ')}.` : '',
@@ -89,8 +90,15 @@ export function completeVisualDeckV4Prompt(
     `Composition rules: ${proposal.visualContract.compositionRules.join(' | ')}.`,
     `Continuity rules: ${proposal.visualContract.continuityRules.join(' | ')}.`,
     `Never include: ${[...proposal.visualContract.forbidden, ...proposal.presentationSpec.forbidden].join(' | ')}.`,
+    'Do not invent any additional labels, captions, page numbers, interface text, or decorative words. Every visible teaching label beyond the title must already be listed in the allowed on-slide copy.',
     'Do not create a contact sheet, thumbnail grid, multi-slide collage, editor interface, frame, watermark, logo, or content from any other slide.',
   ].filter(Boolean).join(' ')
+}
+
+export function visualDeckV4AllowedCopy(
+  brief: NonNullable<PresentationBlueprint['visualDeckV4Proposal']>['slideBriefs'][number],
+) {
+  return [...new Set([brief.title, ...brief.lockedCopy].map((copy) => copy.trim()).filter(Boolean))]
 }
 
 export function blueprintImageRequirements(

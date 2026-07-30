@@ -44,6 +44,20 @@ describe('visual deck v4 chain planner', () => {
       slideCount: 3,
       config: { ...base.config, deckOptions: { ...base.config.deckOptions, length: { slideCount: 3 } } },
     }, draft)).toThrow('VISUAL_DECK_V4_REQUEST_MISMATCH')
+
+    const longTitle = '课堂允许文字'.repeat(30).slice(0, 120)
+    const compiled = createVisualDeckV4BlueprintFromProposal(base, {
+      ...draft,
+      slideBriefs: draft.slideBriefs.map((brief, index) => index === 0 ? {
+        ...brief,
+        title: longTitle,
+        lockedCopy: Array.from({ length: 8 }, (_, copyIndex) => `允许文字${copyIndex + 1}`),
+      } : brief),
+    })
+    expect(compiled.slides[0]?.title).toHaveLength(120)
+    expect(compiled.slides[0]?.body).toHaveLength(8)
+    expect(compiled.visualDeckV4Proposal?.slideBriefs[0]?.title).toBe(longTitle)
+    expect(compiled.visualDeckV4Proposal?.slideBriefs[0]?.lockedCopy).toHaveLength(8)
   })
 
   test('compiles twelve source-grounded slide briefs from raw instruction and resolved sources', () => {

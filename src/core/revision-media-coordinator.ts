@@ -1,7 +1,7 @@
 import { CONTRACT_VERSION } from '../contracts'
 import { revisionPlanSchema } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintElementAssetKey, blueprintImageRequirements } from './blueprint-assets'
+import { blueprintElementAssetKey, blueprintImageRequirements, completeVisualDeckV4Prompt } from './blueprint-assets'
 import { hashInput } from './hash'
 import { MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
@@ -146,6 +146,9 @@ export class RevisionMediaCoordinator {
     return [...byPage].map(([pageNumber, instructions]) => {
       const slide = blueprint.slides[pageNumber - 1]
       if (!slide) throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
+      const approvedPrompt = blueprint.renderMode === 'VISUAL_DECK_V4'
+        ? completeVisualDeckV4Prompt(blueprint, slide)
+        : slide.visualPrompt
       return {
         pageNumber,
         elementId: null,
@@ -154,7 +157,7 @@ export class RevisionMediaCoordinator {
         stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
         slideId: `${run.id}:slide:${pageNumber}`,
         versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
-        prompt: `${slide.visualPrompt} Quality correction: ${instructions.join(' ')}`.slice(0, 3_000),
+        prompt: `Quality correction for this page only: ${instructions.join(' ')} Preserve the approved page brief and all allowed copy exactly. ${approvedPrompt}`.slice(0, 3_000),
         negativePrompt: null,
         aspectRatio: '16:9' as const,
         backgroundMode: 'OPAQUE' as const,

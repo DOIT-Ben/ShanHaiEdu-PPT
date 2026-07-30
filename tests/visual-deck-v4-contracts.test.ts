@@ -70,6 +70,14 @@ describe('visual deck v4 contracts', () => {
     const inventedSource = proposal()
     inventedSource.slideBriefs[1]!.sourceChunkIds = ['invented']
     expect(() => visualDeckV4ProposalSchema.parse(inventedSource)).toThrow()
+
+    const tooMuchCopy = proposal()
+    tooMuchCopy.slideBriefs[0]!.lockedCopy = Array.from({ length: 9 }, (_, index) => `第${index + 1}条文字`)
+    expect(() => visualDeckV4ProposalSchema.parse(tooMuchCopy)).toThrow()
+
+    const inventedVisibleNumber = proposal()
+    inventedVisibleNumber.slideBriefs[0]!.numbers = ['2']
+    expect(() => visualDeckV4ProposalSchema.parse(inventedVisibleNumber)).toThrow()
   })
 
   test('accepts only ordered rendered slides in a v4 manifest', () => {

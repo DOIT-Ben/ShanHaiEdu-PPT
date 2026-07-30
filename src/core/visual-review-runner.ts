@@ -1,8 +1,12 @@
 import { CONTRACT_VERSION } from '../contracts'
 import { slideVisualReviewSchema, type SlideVisualReview } from '../presentation-contracts'
 import { hashInput } from './hash'
+import { StructuredModelError } from './ports'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord, VisualReviewPort } from './ports'
 import { transitionRun } from './policy'
+
+const MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS = 3
+const VISUAL_REVIEW_RETRY_DELAYS_MS = [2_000, 10_000] as const
 
 export type ReviewSlideInput = Readonly<{
   runId: string
@@ -27,6 +31,7 @@ export class VisualReviewRunner {
     repository: AgentRepository
     reviewer: VisualReviewPort
     clock: ClockPort
+    sleep?: (milliseconds: number) => Promise<void>
   }>) {}
 
   async review(input: ReviewSlideInput): Promise<ReviewSlideResult> {
@@ -34,7 +39,7 @@ export class VisualReviewRunner {
     if (prepared.replayed) return prepared
 
     try {
-      const raw = await this.dependencies.reviewer.review({
+      const raw = await this.reviewWithProviderRetry({
         tenantId: prepared.run.host.tenantId,
         artifactId: input.artifactId,
         visualIntent: input.visualIntent,
@@ -49,6 +54,21 @@ export class VisualReviewRunner {
       const step = await this.fail(input, 'VISUAL_REVIEW_FAILED')
       return { step, review: null, replayed: false }
     }
+  }
+
+  private async reviewWithProviderRetry(input: Parameters<VisualReviewPort['review']>[0]) {
+    for (let attempt = 1; attempt <= MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS; attempt++) {
+      try {
+        return await this.dependencies.reviewer.review(input)
+      } catch (error) {
+        if (!(error instanceof StructuredModelError) || !error.retryable
+          || attempt === MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS) throw error
+        await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
+          VISUAL_REVIEW_RETRY_DELAYS_MS[attempt - 1] ?? VISUAL_REVIEW_RETRY_DELAYS_MS.at(-1)!,
+        )
+      }
+    }
+    throw new Error('VISUAL_REVIEW_PROVIDER_RETRY_LOOP_INVALID')
   }
 
   private async prepare(input: ReviewSlideInput): Promise<ReviewSlideResult & { run: RunRecord }> {

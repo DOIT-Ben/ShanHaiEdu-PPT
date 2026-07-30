@@ -42,7 +42,15 @@ export class RevisionPlanningRunner {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const review = await this.requireReview(run)
     if (passesDeckQuality(review)) throw new Error('DECK_REVIEW_ALREADY_PASSED')
-    if (run.revisionRound >= run.maxRevisionRounds) {
+    const completedSteps = await this.dependencies.repository.listSteps(run.id)
+    const pageRevisionCount = completedSteps.filter((step) =>
+      step.tool === 'plan_page_revision' && step.status === 'COMPLETED').length
+    const deckRevisionCount = completedSteps.filter((step) =>
+      step.tool === 'plan_revision' && step.status === 'COMPLETED').length
+    const effectiveDeckRevisionCount = pageRevisionCount === 0 && deckRevisionCount === 0
+      ? run.revisionRound
+      : deckRevisionCount
+    if (effectiveDeckRevisionCount >= run.maxRevisionRounds) {
       return this.requireHuman(run, 'MAX_REVISION_ROUNDS_REACHED')
     }
     if (review.issues.length === 0) return this.requireHuman(run, 'REVISION_PLAN_HAS_NO_ISSUES')

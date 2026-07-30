@@ -15,6 +15,7 @@ import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
@@ -116,9 +117,28 @@ function layeredRevisionPlan() {
   }
 }
 
+function visualDeckV4Blueprint() {
+  const source = { kind: 'TEXT' as const, name: '光合作用教材.txt', text: '绿色植物利用光能制造有机物并释放氧气。'.repeat(8) }
+  return createVisualDeckV4Blueprint({
+    runId: 'run-1', inputHash: 'plan-hash', source,
+    document: {
+      name: source.name, isComplete: true, missingRanges: [],
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+    },
+    config: {
+      instruction: '制作两页光合作用视觉演示', sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: {
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+        audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
+      },
+    },
+    slideCount: 2, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
+  })
+}
+
 async function fixture(
   overrides: Partial<RunRecord> = {},
-  inputs: Readonly<{ blueprint?: ReturnType<typeof blueprint> | ReturnType<typeof layeredBlueprint>; plan?: ReturnType<typeof revisionPlan> }> = {},
+  inputs: Readonly<{ blueprint?: unknown; plan?: ReturnType<typeof revisionPlan> }> = {},
 ) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
@@ -215,5 +235,22 @@ describe('revision media coordinator', () => {
       backgroundMode: 'TRANSPARENT',
       prompt: expect.stringContaining('transparent leaf'),
     })
+  })
+
+  test('redraws a v4 page with the complete approved brief plus the review correction', async () => {
+    const base = visualDeckV4Blueprint()
+    const correction = 'Keep all allowed copy unchanged and remove the extra numeral 2 from the bird label.'
+    const revision = {
+      ...revisionPlan(),
+      operations: [{ ...revisionPlan().operations[0]!, instruction: correction, sourceChunkIds: ['chunk-1'] }],
+    }
+    const { images, coordinator } = await fixture({}, { blueprint: base, plan: revision })
+
+    await coordinator.submit('run-1', 5)
+
+    const request = [...images.requests.values()][0]
+    expect(request?.prompt).toContain('Create one finished, full-bleed 16:9 presentation slide')
+    expect(request?.prompt).toContain(base.visualDeckV4Proposal!.slideBriefs[1]!.title)
+    expect(request?.prompt).toContain(correction)
   })
 })

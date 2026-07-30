@@ -414,7 +414,7 @@ export const deckReviewDraftSchema = z.object({
 
 export const deckReviewSchema = deckReviewDraftSchema.extend({
   id: identifierSchema,
-  revisionRound: z.number().int().min(0).max(2),
+  revisionRound: z.number().int().min(0).max(4),
   createdAt: z.string().datetime(),
 }).strict()
 
@@ -436,7 +436,7 @@ export const revisionPlanDraftSchema = z.object({
 export const revisionPlanSchema = revisionPlanDraftSchema.extend({
   id: identifierSchema,
   reviewId: identifierSchema,
-  revisionRound: z.number().int().min(1).max(2),
+  revisionRound: z.number().int().min(1).max(4),
   createdAt: z.string().datetime(),
 }).strict()
 
@@ -467,7 +467,7 @@ export const webAssetProvenanceSchema = z.object({
 export const deliveryRecordSchema = z.object({
   id: identifierSchema,
   runId: identifierSchema,
-  revisionRound: z.number().int().min(0).max(2),
+  revisionRound: z.number().int().min(0).max(4),
   qualityScore: z.number().int().min(0).max(100).nullable(),
   qualityOverride: z.boolean(),
   qualityOverrideAudit: z.object({

@@ -31,7 +31,7 @@ import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
-const PROVIDER_RETRY_DELAYS_MS = [250, 1_000] as const
+const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000] as const
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
@@ -214,41 +214,33 @@ export class PlanningRunner {
     tenantId: string,
     config: NonNullable<CreateRunRequest['visualDeckV4']>,
   ) {
-    const raw = await this.executeWithProviderRetry(input, {
-      tenantId,
-      operation: 'create_visual_deck_v4_proposal',
-      schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
-      idempotencyKey: input.idempotencyKey,
-      payload: {
-        presentationMode: 'VISUAL_DECK_V4',
-        instruction: config.instruction,
-        deckOptions: config.deckOptions,
-        sourceMode: config.sourceMode,
-        sourceReferences: visualDeckV4SourceReferences(input.source),
-        slideCount: input.slideCount,
-        visualDirection: input.visualDirection,
-        ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
-        ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
-        document: {
-          name: document.name,
-          sources: document.sources ?? [],
-          chunks: document.chunks.map((chunk) => ({
-            id: chunk.id,
-            sourceId: chunk.sourceId,
-            sha256: chunk.sha256,
-            text: chunk.text,
-            pageStart: chunk.pageStart,
-            pageEnd: chunk.pageEnd,
-            region: chunk.region,
-          })),
-          assets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
-          missingRanges: document.missingRanges,
-        },
+    const basePayload = {
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      instruction: config.instruction,
+      deckOptions: config.deckOptions,
+      sourceMode: config.sourceMode,
+      sourceReferences: visualDeckV4SourceReferences(input.source),
+      slideCount: input.slideCount,
+      visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+      document: {
+        name: document.name,
+        sources: document.sources ?? [],
+        chunks: document.chunks.map((chunk) => ({
+          id: chunk.id,
+          sourceId: chunk.sourceId,
+          sha256: chunk.sha256,
+          text: chunk.text,
+          pageStart: chunk.pageStart,
+          pageEnd: chunk.pageEnd,
+          region: chunk.region,
+        })),
+        assets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
+        missingRanges: document.missingRanges,
       },
-      sourceAssets: document.assets ?? [],
-    })
-    const draft = visualDeckV4ProposalDraftSchema.parse(raw)
-    return createVisualDeckV4BlueprintFromProposal({
+    }
+    const compilerInput = {
       runId: input.runId,
       inputHash,
       source: input.source,
@@ -259,7 +251,40 @@ export class PlanningRunner {
       ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
       ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
       createdAt: this.dependencies.clock.now().toISOString(),
-    }, draft)
+    }
+    let repairIssues: { path: string; message: string }[] = []
+    for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
+      try {
+        const modelKey = attempt === 0
+          ? input.idempotencyKey
+          : `visual-deck-v4-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`
+        const raw = await this.executeWithProviderRetry(input, {
+          tenantId,
+          operation: 'create_visual_deck_v4_proposal',
+          schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+          idempotencyKey: modelKey,
+          payload: { ...basePayload, ...(repairIssues.length > 0 ? { contractRepairIssues: repairIssues } : {}) },
+          sourceAssets: document.assets ?? [],
+        })
+        const draft = visualDeckV4ProposalDraftSchema.parse(raw)
+        return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
+      } catch (error) {
+        if (error instanceof PlanningFailureError) throw error
+        const issues = this.contractIssues(error)
+        if (!issues) {
+          throw new PlanningFailureError(this.contractFailure(
+            input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, false,
+          ))
+        }
+        if (attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) {
+          throw new PlanningFailureError(this.contractFailure(
+            input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, true,
+          ))
+        }
+        repairIssues = issues
+      }
+    }
+    throw new Error('VISUAL_DECK_V4_CONTRACT_REPAIR_EXHAUSTED')
   }
 
   private createApprovedBlueprint(
@@ -589,7 +614,9 @@ export class PlanningRunner {
         message: issue.message,
       }))
     }
-    if (error instanceof Error && (error.message.startsWith('BLUEPRINT_') || error.message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID')) {
+    if (error instanceof Error && (error.message.startsWith('BLUEPRINT_')
+      || error.message.startsWith('VISUAL_DECK_V4_')
+      || error.message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID')) {
       return [{ path: 'blueprint', message: error.message }]
     }
     if (error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID') {

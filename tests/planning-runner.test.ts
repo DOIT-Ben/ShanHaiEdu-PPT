@@ -572,7 +572,7 @@ describe('planning runner', () => {
     expect(result.step.status).toBe('COMPLETED')
     expect(executions).toHaveLength(2)
     expect(executions[0]!.idempotencyKey).toBe(executions[1]!.idempotencyKey)
-    expect(delays).toEqual([250])
+    expect(delays).toEqual([5_000])
     expect((await repository.listEvents('run-1')).some((event) =>
       event.type === 'tool.progress' && event.payload.summary?.includes('自动重试 2/3'))).toBe(true)
   })

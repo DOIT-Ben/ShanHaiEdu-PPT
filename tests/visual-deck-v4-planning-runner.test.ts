@@ -49,9 +49,11 @@ describe('visual deck v4 planning runner', () => {
     } as const
     const created = await service.create(request, 'create-v4-planning-0001')
     let providerCalls = 0
+    const providerPayloads: unknown[] = []
     const model: StructuredModelPort = {
       async execute(modelInput) {
         providerCalls += 1
+        providerPayloads.push(structuredClone(modelInput.payload))
         expect(modelInput.operation).toBe('create_visual_deck_v4_proposal')
         const payload = modelInput.payload as {
           document: {
@@ -72,6 +74,14 @@ describe('visual deck v4 planning runner', () => {
           createdAt: clock.now().toISOString(),
         })
         const { compilerVersion: _compilerVersion, ...draft } = proposal
+        if (providerCalls === 1) {
+          return {
+            ...draft,
+            slideBriefs: draft.slideBriefs.map((brief, index) => index === 9
+              ? { ...brief, sourceChunkIds: ['missing-source-chunk'] }
+              : brief),
+          }
+        }
         return draft
       },
     }
@@ -99,7 +109,17 @@ describe('visual deck v4 planning runner', () => {
     const replay = await runner.plan(input)
     const proposal = first.blueprint?.visualDeckV4Proposal
 
-    expect(providerCalls).toBe(1)
+    expect(providerCalls).toBe(2)
+    expect(providerPayloads[1]).toMatchObject({
+      presentationMode: 'VISUAL_DECK_V4',
+      instruction: request.visualDeckV4.instruction,
+      slideCount: request.slideCount,
+      sourceMode: request.visualDeckV4.sourceMode,
+      contractRepairIssues: [{
+        path: 'slideBriefs.9.sourceChunkIds',
+        message: 'grounded v4 slides require valid source chunks',
+      }],
+    })
     expect(first.replayed).toBe(false)
     expect(replay.replayed).toBe(true)
     expect(proposal?.slideBriefs).toHaveLength(12)

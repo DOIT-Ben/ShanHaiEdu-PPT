@@ -6,6 +6,7 @@ import { planningStepKey } from '../src/core/planning-runner'
 import type { DocumentPort, RunRecord } from '../src/core/ports'
 import { RevisionApplicationRunner } from '../src/core/revision-application-runner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 
 function run(): RunRecord {
   return {
@@ -103,6 +104,39 @@ function layeredDraft() {
   return structuredClone(value)
 }
 
+function visualDeckV4Blueprint() {
+  const source = {
+    kind: 'SOURCE_PACKAGE' as const,
+    name: '光合作用教材',
+    sources: [
+      { kind: 'TEXT' as const, sourceId: 'source-1', name: '定义.txt', text: '绿色植物利用光能。'.repeat(8) },
+      { kind: 'TEXT' as const, sourceId: 'source-2', name: '过程.txt', text: '制造有机物并释放氧气。'.repeat(8) },
+    ],
+  }
+  return createVisualDeckV4Blueprint({
+    runId: 'run-1', inputHash: 'plan-hash', source,
+    document: {
+      name: source.name, isComplete: true, missingRanges: [],
+      chunks: [
+        { id: 'chunk-1', sourceId: 'source-1', text: '绿色植物利用光能。'.repeat(8), sha256: 'sha-1' },
+        { id: 'chunk-2', sourceId: 'source-2', text: '制造有机物并释放氧气。'.repeat(8), sha256: 'sha-2' },
+      ],
+      sources: [
+        { id: 'source-1', name: '定义.txt', kind: 'TEXT', status: 'READY' },
+        { id: 'source-2', name: '过程.txt', kind: 'TEXT', status: 'READY' },
+      ],
+    },
+    config: {
+      instruction: '制作两页光合作用视觉演示', sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: {
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+        audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
+      },
+    },
+    slideCount: 2, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
+  })
+}
+
 class StaticDocumentPort implements DocumentPort {
   async resolve() {
     return {
@@ -115,7 +149,7 @@ class StaticDocumentPort implements DocumentPort {
   }
 }
 
-async function fixture(response: unknown, revisionPlan = plan(), baseBlueprint = blueprint()) {
+async function fixture(response: unknown, revisionPlan = plan(), baseBlueprint: unknown = blueprint()) {
   const repository = new InMemoryAgentRepository()
   const application = new MockRevisionApplicationPort(response)
   await repository.createRun(run())
@@ -172,6 +206,18 @@ describe('revision application runner', () => {
 
     expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'REVISING', revisionRound: 1 })
+  })
+
+  test('preserves the approved v4 plan for a page-only redraw without another model rewrite', async () => {
+    const base = visualDeckV4Blueprint()
+    const { application, runner } = await fixture({}, plan('REGENERATE_IMAGE'), base)
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true, replayed: false })
+    expect(result.blueprint?.visualDeckV4Proposal).toEqual(base.visualDeckV4Proposal)
+    expect(result.blueprint?.slides).toEqual(base.slides)
+    expect(application.requests.size).toBe(0)
   })
 
   test('rejects changes to a non-targeted element during v3 single-asset regeneration', async () => {

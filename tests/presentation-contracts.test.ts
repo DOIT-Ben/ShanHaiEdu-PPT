@@ -163,7 +163,7 @@ describe('deck review and revision contracts', () => {
     })
 
     expect(plan.operations).toHaveLength(1)
-    expect(revisionPlanSchema.safeParse({ ...plan, revisionRound: 3 }).success).toBe(false)
+    expect(revisionPlanSchema.safeParse({ ...plan, revisionRound: 5 }).success).toBe(false)
     expect(revisionPlanSchema.safeParse({
       ...plan,
       operations: [{ ...plan.operations[0], issueIds: [] }],

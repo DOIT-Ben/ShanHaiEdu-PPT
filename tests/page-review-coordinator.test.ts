@@ -9,9 +9,12 @@ import {
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord, VisualReviewPort } from '../src/core/ports'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
+import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
+import type { PresentationBlueprint } from '../src/presentation-contracts'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 
-function run(): RunRecord {
+function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
     creationKey: 'create-run-1',
@@ -38,6 +41,7 @@ function run(): RunRecord {
     leaseVersion: 0,
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z',
+    ...overrides,
   }
 }
 
@@ -65,9 +69,39 @@ function blueprint() {
   }
 }
 
+function visualDeckV4Blueprint() {
+  const source = {
+    kind: 'TEXT' as const,
+    name: '分与合教材.txt',
+    text: '把五只小鸟分成两组，记录每一种分法，并检查合起来仍然是五只。'.repeat(8),
+  }
+  return createVisualDeckV4Blueprint({
+    runId: 'run-1', inputHash: 'plan-hash', source,
+    document: {
+      name: source.name,
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+      isComplete: true,
+      missingRanges: [],
+    },
+    config: {
+      instruction: '制作三页讲解5以内数的分与合的视觉PPT',
+      sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: {
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 3 }, aspectRatio: '16:9',
+        audience: '幼儿园大班学生', focus: '理解5的分与合', styleHint: '明亮清晰的儿童课堂信息图',
+      },
+    },
+    slideCount: 3,
+    visualDirection: '明亮清晰的儿童课堂信息图',
+    createdAt: '2026-07-21T00:00:00.000Z',
+  })
+}
+
 async function fixture(options: Readonly<{
   reviewerPort?: VisualReviewPort
   reviewConcurrency?: number
+  runOverrides?: Partial<RunRecord>
+  plannedBlueprint?: PresentationBlueprint
 }> = {}) {
   const repository = new InMemoryAgentRepository()
   const reviewerPort = options.reviewerPort ?? new MockVisualReviewPort({
@@ -84,12 +118,12 @@ async function fixture(options: Readonly<{
     tenantId: 'frameflow', runId: 'run-1', name: `slide-${pageNumber}.png`, mimeType: 'image/png',
     bytes: new TextEncoder().encode(`source-${pageNumber}`), idempotencyKey: `source-${pageNumber}`,
   })))
-  await repository.createRun(run())
+  await repository.createRun(run(options.runOverrides))
   await repository.transact('run-1', (transaction) => {
     transaction.putStep({
       id: 'step-plan', runId: 'run-1', idempotencyKey: planningStepKey('run-1'), inputHash: 'plan-hash',
       tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
-      externalOperationId: null, errorCode: null, output: blueprint(),
+      externalOperationId: null, errorCode: null, output: options.plannedBlueprint ?? blueprint(),
       createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
     })
     for (const pageNumber of [1, 2, 3]) {
@@ -157,6 +191,56 @@ describe('page review coordinator', () => {
     expect(result).toMatchObject({ status: 'NEEDS_HUMAN', approved: 2, rejected: 1, total: 6 })
     expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')).toHaveLength(3)
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toContain('approval.required')
+  })
+
+  test('creates a bounded page-only revision plan for rejected v4 pages', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        source: { kind: 'TEXT', name: '分与合教材.txt', text: '把五只小鸟分成两组，记录每一种分法，并检查合起来仍然是五只。'.repeat(8) },
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '制作三页讲解5以内数的分与合的视觉PPT',
+          sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 3 }, aspectRatio: '16:9',
+            audience: '幼儿园大班学生', focus: '理解5的分与合', styleHint: '明亮清晰的儿童课堂信息图',
+          },
+        },
+        automationLevel: 'BOUNDED_AUTO',
+      },
+    })
+    const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    const artifactId = (imageStep.output as { artifactId: string }).artifactId
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(artifactId, {
+      approved: false,
+      textDetected: true,
+      visualScore: 52,
+      reasons: ['标题中的数字2被错误写成“两”'],
+      retryInstruction: 'Keep all allowed copy unchanged and render the Arabic numeral 2 exactly.',
+    })
+
+    const result = await coordinator.reviewAll('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', approved: 2, rejected: 1, total: 3 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'REVISING', revisionRound: 1 })
+    const planStep = (await repository.listSteps('run-1'))
+      .find((step) => step.idempotencyKey === revisionPlanStepKey('run-1', 1))
+    expect(planStep).toMatchObject({
+      tool: 'plan_page_revision',
+      status: 'COMPLETED',
+      output: {
+        revisionRound: 1,
+        operations: [{
+          slideId: 'run-1:slide:2',
+          kind: 'REGENERATE_IMAGE',
+          instruction: 'Keep all allowed copy unchanged and render the Arabic numeral 2 exactly.',
+        }],
+      },
+    })
+    const requests = [...(reviewerPort as MockVisualReviewPort).requests.values()]
+    expect(requests[1]?.visualIntent).toContain(`允许文字：${planned.slides[1]!.title}`)
   })
 
   test('replays a completed page-review phase without model calls', async () => {

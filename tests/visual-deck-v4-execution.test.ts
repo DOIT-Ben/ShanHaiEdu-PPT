@@ -55,8 +55,10 @@ describe('visual deck v4 execution', () => {
 
     expect(requirements).toHaveLength(2)
     expect(requirements[0]?.prompt).toContain('single raster image')
+    expect(requirements[0]?.prompt).toContain('Allowed on-slide copy')
     expect(requirements[0]?.prompt).toContain(briefs[0]!.title)
     expect(requirements[0]?.prompt).toContain(briefs[0]!.lockedCopy[0]!)
+    expect(requirements[0]?.prompt).toContain('Do not invent any additional labels')
     expect(requirements[0]?.prompt).not.toContain(briefs[1]!.title)
     expect(requirements[0]?.prompt).not.toContain(briefs[1]!.keyClaim)
     expect(requirements[1]?.prompt).not.toContain(briefs[0]!.keyClaim)

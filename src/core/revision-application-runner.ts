@@ -61,6 +61,19 @@ export class RevisionApplicationRunner {
     if (prepared) return prepared
 
     try {
+      if (base.renderMode === 'VISUAL_DECK_V4'
+        && plan.operations.every((operation) => operation.kind !== 'UPDATE_CONTENT')) {
+        const slideIds = new Set(base.slides.map((slide) => `${run.id}:slide:${slide.pageNumber}`))
+        if (plan.operations.some((operation) => !slideIds.has(operation.slideId))) {
+          throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
+        }
+        const blueprint = presentationBlueprintSchema.parse({
+          ...base,
+          id: `${run.id}:blueprint:r${run.revisionRound}`,
+          createdAt: this.dependencies.clock.now().toISOString(),
+        })
+        return this.complete(run, idempotencyKey, blueprint, plan)
+      }
       const raw = await this.dependencies.application.apply({
         tenantId: run.host.tenantId,
         blueprint: base,
