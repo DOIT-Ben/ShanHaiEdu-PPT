@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { layoutPresentationText } from './presentation-text-layout'
+import { visualDeckV4ProposalSchema } from './visual-deck-v4-contracts'
 
 const identifierSchema = z.string().trim().min(1).max(160)
 const sourceChunkIdsSchema = z.array(identifierSchema).min(1).max(200)
@@ -275,8 +276,9 @@ const sourceAssetSummarySchema = z.array(z.object({
 export const presentationBlueprintSchema = blueprintDraftSchema.extend({
   id: identifierSchema,
   visualDirection: z.string().trim().min(3).max(1_000),
-  renderMode: z.enum(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3']).optional(),
+  renderMode: z.enum(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3', 'VISUAL_DECK_V4']).optional(),
   coverDesignMode: z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE']).optional(),
+  visualDeckV4Proposal: visualDeckV4ProposalSchema.optional(),
   sourceManifest: sourceManifestSchema,
   sourceAssets: sourceAssetSummarySchema,
   createdAt: z.string().datetime(),
@@ -305,6 +307,22 @@ export const presentationBlueprintSchema = blueprintDraftSchema.extend({
     } : {}),
   })),
 })).superRefine((value, context) => {
+  if (value.renderMode === 'VISUAL_DECK_V4' && !value.visualDeckV4Proposal) {
+    context.addIssue({ code: 'custom', path: ['visualDeckV4Proposal'], message: 'v4 blueprint requires a visual deck proposal' })
+  }
+  if (value.renderMode !== 'VISUAL_DECK_V4' && value.visualDeckV4Proposal) {
+    context.addIssue({ code: 'custom', path: ['visualDeckV4Proposal'], message: 'v4 proposal is only valid for v4 blueprints' })
+  }
+  if (value.visualDeckV4Proposal) {
+    value.slides.forEach((slide, index) => {
+      const brief = value.visualDeckV4Proposal!.slideBriefs[index]
+      if (!brief || brief.pageNumber !== slide.pageNumber || brief.title !== slide.title) {
+        context.addIssue({ code: 'custom', path: ['slides', index], message: 'v4 blueprint slides must match proposal briefs' })
+      } else if (brief.sourceChunkIds.some((id) => !slide.sourceChunkIds.includes(id))) {
+        context.addIssue({ code: 'custom', path: ['slides', index, 'sourceChunkIds'], message: 'v4 blueprint must retain brief source references' })
+      }
+    })
+  }
   if (value.renderMode !== 'LAYERED_COURSEWARE_V3') return
   value.slides.forEach((slide, index) => {
     if (!slide.layeredDesign) {

@@ -3,6 +3,7 @@ import {
   visualDeckV4DeckManifestSchema,
   visualDeckV4ProposalSchema,
 } from '../src/visual-deck-v4-contracts'
+import { presentationBlueprintSchema } from '../src/presentation-contracts'
 
 function proposal() {
   return {
@@ -84,5 +85,42 @@ describe('visual deck v4 contracts', () => {
     expect(visualDeckV4DeckManifestSchema.parse(manifest).slides).toHaveLength(2)
     manifest.slides.reverse()
     expect(() => visualDeckV4DeckManifestSchema.parse(manifest)).toThrow()
+  })
+
+  test('binds a v4 proposal to the compatible persisted blueprint', () => {
+    const parsedProposal = visualDeckV4ProposalSchema.parse(proposal())
+    const blueprint = {
+      id: 'blueprint-v4',
+      title: parsedProposal.deckPlan.title,
+      visualDirection: parsedProposal.visualContract.artDirection,
+      renderMode: 'VISUAL_DECK_V4' as const,
+      visualDeckV4Proposal: parsedProposal,
+      sourceManifest: [],
+      sourceAssets: [],
+      createdAt: '2026-07-30T00:00:00.000Z',
+      curriculum: {
+        subject: null,
+        grade: null,
+        lessonTitle: parsedProposal.deckPlan.title,
+        sourceSummary: '这是一份用于验证V4规划工件持久化和来源绑定关系的完整资料摘要。',
+        learningObjectives: [parsedProposal.presentationSpec.goal],
+        scopeBoundaries: ['只使用已经绑定的来源资料'],
+        prohibitedExtensions: [],
+        sourceChunkIds: ['chunk-1', 'chunk-2'],
+      },
+      slides: parsedProposal.slideBriefs.map((brief) => ({
+        pageNumber: brief.pageNumber,
+        title: brief.title,
+        body: brief.lockedCopy,
+        layout: brief.pageNumber === 1 ? 'HERO' as const : 'STATEMENT' as const,
+        visualIntent: brief.visualMetaphor,
+        visualPrompt: `V4执行阶段只允许编译当前第${brief.pageNumber}页的独立视觉请求。`,
+        sourceChunkIds: brief.sourceChunkIds,
+      })),
+    }
+
+    expect(presentationBlueprintSchema.parse(blueprint).visualDeckV4Proposal?.slideBriefs).toHaveLength(2)
+    expect(() => presentationBlueprintSchema.parse({ ...blueprint, visualDeckV4Proposal: undefined })).toThrow()
+    expect(() => presentationBlueprintSchema.parse({ ...blueprint, renderMode: 'SLIDE_IMAGE_V2' })).toThrow()
   })
 })
