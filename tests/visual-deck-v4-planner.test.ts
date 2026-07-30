@@ -1,7 +1,51 @@
 import { describe, expect, test } from 'bun:test'
-import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
+import {
+  compileVisualDeckV4Proposal,
+  createVisualDeckV4Blueprint,
+  createVisualDeckV4BlueprintFromProposal,
+} from '../src/core/visual-deck-v4-planner'
 
 describe('visual deck v4 mock planner', () => {
+  test('rejects a model proposal that changes frozen request fields', () => {
+    const source = {
+      kind: 'TEXT' as const,
+      name: '分数教材.txt',
+      text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。'.repeat(4),
+    }
+    const base = {
+      runId: 'run-v4-request-binding', inputHash: 'input-v4-request-binding', source,
+      document: {
+        name: source.name,
+        chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+        isComplete: true,
+        missingRanges: [],
+      },
+      config: {
+        instruction: '为三年级学生制作一套认识二分之一的视觉演示',
+        sourceMode: 'SOURCE_GROUNDED' as const,
+        deckOptions: {
+          deckType: 'DETAILED_DECK' as const, language: 'zh-CN', length: { slideCount: 2 },
+          aspectRatio: '16:9' as const, audience: '小学三年级学生', focus: '平均分和二分之一',
+          styleHint: '温暖的儿童绘本课堂视觉',
+        },
+      },
+      slideCount: 2,
+      visualDirection: '温暖的儿童绘本课堂视觉',
+      createdAt: '2026-07-30T00:00:00.000Z',
+    }
+    const { compilerVersion: _compilerVersion, ...draft } = compileVisualDeckV4Proposal(base)
+
+    expect(() => createVisualDeckV4BlueprintFromProposal(base, {
+      ...draft,
+      sourceUnderstanding: { ...draft.sourceUnderstanding, instruction: '模型擅自改写后的要求' },
+    })).toThrow('VISUAL_DECK_V4_REQUEST_MISMATCH')
+    expect(() => createVisualDeckV4BlueprintFromProposal({
+      ...base,
+      slideCount: 3,
+      config: { ...base.config, deckOptions: { ...base.config.deckOptions, length: { slideCount: 3 } } },
+    }, draft)).toThrow('VISUAL_DECK_V4_REQUEST_MISMATCH')
+  })
+
   test('compiles twelve source-grounded slide briefs from raw instruction and resolved sources', () => {
     const chunks = Array.from({ length: 4 }, (_, index) => ({
       id: `chunk-${index + 1}`,

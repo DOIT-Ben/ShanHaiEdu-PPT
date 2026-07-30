@@ -205,9 +205,24 @@ export function createVisualDeckV4BlueprintFromProposal(
     ...draft,
     compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
   })
+  const expectedSourceMode = input.config.sourceMode === 'AUTO' ? 'SOURCE_GROUNDED' : input.config.sourceMode
+  const expectedAudience = input.config.deckOptions.audience ?? input.targetAudience
+  if (proposal.sourceUnderstanding.instruction !== input.config.instruction
+    || proposal.sourceUnderstanding.sourceMode !== expectedSourceMode
+    || proposal.presentationSpec.sourceMode !== expectedSourceMode
+    || proposal.presentationSpec.slideCount !== input.slideCount
+    || proposal.presentationSpec.deckType !== input.config.deckOptions.deckType
+    || proposal.presentationSpec.language !== input.config.deckOptions.language
+    || (expectedAudience !== undefined && proposal.presentationSpec.audience !== expectedAudience)
+    || (input.config.deckOptions.focus !== undefined
+      && !proposal.presentationSpec.focus.includes(input.config.deckOptions.focus))) {
+    throw new Error('VISUAL_DECK_V4_REQUEST_MISMATCH')
+  }
   const availableChunkIds = new Set(input.document.chunks.map((chunk) => chunk.id))
-  const understoodChunkIds = new Set(proposal.sourceUnderstanding.sources.flatMap((source) => source.sourceChunkIds))
+  const understoodChunks = proposal.sourceUnderstanding.sources.flatMap((source) => source.sourceChunkIds)
+  const understoodChunkIds = new Set(understoodChunks)
   if (availableChunkIds.size !== understoodChunkIds.size
+    || understoodChunks.length !== understoodChunkIds.size
     || [...availableChunkIds].some((chunkId) => !understoodChunkIds.has(chunkId))) {
     throw new Error('VISUAL_DECK_V4_SOURCE_COVERAGE_INVALID')
   }
