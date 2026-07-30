@@ -74,6 +74,7 @@ export class RunService {
       coverDesignMode: parsed.data.coverDesignMode,
       assetAcquisitionPolicy: parsed.data.assetAcquisitionPolicy,
       maxVisualAssetsPerSlide: parsed.data.maxVisualAssetsPerSlide,
+      ...(parsed.data.visualDeckV4 ? { visualDeckV4: parsed.data.visualDeckV4 } : {}),
       maxRevisionRounds: parsed.data.maxRevisionRounds,
       revisionRound: 0,
       planningAttempt: 0,

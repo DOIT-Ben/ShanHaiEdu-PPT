@@ -387,7 +387,8 @@
             "properties": {
               "kind": { "const": "TEXT" },
               "name": { "type": "string", "minLength": 1, "maxLength": 240 },
-              "text": { "type": "string", "minLength": 20, "maxLength": 2000000 }
+              "text": { "type": "string", "minLength": 20, "maxLength": 2000000 },
+              "roleHint": { "enum": ["AUTO", "CONTENT_SOURCE", "TEACHING_GUIDE", "STRUCTURE_REFERENCE", "DESIGN_REFERENCE", "BRAND_GUIDE", "ASSET"] }
             }
           },
           {
@@ -396,7 +397,8 @@
             "required": ["kind", "attachmentId"],
             "properties": {
               "kind": { "const": "HOST_ATTACHMENT" },
-              "attachmentId": { "type": "string", "minLength": 1, "maxLength": 160 }
+              "attachmentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "roleHint": { "enum": ["AUTO", "CONTENT_SOURCE", "TEACHING_GUIDE", "STRUCTURE_REFERENCE", "DESIGN_REFERENCE", "BRAND_GUIDE", "ASSET"] }
             }
           },
           {
@@ -420,7 +422,8 @@
                         "kind": { "const": "TEXT" },
                         "sourceId": { "type": "string", "minLength": 1, "maxLength": 160 },
                         "name": { "type": "string", "minLength": 1, "maxLength": 240 },
-                        "text": { "type": "string", "minLength": 20, "maxLength": 2000000 }
+                        "text": { "type": "string", "minLength": 20, "maxLength": 2000000 },
+                        "roleHint": { "enum": ["AUTO", "CONTENT_SOURCE", "TEACHING_GUIDE", "STRUCTURE_REFERENCE", "DESIGN_REFERENCE", "BRAND_GUIDE", "ASSET"] }
                       }
                     },
                     {
@@ -430,7 +433,8 @@
                       "properties": {
                         "kind": { "const": "HOST_ATTACHMENT" },
                         "sourceId": { "type": "string", "minLength": 1, "maxLength": 160 },
-                        "attachmentId": { "type": "string", "minLength": 1, "maxLength": 160 }
+                        "attachmentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                        "roleHint": { "enum": ["AUTO", "CONTENT_SOURCE", "TEACHING_GUIDE", "STRUCTURE_REFERENCE", "DESIGN_REFERENCE", "BRAND_GUIDE", "ASSET"] }
                       }
                     }
                   ]
@@ -543,10 +547,39 @@
           "automationLevel": { "enum": ["SUPERVISED", "BOUNDED_AUTO"] },
           "budgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
           "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 },
-          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3"], "default": "SLIDE_IMAGE_V2" },
+          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3", "VISUAL_DECK_V4"], "default": "SLIDE_IMAGE_V2" },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"], "default": "INDEPENDENT" },
           "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"], "default": "AI_FIRST" },
-          "maxVisualAssetsPerSlide": { "type": "integer", "minimum": 1, "maximum": 4, "default": 4 }
+          "maxVisualAssetsPerSlide": { "type": "integer", "minimum": 1, "maximum": 4, "default": 4 },
+          "visualDeckV4": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["instruction", "deckOptions"],
+            "properties": {
+              "instruction": { "type": "string", "minLength": 3, "maxLength": 4000 },
+              "sourceMode": { "enum": ["AUTO", "SOURCE_GROUNDED", "OPEN_KNOWLEDGE"], "default": "AUTO" },
+              "deckOptions": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["deckType", "language", "length", "aspectRatio"],
+                "properties": {
+                  "deckType": { "enum": ["DETAILED_DECK", "PRESENTER_SLIDES"], "default": "DETAILED_DECK" },
+                  "language": { "type": "string", "minLength": 2, "maxLength": 40, "default": "zh-CN" },
+                  "length": {
+                    "oneOf": [
+                      { "enum": ["SHORT", "DEFAULT", "LONG"] },
+                      { "type": "object", "additionalProperties": false, "required": ["slideCount"], "properties": { "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 } } }
+                    ],
+                    "default": "DEFAULT"
+                  },
+                  "aspectRatio": { "const": "16:9", "default": "16:9" },
+                  "audience": { "type": "string", "minLength": 3, "maxLength": 500 },
+                  "focus": { "type": "string", "minLength": 3, "maxLength": 1000 },
+                  "styleHint": { "type": "string", "minLength": 3, "maxLength": 1000 }
+                }
+              }
+            }
+          }
         }
       },
       "RunAction": {

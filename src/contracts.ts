@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { visualDeckV4ConfigSchema, visualDeckV4SourceRoleSchema } from './visual-deck-v4-contracts'
 
 export const CONTRACT_VERSION = '1' as const
 export const MAX_PLANNING_RETRIES = 2
@@ -30,7 +31,12 @@ export const runStatusSchema = z.enum([
 ])
 
 export const automationLevelSchema = z.enum(['SUPERVISED', 'BOUNDED_AUTO'])
-export const presentationModeSchema = z.enum(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3'])
+export const presentationModeSchema = z.enum([
+  'SLIDE_IMAGE_V2',
+  'SLIDE_IMAGE_V2_1',
+  'LAYERED_COURSEWARE_V3',
+  'VISUAL_DECK_V4',
+])
 export const coverDesignModeSchema = z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE'])
 export const assetAcquisitionPolicySchema = z.enum(['AI_FIRST', 'SEARCH_FIRST'])
 
@@ -88,10 +94,12 @@ export const documentSourceSchema = z.discriminatedUnion('kind', [
     kind: z.literal('TEXT'),
     name: z.string().trim().min(1).max(240).optional(),
     text: z.string().trim().min(20).max(2_000_000),
+    roleHint: visualDeckV4SourceRoleSchema.optional(),
   }).strict(),
   z.object({
     kind: z.literal('HOST_ATTACHMENT'),
     attachmentId: identifierSchema,
+    roleHint: visualDeckV4SourceRoleSchema.optional(),
   }).strict(),
   z.object({
     kind: z.literal('SOURCE_PACKAGE'),
@@ -102,11 +110,13 @@ export const documentSourceSchema = z.discriminatedUnion('kind', [
         sourceId: identifierSchema,
         name: z.string().trim().min(1).max(240).optional(),
         text: z.string().trim().min(20).max(2_000_000),
+        roleHint: visualDeckV4SourceRoleSchema.optional(),
       }).strict(),
       z.object({
         kind: z.literal('HOST_ATTACHMENT'),
         sourceId: identifierSchema,
         attachmentId: identifierSchema,
+        roleHint: visualDeckV4SourceRoleSchema.optional(),
       }).strict(),
     ])).min(1).max(7),
   }).strict().superRefine((value, context) => {
@@ -140,7 +150,19 @@ export const createRunRequestSchema = z.object({
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
   assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
-}).strict()
+  visualDeckV4: visualDeckV4ConfigSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.presentationMode === 'VISUAL_DECK_V4' && !value.visualDeckV4) {
+    context.addIssue({ code: 'custom', path: ['visualDeckV4'], message: 'visual deck v4 requires mode configuration' })
+  }
+  if (value.presentationMode !== 'VISUAL_DECK_V4' && value.visualDeckV4) {
+    context.addIssue({ code: 'custom', path: ['visualDeckV4'], message: 'visual deck v4 configuration is only valid for v4' })
+  }
+  const length = value.visualDeckV4?.deckOptions.length
+  if (typeof length === 'object' && length.slideCount !== value.slideCount) {
+    context.addIssue({ code: 'custom', path: ['visualDeckV4', 'deckOptions', 'length', 'slideCount'], message: 'v4 length must match slideCount' })
+  }
+})
 
 const actionBase = {
   schemaVersion: z.literal(CONTRACT_VERSION),

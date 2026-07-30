@@ -103,6 +103,53 @@ describe('public v1 contracts', () => {
     })
   })
 
+  test('accepts v4 only with a matching visual deck configuration', () => {
+    const base = {
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: {
+        kind: 'SOURCE_PACKAGE' as const,
+        sources: [
+          {
+            kind: 'TEXT' as const,
+            sourceId: 'lesson-brief',
+            text: '这是一份用于生成资料驱动视觉演示的完整课程说明和内容范围。',
+            roleHint: 'CONTENT_SOURCE' as const,
+          },
+        ],
+      },
+      slideCount: 12,
+      visualDirection: '由智能体根据资料和用户要求编译视觉方向',
+      imageModel: 'nanobanana',
+      automationLevel: 'SUPERVISED' as const,
+      budgetUnits: 12,
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      visualDeckV4: {
+        instruction: '为六年级学生制作一套百分数视觉演示',
+        deckOptions: {
+          deckType: 'PRESENTER_SLIDES' as const,
+          language: 'zh-CN',
+          length: { slideCount: 12 },
+          aspectRatio: '16:9' as const,
+        },
+      },
+    }
+
+    expect(createRunRequestSchema.parse(base)).toMatchObject({
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: {
+        sourceMode: 'AUTO',
+        deckOptions: { deckType: 'PRESENTER_SLIDES', language: 'zh-CN', aspectRatio: '16:9' },
+      },
+    })
+    expect(() => createRunRequestSchema.parse({ ...base, visualDeckV4: undefined })).toThrow()
+    expect(() => createRunRequestSchema.parse({
+      ...base,
+      visualDeckV4: { ...base.visualDeckV4, deckOptions: { ...base.visualDeckV4.deckOptions, length: { slideCount: 10 } } },
+    })).toThrow()
+    expect(() => createRunRequestSchema.parse({ ...base, presentationMode: 'SLIDE_IMAGE_V2' })).toThrow()
+  })
+
   test('accepts an ordered mixed source package and rejects duplicate attachments', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,

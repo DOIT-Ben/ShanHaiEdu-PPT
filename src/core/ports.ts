@@ -346,6 +346,7 @@ export type RunRecord = Readonly<{
   coverDesignMode?: CreateRunRequest['coverDesignMode']
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
+  visualDeckV4?: CreateRunRequest['visualDeckV4']
   maxRevisionRounds: number
   revisionRound: number
   planningAttempt?: number

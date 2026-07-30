@@ -43,6 +43,7 @@ function publicRun(run: RunRecord) {
     coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
     assetAcquisitionPolicy: run.assetAcquisitionPolicy ?? 'AI_FIRST',
     maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
+    ...(run.visualDeckV4 ? { visualDeckV4: run.visualDeckV4 } : {}),
     maxRevisionRounds: run.maxRevisionRounds,
     revisionRound: run.revisionRound,
     planningAttempt: run.planningAttempt ?? 0,
