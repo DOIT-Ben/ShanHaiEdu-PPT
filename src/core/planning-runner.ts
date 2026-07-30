@@ -11,6 +11,7 @@ import { hashInput } from './hash'
 import { StructuredModelError } from './ports'
 import type {
   AgentRepository,
+  AgentTransaction,
   ClockPort,
   DocumentPort,
   DocumentResult,
@@ -20,6 +21,12 @@ import type {
 } from './ports'
 import { transitionRun } from './policy'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
+import {
+  createVisualDeckV4Blueprint,
+  type VisualDeckV4PlanningArtifact,
+  visualDeckV4PlanningArtifactStepKey,
+} from './visual-deck-v4-planner'
+import type { VisualDeckV4Proposal } from '../visual-deck-v4-contracts'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
@@ -101,6 +108,7 @@ export type PlanPresentationInput = Readonly<{
   coverDesignMode?: CreateRunRequest['coverDesignMode']
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
+  visualDeckV4?: CreateRunRequest['visualDeckV4']
   attempt?: number
 }>
 
@@ -125,26 +133,43 @@ export class PlanningRunner {
 
   async plan(input: PlanPresentationInput): Promise<PlanPresentationResult> {
     const run = await this.requireRun(input.runId)
-    const document = await this.dependencies.documents.resolve({ host: run.host, source: input.source })
-    const prepared = await this.prepare(input, document)
+    const strategy = getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2')
+    const visualDeckV4 = input.visualDeckV4 ?? run.visualDeckV4
+    if (strategy.planningKind === 'VISUAL_DECK_COMPILER' && !visualDeckV4) throw new Error('VISUAL_DECK_V4_CONFIG_REQUIRED')
+    const effectiveInput = visualDeckV4 ? { ...input, visualDeckV4 } : input
+    const document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
+    const prepared = await this.prepare(effectiveInput, document)
     if (prepared.replayed) return prepared
 
     if (!document.isComplete || document.chunks.length === 0) {
-      const step = await this.fail(input, this.sourceFailure(input), 'SOURCE_INCOMPLETE', document)
+      const step = await this.fail(effectiveInput, this.sourceFailure(effectiveInput), 'SOURCE_INCOMPLETE', document)
       return { step, blueprint: null, replayed: false }
     }
 
     try {
-      const blueprint = input.source.kind === 'APPROVED_PAGE_DESIGN'
-        ? this.createApprovedBlueprint(input, document, prepared.step.inputHash)
-        : await this.createBlueprint(input, document, prepared.step.inputHash, run.host.tenantId)
-      const step = await this.complete(input, blueprint)
+      const blueprint = strategy.planningKind === 'VISUAL_DECK_COMPILER'
+        ? createVisualDeckV4Blueprint({
+            runId: effectiveInput.runId,
+            inputHash: prepared.step.inputHash,
+            source: effectiveInput.source,
+            document,
+            config: visualDeckV4!,
+            slideCount: effectiveInput.slideCount,
+            visualDirection: effectiveInput.visualDirection,
+            ...(effectiveInput.targetAudience ? { targetAudience: effectiveInput.targetAudience } : {}),
+            ...(effectiveInput.presentationGoal ? { presentationGoal: effectiveInput.presentationGoal } : {}),
+            createdAt: this.dependencies.clock.now().toISOString(),
+          })
+        : effectiveInput.source.kind === 'APPROVED_PAGE_DESIGN'
+          ? this.createApprovedBlueprint(effectiveInput, document, prepared.step.inputHash)
+          : await this.createBlueprint(effectiveInput, document, prepared.step.inputHash, run.host.tenantId)
+      const step = await this.complete(effectiveInput, blueprint)
       return { step, blueprint, replayed: false }
     } catch (error) {
       const failure = error instanceof PlanningFailureError
         ? error.failure
-        : this.contractFailure(input, error, 1, 1, false)
-      const step = await this.fail(input, failure, 'PLANNING_FAILED', document)
+        : this.contractFailure(effectiveInput, error, 1, 1, false)
+      const step = await this.fail(effectiveInput, failure, 'PLANNING_FAILED', document)
       return { step, blueprint: null, replayed: false }
     }
   }
@@ -215,6 +240,7 @@ export class PlanningRunner {
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
       assetAcquisitionPolicy: input.assetAcquisitionPolicy ?? 'AI_FIRST',
       maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
+      visualDeckV4: input.visualDeckV4 ?? null,
       document: {
         name: document.name,
         sources: document.sources ?? [],
@@ -621,6 +647,9 @@ export class PlanningRunner {
       const updated: StepRecord = { ...step, status: 'COMPLETED', output: blueprint, errorCode: null, updatedAt: now }
       transaction.putRun(run)
       transaction.putStep(updated)
+      if (blueprint.visualDeckV4Proposal) {
+        this.persistVisualDeckV4Artifacts(transaction, input, blueprint.visualDeckV4Proposal, now)
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
@@ -662,6 +691,39 @@ export class PlanningRunner {
           })
       return updated
     })
+  }
+
+  private persistVisualDeckV4Artifacts(
+    transaction: AgentTransaction,
+    input: PlanPresentationInput,
+    proposal: VisualDeckV4Proposal,
+    now: string,
+  ) {
+    const artifacts: readonly [VisualDeckV4PlanningArtifact, unknown][] = [
+      ['source-understanding', proposal.sourceUnderstanding],
+      ['presentation-spec', proposal.presentationSpec],
+      ['deck-plan', proposal.deckPlan],
+      ['slide-briefs', proposal.slideBriefs],
+      ['visual-contract', proposal.visualContract],
+    ]
+    for (const [artifact, output] of artifacts) {
+      const key = visualDeckV4PlanningArtifactStepKey(input.runId, artifact, input.attempt ?? 0)
+      transaction.putStep({
+        id: `step-${hashInput({ key }).slice(0, 28)}`,
+        runId: input.runId,
+        idempotencyKey: key,
+        inputHash: hashInput({ compilerVersion: proposal.compilerVersion, artifact, output }),
+        tool: `compile_v4_${artifact.replaceAll('-', '_')}`,
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output,
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
   }
 
   private async fail(

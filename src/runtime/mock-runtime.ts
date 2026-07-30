@@ -439,6 +439,7 @@ export function createAgentRuntime(input: RuntimeInput) {
           coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
           assetAcquisitionPolicy: run.assetAcquisitionPolicy ?? 'AI_FIRST',
           maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
+          ...(run.visualDeckV4 ? { visualDeckV4: run.visualDeckV4 } : {}),
           attempt: planningAttempt,
         })
       } else if (run.status === 'EXECUTING') {

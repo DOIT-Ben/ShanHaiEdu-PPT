@@ -11,6 +11,21 @@ import type { DocumentResult, SourceMaterial } from './ports'
 
 export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-mock-1'
 
+export type VisualDeckV4PlanningArtifact =
+  | 'source-understanding'
+  | 'presentation-spec'
+  | 'deck-plan'
+  | 'slide-briefs'
+  | 'visual-contract'
+
+export function visualDeckV4PlanningArtifactStepKey(
+  runId: string,
+  artifact: VisualDeckV4PlanningArtifact,
+  attempt = 0,
+) {
+  return `${runId}:v4:${artifact}:planning:${attempt}`
+}
+
 type CompileVisualDeckV4Input = Readonly<{
   runId: string
   inputHash: string
