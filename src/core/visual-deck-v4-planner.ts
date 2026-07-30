@@ -10,7 +10,7 @@ import {
 import { hashInput } from './hash'
 import type { DocumentResult, SourceMaterial } from './ports'
 
-export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-mock-1'
+export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-1'
 
 export type VisualDeckV4PlanningArtifact =
   | 'source-understanding'

@@ -7,7 +7,7 @@ import { presentationBlueprintSchema } from '../src/presentation-contracts'
 
 function proposal() {
   return {
-    compilerVersion: 'visual-deck-v4-mock-1',
+    compilerVersion: 'visual-deck-v4-chain-1',
     sourceUnderstanding: {
       sourceMode: 'SOURCE_GROUNDED' as const,
       instruction: '根据教材制作一套适合课堂讲解的百分数视觉演示',
@@ -75,7 +75,7 @@ describe('visual deck v4 contracts', () => {
   test('accepts only ordered rendered slides in a v4 manifest', () => {
     const manifest = {
       schemaVersion: '1', runId: 'run-v4', presentationMode: 'VISUAL_DECK_V4',
-      compilerVersion: 'visual-deck-v4-mock-1', proposalHash: 'a'.repeat(64),
+      compilerVersion: 'visual-deck-v4-chain-1', proposalHash: 'a'.repeat(64),
       slides: [1, 2].map((pageNumber) => ({
         pageNumber, strategy: 'FULL_GENERATIVE', artifactId: `slide-${pageNumber}`,
         sha256: String(pageNumber).repeat(64), revision: 0, qualityStatus: 'APPROVED',

@@ -5,7 +5,7 @@ import {
   createVisualDeckV4BlueprintFromProposal,
 } from '../src/core/visual-deck-v4-planner'
 
-describe('visual deck v4 mock planner', () => {
+describe('visual deck v4 chain planner', () => {
   test('rejects a model proposal that changes frozen request fields', () => {
     const source = {
       kind: 'TEXT' as const,
