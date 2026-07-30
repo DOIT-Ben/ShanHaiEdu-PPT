@@ -80,6 +80,45 @@ describe('mock runtime', () => {
     expect(await repository.getRun(runId)).toMatchObject({
       status: 'COMPLETED', presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 3, qualityScore: 90,
     })
+    const events = await repository.listEvents(runId)
+    const lifecycleTypes = events
+      .filter((event) => ['planning.started', 'planning.completed', 'generation.started', 'generation.progress',
+        'generation.completed', 'page_review.started', 'page_review.completed', 'deck_review.started',
+        'deck_review.completed', 'delivery.started', 'delivery.completed'].includes(event.type))
+      .map((event) => event.type)
+    expect(lifecycleTypes).toEqual([
+      'planning.started', 'planning.completed',
+      'generation.started', 'generation.progress', 'generation.completed',
+      'page_review.started', 'page_review.completed',
+      'deck_review.started', 'deck_review.completed',
+      'delivery.started', 'delivery.completed',
+    ])
+    expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1))
+    expect(events.every((event) => event.eventId === event.id)).toBe(true)
+    const generationProgress = events.find((event) => event.type === 'generation.progress')
+    expect(generationProgress?.payload).toMatchObject({
+      presentationMode: 'VISUAL_DECK_V4', stage: 'GENERATION', completed: 3, total: 3,
+      pageNumbers: [1, 2, 3], budgetUnits: 3, committedBudgetUnits: 3,
+    })
+    const terminal = events.at(-1)
+    expect(terminal).toMatchObject({
+      type: 'run.completed',
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', completed: 1, total: 1,
+        requiresUserAction: false, nextAction: null,
+      },
+    })
+
+    const historyResponse = await runtime.handler(request(`/v1/runs/${runId}/events/history?after=0`))
+    const history = await historyResponse.json() as { data: typeof events }
+    expect(history.data).toEqual(events)
+    const reconnectAfter = events.find((event) => event.type === 'generation.started')!.sequence
+    const streamResponse = await runtime.handler(request(`/v1/runs/${runId}/events?after=${reconnectAfter}`))
+    const streamed = (await streamResponse.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as typeof events[number])
+    expect(streamed).toEqual(events.filter((event) => event.sequence > reconnectAfter))
+    expect(new Set(streamed.map((event) => event.sequence)).size).toBe(streamed.length)
     const reviewSteps = (await repository.listSteps(runId)).filter((step) => step.tool === 'review_slide_image')
     expect(reviewSteps).toHaveLength(3)
     const delivery = (await repository.listDeliveries(runId))[0]!

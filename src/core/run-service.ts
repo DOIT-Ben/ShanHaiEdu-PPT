@@ -15,6 +15,13 @@ import { getPresentationModeStrategy } from './presentation-mode-strategy'
 import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRecord } from './ports'
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  isVisualDeckV4,
+  revisionDetails,
+  v4LifecyclePayload,
+} from './v4-lifecycle'
 
 const ADMIN_ONLY_CRITICAL_CATEGORIES = new Set([
   'CURRICULUM_GAP',
@@ -108,6 +115,7 @@ export class RunService {
         type: 'run.started',
         payload: { status: 'PLANNING' },
       })
+      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
     })
     return { run, replayed: false }
   }
@@ -367,7 +375,16 @@ export class RunService {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'run.paused',
-        payload: { reason: 'USER_PAUSED', resumeState: updated.resumeState! },
+        payload: isVisualDeckV4(updated)
+          ? {
+              ...v4LifecyclePayload(updated, 'RUN', {
+                completed: 0,
+                total: 1,
+                reason: 'PAUSED_BY_USER',
+              }),
+              resumeState: updated.resumeState!,
+            }
+          : { reason: 'USER_PAUSED', resumeState: updated.resumeState! },
       })
     } else if (action.type === 'RESUME') {
       transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'run.resumed', payload: { status: updated.status } })
@@ -375,7 +392,16 @@ export class RunService {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'run.cancelled',
-        payload: { reason: action.reason ?? null, mode: action.mode ?? 'STOP_NEW_SUBMISSIONS' },
+        payload: isVisualDeckV4(updated)
+          ? {
+              ...v4LifecyclePayload(updated, 'RUN', {
+                completed: 0,
+                total: 1,
+                reason: 'CANCELLED_BY_USER',
+              }),
+              mode: action.mode ?? 'STOP_NEW_SUBMISSIONS',
+            }
+          : { reason: action.reason ?? null, mode: action.mode ?? 'STOP_NEW_SUBMISSIONS' },
       })
     } else if (action.type === 'ADD_BUDGET') {
       transaction.appendEvent({
@@ -408,6 +434,29 @@ export class RunService {
           } : {}),
         },
       })
+    }
+    if (!isVisualDeckV4(updated)) return
+    if (action.type === 'APPROVE_BLUEPRINT') {
+      appendV4LifecycleEvent(transaction, 'generation.started', {
+        completed: 0,
+        total: updated.slideCount,
+        pageNumbers: allPageNumbers(updated),
+      })
+    } else if (action.type === 'RETRY_PLANNING' || action.type === 'REPLAN'
+      || action.type === 'REQUEST_BLUEPRINT_REVISION') {
+      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
+    } else if (action.type === 'RETRY_DELIVERY' || action.type === 'ACCEPT_WITH_OVERRIDE') {
+      appendV4LifecycleEvent(transaction, 'delivery.started', { completed: 0, total: 1 })
+    } else if (action.type === 'APPROVE_REVISION' || action.type === 'SUBMIT_LIMITED_REVISION') {
+      const step = transaction.getStep(revisionPlanStepKey(updated.id, updated.revisionRound))
+      const parsed = revisionPlanSchema.safeParse(step?.output)
+      if (parsed.success) {
+        appendV4LifecycleEvent(transaction, 'revision.started', {
+          completed: 0,
+          total: new Set(parsed.data.operations.map((operation) => operation.slideId)).size,
+          ...revisionDetails(parsed.data),
+        })
+      }
     }
   }
 }

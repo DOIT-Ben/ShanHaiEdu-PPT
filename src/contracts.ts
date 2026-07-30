@@ -321,12 +321,103 @@ export const runSnapshotSchema = z.object({
 const eventBase = {
   schemaVersion: z.literal(CONTRACT_VERSION),
   id: identifierSchema,
+  eventId: identifierSchema,
   runId: identifierSchema,
   sequence: z.number().int().positive(),
   createdAt: z.string().datetime(),
 }
 
-export const agentEventSchema = z.discriminatedUnion('type', [
+export const v4LifecycleStageSchema = z.enum([
+  'PLANNING',
+  'GENERATION',
+  'PAGE_REVIEW',
+  'REVISION',
+  'DECK_REVIEW',
+  'DELIVERY',
+  'RUN',
+])
+
+export const v4RevisionKindSchema = z.enum(['PAGE_VISUAL', 'DECK_CONTENT', 'DECK_VISUAL'])
+
+export const v4LifecycleReasonSchema = z.enum([
+  'BUDGET_INSUFFICIENT',
+  'PROVIDER_TEMPORARILY_UNAVAILABLE',
+  'REVISION_LIMIT_REACHED',
+  'USER_CONFIRMATION_REQUIRED',
+  'PLANNING_FAILED',
+  'PAGE_REVIEW_REJECTED',
+  'PAGE_REVIEW_FAILED',
+  'DECK_REVIEW_REJECTED',
+  'DECK_REVIEW_FAILED',
+  'REVISION_FAILED',
+  'DELIVERY_FAILED',
+  'INTERNAL_FAILURE',
+  'PAUSED_BY_USER',
+  'CANCELLED_BY_USER',
+])
+
+export const v4LifecycleNextActionSchema = z.enum([
+  'APPROVE_BLUEPRINT',
+  'ADD_BUDGET',
+  'APPROVE_REVISION',
+  'RETRY',
+  'REVIEW_RESULT',
+  'CONTACT_SUPPORT',
+])
+
+export const v4RunFailureCodeSchema = z.enum(['WORKER_FATAL'])
+
+function v4LifecyclePayloadSchema<T extends z.ZodRawShape = Record<never, never>>(
+  stage: z.infer<typeof v4LifecycleStageSchema>,
+  extension?: T,
+) {
+  return z.object({
+    presentationMode: z.literal('VISUAL_DECK_V4'),
+    stage: z.literal(stage),
+    completed: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+    pageNumbers: z.array(z.number().int().min(1).max(50)).max(50)
+      .refine((value) => new Set(value).size === value.length, 'page numbers must be unique'),
+    revisionKind: v4RevisionKindSchema.nullable(),
+    revisionRound: z.number().int().nonnegative(),
+    maxRevisionRounds: z.number().int().min(0).max(2),
+    budgetUnits: z.number().int().nonnegative(),
+    committedBudgetUnits: z.number().int().nonnegative(),
+    reason: v4LifecycleReasonSchema.nullable(),
+    retryable: z.boolean().nullable(),
+    requiresUserAction: z.boolean(),
+    nextAction: v4LifecycleNextActionSchema.nullable(),
+    ...(extension ?? {} as T),
+  }).strict().superRefine((value, context) => {
+    const lifecycle = value as {
+      completed: number
+      total: number
+      budgetUnits: number
+      committedBudgetUnits: number
+      requiresUserAction: boolean
+      nextAction: string | null
+    }
+    if (lifecycle.completed > lifecycle.total) {
+      context.addIssue({ code: 'custom', path: ['completed'], message: 'completed exceeds total' })
+    }
+    if (lifecycle.committedBudgetUnits > lifecycle.budgetUnits) {
+      context.addIssue({ code: 'custom', path: ['committedBudgetUnits'], message: 'committed budget exceeds run budget' })
+    }
+    if (lifecycle.requiresUserAction !== (lifecycle.nextAction !== null)) {
+      context.addIssue({ code: 'custom', path: ['nextAction'], message: 'next action must match requiresUserAction' })
+    }
+  })
+}
+
+const legacyRunPausedPayloadSchema = z.object({ reason: z.string().min(1).max(500), resumeState: runStatusSchema }).strict()
+const legacyRunCancelledPayloadSchema = z.object({
+  reason: z.string().max(500).nullable(),
+  mode: z.literal('STOP_NEW_SUBMISSIONS').optional(),
+}).strict()
+const legacyRunCompletedPayloadSchema = z.object({ deliveryId: identifierSchema, qualityOverride: z.boolean() }).strict()
+const legacyRunFailedPayloadSchema = z.object({ errorCode: z.string().min(1).max(100) }).strict()
+
+const knownAgentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('run.started'), payload: z.object({ status: z.literal('PLANNING') }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('phase.changed'), payload: z.object({ from: runStatusSchema, to: runStatusSchema, reason: z.string().max(500).optional() }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('approval.required'), payload: z.object({ kind: z.enum(['BLUEPRINT', 'REVISION', 'BUDGET', 'HUMAN_REVIEW']), summary: z.string().min(1).max(1_000) }).strict() }).strict(),
@@ -345,15 +436,50 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('issue.detected'), payload: issueSummarySchema }).strict(),
   z.object({ ...eventBase, type: z.literal('issue.resolved'), payload: z.object({ issueId: identifierSchema, resolution: z.enum(['FIXED', 'ACCEPTED']) }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('budget.updated'), payload: z.object({ budgetUnits: z.number().int().nonnegative(), committedBudgetUnits: z.number().int().nonnegative() }).strict() }).strict(),
-  z.object({ ...eventBase, type: z.literal('run.paused'), payload: z.object({ reason: z.string().min(1).max(500), resumeState: runStatusSchema }).strict() }).strict(),
+  z.object({ ...eventBase, type: z.literal('planning.started'), payload: v4LifecyclePayloadSchema('PLANNING') }).strict(),
+  z.object({ ...eventBase, type: z.literal('planning.completed'), payload: v4LifecyclePayloadSchema('PLANNING') }).strict(),
+  z.object({ ...eventBase, type: z.literal('generation.started'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('generation.progress'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('generation.completed'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('page_review.started'), payload: v4LifecyclePayloadSchema('PAGE_REVIEW') }).strict(),
+  z.object({ ...eventBase, type: z.literal('page_review.completed'), payload: v4LifecyclePayloadSchema('PAGE_REVIEW') }).strict(),
+  z.object({ ...eventBase, type: z.literal('revision.started'), payload: v4LifecyclePayloadSchema('REVISION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('revision.progress'), payload: v4LifecyclePayloadSchema('REVISION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('revision.completed'), payload: v4LifecyclePayloadSchema('REVISION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('deck_review.started'), payload: v4LifecyclePayloadSchema('DECK_REVIEW') }).strict(),
+  z.object({ ...eventBase, type: z.literal('deck_review.completed'), payload: v4LifecyclePayloadSchema('DECK_REVIEW') }).strict(),
+  z.object({ ...eventBase, type: z.literal('delivery.started'), payload: v4LifecyclePayloadSchema('DELIVERY') }).strict(),
+  z.object({ ...eventBase, type: z.literal('delivery.completed'), payload: v4LifecyclePayloadSchema('DELIVERY') }).strict(),
+  z.object({ ...eventBase, type: z.literal('run.paused'), payload: z.union([
+    legacyRunPausedPayloadSchema,
+    v4LifecyclePayloadSchema('RUN', { resumeState: runStatusSchema }),
+  ]) }).strict(),
   z.object({ ...eventBase, type: z.literal('run.resumed'), payload: z.object({ status: runStatusSchema }).strict() }).strict(),
-  z.object({ ...eventBase, type: z.literal('run.cancelled'), payload: z.object({
-    reason: z.string().max(500).nullable(),
-    mode: z.literal('STOP_NEW_SUBMISSIONS').optional(),
-  }).strict() }).strict(),
-  z.object({ ...eventBase, type: z.literal('run.completed'), payload: z.object({ deliveryId: identifierSchema, qualityOverride: z.boolean() }).strict() }).strict(),
-  z.object({ ...eventBase, type: z.literal('run.failed'), payload: z.object({ errorCode: z.string().min(1).max(100) }).strict() }).strict(),
+  z.object({ ...eventBase, type: z.literal('run.cancelled'), payload: z.union([
+    legacyRunCancelledPayloadSchema,
+    v4LifecyclePayloadSchema('RUN', { mode: z.literal('STOP_NEW_SUBMISSIONS') }),
+  ]) }).strict(),
+  z.object({ ...eventBase, type: z.literal('run.completed'), payload: z.union([
+    legacyRunCompletedPayloadSchema,
+    v4LifecyclePayloadSchema('RUN', { deliveryId: identifierSchema, qualityOverride: z.boolean() }),
+  ]) }).strict(),
+  z.object({ ...eventBase, type: z.literal('run.failed'), payload: z.union([
+    legacyRunFailedPayloadSchema,
+    v4LifecyclePayloadSchema('RUN', { errorCode: v4RunFailureCodeSchema }),
+  ]) }).strict(),
 ])
+
+const knownAgentEventTypes = new Set<string>(knownAgentEventSchema.options.map((option) => option.shape.type.value))
+const unknownAgentEventSchema = z.object({
+  ...eventBase,
+  type: nonEmptyTextSchema.max(100),
+  payload: z.record(z.string(), z.unknown()),
+}).strict().refine((value) => !knownAgentEventTypes.has(value.type), {
+  path: ['type'],
+  message: 'known event types must use their typed payload contract',
+})
+
+export const agentEventSchema = z.union([knownAgentEventSchema, unknownAgentEventSchema])
 
 export const apiErrorSchema = z.object({
   error: z.object({
@@ -373,4 +499,11 @@ export type CreateRunRequest = z.infer<typeof createRunRequestSchema>
 export type RunAction = z.infer<typeof runActionSchema>
 export type PlanningFailure = z.infer<typeof planningFailureSchema>
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>
+export type V4LifecycleStage = z.infer<typeof v4LifecycleStageSchema>
+export type V4RevisionKind = z.infer<typeof v4RevisionKindSchema>
+export type V4LifecycleReason = z.infer<typeof v4LifecycleReasonSchema>
+export type V4LifecycleNextAction = z.infer<typeof v4LifecycleNextActionSchema>
+export type V4RunFailureCode = z.infer<typeof v4RunFailureCodeSchema>
+export type KnownAgentEvent = z.infer<typeof knownAgentEventSchema>
 export type AgentEvent = z.infer<typeof agentEventSchema>
+export type AgentEventEnvelope = AgentEvent

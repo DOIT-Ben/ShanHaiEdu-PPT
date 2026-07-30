@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import type { AgentEvent } from '../contracts'
+import type { KnownAgentEvent as AgentEvent } from '../contracts'
 import type {
   AgentRepository,
   AgentTransaction,
@@ -53,6 +53,11 @@ type PlanningFailureQueryParameters = [
 
 function parseJson<T>(row: JsonRow | null): T | null {
   return row ? JSON.parse(row.data) as T : null
+}
+
+function parseAgentEvent(data: string): AgentEvent {
+  const event = JSON.parse(data) as AgentEvent & { eventId?: string }
+  return event.eventId ? event : { ...event, eventId: event.id }
 }
 
 export class SqliteAgentRepository implements AgentRepository {
@@ -228,7 +233,19 @@ export class SqliteAgentRepository implements AgentRepository {
   async listEvents(runId: string, afterSequence = 0) {
     return this.#database.query<JsonRow, [string, number]>(
       'SELECT data FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC',
-    ).all(runId, afterSequence).map((row) => JSON.parse(row.data) as AgentEvent)
+    ).all(runId, afterSequence).map((row) => parseAgentEvent(row.data))
+  }
+
+  async getTerminalEvent(runId: string) {
+    const row = this.#database.query<JsonRow, [string]>(`
+      SELECT data
+      FROM agent_events
+      WHERE run_id = ?
+        AND json_extract(data, '$.type') IN ('run.completed', 'run.failed', 'run.cancelled')
+      ORDER BY sequence ASC
+      LIMIT 1
+    `).get(runId)
+    return row ? parseAgentEvent(row.data) as Awaited<ReturnType<AgentRepository['getTerminalEvent']>> : null
   }
 
   async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
@@ -240,7 +257,7 @@ export class SqliteAgentRepository implements AgentRepository {
     for (const row of rows.slice(0, input.limit)) {
       const bytes = Buffer.byteLength(row.data)
       if (events.length > 0 && byteLength + bytes > input.maxBytes) break
-      events.push(JSON.parse(row.data) as AgentEvent)
+      events.push(parseAgentEvent(row.data))
       byteLength += bytes
     }
     return {
@@ -254,10 +271,10 @@ export class SqliteAgentRepository implements AgentRepository {
   async getRunEventSnapshot(runId: string) {
     const openIssues = this.#database.query<JsonRow, [string]>(
       'SELECT data FROM agent_open_issues WHERE run_id = ? ORDER BY sequence ASC',
-    ).all(runId).map((row) => (JSON.parse(row.data) as Extract<AgentEvent, { type: 'issue.detected' }>).payload)
+    ).all(runId).map((row) => (parseAgentEvent(row.data) as Extract<AgentEvent, { type: 'issue.detected' }>).payload)
     const progress = this.#database.query<JsonRow, [string]>(
       'SELECT data FROM agent_progress WHERE run_id = ? ORDER BY sequence ASC',
-    ).all(runId).map((row) => (JSON.parse(row.data) as Extract<AgentEvent, { type: 'tool.progress' }>).payload)
+    ).all(runId).map((row) => (parseAgentEvent(row.data) as Extract<AgentEvent, { type: 'tool.progress' }>).payload)
     return { openIssues, progress }
   }
 
@@ -305,7 +322,7 @@ export class SqliteAgentRepository implements AgentRepository {
         AND json_extract(agent_events.data, '$.type') IN ('run.started', 'phase.changed', 'tool.started', 'tool.progress')
       ORDER BY agent_events.rowid DESC
       LIMIT 50000
-    `).all(filters.tenantId).map((row) => JSON.parse(row.data) as AgentEvent)
+    `).all(filters.tenantId).map((row) => parseAgentEvent(row.data))
     return buildOperationsReport({ runs, steps, events, filters })
   }
 
@@ -390,7 +407,7 @@ export class SqliteAgentRepository implements AgentRepository {
         listEvents: () => {
           const stored = this.#database.query<JsonRow, [string]>(
             'SELECT data FROM agent_events WHERE run_id = ? ORDER BY sequence ASC',
-          ).all(runId).map((row) => JSON.parse(row.data) as AgentEvent)
+          ).all(runId).map((row) => parseAgentEvent(row.data))
           return [...stored, ...appendedEvents].map((event) => structuredClone(event))
         },
         getDelivery: (deliveryId) => {
@@ -406,9 +423,11 @@ export class SqliteAgentRepository implements AgentRepository {
         putDelivery(delivery) { touchedDeliveries.set(delivery.id, structuredClone(delivery)) },
         appendEvent: (event: NewAgentEvent) => {
           nextSequence += 1
+          const eventId = `${runId}:event:${nextSequence}`
           const created = {
             ...structuredClone(event),
-            id: `${runId}:event:${nextSequence}`,
+            id: eventId,
+            eventId,
             runId,
             sequence: nextSequence,
             createdAt: nextRun.updatedAt,
@@ -525,7 +544,7 @@ export class SqliteAgentRepository implements AgentRepository {
   private backfillEventSnapshots() {
     const events = this.#database.query<JsonRow, []>(
       "SELECT data FROM agent_events WHERE json_extract(data, '$.type') IN ('issue.detected', 'issue.resolved', 'tool.progress', 'tool.completed', 'tool.failed') ORDER BY run_id, sequence",
-    ).all().map((row) => JSON.parse(row.data) as AgentEvent)
+    ).all().map((row) => parseAgentEvent(row.data))
     const backfill = this.#database.transaction(() => {
       for (const event of events) this.updateEventSnapshot(event)
     })

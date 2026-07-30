@@ -28,6 +28,7 @@ import {
 } from './visual-deck-v4-planner'
 import type { VisualDeckV4Proposal } from '../visual-deck-v4-contracts'
 import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
+import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
@@ -708,6 +709,7 @@ export class PlanningRunner {
             : '分析教材并规划逐页蓝图',
         },
       })
+      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
       return { run: updatedRun, step, blueprint: null, replayed: false }
     })
   }
@@ -777,6 +779,14 @@ export class PlanningRunner {
             : `已生成 ${blueprint.slides.length} 页教学蓝图`,
         },
       })
+      appendV4LifecycleEvent(transaction, 'planning.completed', {
+        completed: 1,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+        reason: approvedPageDesign ? null : 'USER_CONFIRMATION_REQUIRED',
+        requiresUserAction: !approvedPageDesign,
+        nextAction: approvedPageDesign ? null : 'APPROVE_BLUEPRINT',
+      })
       const attempt = input.attempt ?? 0
       if (attempt > 0) {
         const previous = transaction.getStep(planningStepKey(input.runId, attempt - 1))
@@ -804,6 +814,13 @@ export class PlanningRunner {
             type: 'approval.required',
             payload: { kind: 'BLUEPRINT', summary: `请确认《${blueprint.title}》的 ${blueprint.slides.length} 页蓝图` },
           })
+      if (approvedPageDesign) {
+        appendV4LifecycleEvent(transaction, 'generation.started', {
+          completed: 0,
+          total: transaction.run.slideCount,
+          pageNumbers: allPageNumbers(transaction.run),
+        })
+      }
       return updated
     })
   }
@@ -882,6 +899,16 @@ export class PlanningRunner {
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
         payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: failure.errorCode },
+      })
+      appendV4LifecycleEvent(transaction, 'planning.completed', {
+        completed: 0,
+        total: 1,
+        reason: ['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'PROVIDER_UNAVAILABLE'].includes(failure.errorCode)
+          ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
+          : 'PLANNING_FAILED',
+        retryable: failure.retryable,
+        requiresUserAction: true,
+        nextAction: failure.retryable ? 'RETRY' : 'REVIEW_RESULT',
       })
       return updated
     })

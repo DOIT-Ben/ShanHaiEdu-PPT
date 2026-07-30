@@ -241,6 +241,20 @@ describe('page review coordinator', () => {
     })
     const requests = [...(reviewerPort as MockVisualReviewPort).requests.values()]
     expect(requests[1]?.visualIntent).toContain(`允许文字：${planned.slides[1]!.title}`)
+    const lifecycle = (await repository.listEvents('run-1'))
+      .filter((event) => event.type === 'page_review.completed' || event.type === 'revision.started')
+    expect(lifecycle).toHaveLength(2)
+    expect(lifecycle[0]).toMatchObject({
+      type: 'page_review.completed',
+      payload: { completed: 3, total: 3, reason: 'PAGE_REVIEW_REJECTED' },
+    })
+    expect(lifecycle[1]).toMatchObject({
+      type: 'revision.started',
+      payload: {
+        revisionKind: 'PAGE_VISUAL', revisionRound: 1, maxRevisionRounds: 2,
+        pageNumbers: [2], completed: 0, total: 1,
+      },
+    })
   })
 
   test('replays a completed page-review phase without model calls', async () => {
@@ -289,5 +303,32 @@ describe('page review coordinator', () => {
     expect(transitions).toHaveLength(1)
     expect(transitions[0]?.payload).toMatchObject({ from: 'PAGE_REVIEW', to: 'NEEDS_HUMAN' })
     expect(events.filter((event) => event.type === 'approval.required')).toHaveLength(1)
+    expect(events.filter((event) => event.type === 'page_review.completed')).toHaveLength(0)
+  })
+
+  test('reports every affected v4 page when concurrent visual reviews fail', async () => {
+    const reviewerPort: VisualReviewPort = {
+      async review() {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        throw new Error('injected review failure')
+      },
+    }
+    const { repository, coordinator } = await fixture({
+      reviewerPort,
+      reviewConcurrency: 3,
+      plannedBlueprint: visualDeckV4Blueprint(),
+      runOverrides: { presentationMode: 'VISUAL_DECK_V4' },
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    const completed = (await repository.listEvents('run-1'))
+      .filter((event) => event.type === 'page_review.completed')
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toMatchObject({
+      payload: {
+        completed: 3, total: 3, pageNumbers: [1, 2, 3],
+        reason: 'PAGE_REVIEW_FAILED', requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+      },
+    })
   })
 })

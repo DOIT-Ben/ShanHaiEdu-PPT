@@ -113,11 +113,19 @@ describe('SQLite repository', () => {
     })
     first.close()
 
+    const legacy = new Database(filename)
+    const stored = legacy.query<{ data: string }, []>('SELECT data FROM agent_events WHERE sequence = 1').get()!
+    const legacyEvent = JSON.parse(stored.data) as Record<string, unknown>
+    delete legacyEvent.eventId
+    legacy.query('UPDATE agent_events SET data = ? WHERE sequence = 1').run(JSON.stringify(legacyEvent))
+    legacy.close(true)
+
     const reopened = new SqliteAgentRepository(filename)
     expect(await reopened.getRun('run-1')).toMatchObject({ status: 'AWAITING_BLUEPRINT_APPROVAL', version: 1 })
     expect(await reopened.listSteps('run-1')).toHaveLength(1)
     expect(await reopened.listDeliveries('run-1')).toHaveLength(1)
-    expect((await reopened.listEvents('run-1')).map((event) => event.sequence)).toEqual([1])
+    expect((await reopened.listEvents('run-1')).map((event) => ({ sequence: event.sequence, eventId: event.eventId })))
+      .toEqual([{ sequence: 1, eventId: 'run-1:event:1' }])
     await reopened.transact('run-1', (transaction) => {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -163,6 +171,30 @@ describe('SQLite repository', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PLANNING', version: 0 })
     expect(await repository.listEvents('run-1')).toEqual([])
     expect(await repository.listDeliveries('run-1')).toEqual([])
+    repository.close()
+  })
+
+  test('finds the first terminal event without confusing later reconciliation events', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED', version: 1 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.cancelled',
+        payload: { reason: null, mode: 'STOP_NEW_SUBMISSIONS' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: 'step-1', summary: 'late provider reconciliation completed' },
+      })
+    })
+
+    expect(await repository.getTerminalEvent('run-1')).toMatchObject({
+      sequence: 1, type: 'run.cancelled', eventId: 'run-1:event:1',
+    })
     repository.close()
   })
 

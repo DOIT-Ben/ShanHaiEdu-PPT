@@ -9,6 +9,11 @@ import type { AgentRepository, ArtifactPort, ClockPort, PresentationRendererPort
 import { transitionRun } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  revisionDetails,
+} from './v4-lifecycle'
 
 const COMPOSITE_REVIEW_VERSION = 'classroom-v4'
 
@@ -49,6 +54,13 @@ export class PageReviewCoordinator {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     if (run.status === 'DECK_REVIEW') return this.summary(run, blueprint)
     if (run.status !== 'PAGE_REVIEW') throw new Error('RUN_NOT_IN_PAGE_REVIEW')
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      appendV4LifecycleEvent(transaction, 'page_review.started', {
+        completed: 0,
+        total: transaction.run.slideCount,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
+    })
     const requirements = blueprintImageRequirements(run, blueprint)
     const fullPageRaster = blueprint.renderMode === 'VISUAL_DECK_V4'
     const completedImageSteps = (await this.dependencies.repository.listSteps(runId))
@@ -118,9 +130,7 @@ export class PageReviewCoordinator {
           return result
         })
         reviews.push(...compositeReviews.filter((result): result is ReviewSlideResult => result !== null))
-      } catch {
-        await this.moveToHuman(runId, 'PAGE_COMPOSITE_REVIEW_FAILED')
-      }
+      } catch {}
     }
 
     rejected = reviews.filter((result) => result.review && !result.review.approved).length
@@ -133,10 +143,15 @@ export class PageReviewCoordinator {
         && !reviews.some((result) => result.review === null)
         && await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
       if (!autoRevisionStarted) {
-        await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED')
+        const problemPageNumbers = this.problemPageNumbers(blueprint, imageSteps, reviews)
+        await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED', {
+          completed: reviews.length,
+          total,
+          pageNumbers: problemPageNumbers,
+        })
       }
     } else if (approved === total) {
-      await this.moveToDeckReview(runId)
+      await this.moveToDeckReview(runId, total)
     }
     const latest = await this.dependencies.repository.getRun(runId)
     return { status: latest?.status ?? 'FAILED', approved, rejected, total, reviews }
@@ -209,6 +224,21 @@ export class PageReviewCoordinator {
         updatedAt: now,
       })
       transaction.putRun({ ...transaction.run, ...policy, revisionRound: targetRevisionRound, updatedAt: now })
+      appendV4LifecycleEvent(transaction, 'page_review.completed', {
+        completed: reviews.length,
+        total: reviews.length,
+        pageNumbers: rejected.map(({ slide }) => slide.pageNumber),
+        revisionRound: run.revisionRound,
+        reason: 'PAGE_REVIEW_REJECTED',
+        retryable: true,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0,
+        total: rejected.length,
+        reason: 'PAGE_REVIEW_REJECTED',
+        retryable: true,
+        ...revisionDetails(plan, true),
+      })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
@@ -235,37 +265,75 @@ export class PageReviewCoordinator {
     }
   }
 
-  private async moveToDeckReview(runId: string) {
+  private async moveToDeckReview(runId: string, total: number) {
     await this.dependencies.repository.transact(runId, (transaction) => {
       if (transaction.run.status === 'DECK_REVIEW') return
       const now = this.dependencies.clock.now().toISOString()
       const policy = transitionRun(transaction.run, 'DECK_REVIEW')
       transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      appendV4LifecycleEvent(transaction, 'page_review.completed', {
+        completed: total,
+        total,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
         payload: { from: 'PAGE_REVIEW', to: 'DECK_REVIEW' },
       })
+      appendV4LifecycleEvent(transaction, 'deck_review.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
     })
   }
 
-  private async moveToHuman(runId: string, reason: string) {
+  private async moveToHuman(
+    runId: string,
+    reason: string,
+    progress?: Readonly<{ completed: number; total: number; pageNumbers?: readonly number[] }>,
+  ) {
     await this.dependencies.repository.transact(runId, (transaction) => {
-      if (transaction.run.status === 'NEEDS_HUMAN') return
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
-      transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason },
+      if (fromStatus !== 'NEEDS_HUMAN') {
+        const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '至少一页视觉质检未通过，请确认后续局部修订。' },
+        })
+      }
+      appendV4LifecycleEvent(transaction, 'page_review.completed', {
+        completed: progress?.completed ?? 0,
+        total: progress?.total ?? transaction.run.slideCount,
+        pageNumbers: progress?.pageNumbers ?? allPageNumbers(transaction.run),
+        reason: reason.includes('REJECTED') ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED',
+        retryable: true,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'approval.required',
-        payload: { kind: 'HUMAN_REVIEW', summary: '至少一页视觉质检未通过，请确认后续局部修订。' },
-      })
+    })
+  }
+
+  private problemPageNumbers(
+    blueprint: PresentationBlueprint,
+    imageSteps: readonly (StepRecord | null)[],
+    reviews: readonly ReviewSlideResult[],
+  ) {
+    return imageSteps.flatMap((imageStep, index) => {
+      const pageNumber = blueprint.slides[index]?.pageNumber
+      if (!pageNumber) return []
+      if (!imageStep) return [pageNumber]
+      const result = reviews.find((candidate) => candidate.step.idempotencyKey === `${imageStep.idempotencyKey}:review`)
+      return result?.review?.approved ? [] : [pageNumber]
     })
   }
 

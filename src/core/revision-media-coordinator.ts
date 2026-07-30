@@ -3,10 +3,17 @@ import { revisionPlanSchema } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintElementAssetKey, blueprintImageRequirements, completeVisualDeckV4Prompt } from './blueprint-assets'
 import { hashInput } from './hash'
-import { MediaStepRunner } from './media-step-runner'
+import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
 import { evaluateBudget, transitionRun } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  isVisualDeckV4,
+  revisionDetails,
+  v4LifecyclePayload,
+} from './v4-lifecycle'
 
 export type RevisionMediaResult = Readonly<{
   status: RunRecord['status']
@@ -45,7 +52,7 @@ export class RevisionMediaCoordinator {
 
     for (const target of pending) {
       const key = target.idempotencyKey
-      await this.dependencies.media.submitSlideImage({
+      const result = await this.dependencies.media.submitSlideImage({
         runId,
         stepId: target.stepId,
         idempotencyKey: key,
@@ -60,6 +67,10 @@ export class RevisionMediaCoordinator {
         ...(target.elementId ? { elementId: target.elementId } : {}),
         ...(target.assetReuseKey ? { assetReuseKey: target.assetReuseKey } : {}),
       })
+      if (isMediaFailureStepStatus(result.step.status)) {
+        await this.failV4Revision(run, result.step, targets.length)
+        break
+      }
       const latest = await this.dependencies.repository.getRun(runId)
       if (!latest || latest.status === 'NEEDS_HUMAN' || latest.status === 'PAUSED') break
     }
@@ -75,27 +86,58 @@ export class RevisionMediaCoordinator {
   async refresh(runId: string): Promise<RevisionMediaResult> {
     const run = await this.requireRun(runId)
     const targets = await this.targets(run)
+    const initialSteps = await this.currentSteps(run, targets)
+    const initialFailure = initialSteps.find((step) => isMediaFailureStepStatus(step.status))
+    if (initialFailure) {
+      await this.failV4Revision(run, initialFailure, targets.length)
+      return this.summary(await this.requireRun(runId))
+    }
     if (run.status === 'PAGE_REVIEW') return this.summary(run)
     if (run.status !== 'REVISING') return this.summary(run)
-    const steps = await this.currentSteps(run, targets)
-    for (const step of steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
+    for (const step of initialSteps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
       await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
       const latest = await this.requireRun(runId)
       if (latest.status === 'NEEDS_HUMAN') break
     }
     const refreshed = await this.currentSteps(run, targets)
-    const failed = refreshed.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
+    const failed = refreshed.find((step) => isMediaFailureStepStatus(step.status))
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step)).length
     const latest = await this.requireRun(runId)
+    const details = await this.details(run)
     if (!failed && completed === targets.length && latest.status === 'REVISING') {
       await this.dependencies.repository.transact(runId, (transaction) => {
         const now = this.dependencies.clock.now().toISOString()
         const policy = transitionRun(transaction.run, 'PAGE_REVIEW')
         transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+        appendV4LifecycleEvent(transaction, 'revision.progress', {
+          completed,
+          total: targets.length,
+          ...details,
+        })
+        appendV4LifecycleEvent(transaction, 'revision.completed', {
+          completed,
+          total: targets.length,
+          ...details,
+        })
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
           payload: { from: 'REVISING', to: 'PAGE_REVIEW' },
+        })
+        appendV4LifecycleEvent(transaction, 'page_review.started', {
+          completed: 0,
+          total: transaction.run.slideCount,
+          pageNumbers: allPageNumbers(transaction.run),
+        })
+      })
+    } else if (failed) {
+      await this.failV4Revision(latest, failed, targets.length)
+    } else if (isVisualDeckV4(latest)) {
+      await this.dependencies.repository.transact(runId, (transaction) => {
+        appendV4LifecycleEvent(transaction, 'revision.progress', {
+          completed,
+          total: targets.length,
+          ...details,
         })
       })
     }
@@ -171,6 +213,48 @@ export class RevisionMediaCoordinator {
       .filter((step) => step.tool === 'generate_slide_image' && keys.has(step.idempotencyKey))
   }
 
+  private async details(run: RunRecord) {
+    const step = (await this.dependencies.repository.listSteps(run.id))
+      .find((candidate) => candidate.idempotencyKey === revisionPlanStepKey(run.id, run.revisionRound)
+        && candidate.status === 'COMPLETED')
+    if (!step) throw new Error('REVISION_PLAN_NOT_READY')
+    return revisionDetails(revisionPlanSchema.parse(step.output), step.tool === 'plan_page_revision')
+  }
+
+  private async failV4Revision(run: RunRecord, failed: StepRecord, total: number) {
+    if (!isVisualDeckV4(run)) return
+    const details = await this.details(run)
+    const completed = (await this.currentSteps(run, await this.targets(run)))
+      .filter((step) => step.status === 'COMPLETED' && this.artifactId(step)).length
+    await this.dependencies.repository.transact(run.id, (transaction) => {
+      const fromStatus = transaction.run.status
+      if (fromStatus === 'REVISING') {
+        const now = this.dependencies.clock.now().toISOString()
+        const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: failed.errorCode ?? 'REVISION_MEDIA_FAILED' },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '局部重绘失败，需要人工核对后重试。' },
+        })
+      }
+      appendV4LifecycleEvent(transaction, 'revision.completed', {
+        completed,
+        total,
+        ...details,
+        reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+        retryable: false,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
+      })
+    })
+  }
+
   private imageKey(run: RunRecord, pageNumber: number) {
     return `${run.id}:slide:${pageNumber}:image:r${run.revisionRound}:v1`
   }
@@ -195,11 +279,24 @@ export class RevisionMediaCoordinator {
     await this.dependencies.repository.transact(run.id, (transaction) => {
       const now = this.dependencies.clock.now().toISOString()
       const policy = transitionRun(transaction.run, 'PAUSED')
-      transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      const updated = { ...transaction.run, ...policy, updatedAt: now }
+      transaction.putRun(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'run.paused',
-        payload: { reason: `BUDGET_REQUIRED:${required}`, resumeState: 'REVISING' },
+        payload: isVisualDeckV4(updated)
+          ? {
+              ...v4LifecyclePayload(updated, 'RUN', {
+                completed: 0,
+                total: 1,
+                reason: 'BUDGET_INSUFFICIENT',
+                retryable: true,
+                requiresUserAction: true,
+                nextAction: 'ADD_BUDGET',
+              }),
+              resumeState: 'REVISING',
+            }
+          : { reason: `BUDGET_REQUIRED:${required}`, resumeState: 'REVISING' },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,

@@ -204,7 +204,7 @@
       ],
       "get": {
         "operationId": "streamRunEvents",
-        "description": "Replays durable events after the supplied cursor in batches of at most 100 events and 256 KiB, then shares one live poller per Run. The stream closes after a terminal run.completed, run.failed, or run.cancelled event. Clients reconnect with Last-Event-ID or after and must ignore event ids they have already applied.",
+        "description": "Replays durable AgentEvent objects after the supplied cursor in batches of at most 100 events and 256 KiB, then shares one live poller per Run. Each SSE data field is the same AgentEvent structure returned by event history. The stream closes after a terminal run.completed, run.failed, or run.cancelled event. Clients reconnect with Last-Event-ID or after and must ignore sequences they have already applied.",
         "parameters": [
           { "$ref": "#/components/parameters/RunId" },
           { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
@@ -242,7 +242,7 @@
                   "type": "object",
                   "required": ["data", "pagination"],
                   "properties": {
-                    "data": { "type": "array", "maxItems": 100, "items": { "type": "object" } },
+                    "data": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/AgentEvent" } },
                     "pagination": {
                       "type": "object",
                       "required": ["nextAfter", "hasMore"],
@@ -315,6 +315,188 @@
       }
     },
     "schemas": {
+      "AgentEventEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "id", "eventId", "runId", "sequence", "createdAt", "type", "payload"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "eventId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "type": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "payload": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "V4LifecyclePayload": {
+        "type": "object",
+        "required": ["presentationMode", "stage", "completed", "total", "pageNumbers", "revisionKind", "revisionRound", "maxRevisionRounds", "budgetUnits", "committedBudgetUnits", "reason", "retryable", "requiresUserAction", "nextAction"],
+        "properties": {
+          "presentationMode": { "const": "VISUAL_DECK_V4" },
+          "stage": { "enum": ["PLANNING", "GENERATION", "PAGE_REVIEW", "REVISION", "DECK_REVIEW", "DELIVERY", "RUN"] },
+          "completed": { "type": "integer", "minimum": 0 },
+          "total": { "type": "integer", "minimum": 0 },
+          "pageNumbers": {
+            "type": "array",
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": { "type": "integer", "minimum": 1, "maximum": 50 }
+          },
+          "revisionKind": { "type": ["string", "null"], "enum": ["PAGE_VISUAL", "DECK_CONTENT", "DECK_VISUAL", null] },
+          "revisionRound": { "type": "integer", "minimum": 0 },
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "budgetUnits": { "type": "integer", "minimum": 0 },
+          "committedBudgetUnits": { "type": "integer", "minimum": 0 },
+          "reason": {
+            "type": ["string", "null"],
+            "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER", null]
+          },
+          "retryable": { "type": ["boolean", "null"] },
+          "requiresUserAction": { "type": "boolean" },
+          "nextAction": {
+            "type": ["string", "null"],
+            "enum": ["APPROVE_BLUEPRINT", "ADD_BUDGET", "APPROVE_REVISION", "RETRY", "REVIEW_RESULT", "CONTACT_SUPPORT", null]
+          }
+        }
+      },
+      "V4LifecycleEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AgentEventEnvelope" },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "type": { "enum": ["planning.started", "planning.completed"] },
+                  "payload": { "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "properties": { "stage": { "const": "PLANNING" } } }], "unevaluatedProperties": false }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "enum": ["generation.started", "generation.progress", "generation.completed"] },
+                  "payload": { "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "properties": { "stage": { "const": "GENERATION" } } }], "unevaluatedProperties": false }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "enum": ["page_review.started", "page_review.completed"] },
+                  "payload": { "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "properties": { "stage": { "const": "PAGE_REVIEW" } } }], "unevaluatedProperties": false }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "enum": ["revision.started", "revision.progress", "revision.completed"] },
+                  "payload": { "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "properties": { "stage": { "const": "REVISION" } } }], "unevaluatedProperties": false }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "enum": ["deck_review.started", "deck_review.completed"] },
+                  "payload": { "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "properties": { "stage": { "const": "DECK_REVIEW" } } }], "unevaluatedProperties": false }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "enum": ["delivery.started", "delivery.completed"] },
+                  "payload": { "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "properties": { "stage": { "const": "DELIVERY" } } }], "unevaluatedProperties": false }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.paused" },
+                  "payload": {
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["resumeState"], "properties": { "stage": { "const": "RUN" }, "resumeState": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] } } }],
+                    "unevaluatedProperties": false
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.completed" },
+                  "payload": {
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["deliveryId", "qualityOverride"], "properties": { "stage": { "const": "RUN" }, "deliveryId": { "type": "string", "minLength": 1, "maxLength": 160 }, "qualityOverride": { "type": "boolean" } } }],
+                    "unevaluatedProperties": false
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.failed" },
+                  "payload": {
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "const": "WORKER_FATAL" } } }],
+                    "unevaluatedProperties": false
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.cancelled" },
+                  "payload": {
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["mode"], "properties": { "stage": { "const": "RUN" }, "mode": { "const": "STOP_NEW_SUBMISSIONS" } } }],
+                    "unevaluatedProperties": false
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "ForwardCompatibleAgentEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AgentEventEnvelope" },
+          {
+            "properties": {
+              "type": {
+                "not": {
+                  "enum": ["planning.started", "planning.completed", "generation.started", "generation.progress", "generation.completed", "page_review.started", "page_review.completed", "revision.started", "revision.progress", "revision.completed", "deck_review.started", "deck_review.completed", "delivery.started", "delivery.completed", "run.paused", "run.completed", "run.failed", "run.cancelled"]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "LegacyTerminalAgentEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AgentEventEnvelope" },
+          {
+            "oneOf": [
+              {
+                "properties": {
+                  "type": { "const": "run.paused" },
+                  "payload": { "type": "object", "additionalProperties": false, "required": ["reason", "resumeState"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 500 }, "resumeState": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] } } }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.completed" },
+                  "payload": { "type": "object", "additionalProperties": false, "required": ["deliveryId", "qualityOverride"], "properties": { "deliveryId": { "type": "string", "minLength": 1, "maxLength": 160 }, "qualityOverride": { "type": "boolean" } } }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.failed" },
+                  "payload": { "type": "object", "additionalProperties": false, "required": ["errorCode"], "properties": { "errorCode": { "type": "string", "minLength": 1, "maxLength": 100 } } }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.cancelled" },
+                  "payload": { "type": "object", "additionalProperties": false, "required": ["reason"], "properties": { "reason": { "type": ["string", "null"], "maxLength": 500 }, "mode": { "const": "STOP_NEW_SUBMISSIONS" } } }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "AgentEvent": {
+        "description": "Forward-compatible durable event contract. Known V4 lifecycle events use the typed variant; consumers must ignore unhandled future type values and use sequence for ordering and deduplication.",
+        "oneOf": [
+          { "$ref": "#/components/schemas/V4LifecycleEvent" },
+          { "$ref": "#/components/schemas/LegacyTerminalAgentEvent" },
+          { "$ref": "#/components/schemas/ForwardCompatibleAgentEvent" }
+        ]
+      },
       "Liveness": {
         "type": "object",
         "additionalProperties": false,

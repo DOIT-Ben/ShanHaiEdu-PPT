@@ -3,7 +3,7 @@ import { slideVisualReviewSchema, type PresentationBlueprint, type SlideVisualRe
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
 import { hashInput } from './hash'
-import { MediaStepRunner } from './media-step-runner'
+import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type {
   AcquiredWebAsset,
   AgentRepository,
@@ -17,6 +17,12 @@ import type {
   StepRecord,
 } from './ports'
 import { evaluateBudget, transitionRun } from './policy'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  isVisualDeckV4,
+  v4LifecyclePayload,
+} from './v4-lifecycle'
 
 export type SubmitBlueprintImagesResult = Readonly<{
   status: RunRecord['status']
@@ -53,13 +59,20 @@ export class SlideGenerationCoordinator {
       return { status: run.status, submitted: 0, total: run.slideCount, steps: [] }
     }
     if (run.status !== 'EXECUTING') throw new Error('RUN_NOT_EXECUTING')
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      appendV4LifecycleEvent(transaction, 'generation.started', {
+        completed: 0,
+        total: transaction.run.slideCount,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
+    })
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const requirements = blueprintImageRequirements(run, blueprint)
     const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const sequentialPageExecution = run.source.kind === 'APPROVED_PAGE_DESIGN'
-    const blockingStep = existingSteps.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
+    const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status))
     if (blockingStep) {
       await this.requireHuman(runId, blockingStep)
       return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
@@ -169,12 +182,12 @@ export class SlideGenerationCoordinator {
       const existingIndex = steps.findIndex((step) => step.idempotencyKey === result.step.idempotencyKey)
       if (existingIndex === -1) steps.push(result.step)
       else steps[existingIndex] = result.step
-      const latestRun = await this.dependencies.repository.getRun(runId)
-      if (!latestRun || latestRun.status === 'NEEDS_HUMAN' || latestRun.status === 'PAUSED') break
-      if (result.step.status === 'FAILED') {
+      if (isMediaFailureStepStatus(result.step.status)) {
         await this.requireHuman(runId, result.step)
         break
       }
+      const latestRun = await this.dependencies.repository.getRun(runId)
+      if (!latestRun || latestRun.status === 'NEEDS_HUMAN' || latestRun.status === 'PAUSED') break
       await this.appendProgress(runId, result.step.id, steps.length, requirements.length, requirement.sourceAssetStrategy === 'SEARCH_WEB'
         ? '网络素材未命中，已回退 AI 生成'
         : '已安全提交图片任务')
@@ -207,10 +220,10 @@ export class SlideGenerationCoordinator {
 
     const refreshed = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
-    const failed = refreshed.find((step) => ['FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
-    if (failed) await this.requireHuman(runId, failed)
+    const failed = refreshed.find((step) => isMediaFailureStepStatus(step.status))
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step) !== null)
-    await this.appendCompletedPageProgress(runId, completed.length, requirements.length)
+    if (failed) await this.requireHuman(runId, failed)
+    else await this.appendCompletedPageProgress(runId, completed.length, requirements.length)
     const latest = await this.dependencies.repository.getRun(runId)
     if (!failed && completed.length === requirements.length && latest?.status === 'EXECUTING') {
       await this.dependencies.repository.transact(runId, (transaction) => {
@@ -218,10 +231,20 @@ export class SlideGenerationCoordinator {
         const now = this.dependencies.clock.now().toISOString()
         const policy = transitionRun(transaction.run, 'PAGE_REVIEW')
         transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+        appendV4LifecycleEvent(transaction, 'generation.completed', {
+          completed: requirements.length,
+          total: requirements.length,
+          pageNumbers: allPageNumbers(transaction.run),
+        })
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
           payload: { from: 'EXECUTING', to: 'PAGE_REVIEW' },
+        })
+        appendV4LifecycleEvent(transaction, 'page_review.started', {
+          completed: 0,
+          total: transaction.run.slideCount,
+          pageNumbers: allPageNumbers(transaction.run),
         })
       })
     }
@@ -485,10 +508,23 @@ export class SlideGenerationCoordinator {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'run.paused',
-        payload: {
-          reason: `BUDGET_REQUIRED:${requiredBudgetUnits}`,
-          resumeState: 'EXECUTING',
-        },
+        payload: isVisualDeckV4(updated)
+          ? {
+              ...v4LifecyclePayload(updated, 'RUN', {
+                completed: 0,
+                total: updated.slideCount,
+                pageNumbers: allPageNumbers(updated),
+                reason: 'BUDGET_INSUFFICIENT',
+                retryable: true,
+                requiresUserAction: true,
+                nextAction: 'ADD_BUDGET',
+              }),
+              resumeState: 'EXECUTING',
+            }
+          : {
+              reason: `BUDGET_REQUIRED:${requiredBudgetUnits}`,
+              resumeState: 'EXECUTING',
+            },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -501,20 +537,34 @@ export class SlideGenerationCoordinator {
 
   private async requireHuman(runId: string, step: StepRecord) {
     await this.dependencies.repository.transact(runId, (transaction) => {
-      if (transaction.run.status === 'NEEDS_HUMAN') return
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
-      transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: step.errorCode ?? 'IMAGE_SUBMISSION_FAILED' },
-      })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'approval.required',
-        payload: { kind: 'HUMAN_REVIEW', summary: '图片任务需要人工核对后才能继续。' },
+      if (fromStatus !== 'NEEDS_HUMAN') {
+        const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: step.errorCode ?? 'IMAGE_SUBMISSION_FAILED' },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '图片任务需要人工核对后才能继续。' },
+        })
+      }
+      const completed = transaction.listSteps().filter((candidate) =>
+        candidate.tool === 'generate_slide_image' && candidate.status === 'COMPLETED').length
+      appendV4LifecycleEvent(transaction, 'generation.completed', {
+        completed: Math.min(completed, transaction.run.slideCount),
+        total: transaction.run.slideCount,
+        pageNumbers: allPageNumbers(transaction.run),
+        reason: step.errorCode === 'SOURCE_ASSET_NOT_FOUND'
+          ? 'PAGE_REVIEW_FAILED'
+          : 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+        retryable: false,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
       })
     })
   }
@@ -540,6 +590,11 @@ export class SlideGenerationCoordinator {
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.progress',
         payload: { stepId, completed, total, summary: `已完成 ${completed}/${total} 页` },
+      })
+      appendV4LifecycleEvent(transaction, 'generation.progress', {
+        completed,
+        total,
+        pageNumbers: allPageNumbers(transaction.run),
       })
     })
   }

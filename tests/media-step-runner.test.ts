@@ -6,7 +6,7 @@ import type { RunRecord } from '../src/core/ports'
 import { hashInput } from '../src/core/hash'
 import { reserveBudget } from '../src/core/policy'
 
-function run(): RunRecord {
+function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-1',
     creationKey: 'create-run-1',
@@ -33,6 +33,7 @@ function run(): RunRecord {
     leaseVersion: 0,
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z',
+    ...overrides,
   }
 }
 
@@ -47,12 +48,12 @@ const request = {
   budgetUnits: 10,
 } as const
 
-async function fixture() {
+async function fixture(overrides: Partial<RunRecord> = {}) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
   const clock = new FixedClock()
-  await repository.createRun(run())
+  await repository.createRun(run(overrides))
   return { repository, budget, images, runner: new MediaStepRunner({ repository, budget, images, clock }) }
 }
 
@@ -101,7 +102,7 @@ describe('media step runner', () => {
   })
 
   test('keeps budget and requires a human when submission state is unknown', async () => {
-    const { repository, budget, images, runner } = await fixture()
+    const { repository, budget, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')
     const result = await runner.submitSlideImage(request)
 

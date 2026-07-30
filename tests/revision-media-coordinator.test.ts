@@ -214,11 +214,21 @@ describe('revision media coordinator', () => {
   })
 
   test('pauses before any redraw when the remaining budget is insufficient', async () => {
-    const { images, coordinator } = await fixture({ budgetUnits: 20, committedBudgetUnits: 20 })
+    const { repository, images, coordinator } = await fixture({
+      budgetUnits: 20,
+      committedBudgetUnits: 20,
+      presentationMode: 'VISUAL_DECK_V4',
+    })
     const result = await coordinator.submit('run-1', 5)
 
     expect(result).toMatchObject({ status: 'PAUSED', submitted: 0, total: 1 })
     expect(images.operations.size).toBe(0)
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'run.paused')).toMatchObject({
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', reason: 'BUDGET_INSUFFICIENT',
+        retryable: true, requiresUserAction: true, nextAction: 'ADD_BUDGET',
+      },
+    })
   })
 
   test('redraws one v3 element using the canonical strategy-aware asset key', async () => {
@@ -244,7 +254,10 @@ describe('revision media coordinator', () => {
       ...revisionPlan(),
       operations: [{ ...revisionPlan().operations[0]!, instruction: correction, sourceChunkIds: ['chunk-1'] }],
     }
-    const { images, coordinator } = await fixture({}, { blueprint: base, plan: revision })
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: base,
+      plan: revision,
+    })
 
     await coordinator.submit('run-1', 5)
 
@@ -252,5 +265,58 @@ describe('revision media coordinator', () => {
     expect(request?.prompt).toContain('Create one finished, full-bleed 16:9 presentation slide')
     expect(request?.prompt).toContain(base.visualDeckV4Proposal!.slideBriefs[1]!.title)
     expect(request?.prompt).toContain(correction)
+    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
+    const lifecycle = (await repository.listEvents('run-1'))
+      .filter((event) => event.type === 'revision.progress' || event.type === 'revision.completed'
+        || event.type === 'page_review.started')
+    expect(lifecycle.map((event) => event.type)).toEqual([
+      'revision.progress', 'revision.completed', 'page_review.started',
+    ])
+    expect(lifecycle[1]).toMatchObject({
+      payload: { revisionKind: 'DECK_VISUAL', pageNumbers: [2], completed: 1, total: 1 },
+    })
+  })
+
+  test('moves a v4 revision to human review when the redraw provider fails before submission', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    images.failNext('NO_HEALTHY_ROUTE_BEFORE_SUBMIT', 'NOT_SUBMITTED')
+
+    await coordinator.submit('run-1', 5)
+    const result = await coordinator.refresh('run-1')
+
+    expect(result.status).toBe('NEEDS_HUMAN')
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'revision.completed'))
+      .toMatchObject({
+        payload: {
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false,
+          requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+        },
+      })
+  })
+
+  test('ends a v4 revision once when the submitted redraw later fails', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    await coordinator.submit('run-1', 5)
+    images.fail('run-1:slide:2:image:r1:v1', 'PROVIDER_REJECTED', 'UNKNOWN')
+
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 0 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN', committedBudgetUnits: 25,
+    })
+    const lifecycle = (await repository.listEvents('run-1'))
+      .filter((event) => event.type.startsWith('revision.'))
+    expect(lifecycle.filter((event) => event.type === 'revision.completed')).toHaveLength(1)
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: 'revision.completed',
+      payload: { reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false },
+    })
   })
 })

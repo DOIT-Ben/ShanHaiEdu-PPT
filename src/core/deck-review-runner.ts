@@ -25,6 +25,7 @@ import type {
   StepRecord,
 } from './ports'
 import { transitionRun } from './policy'
+import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 
 export const DECK_QUALITY_THRESHOLD = 80
 
@@ -148,6 +149,11 @@ export class DeckReviewRunner {
         type: 'tool.started',
         payload: { stepId: step.id, tool: step.tool, label: '执行整套课件质量评估' },
       })
+      appendV4LifecycleEvent(transaction, 'deck_review.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       return null
     })
   }
@@ -167,6 +173,13 @@ export class DeckReviewRunner {
         type: 'tool.completed',
         payload: { stepId: step.id, summary: `整套课件质量评估完成（${review.qualityScore} 分）` },
       })
+      appendV4LifecycleEvent(transaction, 'deck_review.completed', {
+        completed: 1,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+        reason: passed ? null : 'DECK_REVIEW_REJECTED',
+        retryable: passed ? null : true,
+      })
       for (const issue of review.issues) {
         transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'issue.detected', payload: issue })
       }
@@ -175,6 +188,11 @@ export class DeckReviewRunner {
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
           payload: { from: 'DECK_REVIEW', to: 'DELIVERING' },
+        })
+        appendV4LifecycleEvent(transaction, 'delivery.started', {
+          completed: 0,
+          total: 1,
+          pageNumbers: allPageNumbers(transaction.run),
         })
       }
       return { step: updatedStep, review, passed, replayed: false }
@@ -215,6 +233,15 @@ export class DeckReviewRunner {
           schemaVersion: CONTRACT_VERSION,
           type: 'approval.required',
           payload: { kind: 'HUMAN_REVIEW', summary: '整套课件审查失败，需要人工处理后重试。' },
+        })
+        appendV4LifecycleEvent(transaction, 'deck_review.completed', {
+          completed: 0,
+          total: 1,
+          pageNumbers: allPageNumbers(transaction.run),
+          reason: 'DECK_REVIEW_FAILED',
+          retryable: true,
+          requiresUserAction: true,
+          nextAction: 'REVIEW_RESULT',
         })
       }
       return { step: updatedStep, review: null, passed: false, replayed: false }

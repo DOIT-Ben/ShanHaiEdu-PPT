@@ -45,6 +45,7 @@ import type {
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
+import { failVisualDeckV4Run } from '../core/v4-lifecycle'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 
 export class SystemClock implements ClockPort {
@@ -526,6 +527,12 @@ export function createAgentRuntime(input: RuntimeInput) {
         await delivery.deliver(run.id)
       }
     } catch (error) {
+      await failVisualDeckV4Run({
+        repository: input.repository,
+        clock,
+        runId: candidate.id,
+        errorCode: 'WORKER_FATAL',
+      }).catch(() => false)
       throw new WorkerTickError({
         runId: candidate.id,
         phase,
