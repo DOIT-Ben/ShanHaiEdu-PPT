@@ -6,6 +6,7 @@ import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-op
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
+import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
 
@@ -117,7 +118,10 @@ async function runDetail(repository: AgentRepository, run: RunRecord) {
     repository.getRunEventSnapshot(run.id),
   ])
   const blueprint = await getActiveBlueprint(repository, run.id, run.revisionRound).catch(() => null)
-  return { ...publicRun(run), blueprint, deliveries, issues: snapshot.openIssues, progress: snapshot.progress }
+  const generationPlan = blueprint?.visualDeckV4Proposal
+    ? visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal)
+    : null
+  return { ...publicRun(run), blueprint, generationPlan, deliveries, issues: snapshot.openIssues, progress: snapshot.progress }
 }
 
 function sseResponse(input: Readonly<{

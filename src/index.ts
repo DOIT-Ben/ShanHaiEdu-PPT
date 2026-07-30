@@ -1,6 +1,7 @@
 export * from './contracts'
 export * from './presentation-contracts'
 export * from './visual-deck-v4-contracts'
+export * from './visual-deck-v4-generation-plan'
 export * from './shanhai-v1-contracts'
 export * from './adapters/in-memory-repository'
 export * from './adapters/frameflow-host'

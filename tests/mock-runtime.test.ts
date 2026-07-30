@@ -58,9 +58,16 @@ describe('mock runtime', () => {
 
     await runtime.tick()
     const plannedResponse = await runtime.handler(request(`/v1/runs/${runId}`))
-    const planned = await plannedResponse.json() as { data: { status: string; version: number; blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } } } }
+    const planned = await plannedResponse.json() as { data: {
+      status: string
+      version: number
+      blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } }
+      generationPlan?: { title: string; slideCount: number; pages: unknown[]; output: { editable: boolean } }
+    } }
     expect(planned.data.status).toBe('AWAITING_BLUEPRINT_APPROVAL')
     expect(planned.data.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(3)
+    expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
+    expect(planned.data.generationPlan?.pages).toHaveLength(3)
 
     const approved = await runtime.handler(request(`/v1/runs/${runId}/actions`, {
       method: 'POST',
