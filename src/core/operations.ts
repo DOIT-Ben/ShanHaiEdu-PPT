@@ -1,4 +1,4 @@
-import type { AgentEvent, RunStatus } from '../contracts'
+import type { KnownAgentEvent as AgentEvent, RunStatus } from '../contracts'
 import type {
   OperationsFilters,
   OperationsPercentiles,

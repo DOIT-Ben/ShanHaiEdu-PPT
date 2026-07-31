@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../contracts'
+import type { KnownAgentEvent as AgentEvent } from '../contracts'
 import type {
   AgentRepository,
   AgentTransaction,
@@ -82,6 +82,13 @@ export class InMemoryAgentRepository implements AgentRepository {
     const stored = this.#runs.get(runId)
     if (!stored) return []
     return stored.events.filter((event) => event.sequence > afterSequence).map(clone)
+  }
+
+  async getTerminalEvent(runId: string) {
+    const stored = this.#runs.get(runId)
+    const event = stored?.events.find((candidate) =>
+      candidate.type === 'run.completed' || candidate.type === 'run.failed' || candidate.type === 'run.cancelled')
+    return event ? clone(event) : null
   }
 
   async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
@@ -191,9 +198,11 @@ export class InMemoryAgentRepository implements AgentRepository {
         putDelivery(delivery) { nextDeliveries.set(delivery.id, clone(delivery)) },
         appendEvent(event: NewAgentEvent) {
           const sequence = (nextEvents.at(-1)?.sequence ?? 0) + 1
+          const eventId = `${runId}:event:${sequence}`
           const created: AgentEvent = {
             ...clone(event),
-            id: `${runId}:event:${sequence}`,
+            id: eventId,
+            eventId,
             runId,
             sequence,
             createdAt: nextRun.updatedAt,

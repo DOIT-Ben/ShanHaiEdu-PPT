@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { CONTRACT_VERSION, type AgentEvent } from '../src/contracts'
+import { CONTRACT_VERSION, type KnownAgentEvent as AgentEvent } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import type { RunRecord } from '../src/core/ports'
 import { RunEventBroker } from '../src/http/run-event-broker'
@@ -129,7 +129,71 @@ describe('RunEventBroker', () => {
     await waitFor(() => closed)
 
     expect(events).toEqual([])
-    expect(repository.readCount).toBe(1)
+    expect(repository.readCount).toBe(0)
+    expect(broker.activePollers()).toBe(0)
+  })
+
+  test('stops at the first terminal event and leaves later audit events out of SSE', async () => {
+    const repository = new CountingRepository()
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.cancelled',
+        payload: { reason: 'test cancellation', mode: 'STOP_NEW_SUBMISSIONS' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: 'step-1', summary: 'late provider reconciliation completed' },
+      })
+    })
+    const broker = new RunEventBroker({ repository, pollMs: 5 })
+    const types: string[] = []
+    let closed = false
+
+    await broker.subscribe({
+      runId: 'run-1', after: 0,
+      onEvent: (event) => Boolean(types.push(event.type)),
+      onClose: () => { closed = true },
+    })
+    await waitFor(() => closed)
+
+    expect(types).toEqual(['run.cancelled'])
+    expect((await repository.listEvents('run-1')).map((event) => event.type))
+      .toEqual(['run.cancelled', 'tool.completed'])
+  })
+
+  test('closes without post-terminal events when reconnecting from the terminal sequence', async () => {
+    const repository = new CountingRepository()
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.cancelled',
+        payload: { reason: null, mode: 'STOP_NEW_SUBMISSIONS' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: 'step-1', summary: 'late provider reconciliation completed' },
+      })
+    })
+    const broker = new RunEventBroker({ repository, pollMs: 5 })
+    const events: AgentEvent[] = []
+    let closed = false
+
+    await broker.subscribe({
+      runId: 'run-1', after: 1,
+      onEvent: (event) => Boolean(events.push(event)),
+      onClose: () => { closed = true },
+    })
+    await waitFor(() => closed)
+
+    expect(events).toEqual([])
+    expect(repository.readCount).toBe(0)
     expect(broker.activePollers()).toBe(0)
   })
 

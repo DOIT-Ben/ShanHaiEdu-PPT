@@ -1,11 +1,19 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { revisionPlanSchema, type PresentationBlueprint } from '../presentation-contracts'
 import { mapWithConcurrency } from './concurrency'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintImageRequirements, latestCompletedAssetStep } from './blueprint-assets'
+import { blueprintImageRequirements, latestCompletedAssetStep, visualDeckV4AllowedCopy } from './blueprint-assets'
+import { hashInput } from './hash'
 import { renderAndStoreSlidePreviews, requirePresentationArtifactReferences } from './presentation-render-input'
 import type { AgentRepository, ArtifactPort, ClockPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 import { transitionRun } from './policy'
+import { revisionPlanStepKey } from './revision-planning-runner'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  revisionDetails,
+} from './v4-lifecycle'
 
 const COMPOSITE_REVIEW_VERSION = 'classroom-v4'
 
@@ -46,7 +54,15 @@ export class PageReviewCoordinator {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     if (run.status === 'DECK_REVIEW') return this.summary(run, blueprint)
     if (run.status !== 'PAGE_REVIEW') throw new Error('RUN_NOT_IN_PAGE_REVIEW')
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      appendV4LifecycleEvent(transaction, 'page_review.started', {
+        completed: 0,
+        total: transaction.run.slideCount,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
+    })
     const requirements = blueprintImageRequirements(run, blueprint)
+    const fullPageRaster = blueprint.renderMode === 'VISUAL_DECK_V4'
     const completedImageSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
     const imageSteps = requirements.map((requirement) =>
@@ -62,6 +78,7 @@ export class PageReviewCoordinator {
       const imageStep = imageSteps[index]
       const output = imageStep ? this.imageOutput(imageStep) : null
       if (!imageStep || !output) throw new Error('PAGE_ARTIFACT_NOT_FOUND')
+      const v4Brief = blueprint.visualDeckV4Proposal?.slideBriefs.find((brief) => brief.pageNumber === slide.pageNumber)
       const result = await this.dependencies.reviewer.review({
         runId,
         stepId: `${imageStep.id}:review`,
@@ -69,8 +86,10 @@ export class PageReviewCoordinator {
         slideId: output.slideId,
         versionId: output.versionId,
         artifactId: output.artifactId,
-        visualIntent: requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
-        layout: requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
+        visualIntent: fullPageRaster && v4Brief
+          ? `${slide.visualIntent}；允许文字：${visualDeckV4AllowedCopy(v4Brief).join('｜')}；数字：${v4Brief.numbers.join('｜') || '无'}；公式：${v4Brief.formulas.join('｜') || '无'}；允许空格、换行和不改变含义的普通标点差异，禁止替换字词、改变数字或添加未列出的标签`
+          : requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
+        layout: fullPageRaster ? 'VISUAL_DECK_V4' : requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
       })
       if (result.review === null) stopReviews = true
@@ -79,7 +98,7 @@ export class PageReviewCoordinator {
     reviews.push(...assetReviews.filter((result): result is ReviewSlideResult => result !== null))
 
     let rejected = reviews.filter((result) => result.review && !result.review.approved).length
-    if (!reviews.some((result) => result.review === null) && rejected === 0) {
+    if (!fullPageRaster && !reviews.some((result) => result.review === null) && rejected === 0) {
       try {
         const references = await requirePresentationArtifactReferences(this.dependencies.repository, run, blueprint)
         const previews = await renderAndStoreSlidePreviews({
@@ -111,21 +130,127 @@ export class PageReviewCoordinator {
           return result
         })
         reviews.push(...compositeReviews.filter((result): result is ReviewSlideResult => result !== null))
-      } catch {
-        await this.moveToHuman(runId, 'PAGE_COMPOSITE_REVIEW_FAILED')
-      }
+      } catch {}
     }
 
     rejected = reviews.filter((result) => result.review && !result.review.approved).length
     const approved = reviews.filter((result) => result.review?.approved).length
-    const total = requirements.length + blueprint.slides.length
+    const total = requirements.length + (fullPageRaster ? 0 : blueprint.slides.length)
     if (reviews.some((result) => result.review === null) || rejected > 0 || reviews.length !== total) {
-      await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED')
+      const autoRevisionStarted = fullPageRaster
+        && rejected > 0
+        && reviews.length === total
+        && !reviews.some((result) => result.review === null)
+        && await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
+      if (!autoRevisionStarted) {
+        const problemPageNumbers = this.problemPageNumbers(blueprint, imageSteps, reviews)
+        await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED', {
+          completed: reviews.length,
+          total,
+          pageNumbers: problemPageNumbers,
+        })
+      }
     } else if (approved === total) {
-      await this.moveToDeckReview(runId)
+      await this.moveToDeckReview(runId, total)
     }
     const latest = await this.dependencies.repository.getRun(runId)
     return { status: latest?.status ?? 'FAILED', approved, rejected, total, reviews }
+  }
+
+  private async startAutomaticPageRevision(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    imageSteps: readonly (StepRecord | null)[],
+    reviews: readonly ReviewSlideResult[],
+  ) {
+    if (run.automationLevel !== 'BOUNDED_AUTO') return false
+    const existingSteps = await this.dependencies.repository.listSteps(run.id)
+    const pageRevisionCount = existingSteps.filter((step) =>
+      step.tool === 'plan_page_revision' && step.status === 'COMPLETED').length
+    if (pageRevisionCount >= run.maxRevisionRounds) return false
+    const targetRevisionRound = run.revisionRound + 1
+    const rejected = imageSteps.flatMap((imageStep, index) => {
+      if (!imageStep) return []
+      const reviewResult = reviews.find((candidate) => candidate.step.idempotencyKey === `${imageStep.idempotencyKey}:review`)
+      if (!reviewResult?.review || reviewResult.review.approved || !reviewResult.review.retryInstruction) return []
+      const slide = blueprint.slides[index]
+      if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
+      return [{ slide, reviewResult }]
+    })
+    if (rejected.length === 0) return false
+    const plan = revisionPlanSchema.parse({
+      id: `${run.id}:page-revision-plan:r${targetRevisionRound}`,
+      reviewId: `${run.id}:page-review:r${run.revisionRound}`,
+      revisionRound: targetRevisionRound,
+      createdAt: this.dependencies.clock.now().toISOString(),
+      summary: `自动局部重绘 ${rejected.length} 个未通过视觉质检的页面，其他页面保持不变。`,
+      operations: rejected.map(({ slide, reviewResult }) => ({
+        id: `${run.id}:page-revision:r${targetRevisionRound}:p${slide.pageNumber}`,
+        slideId: `${run.id}:slide:${slide.pageNumber}`,
+        kind: 'REGENERATE_IMAGE' as const,
+        issueIds: [`${run.id}:page-review:r${run.revisionRound}:p${slide.pageNumber}`],
+        instruction: reviewResult.review!.retryInstruction!,
+        sourceChunkIds: slide.sourceChunkIds,
+      })),
+    })
+    const idempotencyKey = revisionPlanStepKey(run.id, targetRevisionRound)
+    const inputHash = hashInput({ tool: 'plan_revision', origin: 'page_review', plan })
+    await this.dependencies.repository.transact(run.id, (transaction) => {
+      const existing = transaction.getStep(idempotencyKey)
+      if (existing) {
+        if (existing.inputHash !== inputHash || existing.tool !== 'plan_page_revision') {
+          throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+        }
+        return
+      }
+      if (transaction.run.status !== 'PAGE_REVIEW' || transaction.run.revisionRound !== run.revisionRound) {
+        throw new Error('RUN_PAGE_REVIEW_VERSION_CONFLICT')
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      const policy = transitionRun(transaction.run, 'REVISING')
+      transaction.putStep({
+        id: `step-${run.id}-page-revision-plan-r${targetRevisionRound}`,
+        runId: run.id,
+        idempotencyKey,
+        inputHash,
+        tool: 'plan_page_revision',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: plan,
+        createdAt: now,
+        updatedAt: now,
+      })
+      transaction.putRun({ ...transaction.run, ...policy, revisionRound: targetRevisionRound, updatedAt: now })
+      appendV4LifecycleEvent(transaction, 'page_review.completed', {
+        completed: reviews.length,
+        total: reviews.length,
+        pageNumbers: rejected.map(({ slide }) => slide.pageNumber),
+        revisionRound: run.revisionRound,
+        reason: 'PAGE_REVIEW_REJECTED',
+        retryable: true,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0,
+        total: rejected.length,
+        reason: 'PAGE_REVIEW_REJECTED',
+        retryable: true,
+        ...revisionDetails(plan, true),
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: `step-${run.id}-page-revision-plan-r${targetRevisionRound}`, summary: plan.summary },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'phase.changed',
+        payload: { from: 'PAGE_REVIEW', to: 'REVISING', reason: 'PAGE_REVIEW_REJECTED' },
+      })
+    })
+    return true
   }
 
   private imageOutput(step: StepRecord) {
@@ -140,37 +265,75 @@ export class PageReviewCoordinator {
     }
   }
 
-  private async moveToDeckReview(runId: string) {
+  private async moveToDeckReview(runId: string, total: number) {
     await this.dependencies.repository.transact(runId, (transaction) => {
       if (transaction.run.status === 'DECK_REVIEW') return
       const now = this.dependencies.clock.now().toISOString()
       const policy = transitionRun(transaction.run, 'DECK_REVIEW')
       transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      appendV4LifecycleEvent(transaction, 'page_review.completed', {
+        completed: total,
+        total,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
         payload: { from: 'PAGE_REVIEW', to: 'DECK_REVIEW' },
       })
+      appendV4LifecycleEvent(transaction, 'deck_review.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
     })
   }
 
-  private async moveToHuman(runId: string, reason: string) {
+  private async moveToHuman(
+    runId: string,
+    reason: string,
+    progress?: Readonly<{ completed: number; total: number; pageNumbers?: readonly number[] }>,
+  ) {
     await this.dependencies.repository.transact(runId, (transaction) => {
-      if (transaction.run.status === 'NEEDS_HUMAN') return
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
-      transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason },
+      if (fromStatus !== 'NEEDS_HUMAN') {
+        const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'HUMAN_REVIEW', summary: '至少一页视觉质检未通过，请确认后续局部修订。' },
+        })
+      }
+      appendV4LifecycleEvent(transaction, 'page_review.completed', {
+        completed: progress?.completed ?? 0,
+        total: progress?.total ?? transaction.run.slideCount,
+        pageNumbers: progress?.pageNumbers ?? allPageNumbers(transaction.run),
+        reason: reason.includes('REJECTED') ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED',
+        retryable: true,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'approval.required',
-        payload: { kind: 'HUMAN_REVIEW', summary: '至少一页视觉质检未通过，请确认后续局部修订。' },
-      })
+    })
+  }
+
+  private problemPageNumbers(
+    blueprint: PresentationBlueprint,
+    imageSteps: readonly (StepRecord | null)[],
+    reviews: readonly ReviewSlideResult[],
+  ) {
+    return imageSteps.flatMap((imageStep, index) => {
+      const pageNumber = blueprint.slides[index]?.pageNumber
+      if (!pageNumber) return []
+      if (!imageStep) return [pageNumber]
+      const result = reviews.find((candidate) => candidate.step.idempotencyKey === `${imageStep.idempotencyKey}:review`)
+      return result?.review?.approved ? [] : [pageNumber]
     })
   }
 
@@ -180,9 +343,11 @@ export class PageReviewCoordinator {
       const imageStep = latestCompletedAssetStep(imageSteps, requirement, run.revisionRound)
       return imageStep ? `${imageStep.idempotencyKey}:review` : ''
     }))
-    for (const slide of blueprint.slides) {
-      const reviewVersion = compositeReviewVersion(blueprint.title, slide.pageNumber)
-      reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${reviewVersion}`)
+    if (blueprint.renderMode !== 'VISUAL_DECK_V4') {
+      for (const slide of blueprint.slides) {
+        const reviewVersion = compositeReviewVersion(blueprint.title, slide.pageNumber)
+        reviewKeys.add(`${run.id}:slide:${slide.pageNumber}:composite:r${run.revisionRound}:review:${reviewVersion}`)
+      }
     }
     const reviews = (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'review_slide_image' && step.status === 'COMPLETED' && reviewKeys.has(step.idempotencyKey))
@@ -191,7 +356,8 @@ export class PageReviewCoordinator {
       status: run.status,
       approved: reviews.filter((result) => result.review?.approved).length,
       rejected: reviews.filter((result) => result.review && !result.review.approved).length,
-      total: blueprintImageRequirements(run, blueprint).length + blueprint.slides.length,
+      total: blueprintImageRequirements(run, blueprint).length
+        + (blueprint.renderMode === 'VISUAL_DECK_V4' ? 0 : blueprint.slides.length),
       reviews,
     }
   }

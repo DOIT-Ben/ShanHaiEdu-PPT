@@ -2,7 +2,7 @@
 
 PPT Agent 是一个宿主无关的课件智能体。它拥有自己的 Run、Step、Issue 和 Event 语义，通过版本化合同接收教材、规划页面、生成视觉素材、执行质量审查、有限修订并交付可编辑 PPTX。
 
-演示模式包括兼容的整页生图 `SLIDE_IMAGE_V2`、增加一次结构化 Reflection 与提示词编译的 `SLIDE_IMAGE_V2_1`，以及素材分层可编辑的 `LAYERED_COURSEWARE_V3`。V2.1 每页仍只生成一张图片，不增加图片调用次数。
+演示模式包括兼容的整页生图 `SLIDE_IMAGE_V2`、增加一次结构化 Reflection 与提示词编译的 `SLIDE_IMAGE_V2_1`、素材分层可编辑的 `LAYERED_COURSEWARE_V3`，以及 NotebookLM 风格整页视觉链路 `VISUAL_DECK_V4`。V2.1 每页仍只生成一张图片，不增加图片调用次数；V4 交付不可编辑的整页图片型 PPTX。
 
 FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通过相同 API 和宿主端口接入。
 
@@ -19,6 +19,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - 创建和动作接口按 `tenantId + externalUserId` 分别限流，默认每分钟 10 次和 60 次，超限返回 `429` 与 `Retry-After`。
 - Run 列表使用 SQLite Keyset 分页；宿主、状态和 Step 查询字段有显式索引，旧库只回填缺失查询列。
 - RevisionPlan 可限定页面执行内容更新、重排和预算保护的局部重绘，并重新进入逐页与整套审查。
+- V4 从规划、逐页生成、页级审查、局部修订、整套审查到交付均发射结构化生命周期事件；历史接口与 SSE 使用同一 `AgentEvent` 信封，并以单调 `sequence` 支持断线恢复和去重。
 - 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
 - FrameFlow Agent API Client 与工作台已通过功能开关在生产受控启用；后续宿主继续复用同一公共合同。
 

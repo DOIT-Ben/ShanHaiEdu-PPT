@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../contracts'
+import type { KnownAgentEvent as AgentEvent } from '../contracts'
 import type { AgentRepository } from '../core/ports'
 import { isTerminalStatus } from '../core/policy'
 
@@ -10,6 +10,8 @@ type Subscriber = {
 
 type RunChannel = {
   cursor: number
+  terminalSequence: number | null
+  terminalReady: Promise<void>
   subscribers: Set<Subscriber>
   timer: ReturnType<typeof setTimeout> | null
   polling: boolean
@@ -36,18 +38,49 @@ export class RunEventBroker {
   }>) {
     let channel = this.channels.get(input.runId)
     if (!channel) {
-      channel = { cursor: input.after, subscribers: new Set(), timer: null, polling: false }
+      channel = {
+        cursor: input.after,
+        terminalSequence: null,
+        terminalReady: Promise.resolve(),
+        subscribers: new Set(),
+        timer: null,
+        polling: false,
+      }
       this.channels.set(input.runId, channel)
+      const initializingChannel = channel
+      channel.terminalReady = this.input.repository.getTerminalEvent(input.runId).then((terminal) => {
+        initializingChannel.terminalSequence = terminal?.sequence ?? null
+      })
+    }
+    try {
+      await channel.terminalReady
+    } catch {
+      input.onClose()
+      if (channel.subscribers.size === 0) this.stop(input.runId, channel)
+      return () => {}
+    }
+    if (channel.terminalSequence !== null && input.after >= channel.terminalSequence) {
+      input.onClose()
+      if (channel.subscribers.size === 0) this.stop(input.runId, channel)
+      return () => {}
     }
     let cursor = input.after
     while (cursor < channel.cursor) {
       const page = await this.read(input.runId, cursor)
       for (const event of page.events) {
+        if (channel.terminalSequence !== null && event.sequence > channel.terminalSequence) {
+          input.onClose()
+          return () => {}
+        }
         if (!input.onEvent(event)) {
           input.onClose()
           return () => {}
         }
         cursor = event.sequence
+        if (this.isTerminalEvent(event)) {
+          input.onClose()
+          return () => {}
+        }
       }
       if (!page.hasMore || page.events.length === 0) break
     }
@@ -74,8 +107,8 @@ export class RunEventBroker {
       const page = await this.read(runId, channel.cursor)
       let terminal = false
       for (const event of page.events) {
+        if (channel.terminalSequence !== null && event.sequence > channel.terminalSequence) break
         channel.cursor = event.sequence
-        terminal ||= event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
         for (const subscriber of [...channel.subscribers]) {
           if (event.sequence <= subscriber.cursor) continue
           if (!subscriber.onEvent(event)) {
@@ -83,6 +116,11 @@ export class RunEventBroker {
             this.remove(runId, channel, subscriber)
           }
           else subscriber.cursor = event.sequence
+        }
+        if (this.isTerminalEvent(event)) {
+          channel.terminalSequence = event.sequence
+          terminal = true
+          break
         }
       }
       if (!terminal && page.events.length === 0) {
@@ -112,6 +150,10 @@ export class RunEventBroker {
       limit: this.input.eventLimit ?? DEFAULT_EVENT_BATCH_LIMIT,
       maxBytes: this.input.maxBytes ?? DEFAULT_EVENT_BATCH_BYTES,
     })
+  }
+
+  private isTerminalEvent(event: AgentEvent) {
+    return event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
   }
 
   private remove(runId: string, channel: RunChannel, subscriber: Subscriber) {

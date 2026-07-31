@@ -20,6 +20,11 @@ import type {
 } from './ports'
 import { transitionRun } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  revisionDetails,
+} from './v4-lifecycle'
 
 export type RevisionApplicationResult = Readonly<{
   status: RunRecord['status']
@@ -61,6 +66,19 @@ export class RevisionApplicationRunner {
     if (prepared) return prepared
 
     try {
+      if (base.renderMode === 'VISUAL_DECK_V4'
+        && plan.operations.every((operation) => operation.kind !== 'UPDATE_CONTENT')) {
+        const slideIds = new Set(base.slides.map((slide) => `${run.id}:slide:${slide.pageNumber}`))
+        if (plan.operations.some((operation) => !slideIds.has(operation.slideId))) {
+          throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
+        }
+        const blueprint = presentationBlueprintSchema.parse({
+          ...base,
+          id: `${run.id}:blueprint:r${run.revisionRound}`,
+          createdAt: this.dependencies.clock.now().toISOString(),
+        })
+        return this.complete(run, idempotencyKey, blueprint, plan)
+      }
       const raw = await this.dependencies.application.apply({
         tenantId: run.host.tenantId,
         blueprint: base,
@@ -129,6 +147,12 @@ export class RevisionApplicationRunner {
         type: 'tool.started',
         payload: { stepId: step.id, tool: step.tool, label: `执行第 ${run.revisionRound} 轮局部修订` },
       })
+      const details = revisionDetails(plan)
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0,
+        total: details.pageNumbers.length,
+        ...details,
+      })
       return null
     })
   }
@@ -155,10 +179,21 @@ export class RevisionApplicationRunner {
         payload: { stepId: step.id, summary: `已按计划更新 ${new Set(plan.operations.map((item) => item.slideId)).size} 页` },
       })
       if (!requiresMedia) {
+        const details = revisionDetails(plan)
+        appendV4LifecycleEvent(transaction, 'revision.completed', {
+          completed: details.pageNumbers.length,
+          total: details.pageNumbers.length,
+          ...details,
+        })
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
           payload: { from: 'REVISING', to: 'DECK_REVIEW' },
+        })
+        appendV4LifecycleEvent(transaction, 'deck_review.started', {
+          completed: 0,
+          total: 1,
+          pageNumbers: allPageNumbers(transaction.run),
         })
       }
       return { status: updatedRun.status, step: updatedStep, blueprint, requiresMedia, replayed: false }
@@ -192,6 +227,16 @@ export class RevisionApplicationRunner {
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
         payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: errorCode },
+      })
+      const details = revisionDetails(plan)
+      appendV4LifecycleEvent(transaction, 'revision.completed', {
+        completed: 0,
+        total: details.pageNumbers.length,
+        ...details,
+        reason: 'REVISION_FAILED',
+        retryable: false,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
       })
       return { status: updatedRun.status, step: updatedStep, blueprint: null, requiresMedia: requiresRevisionMedia(plan), replayed: false }
     })

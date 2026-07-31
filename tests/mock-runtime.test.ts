@@ -22,6 +22,126 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
 }
 
 describe('mock runtime', () => {
+  test('runs a notebooklm-style v4 request through approval to a raster-only pptx', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const runtime = createMockRuntime({ repository, artifacts, apiToken: token })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-create-v4-chain-0001' },
+      body: JSON.stringify({
+        schemaVersion: '1',
+        host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: {
+          kind: 'TEXT', name: '分数教材.txt', roleHint: 'CONTENT_SOURCE',
+          text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。判断分数前必须先判断是否平均分。'.repeat(4),
+        },
+        slideCount: 3,
+        visualDirection: '温暖、清晰、有故事感的小学课堂绘本视觉',
+        imageModel: 'nanobanana',
+        automationLevel: 'SUPERVISED',
+        budgetUnits: 3,
+        maxRevisionRounds: 2,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '制作一套让三年级学生理解平均分和二分之一的完整视觉演示',
+          sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 3 }, aspectRatio: '16:9',
+            audience: '小学三年级学生', focus: '平均分与二分之一', styleHint: '温暖的儿童绘本课堂视觉',
+          },
+        },
+      }),
+    }))
+    expect(created.status).toBe(201)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+
+    await runtime.tick()
+    const plannedResponse = await runtime.handler(request(`/v1/runs/${runId}`))
+    const planned = await plannedResponse.json() as { data: {
+      status: string
+      version: number
+      blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } }
+      generationPlan?: { title: string; slideCount: number; pages: unknown[]; output: { editable: boolean } }
+    } }
+    expect(planned.data.status).toBe('AWAITING_BLUEPRINT_APPROVAL')
+    expect(planned.data.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(3)
+    expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
+    expect(planned.data.generationPlan?.pages).toHaveLength(3)
+
+    const approved = await runtime.handler(request(`/v1/runs/${runId}/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-approve-v4-chain-0001' },
+      body: JSON.stringify({ schemaVersion: '1', type: 'APPROVE_BLUEPRINT', expectedVersion: planned.data.version }),
+    }))
+    expect(approved.status).toBe(200)
+    for (let index = 0; index < 4; index += 1) await runtime.tick()
+
+    expect(await repository.getRun(runId)).toMatchObject({
+      status: 'COMPLETED', presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 3, qualityScore: 90,
+    })
+    const events = await repository.listEvents(runId)
+    const lifecycleTypes = events
+      .filter((event) => ['planning.started', 'planning.completed', 'generation.started', 'generation.progress',
+        'generation.completed', 'page_review.started', 'page_review.completed', 'deck_review.started',
+        'deck_review.completed', 'delivery.started', 'delivery.completed'].includes(event.type))
+      .map((event) => event.type)
+    expect(lifecycleTypes).toEqual([
+      'planning.started', 'planning.completed',
+      'generation.started', 'generation.progress', 'generation.completed',
+      'page_review.started', 'page_review.completed',
+      'deck_review.started', 'deck_review.completed',
+      'delivery.started', 'delivery.completed',
+    ])
+    expect(events.map((event) => event.sequence)).toEqual(events.map((_, index) => index + 1))
+    expect(events.every((event) => event.eventId === event.id)).toBe(true)
+    const generationProgress = events.find((event) => event.type === 'generation.progress')
+    expect(generationProgress?.payload).toMatchObject({
+      presentationMode: 'VISUAL_DECK_V4', stage: 'GENERATION', completed: 3, total: 3,
+      pageNumbers: [1, 2, 3], budgetUnits: 3, committedBudgetUnits: 3,
+    })
+    const terminal = events.at(-1)
+    expect(terminal).toMatchObject({
+      type: 'run.completed',
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', completed: 1, total: 1,
+        requiresUserAction: false, nextAction: null,
+      },
+    })
+
+    const historyResponse = await runtime.handler(request(`/v1/runs/${runId}/events/history?after=0`))
+    const history = await historyResponse.json() as { data: typeof events }
+    expect(history.data).toEqual(events)
+    const reconnectAfter = events.find((event) => event.type === 'generation.started')!.sequence
+    const streamResponse = await runtime.handler(request(`/v1/runs/${runId}/events?after=${reconnectAfter}`))
+    const streamed = (await streamResponse.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as typeof events[number])
+    expect(streamed).toEqual(events.filter((event) => event.sequence > reconnectAfter))
+    expect(new Set(streamed.map((event) => event.sequence)).size).toBe(streamed.length)
+    const reviewSteps = (await repository.listSteps(runId)).filter((step) => step.tool === 'review_slide_image')
+    expect(reviewSteps).toHaveLength(3)
+    const delivery = (await repository.listDeliveries(runId))[0]!
+    const artifact = artifacts.artifacts.get(delivery.pptx.artifactId)
+    expect(artifact?.bytes.length).toBeGreaterThan(10_000)
+
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-v4-chain-'))
+    try {
+      const path = join(directory, 'visual-deck.pptx')
+      await writeFile(path, artifact!.bytes)
+      for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1) {
+        const process = Bun.spawn(['unzip', '-p', path, `ppt/slides/slide${pageNumber}.xml`], { stdout: 'pipe', stderr: 'pipe' })
+        const xml = await new Response(process.stdout).text()
+        expect(await process.exited).toBe(0)
+        expect(xml.match(/<p:pic>/g)).toHaveLength(1)
+        expect(xml).toContain(`visual-deck-page-${pageNumber}`)
+        expect(xml).not.toContain('<a:t>')
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('routes a failed deck review through approved local revision and re-review', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()

@@ -410,12 +410,22 @@ describe('slide generation coordinator', () => {
 
   test('stops the batch immediately when a provider submission is unknown', async () => {
     const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')
     const result = await coordinator.submitBlueprintImages('run-1', 10)
 
     expect(result).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 0, total: 3 })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 10 })
     expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')).toHaveLength(1)
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'generation.completed'))
+      .toMatchObject({
+        payload: {
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false,
+          requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+        },
+      })
   })
 
   test('moves to page review only after every image has a controlled artifact', async () => {
@@ -532,17 +542,27 @@ describe('slide generation coordinator', () => {
 
   test('moves to human review when a completed provider operation failed', async () => {
     const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
     await coordinator.submitBlueprintImages('run-1', 10)
-    const firstKey = [...images.operations.keys()][0]!
-    images.fail(firstKey, 'PROVIDER_REJECTED', 'NOT_CHARGED')
+    const keys = [...images.operations.keys()]
+    images.complete(keys[0]!, 'artifact-r1-1')
+    images.fail(keys[1]!, 'PROVIDER_REJECTED', 'CHARGED')
     const result = await coordinator.refreshBlueprintImages('run-1')
 
     expect(result.status).toBe('NEEDS_HUMAN')
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 20 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 30 })
     const events = await repository.listEvents('run-1')
     expect(events.find((event) => event.type === 'phase.changed')?.payload)
       .toMatchObject({ from: 'EXECUTING', to: 'NEEDS_HUMAN' })
     expect(events.map((event) => event.type)).toContain('approval.required')
+    const lifecycle = events.filter((event) => event.type.startsWith('generation.'))
+    expect(lifecycle.filter((event) => event.type === 'generation.completed')).toHaveLength(1)
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: 'generation.completed',
+      payload: { completed: 1, total: 3, retryable: false },
+    })
   })
 
   test('reuses an original source image without image-provider calls or budget charge', async () => {

@@ -11,6 +11,7 @@ import { hashInput } from './hash'
 import { StructuredModelError } from './ports'
 import type {
   AgentRepository,
+  AgentTransaction,
   ClockPort,
   DocumentPort,
   DocumentResult,
@@ -19,10 +20,19 @@ import type {
   StructuredModelPort,
 } from './ports'
 import { transitionRun } from './policy'
+import { getPresentationModeStrategy } from './presentation-mode-strategy'
+import {
+  createVisualDeckV4BlueprintFromProposal,
+  type VisualDeckV4PlanningArtifact,
+  visualDeckV4PlanningArtifactStepKey,
+} from './visual-deck-v4-planner'
+import type { VisualDeckV4Proposal } from '../visual-deck-v4-contracts'
+import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
+import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 3
-const PROVIDER_RETRY_DELAYS_MS = [250, 1_000] as const
+const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000] as const
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
@@ -80,6 +90,31 @@ export function approvedPageVisualPrompt(
   ].join(' ')
 }
 
+function visualDeckV4SourceReferences(source: CreateRunRequest['source']) {
+  if (source.kind === 'SOURCE_PACKAGE') {
+    return source.sources.map((item) => ({
+      sourceId: item.sourceId,
+      name: item.kind === 'TEXT' ? item.name ?? item.sourceId : item.sourceId,
+      kind: item.kind,
+      roleHint: item.roleHint ?? 'AUTO',
+    }))
+  }
+  if (source.kind === 'APPROVED_PAGE_DESIGN') {
+    return [{
+      sourceId: source.artifactVersionId,
+      name: source.title,
+      kind: source.kind,
+      roleHint: 'DESIGN_REFERENCE' as const,
+    }]
+  }
+  return [{
+    sourceId: source.kind === 'TEXT' ? 'inline-source' : source.attachmentId,
+    name: source.kind === 'TEXT' ? source.name ?? 'inline-material.txt' : source.attachmentId,
+    kind: source.kind,
+    roleHint: source.roleHint ?? 'AUTO',
+  }]
+}
+
 class PlanningFailureError extends Error {
   constructor(readonly failure: PlanningFailure) {
     super(failure.errorCode)
@@ -100,6 +135,7 @@ export type PlanPresentationInput = Readonly<{
   coverDesignMode?: CreateRunRequest['coverDesignMode']
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
+  visualDeckV4?: CreateRunRequest['visualDeckV4']
   attempt?: number
 }>
 
@@ -124,28 +160,132 @@ export class PlanningRunner {
 
   async plan(input: PlanPresentationInput): Promise<PlanPresentationResult> {
     const run = await this.requireRun(input.runId)
-    const document = await this.dependencies.documents.resolve({ host: run.host, source: input.source })
-    const prepared = await this.prepare(input, document)
+    const presentationMode = run.presentationMode ?? 'SLIDE_IMAGE_V2'
+    if (input.presentationMode && input.presentationMode !== presentationMode) {
+      throw new Error('RUN_PRESENTATION_MODE_MISMATCH')
+    }
+    if (input.visualDeckV4 && hashInput(input.visualDeckV4) !== hashInput(run.visualDeckV4 ?? null)) {
+      throw new Error('RUN_VISUAL_DECK_V4_CONFIG_MISMATCH')
+    }
+    const strategy = getPresentationModeStrategy(presentationMode)
+    const visualDeckV4 = run.visualDeckV4
+    if (strategy.planningKind === 'VISUAL_DECK_COMPILER' && !visualDeckV4) throw new Error('VISUAL_DECK_V4_CONFIG_REQUIRED')
+    const { visualDeckV4: _requestedVisualDeckV4, ...baseInput } = input
+    const effectiveInput: PlanPresentationInput = {
+      ...baseInput,
+      presentationMode,
+      ...(visualDeckV4 ? { visualDeckV4 } : {}),
+    }
+    const document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
+    const prepared = await this.prepare(effectiveInput, document)
     if (prepared.replayed) return prepared
 
     if (!document.isComplete || document.chunks.length === 0) {
-      const step = await this.fail(input, this.sourceFailure(input), 'SOURCE_INCOMPLETE', document)
+      const step = await this.fail(effectiveInput, this.sourceFailure(effectiveInput), 'SOURCE_INCOMPLETE', document)
       return { step, blueprint: null, replayed: false }
     }
 
     try {
-      const blueprint = input.source.kind === 'APPROVED_PAGE_DESIGN'
-        ? this.createApprovedBlueprint(input, document, prepared.step.inputHash)
-        : await this.createBlueprint(input, document, prepared.step.inputHash, run.host.tenantId)
-      const step = await this.complete(input, blueprint)
+      const blueprint = strategy.planningKind === 'VISUAL_DECK_COMPILER'
+        ? await this.createVisualDeckV4Blueprint(
+            effectiveInput,
+            document,
+            prepared.step.inputHash,
+            run.host.tenantId,
+            visualDeckV4!,
+          )
+        : effectiveInput.source.kind === 'APPROVED_PAGE_DESIGN'
+          ? this.createApprovedBlueprint(effectiveInput, document, prepared.step.inputHash)
+          : await this.createBlueprint(effectiveInput, document, prepared.step.inputHash, run.host.tenantId)
+      const step = await this.complete(effectiveInput, blueprint)
       return { step, blueprint, replayed: false }
     } catch (error) {
       const failure = error instanceof PlanningFailureError
         ? error.failure
-        : this.contractFailure(input, error, 1, 1, false)
-      const step = await this.fail(input, failure, 'PLANNING_FAILED', document)
+        : this.contractFailure(effectiveInput, error, 1, 1, false)
+      const step = await this.fail(effectiveInput, failure, 'PLANNING_FAILED', document)
       return { step, blueprint: null, replayed: false }
     }
+  }
+
+  private async createVisualDeckV4Blueprint(
+    input: PlanPresentationInput,
+    document: DocumentResult,
+    inputHash: string,
+    tenantId: string,
+    config: NonNullable<CreateRunRequest['visualDeckV4']>,
+  ) {
+    const basePayload = {
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      instruction: config.instruction,
+      deckOptions: config.deckOptions,
+      sourceMode: config.sourceMode,
+      sourceReferences: visualDeckV4SourceReferences(input.source),
+      slideCount: input.slideCount,
+      visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+      document: {
+        name: document.name,
+        sources: document.sources ?? [],
+        chunks: document.chunks.map((chunk) => ({
+          id: chunk.id,
+          sourceId: chunk.sourceId,
+          sha256: chunk.sha256,
+          text: chunk.text,
+          pageStart: chunk.pageStart,
+          pageEnd: chunk.pageEnd,
+          region: chunk.region,
+        })),
+        assets: (document.assets ?? []).map(({ bytes: _bytes, ...asset }) => asset),
+        missingRanges: document.missingRanges,
+      },
+    }
+    const compilerInput = {
+      runId: input.runId,
+      inputHash,
+      source: input.source,
+      document,
+      config,
+      slideCount: input.slideCount,
+      visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+      createdAt: this.dependencies.clock.now().toISOString(),
+    }
+    let repairIssues: { path: string; message: string }[] = []
+    for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
+      try {
+        const modelKey = attempt === 0
+          ? input.idempotencyKey
+          : `visual-deck-v4-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`
+        const raw = await this.executeWithProviderRetry(input, {
+          tenantId,
+          operation: 'create_visual_deck_v4_proposal',
+          schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+          idempotencyKey: modelKey,
+          payload: { ...basePayload, ...(repairIssues.length > 0 ? { contractRepairIssues: repairIssues } : {}) },
+          sourceAssets: document.assets ?? [],
+        })
+        const draft = visualDeckV4ProposalDraftSchema.parse(raw)
+        return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
+      } catch (error) {
+        if (error instanceof PlanningFailureError) throw error
+        const issues = this.contractIssues(error)
+        if (!issues) {
+          throw new PlanningFailureError(this.contractFailure(
+            input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, false,
+          ))
+        }
+        if (attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) {
+          throw new PlanningFailureError(this.contractFailure(
+            input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, true,
+          ))
+        }
+        repairIssues = issues
+      }
+    }
+    throw new Error('VISUAL_DECK_V4_CONTRACT_REPAIR_EXHAUSTED')
   }
 
   private createApprovedBlueprint(
@@ -204,6 +344,7 @@ export class PlanningRunner {
   }
 
   private async createBlueprint(input: PlanPresentationInput, document: DocumentResult, inputHash: string, tenantId: string) {
+    const strategy = getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2')
     const basePayload = {
       slideCount: input.slideCount,
       visualDirection: input.visualDirection,
@@ -213,6 +354,7 @@ export class PlanningRunner {
       coverDesignMode: input.coverDesignMode ?? 'INDEPENDENT',
       assetAcquisitionPolicy: input.assetAcquisitionPolicy ?? 'AI_FIRST',
       maxVisualAssetsPerSlide: input.maxVisualAssetsPerSlide ?? 4,
+      visualDeckV4: input.visualDeckV4 ?? null,
       document: {
         name: document.name,
         sources: document.sources ?? [],
@@ -270,7 +412,7 @@ export class PlanningRunner {
       }
     }
     if (!initialDraft) throw new Error('BLUEPRINT_CONTRACT_REPAIR_EXHAUSTED')
-    const draft = input.presentationMode === 'SLIDE_IMAGE_V2_1'
+    const draft = strategy.planningKind === 'BLUEPRINT_WITH_REFLECTION'
       ? await this.reflectBlueprint(input, initialDraft, tenantId)
       : initialDraft
     this.assertBlueprintCoverage(
@@ -473,7 +615,9 @@ export class PlanningRunner {
         message: issue.message,
       }))
     }
-    if (error instanceof Error && (error.message.startsWith('BLUEPRINT_') || error.message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID')) {
+    if (error instanceof Error && (error.message.startsWith('BLUEPRINT_')
+      || error.message.startsWith('VISUAL_DECK_V4_')
+      || error.message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID')) {
       return [{ path: 'blueprint', message: error.message }]
     }
     if (error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID') {
@@ -565,6 +709,7 @@ export class PlanningRunner {
             : '分析教材并规划逐页蓝图',
         },
       })
+      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
       return { run: updatedRun, step, blueprint: null, replayed: false }
     })
   }
@@ -595,10 +740,11 @@ export class PlanningRunner {
     if ([...availableAssets].some((id) => !curriculumAssets.includes(id) || !mappedAssets.has(id))) {
       throw new Error('BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE')
     }
-    if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) => !slide.layeredDesign)) {
+    const strategy = getPresentationModeStrategy(presentationMode)
+    if (strategy.assetModel === 'LAYERED_ELEMENTS' && draft.slides.some((slide) => !slide.layeredDesign)) {
       throw new Error('LAYERED_BLUEPRINT_SCHEMA_INVALID')
     }
-    if (presentationMode === 'LAYERED_COURSEWARE_V3' && draft.slides.some((slide) =>
+    if (strategy.assetModel === 'LAYERED_ELEMENTS' && draft.slides.some((slide) =>
       slide.layeredDesign!.elements.filter((element) =>
         element.kind === 'IMAGE' && element.role !== 'BASE_LAYER').length > maxVisualAssetsPerSlide)) {
       throw new Error('BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED')
@@ -618,6 +764,9 @@ export class PlanningRunner {
       const updated: StepRecord = { ...step, status: 'COMPLETED', output: blueprint, errorCode: null, updatedAt: now }
       transaction.putRun(run)
       transaction.putStep(updated)
+      if (blueprint.visualDeckV4Proposal) {
+        this.persistVisualDeckV4Artifacts(transaction, input, blueprint.visualDeckV4Proposal, now)
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
@@ -625,10 +774,18 @@ export class PlanningRunner {
           stepId: step.id,
           summary: approvedPageDesign
             ? `已载入教师审核的 ${blueprint.slides.length} 页设计稿，开始逐页生成`
-            : input.presentationMode === 'SLIDE_IMAGE_V2_1'
+            : getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2').planningKind === 'BLUEPRINT_WITH_REFLECTION'
             ? `已反思并修订 ${blueprint.slides.length} 页教学蓝图`
             : `已生成 ${blueprint.slides.length} 页教学蓝图`,
         },
+      })
+      appendV4LifecycleEvent(transaction, 'planning.completed', {
+        completed: 1,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+        reason: approvedPageDesign ? null : 'USER_CONFIRMATION_REQUIRED',
+        requiresUserAction: !approvedPageDesign,
+        nextAction: approvedPageDesign ? null : 'APPROVE_BLUEPRINT',
       })
       const attempt = input.attempt ?? 0
       if (attempt > 0) {
@@ -657,8 +814,48 @@ export class PlanningRunner {
             type: 'approval.required',
             payload: { kind: 'BLUEPRINT', summary: `请确认《${blueprint.title}》的 ${blueprint.slides.length} 页蓝图` },
           })
+      if (approvedPageDesign) {
+        appendV4LifecycleEvent(transaction, 'generation.started', {
+          completed: 0,
+          total: transaction.run.slideCount,
+          pageNumbers: allPageNumbers(transaction.run),
+        })
+      }
       return updated
     })
+  }
+
+  private persistVisualDeckV4Artifacts(
+    transaction: AgentTransaction,
+    input: PlanPresentationInput,
+    proposal: VisualDeckV4Proposal,
+    now: string,
+  ) {
+    const artifacts: readonly [VisualDeckV4PlanningArtifact, unknown][] = [
+      ['source-understanding', proposal.sourceUnderstanding],
+      ['presentation-spec', proposal.presentationSpec],
+      ['deck-plan', proposal.deckPlan],
+      ['slide-briefs', proposal.slideBriefs],
+      ['visual-contract', proposal.visualContract],
+    ]
+    for (const [artifact, output] of artifacts) {
+      const key = visualDeckV4PlanningArtifactStepKey(input.runId, artifact, input.attempt ?? 0)
+      transaction.putStep({
+        id: `step-${hashInput({ key }).slice(0, 28)}`,
+        runId: input.runId,
+        idempotencyKey: key,
+        inputHash: hashInput({ compilerVersion: proposal.compilerVersion, artifact, output }),
+        tool: `compile_v4_${artifact.replaceAll('-', '_')}`,
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output,
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
   }
 
   private async fail(
@@ -702,6 +899,16 @@ export class PlanningRunner {
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
         payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: failure.errorCode },
+      })
+      appendV4LifecycleEvent(transaction, 'planning.completed', {
+        completed: 0,
+        total: 1,
+        reason: ['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'PROVIDER_UNAVAILABLE'].includes(failure.errorCode)
+          ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
+          : 'PLANNING_FAILED',
+        retryable: failure.retryable,
+        requiresUserAction: true,
+        nextAction: failure.retryable ? 'RETRY' : 'REVIEW_RESULT',
       })
       return updated
     })

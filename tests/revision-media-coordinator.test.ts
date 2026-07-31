@@ -15,6 +15,7 @@ import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
@@ -116,9 +117,28 @@ function layeredRevisionPlan() {
   }
 }
 
+function visualDeckV4Blueprint() {
+  const source = { kind: 'TEXT' as const, name: '光合作用教材.txt', text: '绿色植物利用光能制造有机物并释放氧气。'.repeat(8) }
+  return createVisualDeckV4Blueprint({
+    runId: 'run-1', inputHash: 'plan-hash', source,
+    document: {
+      name: source.name, isComplete: true, missingRanges: [],
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+    },
+    config: {
+      instruction: '制作两页光合作用视觉演示', sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: {
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+        audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
+      },
+    },
+    slideCount: 2, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
+  })
+}
+
 async function fixture(
   overrides: Partial<RunRecord> = {},
-  inputs: Readonly<{ blueprint?: ReturnType<typeof blueprint> | ReturnType<typeof layeredBlueprint>; plan?: ReturnType<typeof revisionPlan> }> = {},
+  inputs: Readonly<{ blueprint?: unknown; plan?: ReturnType<typeof revisionPlan> }> = {},
 ) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
@@ -194,11 +214,21 @@ describe('revision media coordinator', () => {
   })
 
   test('pauses before any redraw when the remaining budget is insufficient', async () => {
-    const { images, coordinator } = await fixture({ budgetUnits: 20, committedBudgetUnits: 20 })
+    const { repository, images, coordinator } = await fixture({
+      budgetUnits: 20,
+      committedBudgetUnits: 20,
+      presentationMode: 'VISUAL_DECK_V4',
+    })
     const result = await coordinator.submit('run-1', 5)
 
     expect(result).toMatchObject({ status: 'PAUSED', submitted: 0, total: 1 })
     expect(images.operations.size).toBe(0)
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'run.paused')).toMatchObject({
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', reason: 'BUDGET_INSUFFICIENT',
+        retryable: true, requiresUserAction: true, nextAction: 'ADD_BUDGET',
+      },
+    })
   })
 
   test('redraws one v3 element using the canonical strategy-aware asset key', async () => {
@@ -214,6 +244,79 @@ describe('revision media coordinator', () => {
     expect([...images.requests.values()][0]).toMatchObject({
       backgroundMode: 'TRANSPARENT',
       prompt: expect.stringContaining('transparent leaf'),
+    })
+  })
+
+  test('redraws a v4 page with the complete approved brief plus the review correction', async () => {
+    const base = visualDeckV4Blueprint()
+    const correction = 'Keep all allowed copy unchanged and remove the extra numeral 2 from the bird label.'
+    const revision = {
+      ...revisionPlan(),
+      operations: [{ ...revisionPlan().operations[0]!, instruction: correction, sourceChunkIds: ['chunk-1'] }],
+    }
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: base,
+      plan: revision,
+    })
+
+    await coordinator.submit('run-1', 5)
+
+    const request = [...images.requests.values()][0]
+    expect(request?.prompt).toContain('Create one finished, full-bleed 16:9 presentation slide')
+    expect(request?.prompt).toContain(base.visualDeckV4Proposal!.slideBriefs[1]!.title)
+    expect(request?.prompt).toContain(correction)
+    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
+    const lifecycle = (await repository.listEvents('run-1'))
+      .filter((event) => event.type === 'revision.progress' || event.type === 'revision.completed'
+        || event.type === 'page_review.started')
+    expect(lifecycle.map((event) => event.type)).toEqual([
+      'revision.progress', 'revision.completed', 'page_review.started',
+    ])
+    expect(lifecycle[1]).toMatchObject({
+      payload: { revisionKind: 'DECK_VISUAL', pageNumbers: [2], completed: 1, total: 1 },
+    })
+  })
+
+  test('moves a v4 revision to human review when the redraw provider fails before submission', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    images.failNext('NO_HEALTHY_ROUTE_BEFORE_SUBMIT', 'NOT_SUBMITTED')
+
+    await coordinator.submit('run-1', 5)
+    const result = await coordinator.refresh('run-1')
+
+    expect(result.status).toBe('NEEDS_HUMAN')
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'revision.completed'))
+      .toMatchObject({
+        payload: {
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false,
+          requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+        },
+      })
+  })
+
+  test('ends a v4 revision once when the submitted redraw later fails', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    await coordinator.submit('run-1', 5)
+    images.fail('run-1:slide:2:image:r1:v1', 'PROVIDER_REJECTED', 'UNKNOWN')
+
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 0 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN', committedBudgetUnits: 25,
+    })
+    const lifecycle = (await repository.listEvents('run-1'))
+      .filter((event) => event.type.startsWith('revision.'))
+    expect(lifecycle.filter((event) => event.type === 'revision.completed')).toHaveLength(1)
+    expect(lifecycle.at(-1)).toMatchObject({
+      type: 'revision.completed',
+      payload: { reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false },
     })
   })
 })

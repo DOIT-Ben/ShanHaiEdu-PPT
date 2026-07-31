@@ -21,6 +21,10 @@ import type {
   StepRecord,
 } from './ports'
 import { transitionRun } from './policy'
+import {
+  appendV4LifecycleEvent,
+  revisionDetails,
+} from './v4-lifecycle'
 
 export type RevisionPlanningResult = Readonly<{
   status: RunRecord['status']
@@ -42,7 +46,16 @@ export class RevisionPlanningRunner {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const review = await this.requireReview(run)
     if (passesDeckQuality(review)) throw new Error('DECK_REVIEW_ALREADY_PASSED')
-    if (run.revisionRound >= run.maxRevisionRounds) {
+    await this.startLifecycle(run, review)
+    const completedSteps = await this.dependencies.repository.listSteps(run.id)
+    const pageRevisionCount = completedSteps.filter((step) =>
+      step.tool === 'plan_page_revision' && step.status === 'COMPLETED').length
+    const deckRevisionCount = completedSteps.filter((step) =>
+      step.tool === 'plan_revision' && step.status === 'COMPLETED').length
+    const effectiveDeckRevisionCount = pageRevisionCount === 0 && deckRevisionCount === 0
+      ? run.revisionRound
+      : deckRevisionCount
+    if (effectiveDeckRevisionCount >= run.maxRevisionRounds) {
       return this.requireHuman(run, 'MAX_REVISION_ROUNDS_REACHED')
     }
     if (review.issues.length === 0) return this.requireHuman(run, 'REVISION_PLAN_HAS_NO_ISSUES')
@@ -173,6 +186,20 @@ export class RevisionPlanningRunner {
           type: 'approval.required',
           payload: { kind: 'REVISION', summary: plan.summary },
         })
+        appendV4LifecycleEvent(transaction, 'revision.progress', {
+          completed: 0,
+          total: new Set(plan.operations.map((operation) => operation.slideId)).size,
+          ...revisionDetails(plan),
+          reason: 'USER_CONFIRMATION_REQUIRED',
+          requiresUserAction: true,
+          nextAction: 'APPROVE_REVISION',
+        })
+      } else {
+        appendV4LifecycleEvent(transaction, 'revision.started', {
+          completed: 0,
+          total: new Set(plan.operations.map((operation) => operation.slideId)).size,
+          ...revisionDetails(plan),
+        })
       }
       return { status: updatedRun.status, step: updatedStep, plan, replayed: false }
     })
@@ -204,6 +231,21 @@ export class RevisionPlanningRunner {
         type: 'approval.required',
         payload: { kind: 'HUMAN_REVIEW', summary: '修订规划失败，需要人工处理后重试。' },
       })
+      const started = [...transaction.listEvents()].reverse()
+        .find((event) => event.type === 'revision.started')
+      appendV4LifecycleEvent(transaction, 'revision.completed', {
+        completed: 0,
+        total: started?.type === 'revision.started' ? started.payload.total : 0,
+        pageNumbers: started?.type === 'revision.started' ? started.payload.pageNumbers : [],
+        revisionKind: started?.type === 'revision.started' ? started.payload.revisionKind : null,
+        revisionRound: started?.type === 'revision.started'
+          ? started.payload.revisionRound
+          : transaction.run.revisionRound + 1,
+        reason: 'REVISION_FAILED',
+        retryable: false,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
+      })
       return { status: updatedRun.status, step: updatedStep, plan: null, replayed: false }
     })
   }
@@ -226,9 +268,46 @@ export class RevisionPlanningRunner {
         type: 'approval.required',
         payload: { kind: 'HUMAN_REVIEW', summary: '自动修订无法继续，请人工确认当前结果或后续处理。' },
       })
+      const started = [...transaction.listEvents()].reverse()
+        .find((event) => event.type === 'revision.started')
+      appendV4LifecycleEvent(transaction, 'revision.completed', {
+        completed: 0,
+        total: started?.type === 'revision.started' ? started.payload.total : 0,
+        pageNumbers: started?.type === 'revision.started' ? started.payload.pageNumbers : [],
+        revisionKind: started?.type === 'revision.started' ? started.payload.revisionKind : null,
+        revisionRound: started?.type === 'revision.started'
+          ? started.payload.revisionRound
+          : transaction.run.revisionRound + 1,
+        reason: reason === 'MAX_REVISION_ROUNDS_REACHED' ? 'REVISION_LIMIT_REACHED' : 'REVISION_FAILED',
+        retryable: false,
+        requiresUserAction: true,
+        nextAction: 'REVIEW_RESULT',
+      })
       return next
     })
     return { status: updated.status, step: null, plan: null, replayed: false }
+  }
+
+  private async startLifecycle(run: RunRecord, review: DeckReview) {
+    const pageNumbers = [...new Set(review.issues.flatMap((issue) => issue.slideIds)
+      .map((slideId) => Number(slideId.split(':').at(-1))))]
+      .filter((pageNumber) => Number.isSafeInteger(pageNumber) && pageNumber > 0)
+      .sort((left, right) => left - right)
+    const revisionKind = review.issues.some((issue) => issue.repairDomain === 'KNOWLEDGE'
+      || ['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(issue.category))
+      ? 'DECK_CONTENT' as const
+      : 'DECK_VISUAL' as const
+    await this.dependencies.repository.transact(run.id, (transaction) => {
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0,
+        total: pageNumbers.length,
+        pageNumbers,
+        revisionKind,
+        revisionRound: run.revisionRound + 1,
+        reason: 'DECK_REVIEW_REJECTED',
+        retryable: true,
+      })
+    })
   }
 
   private async requireRun(runId: string) {

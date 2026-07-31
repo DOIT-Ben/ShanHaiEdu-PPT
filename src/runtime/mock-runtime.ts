@@ -15,6 +15,7 @@ import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
 import { PlanningRunner, planningStepKey } from '../core/planning-runner'
+import { compileVisualDeckV4Proposal } from '../core/visual-deck-v4-planner'
 import {
   acquireMediaReconciliationLease,
   acquireRunLease,
@@ -44,6 +45,7 @@ import type {
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
+import { failVisualDeckV4Run } from '../core/v4-lifecycle'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 
 export class SystemClock implements ClockPort {
@@ -61,6 +63,68 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
 
 class DeterministicPlanningModel implements StructuredModelPort {
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
+    if (input.operation === 'create_visual_deck_v4_proposal') {
+      const payload = input.payload as {
+        instruction: string
+        sourceMode: 'AUTO' | 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE'
+        sourceReferences: readonly Readonly<{
+          sourceId: string
+          name: string
+          roleHint: 'AUTO' | 'CONTENT_SOURCE' | 'TEACHING_GUIDE' | 'STRUCTURE_REFERENCE' | 'DESIGN_REFERENCE' | 'BRAND_GUIDE' | 'ASSET'
+        }>[]
+        deckOptions: {
+          deckType: 'DETAILED_DECK' | 'PRESENTER_SLIDES'
+          language: string
+          length: 'SHORT' | 'DEFAULT' | 'LONG' | { slideCount: number }
+          aspectRatio: '16:9'
+          audience?: string
+          focus?: string
+          styleHint?: string
+        }
+        slideCount: number
+        visualDirection: string
+        targetAudience?: string
+        presentationGoal?: string
+        document: {
+          name: string
+          sources: { id: string; name: string; kind: 'TEXT' | 'IMAGE' | 'PDF' | 'MARKDOWN'; status: 'READY' | 'FAILED'; failureCode?: string }[]
+          chunks: { id: string; sourceId?: string; text: string; sha256: string }[]
+          missingRanges: string[]
+        }
+      }
+      const source = {
+        kind: 'SOURCE_PACKAGE' as const,
+        name: payload.document.name,
+        sources: payload.sourceReferences.map((reference) => ({
+          kind: 'TEXT' as const,
+          sourceId: reference.sourceId,
+          name: reference.name,
+          roleHint: reference.roleHint,
+          text: payload.document.chunks
+            .filter((chunk) => chunk.sourceId === reference.sourceId || payload.sourceReferences.length === 1)
+            .map((chunk) => chunk.text)
+            .join('\n') || '当前资料只提供视觉参考，规划时不得将其作为新的事实来源。',
+        })),
+      }
+      const proposal = compileVisualDeckV4Proposal({
+        runId: 'mock-v4-run',
+        inputHash: input.idempotencyKey,
+        source,
+        document: { ...payload.document, isComplete: payload.document.missingRanges.length === 0 },
+        config: {
+          instruction: payload.instruction,
+          sourceMode: payload.sourceMode,
+          deckOptions: payload.deckOptions,
+        },
+        slideCount: payload.slideCount,
+        visualDirection: payload.visualDirection,
+        ...(payload.targetAudience ? { targetAudience: payload.targetAudience } : {}),
+        ...(payload.presentationGoal ? { presentationGoal: payload.presentationGoal } : {}),
+        createdAt: new Date(0).toISOString(),
+      })
+      const { compilerVersion: _compilerVersion, ...draft } = proposal
+      return draft
+    }
     if (input.operation === 'reflect_blueprint') {
       const payload = input.payload as {
         targetAudience?: string
@@ -439,6 +503,7 @@ export function createAgentRuntime(input: RuntimeInput) {
           coverDesignMode: run.coverDesignMode ?? 'INDEPENDENT',
           assetAcquisitionPolicy: run.assetAcquisitionPolicy ?? 'AI_FIRST',
           maxVisualAssetsPerSlide: run.maxVisualAssetsPerSlide ?? 4,
+          ...(run.visualDeckV4 ? { visualDeckV4: run.visualDeckV4 } : {}),
           attempt: planningAttempt,
         })
       } else if (run.status === 'EXECUTING') {
@@ -462,6 +527,12 @@ export function createAgentRuntime(input: RuntimeInput) {
         await delivery.deliver(run.id)
       }
     } catch (error) {
+      await failVisualDeckV4Run({
+        repository: input.repository,
+        clock,
+        runId: candidate.id,
+        errorCode: 'WORKER_FATAL',
+      }).catch(() => false)
       throw new WorkerTickError({
         runId: candidate.id,
         phase,

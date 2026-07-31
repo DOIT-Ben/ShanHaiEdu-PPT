@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { CONTRACT_VERSION, type AgentEvent } from '../src/contracts'
+import { CONTRACT_VERSION, type KnownAgentEvent as AgentEvent } from '../src/contracts'
 import { buildOperationsReport } from '../src/core/operations'
 import type { OperationsFilters, RunRecord, StepRecord } from '../src/core/ports'
 
@@ -33,14 +33,14 @@ const filters: OperationsFilters = {
 
 function phaseEvent(runId: string, sequence: number, createdAt: string, from: RunRecord['status'], to: RunRecord['status']): AgentEvent {
   return {
-    schemaVersion: CONTRACT_VERSION, id: `${runId}:event:${sequence}`, runId, sequence, createdAt,
+    schemaVersion: CONTRACT_VERSION, id: `${runId}:event:${sequence}`, eventId: `${runId}:event:${sequence}`, runId, sequence, createdAt,
     type: 'phase.changed', payload: { from, to },
   }
 }
 
 function startedEvent(runId: string): AgentEvent {
   return {
-    schemaVersion: CONTRACT_VERSION, id: `${runId}:event:1`, runId, sequence: 1,
+    schemaVersion: CONTRACT_VERSION, id: `${runId}:event:1`, eventId: `${runId}:event:1`, runId, sequence: 1,
     createdAt: '2026-07-22T00:00:00.000Z', type: 'run.started', payload: { status: 'PLANNING' },
   }
 }

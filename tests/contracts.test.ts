@@ -103,6 +103,53 @@ describe('public v1 contracts', () => {
     })
   })
 
+  test('accepts v4 only with a matching visual deck configuration', () => {
+    const base = {
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: {
+        kind: 'SOURCE_PACKAGE' as const,
+        sources: [
+          {
+            kind: 'TEXT' as const,
+            sourceId: 'lesson-brief',
+            text: '这是一份用于生成资料驱动视觉演示的完整课程说明和内容范围。',
+            roleHint: 'CONTENT_SOURCE' as const,
+          },
+        ],
+      },
+      slideCount: 12,
+      visualDirection: '由智能体根据资料和用户要求编译视觉方向',
+      imageModel: 'nanobanana',
+      automationLevel: 'SUPERVISED' as const,
+      budgetUnits: 12,
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      visualDeckV4: {
+        instruction: '为六年级学生制作一套百分数视觉演示',
+        deckOptions: {
+          deckType: 'PRESENTER_SLIDES' as const,
+          language: 'zh-CN',
+          length: { slideCount: 12 },
+          aspectRatio: '16:9' as const,
+        },
+      },
+    }
+
+    expect(createRunRequestSchema.parse(base)).toMatchObject({
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: {
+        sourceMode: 'AUTO',
+        deckOptions: { deckType: 'PRESENTER_SLIDES', language: 'zh-CN', aspectRatio: '16:9' },
+      },
+    })
+    expect(() => createRunRequestSchema.parse({ ...base, visualDeckV4: undefined })).toThrow()
+    expect(() => createRunRequestSchema.parse({
+      ...base,
+      visualDeckV4: { ...base.visualDeckV4, deckOptions: { ...base.visualDeckV4.deckOptions, length: { slideCount: 10 } } },
+    })).toThrow()
+    expect(() => createRunRequestSchema.parse({ ...base, presentationMode: 'SLIDE_IMAGE_V2' })).toThrow()
+  })
+
   test('accepts an ordered mixed source package and rejects duplicate attachments', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,
@@ -293,6 +340,7 @@ describe('public v1 contracts', () => {
     const event = {
       schemaVersion: CONTRACT_VERSION,
       id: 'event-1',
+      eventId: 'event-1',
       runId: 'run-1',
       sequence: 1,
       createdAt: '2026-07-21T00:00:00.000Z',
@@ -302,6 +350,46 @@ describe('public v1 contracts', () => {
 
     expect(agentEventSchema.parse(event).type).toBe('budget.updated')
     expect(() => agentEventSchema.parse({ ...event, payload: { progress: 50 } })).toThrow()
-    expect(() => agentEventSchema.parse({ ...event, type: 'internal.debug' })).toThrow()
+    expect(agentEventSchema.parse({ ...event, type: 'future.event', payload: { value: 1 } }).type)
+      .toBe('future.event')
+    expect(() => agentEventSchema.parse({ ...event, type: 'budget.updated', payload: { value: 1 } })).toThrow()
+  })
+
+  test('validates stable visual deck v4 lifecycle fields', () => {
+    const event = {
+      schemaVersion: CONTRACT_VERSION,
+      id: 'run-v4:event:4',
+      eventId: 'run-v4:event:4',
+      runId: 'run-v4',
+      sequence: 4,
+      createdAt: '2026-07-30T00:00:00.000Z',
+      type: 'revision.started',
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4',
+        stage: 'REVISION',
+        completed: 0,
+        total: 3,
+        pageNumbers: [2, 5, 6],
+        revisionKind: 'PAGE_VISUAL',
+        revisionRound: 1,
+        maxRevisionRounds: 2,
+        budgetUnits: 12,
+        committedBudgetUnits: 6,
+        reason: 'PAGE_REVIEW_REJECTED',
+        retryable: true,
+        requiresUserAction: false,
+        nextAction: null,
+      },
+    } as const
+
+    expect(agentEventSchema.parse(event)).toEqual(event)
+    expect(() => agentEventSchema.parse({
+      ...event,
+      payload: { ...event.payload, completed: 4 },
+    })).toThrow()
+    expect(() => agentEventSchema.parse({
+      ...event,
+      payload: { ...event.payload, requiresUserAction: true, nextAction: null },
+    })).toThrow()
   })
 })

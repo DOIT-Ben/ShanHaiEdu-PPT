@@ -50,7 +50,7 @@ describe('run transition policy', () => {
 
     expect(result).toMatchObject({ status: 'DELIVERING', qualityOverride: true, version: 4 })
     expect(canTransition('DELIVERING', 'COMPLETED')).toBe(true)
-    expect(canTransition('DELIVERING', 'FAILED')).toBe(false)
+    expect(canTransition('DELIVERING', 'FAILED')).toBe(true)
   })
 
   test('rejects stale actions and invalid terminal transitions', () => {

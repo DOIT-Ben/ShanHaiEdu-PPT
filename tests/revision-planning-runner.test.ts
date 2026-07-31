@@ -4,7 +4,7 @@ import { FixedClock, MockRevisionPlanningPort } from '../src/adapters/mock-ports
 import { deckReviewStepKey } from '../src/core/deck-review-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
-import { RevisionPlanningRunner } from '../src/core/revision-planning-runner'
+import { RevisionPlanningRunner, revisionPlanStepKey } from '../src/core/revision-planning-runner'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -144,13 +144,20 @@ async function fixture(runOverrides: Partial<RunRecord> = {}, response: unknown 
 
 describe('revision planning runner', () => {
   test('waits for explicit approval in supervised mode', async () => {
-    const { repository, planner, runner } = await fixture()
+    const { repository, planner, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     const result = await runner.plan('run-1')
 
     expect(result).toMatchObject({ status: 'AWAITING_REVISION_APPROVAL', replayed: false, plan: { revisionRound: 1 } })
     expect(await repository.getRun('run-1')).toMatchObject({ revisionRound: 0, version: 7 })
     expect(planner.requests.size).toBe(1)
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toContain('approval.required')
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'revision.progress'))
+      .toMatchObject({
+        payload: {
+          revisionKind: 'DECK_CONTENT', pageNumbers: [2], reason: 'USER_CONFIRMATION_REQUIRED',
+          requiresUserAction: true, nextAction: 'APPROVE_REVISION',
+        },
+      })
   })
 
   test('enters the next revision round directly in bounded auto mode', async () => {
@@ -162,12 +169,46 @@ describe('revision planning runner', () => {
   })
 
   test('stops without a planner call at the configured revision limit', async () => {
-    const { repository, planner, runner } = await fixture({ revisionRound: 2, maxRevisionRounds: 2 })
+    const { repository, planner, runner } = await fixture({
+      revisionRound: 2,
+      maxRevisionRounds: 2,
+      presentationMode: 'VISUAL_DECK_V4',
+    })
     const result = await runner.plan('run-1')
 
     expect(result).toMatchObject({ status: 'NEEDS_HUMAN', step: null, plan: null })
     expect(planner.requests.size).toBe(0)
     expect(await repository.getRun('run-1')).toMatchObject({ revisionRound: 2 })
+    expect((await repository.listEvents('run-1')).find((event) => event.type === 'revision.completed'))
+      .toMatchObject({
+        payload: {
+          reason: 'REVISION_LIMIT_REACHED', retryable: false,
+          requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+        },
+      })
+  })
+
+  test('keeps deck revision capacity after two bounded page redraw rounds', async () => {
+    const { repository, runner } = await fixture({
+      automationLevel: 'BOUNDED_AUTO', revisionRound: 2, maxRevisionRounds: 2,
+    })
+    await repository.transact('run-1', (transaction) => {
+      for (const round of [1, 2]) {
+        transaction.putStep({
+          id: `step-page-revision-${round}`, runId: 'run-1', idempotencyKey: revisionPlanStepKey('run-1', round),
+          inputHash: `page-revision-${round}`, tool: 'plan_page_revision', status: 'COMPLETED', budgetUnits: 0,
+          budgetReservationId: null, externalOperationId: null, errorCode: null,
+          output: { id: `page-plan-${round}`, reviewId: `page-review-${round - 1}`, revisionRound: round,
+            createdAt: transaction.run.createdAt, ...plan() },
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        })
+      }
+    })
+
+    const result = await runner.plan('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', plan: { revisionRound: 3 } })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'REVISING', revisionRound: 3 })
   })
 
   test('rejects a plan that invents issue and source references', async () => {

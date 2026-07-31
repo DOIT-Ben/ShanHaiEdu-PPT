@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockVisualReviewPort } from '../src/adapters/mock-ports'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
+import { StructuredModelError } from '../src/core/ports'
 import type { RunRecord } from '../src/core/ports'
 
 const request = {
@@ -123,5 +124,33 @@ describe('side-effect-free visual review runner', () => {
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
       'tool.started', 'tool.failed', 'phase.changed', 'approval.required',
     ])
+  })
+
+  test('retries a transient review provider failure with the same idempotency key', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run())
+    const requests: string[] = []
+    const delays: number[] = []
+    const reviewer = new VisualReviewRunner({
+      repository,
+      clock: new FixedClock(),
+      reviewer: {
+        async review(input) {
+          requests.push(input.idempotencyKey)
+          if (requests.length < 3) {
+            throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', 'review-request-1')
+          }
+          return { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
+        },
+      },
+      sleep: async (milliseconds) => { delays.push(milliseconds) },
+    })
+
+    const result = await reviewer.review(request)
+
+    expect(result.review).toMatchObject({ approved: true, visualScore: 92 })
+    expect(requests).toEqual([request.idempotencyKey, request.idempotencyKey, request.idempotencyKey])
+    expect(delays).toEqual([2_000, 10_000])
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW' })
   })
 })

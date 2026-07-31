@@ -1,4 +1,4 @@
-import { CONTRACT_VERSION, type AgentEvent } from '../contracts'
+import { CONTRACT_VERSION } from '../contracts'
 import {
   type AgentRepository,
   BudgetReservationError,
@@ -8,9 +8,23 @@ import {
   MediaSubmissionError,
   type RunRecord,
   type StepRecord,
+  type StepStatus,
 } from './ports'
 import { hashInput } from './hash'
 import { releaseBudget, reserveBudget, transitionRun } from './policy'
+
+const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
+  'FAILED',
+  'RESERVATION_UNKNOWN',
+  'SUBMISSION_UNKNOWN',
+  'FAILED_NOT_CHARGED',
+  'FAILED_CHARGED',
+  'BILLING_UNKNOWN',
+])
+
+export function isMediaFailureStepStatus(status: StepStatus) {
+  return MEDIA_FAILURE_STEP_STATUSES.has(status)
+}
 
 export type SubmitSlideImageInput = Readonly<{
   runId: string

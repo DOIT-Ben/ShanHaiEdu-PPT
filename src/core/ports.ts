@@ -1,4 +1,4 @@
-import type { AgentEvent, CreateRunRequest, HostContext, RunStatus } from '../contracts'
+import type { KnownAgentEvent as AgentEvent, CreateRunRequest, HostContext, RunStatus } from '../contracts'
 import type { AssetIntent, DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } from '../presentation-contracts'
 
 export type SourceChunk = Readonly<{
@@ -346,6 +346,7 @@ export type RunRecord = Readonly<{
   coverDesignMode?: CreateRunRequest['coverDesignMode']
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
+  visualDeckV4?: CreateRunRequest['visualDeckV4']
   maxRevisionRounds: number
   revisionRound: number
   planningAttempt?: number
@@ -396,7 +397,7 @@ export type StepRecord = Readonly<{
   updatedAt: string
 }>
 
-export type NewAgentEvent = Omit<AgentEvent, 'id' | 'runId' | 'sequence' | 'createdAt'>
+export type NewAgentEvent = Omit<AgentEvent, 'id' | 'eventId' | 'runId' | 'sequence' | 'createdAt'>
 
 export type PlanningFailureFilters = Readonly<{
   tenantId: string
@@ -418,6 +419,10 @@ export type EventPage = Readonly<{
   nextAfter: number
   hasMore: boolean
   byteLength: number
+}>
+
+export type TerminalAgentEvent = Extract<AgentEvent, {
+  type: 'run.completed' | 'run.failed' | 'run.cancelled'
 }>
 
 export type RunEventSnapshot = Readonly<{
@@ -501,6 +506,7 @@ export interface AgentRepository {
   listSteps(runId: string): Promise<readonly StepRecord[]>
   listDeliveries(runId: string): Promise<readonly DeliveryRecord[]>
   listEvents(runId: string, afterSequence?: number): Promise<readonly AgentEvent[]>
+  getTerminalEvent(runId: string): Promise<TerminalAgentEvent | null>
   readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>): Promise<EventPage>
   getRunEventSnapshot(runId: string): Promise<RunEventSnapshot>
   getOperationsReport(filters: OperationsFilters): Promise<OperationsReport>

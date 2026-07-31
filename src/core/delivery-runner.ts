@@ -20,6 +20,12 @@ import type {
   StepRecord,
 } from './ports'
 import { transitionRun } from './policy'
+import {
+  allPageNumbers,
+  appendV4LifecycleEvent,
+  isVisualDeckV4,
+  v4LifecyclePayload,
+} from './v4-lifecycle'
 
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const
 
@@ -211,6 +217,11 @@ export class DeliveryRunner {
         type: 'tool.started',
         payload: { stepId: step.id, tool: step.tool, label: '生成 PNG 预览和可编辑 PPTX' },
       })
+      appendV4LifecycleEvent(transaction, 'delivery.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       return null
     })
   }
@@ -231,10 +242,25 @@ export class DeliveryRunner {
         type: 'tool.completed',
         payload: { stepId: step.id, summary: 'PNG 预览和可编辑 PPTX 已生成' },
       })
+      appendV4LifecycleEvent(transaction, 'delivery.completed', {
+        completed: 1,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'run.completed',
-        payload: { deliveryId: delivery.id, qualityOverride: delivery.qualityOverride },
+        payload: isVisualDeckV4(updatedRun)
+          ? {
+              ...v4LifecyclePayload(updatedRun, 'RUN', {
+                completed: 1,
+                total: 1,
+                pageNumbers: allPageNumbers(updatedRun),
+              }),
+              deliveryId: delivery.id,
+              qualityOverride: delivery.qualityOverride,
+            }
+          : { deliveryId: delivery.id, qualityOverride: delivery.qualityOverride },
       })
       return { status: updatedRun.status, step: updatedStep, delivery, replayed: false }
     })
@@ -267,6 +293,15 @@ export class DeliveryRunner {
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
         payload: { from: 'DELIVERING', to: 'NEEDS_HUMAN', reason: errorCode },
+      })
+      appendV4LifecycleEvent(transaction, 'delivery.completed', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+        reason: 'DELIVERY_FAILED',
+        retryable: true,
+        requiresUserAction: true,
+        nextAction: 'RETRY',
       })
       return { status: updatedRun.status, step: updatedStep, delivery: null, replayed: false }
     })
