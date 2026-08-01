@@ -15,9 +15,12 @@ import { getPresentationModeStrategy } from './presentation-mode-strategy'
 import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRecord } from './ports'
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import {
   allPageNumbers,
+  activeRevisionLifecycle,
   appendV4LifecycleEvent,
+  closeActiveV4LifecycleStages,
   isVisualDeckV4,
   revisionDetails,
   v4LifecyclePayload,
@@ -115,7 +118,11 @@ export class RunService {
         type: 'run.started',
         payload: { status: 'PLANNING' },
       })
-      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
+      appendV4LifecycleEvent(transaction, 'planning.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
     })
     return { run, replayed: false }
   }
@@ -323,6 +330,26 @@ export class RunService {
           ...(action.targetElementId ? { targetElementId: action.targetElementId } : {}),
         }],
       })
+      if (isVisualDeckV4(transaction.run)) {
+        try {
+          visualDeckV4RevisionInstructions({
+            runId: transaction.run.id,
+            pageNumber: slide.pageNumber,
+            revisionRound: targetRound,
+            steps: transaction.listSteps(),
+            currentInstructions: [action.instruction],
+          })
+        } catch (error) {
+          if (error instanceof Error && error.message === 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED') {
+            throw new RunServiceError(
+              422,
+              'REVISION_INSTRUCTION_BUDGET_EXCEEDED',
+              'revision history is too large for another lossless page correction',
+            )
+          }
+          throw error
+        }
+      }
       const key = revisionPlanStepKey(transaction.run.id, targetRound)
       const existingPlan = transaction.getStep(key)
       transaction.putStep({
@@ -364,6 +391,9 @@ export class RunService {
     updated: RunRecord,
     action: RunAction,
   ) {
+    if (action.type === 'CANCEL' && isVisualDeckV4(updated)) {
+      closeActiveV4LifecycleStages(transaction, 'CANCELLED_BY_USER')
+    }
     if (previous.status !== updated.status) {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -436,7 +466,22 @@ export class RunService {
       })
     }
     if (!isVisualDeckV4(updated)) return
-    if (action.type === 'APPROVE_BLUEPRINT') {
+    if (action.type === 'REJECT_REVISION') {
+      const started = activeRevisionLifecycle(transaction)
+      if (started) {
+        appendV4LifecycleEvent(transaction, 'revision.completed', {
+          completed: 0,
+          total: started.payload.total,
+          pageNumbers: started.payload.pageNumbers,
+          revisionKind: started.payload.revisionKind,
+          revisionRound: started.payload.revisionRound,
+          reason: 'REVISION_REJECTED_BY_USER',
+          retryable: false,
+          requiresUserAction: true,
+          nextAction: 'REVIEW_RESULT',
+        })
+      }
+    } else if (action.type === 'APPROVE_BLUEPRINT') {
       appendV4LifecycleEvent(transaction, 'generation.started', {
         completed: 0,
         total: updated.slideCount,
@@ -444,7 +489,11 @@ export class RunService {
       })
     } else if (action.type === 'RETRY_PLANNING' || action.type === 'REPLAN'
       || action.type === 'REQUEST_BLUEPRINT_REVISION') {
-      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
+      appendV4LifecycleEvent(transaction, 'planning.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(updated),
+      })
     } else if (action.type === 'RETRY_DELIVERY' || action.type === 'ACCEPT_WITH_OVERRIDE') {
       appendV4LifecycleEvent(transaction, 'delivery.started', { completed: 0, total: 1 })
     } else if (action.type === 'APPROVE_REVISION' || action.type === 'SUBMIT_LIMITED_REVISION') {

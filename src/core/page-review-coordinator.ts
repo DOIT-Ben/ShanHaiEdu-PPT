@@ -8,9 +8,11 @@ import { renderAndStoreSlidePreviews, requirePresentationArtifactReferences } fr
 import type { AgentRepository, ArtifactPort, ClockPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 import { transitionRun } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
 import {
   allPageNumbers,
+  appendFixedIssueResolutions,
   appendV4LifecycleEvent,
   revisionDetails,
 } from './v4-lifecycle'
@@ -42,7 +44,7 @@ export class PageReviewCoordinator {
     clock: ClockPort
     reviewConcurrency?: number
   }>) {
-    this.reviewConcurrency = dependencies.reviewConcurrency ?? 3
+    this.reviewConcurrency = dependencies.reviewConcurrency ?? 1
     if (!Number.isSafeInteger(this.reviewConcurrency) || this.reviewConcurrency < 1 || this.reviewConcurrency > 8) {
       throw new Error('REVIEW_CONCURRENCY_INVALID')
     }
@@ -87,7 +89,7 @@ export class PageReviewCoordinator {
         versionId: output.versionId,
         artifactId: output.artifactId,
         visualIntent: fullPageRaster && v4Brief
-          ? `${slide.visualIntent}；允许文字：${visualDeckV4AllowedCopy(v4Brief).join('｜')}；数字：${v4Brief.numbers.join('｜') || '无'}；公式：${v4Brief.formulas.join('｜') || '无'}；允许空格、换行和不改变含义的普通标点差异，禁止替换字词、改变数字或添加未列出的标签`
+          ? `${slide.visualIntent}；允许文字：${visualDeckV4AllowedCopy(v4Brief).join('｜')}；数字：${v4Brief.numbers.join('｜') || '无'}；公式：${v4Brief.formulas.join('｜') || '无'}；非展示事实核对项（只用于核对对象、关系、数量和结论，不得要求画面显示这些句子）：${v4Brief.facts.join('｜') || '无'}；允许空格、换行和不改变含义的普通标点差异，禁止替换字词、改变数字或添加未列出的标签`
           : requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
         layout: fullPageRaster ? 'VISUAL_DECK_V4' : requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
@@ -136,16 +138,20 @@ export class PageReviewCoordinator {
     rejected = reviews.filter((result) => result.review && !result.review.approved).length
     const approved = reviews.filter((result) => result.review?.approved).length
     const total = requirements.length + (fullPageRaster ? 0 : blueprint.slides.length)
-    if (reviews.some((result) => result.review === null) || rejected > 0 || reviews.length !== total) {
+    const executionFailed = reviews.some((result) => result.review === null) || reviews.length !== total
+    if (!executionFailed) {
+      await this.resolveSupersededPageIssues(run, reviews)
+    }
+    if (executionFailed || rejected > 0) {
       const autoRevisionStarted = fullPageRaster
+        && !executionFailed
         && rejected > 0
         && reviews.length === total
-        && !reviews.some((result) => result.review === null)
         && await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
       if (!autoRevisionStarted) {
         const problemPageNumbers = this.problemPageNumbers(blueprint, imageSteps, reviews)
-        await this.moveToHuman(runId, rejected > 0 ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED', {
-          completed: reviews.length,
+        await this.moveToHuman(runId, executionFailed ? 'PAGE_REVIEW_FAILED' : 'PAGE_REVIEW_REJECTED', {
+          completed: reviews.filter((result) => result.review !== null).length,
           total,
           pageNumbers: problemPageNumbers,
         })
@@ -164,10 +170,7 @@ export class PageReviewCoordinator {
     reviews: readonly ReviewSlideResult[],
   ) {
     if (run.automationLevel !== 'BOUNDED_AUTO') return false
-    const existingSteps = await this.dependencies.repository.listSteps(run.id)
-    const pageRevisionCount = existingSteps.filter((step) =>
-      step.tool === 'plan_page_revision' && step.status === 'COMPLETED').length
-    if (pageRevisionCount >= run.maxRevisionRounds) return false
+    if (run.revisionRound >= run.maxRevisionRounds) return false
     const targetRevisionRound = run.revisionRound + 1
     const rejected = imageSteps.flatMap((imageStep, index) => {
       if (!imageStep) return []
@@ -178,6 +181,21 @@ export class PageReviewCoordinator {
       return [{ slide, reviewResult }]
     })
     if (rejected.length === 0) return false
+    const steps = await this.dependencies.repository.listSteps(run.id)
+    try {
+      for (const { slide, reviewResult } of rejected) {
+        visualDeckV4RevisionInstructions({
+          runId: run.id,
+          pageNumber: slide.pageNumber,
+          revisionRound: targetRevisionRound,
+          steps,
+          currentInstructions: [reviewResult.review!.retryInstruction!],
+        })
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED') return false
+      throw error
+    }
     const plan = revisionPlanSchema.parse({
       id: `${run.id}:page-revision-plan:r${targetRevisionRound}`,
       reviewId: `${run.id}:page-review:r${run.revisionRound}`,
@@ -188,7 +206,7 @@ export class PageReviewCoordinator {
         id: `${run.id}:page-revision:r${targetRevisionRound}:p${slide.pageNumber}`,
         slideId: `${run.id}:slide:${slide.pageNumber}`,
         kind: 'REGENERATE_IMAGE' as const,
-        issueIds: [`${run.id}:page-review:r${run.revisionRound}:p${slide.pageNumber}`],
+        issueIds: [`${reviewResult.step.id}:visual-review`],
         instruction: reviewResult.review!.retryInstruction!,
         sourceChunkIds: slide.sourceChunkIds,
       })),
@@ -251,6 +269,40 @@ export class PageReviewCoordinator {
       })
     })
     return true
+  }
+
+  private async resolveSupersededPageIssues(run: RunRecord, reviews: readonly ReviewSlideResult[]) {
+    if (run.revisionRound === 0) return
+    const planSteps = (await this.dependencies.repository.listSteps(run.id))
+      .filter((step) => step.tool === 'plan_page_revision' && step.status === 'COMPLETED')
+    const planStep = planSteps
+      .find((step) => step.idempotencyKey === revisionPlanStepKey(run.id, run.revisionRound)
+      )
+    if (!planStep) return
+    const plan = revisionPlanSchema.parse(planStep.output)
+    const approvedSlideIds = new Set(reviews
+      .filter((result) => result.review?.approved)
+      .map((result) => this.reviewSlideId(run.id, result.step)))
+    const repairedSlideIds = new Set(plan.operations
+      .map((operation) => operation.slideId)
+      .filter((slideId) => approvedSlideIds.has(slideId)))
+    if (repairedSlideIds.size === 0) return
+    await this.dependencies.repository.transact(run.id, (transaction) => {
+      const repairedIssueIds = planSteps.flatMap((candidate) => {
+        const candidatePlan = revisionPlanSchema.parse(candidate.output)
+        return candidatePlan.operations
+          .filter((operation) => repairedSlideIds.has(operation.slideId))
+          .flatMap((operation) => operation.issueIds)
+      })
+      appendFixedIssueResolutions(transaction, repairedIssueIds)
+    })
+  }
+
+  private reviewSlideId(runId: string, step: StepRecord) {
+    const prefix = `${runId}:slide:`
+    if (!step.idempotencyKey.startsWith(prefix)) return null
+    const pageNumber = Number(step.idempotencyKey.slice(prefix.length).split(':')[0])
+    return Number.isSafeInteger(pageNumber) && pageNumber > 0 ? `${runId}:slide:${pageNumber}` : null
   }
 
   private imageOutput(step: StepRecord) {
@@ -316,7 +368,7 @@ export class PageReviewCoordinator {
         total: progress?.total ?? transaction.run.slideCount,
         pageNumbers: progress?.pageNumbers ?? allPageNumbers(transaction.run),
         reason: reason.includes('REJECTED') ? 'PAGE_REVIEW_REJECTED' : 'PAGE_REVIEW_FAILED',
-        retryable: true,
+        retryable: reason.includes('REJECTED'),
         requiresUserAction: true,
         nextAction: 'REVIEW_RESULT',
       })

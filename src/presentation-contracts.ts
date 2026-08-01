@@ -392,7 +392,8 @@ export const deckReviewIssueSchema = z.object({
   status: z.literal('OPEN'),
   repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']).optional(),
 }).strict().superRefine((value, context) => {
-  if (['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(value.category) && value.sourceChunkIds.length === 0) {
+  if ((['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(value.category) || value.repairDomain === 'KNOWLEDGE')
+    && value.sourceChunkIds.length === 0) {
     context.addIssue({
       code: 'custom',
       path: ['sourceChunkIds'],
@@ -401,7 +402,7 @@ export const deckReviewIssueSchema = z.object({
   }
 })
 
-export const deckReviewDraftSchema = z.object({
+const deckReviewDraftObjectSchema = z.object({
   qualityScore: z.number().int().min(0).max(100),
   curriculumCoverageScore: z.number().int().min(0).max(100),
   narrativeCoherenceScore: z.number().int().min(0).max(100),
@@ -412,11 +413,30 @@ export const deckReviewDraftSchema = z.object({
   issues: z.array(deckReviewIssueSchema).max(100),
 }).strict()
 
-export const deckReviewSchema = deckReviewDraftSchema.extend({
+function requireUniqueDeckReviewIssueIds(
+  value: z.infer<typeof deckReviewDraftObjectSchema>,
+  context: z.RefinementCtx,
+) {
+  const seen = new Set<string>()
+  value.issues.forEach((issue, index) => {
+    if (seen.has(issue.id)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['issues', index, 'id'],
+        message: 'deck review issue ids must be unique',
+      })
+    }
+    seen.add(issue.id)
+  })
+}
+
+export const deckReviewDraftSchema = deckReviewDraftObjectSchema.superRefine(requireUniqueDeckReviewIssueIds)
+
+export const deckReviewSchema = deckReviewDraftObjectSchema.extend({
   id: identifierSchema,
   revisionRound: z.number().int().min(0).max(4),
   createdAt: z.string().datetime(),
-}).strict()
+}).strict().superRefine(requireUniqueDeckReviewIssueIds)
 
 export const revisionOperationSchema = z.object({
   id: identifierSchema,

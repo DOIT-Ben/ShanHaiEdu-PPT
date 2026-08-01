@@ -96,7 +96,7 @@ export class RuntimeHealthMonitor {
       ? Math.max(0, now.getTime() - Date.parse(this.lastTickStartedAt))
       : null
     const heartbeatStaleMs = this.options.heartbeatStaleMs ?? 5_000
-    const tickStaleMs = this.options.tickStaleMs ?? 15 * 60_000
+    const tickStaleMs = this.options.tickStaleMs ?? 25 * 60_000
     let reason: 'WORKER_NOT_STARTED' | 'WORKER_HEARTBEAT_STALE' | 'WORKER_TICK_STUCK' | 'WORKER_TICK_FAILED' | null = null
     if (heartbeatAgeMs === null) reason = 'WORKER_NOT_STARTED'
     else if (heartbeatAgeMs > heartbeatStaleMs) reason = 'WORKER_HEARTBEAT_STALE'

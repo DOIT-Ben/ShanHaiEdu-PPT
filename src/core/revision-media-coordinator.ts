@@ -1,10 +1,16 @@
 import { CONTRACT_VERSION } from '../contracts'
 import { revisionPlanSchema } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintElementAssetKey, blueprintImageRequirements, completeVisualDeckV4Prompt } from './blueprint-assets'
+import {
+  blueprintElementAssetKey,
+  blueprintImageRequirements,
+  completeVisualDeckV4RevisionPrompt,
+  VISUAL_DECK_V4_NEGATIVE_PROMPT,
+} from './blueprint-assets'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
+import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import {
@@ -147,7 +153,8 @@ export class RevisionMediaCoordinator {
 
   private async targets(run: RunRecord) {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, run.id, run.revisionRound)
-    const step = (await this.dependencies.repository.listSteps(run.id))
+    const steps = await this.dependencies.repository.listSteps(run.id)
+    const step = steps
       .find((candidate) => candidate.idempotencyKey === revisionPlanStepKey(run.id, run.revisionRound)
         && candidate.status === 'COMPLETED')
     if (!step) throw new Error('REVISION_PLAN_NOT_READY')
@@ -181,16 +188,28 @@ export class RevisionMediaCoordinator {
       return [...new Map(targets.map((target) => [target.idempotencyKey, target])).values()]
     }
     const byPage = new Map<number, string[]>()
-    for (const operation of plan.operations.filter((item) => item.kind === 'REGENERATE_IMAGE' || item.kind === 'RELAYOUT')) {
+    const rasterOperations = blueprint.renderMode === 'VISUAL_DECK_V4'
+      ? plan.operations
+      : plan.operations.filter((item) => item.kind === 'REGENERATE_IMAGE' || item.kind === 'RELAYOUT')
+    for (const operation of rasterOperations) {
       const pageNumber = Number(operation.slideId.split(':').at(-1))
-      byPage.set(pageNumber, [...(byPage.get(pageNumber) ?? []), operation.instruction])
+      byPage.set(pageNumber, [
+        ...(byPage.get(pageNumber) ?? []),
+        operation.instruction,
+      ])
     }
     return [...byPage].map(([pageNumber, instructions]) => {
       const slide = blueprint.slides[pageNumber - 1]
       if (!slide) throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
-      const approvedPrompt = blueprint.renderMode === 'VISUAL_DECK_V4'
-        ? completeVisualDeckV4Prompt(blueprint, slide)
-        : slide.visualPrompt
+      const revisionInstructions = blueprint.renderMode === 'VISUAL_DECK_V4'
+        ? visualDeckV4RevisionInstructions({
+            runId: run.id,
+            pageNumber,
+            revisionRound: run.revisionRound,
+            steps,
+            currentInstructions: instructions,
+          })
+        : instructions
       return {
         pageNumber,
         elementId: null,
@@ -199,8 +218,10 @@ export class RevisionMediaCoordinator {
         stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
         slideId: `${run.id}:slide:${pageNumber}`,
         versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
-        prompt: `Quality correction for this page only: ${instructions.join(' ')} Preserve the approved page brief and all allowed copy exactly. ${approvedPrompt}`.slice(0, 3_000),
-        negativePrompt: null,
+        prompt: blueprint.renderMode === 'VISUAL_DECK_V4'
+          ? completeVisualDeckV4RevisionPrompt(blueprint, slide, revisionInstructions)
+          : `Quality correction for this page only: ${instructions.join(' ')} Preserve the approved page brief and all allowed copy exactly. ${slide.visualPrompt}`.slice(0, 3_000),
+        negativePrompt: blueprint.renderMode === 'VISUAL_DECK_V4' ? VISUAL_DECK_V4_NEGATIVE_PROMPT : null,
         aspectRatio: '16:9' as const,
         backgroundMode: 'OPAQUE' as const,
       }

@@ -54,7 +54,7 @@ async function fixture(response: unknown) {
   return {
     repository,
     reviewer,
-    runner: new VisualReviewRunner({ repository, reviewer, clock: new FixedClock() }),
+    runner: new VisualReviewRunner({ repository, reviewer, clock: new FixedClock(), sleep: async () => {} }),
   }
 }
 
@@ -109,7 +109,7 @@ describe('side-effect-free visual review runner', () => {
       .rejects.toThrow('STEP_IDEMPOTENCY_CONFLICT')
   })
 
-  test('moves to human review when the reviewer returns an invalid contract', async () => {
+  test('persists an invalid review result without taking ownership of the batch phase', async () => {
     const { repository, runner } = await fixture({
       approved: true,
       textDetected: true,
@@ -119,10 +119,26 @@ describe('side-effect-free visual review runner', () => {
     })
     const result = await runner.review(request)
 
-    expect(result).toMatchObject({ review: null, step: { status: 'FAILED', errorCode: 'VISUAL_REVIEW_FAILED' } })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(result).toMatchObject({
+      review: null,
+      step: {
+        status: 'FAILED',
+        errorCode: 'MODEL_JSON_INVALID',
+        output: {
+          diagnostic: {
+            providerAttempt: 1,
+            maxProviderAttempts: 5,
+            contractAttempt: 2,
+            maxContractAttempts: 2,
+            model: null,
+            requestId: null,
+          },
+        },
+      },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW' })
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
-      'tool.started', 'tool.failed', 'phase.changed', 'approval.required',
+      'tool.started', 'tool.failed',
     ])
   })
 
@@ -137,7 +153,7 @@ describe('side-effect-free visual review runner', () => {
       reviewer: {
         async review(input) {
           requests.push(input.idempotencyKey)
-          if (requests.length < 3) {
+          if (requests.length < 5) {
             throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', 'review-request-1')
           }
           return { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
@@ -149,8 +165,156 @@ describe('side-effect-free visual review runner', () => {
     const result = await reviewer.review(request)
 
     expect(result.review).toMatchObject({ approved: true, visualScore: 92 })
-    expect(requests).toEqual([request.idempotencyKey, request.idempotencyKey, request.idempotencyKey])
-    expect(delays).toEqual([2_000, 10_000])
+    expect(requests).toEqual(Array.from({ length: 5 }, () => request.idempotencyKey))
+    expect(delays).toEqual([2_000, 10_000, 30_000, 60_000])
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW' })
+  })
+
+  test('repairs an invalid review contract with a distinct model key', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run())
+    const requests: string[] = []
+    const contractIssues: unknown[] = []
+    const delays: number[] = []
+    const reviewer = new VisualReviewRunner({
+      repository,
+      clock: new FixedClock(),
+      reviewer: {
+        async review(input) {
+          requests.push(input.idempotencyKey)
+          contractIssues.push(input.contractRepairIssues)
+          if (requests.length === 1) {
+            return { approved: true, textDetected: true, visualScore: 80, reasons: [], retryInstruction: null }
+          }
+          return { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
+        },
+      },
+      sleep: async (milliseconds) => { delays.push(milliseconds) },
+    })
+
+    const result = await reviewer.review(request)
+
+    expect(result.review).toMatchObject({ approved: true, visualScore: 92 })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]).toBe(request.idempotencyKey)
+    expect(requests[1]).not.toBe(request.idempotencyKey)
+    expect(delays).toEqual([])
+    expect(contractIssues[1]).toEqual([
+      { path: 'approved', message: 'an image with detected text cannot be approved' },
+    ])
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW' })
+  })
+
+  test('preserves the final provider diagnostic after bounded retries are exhausted', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run())
+    let attempts = 0
+    const runner = new VisualReviewRunner({
+      repository,
+      clock: new FixedClock(),
+      reviewer: {
+        async review() {
+          attempts += 1
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', `review-request-${attempts}`)
+        },
+      },
+      sleep: async () => {},
+    })
+
+    const result = await runner.review(request)
+
+    expect(attempts).toBe(5)
+    expect(result).toMatchObject({
+      review: null,
+      step: {
+        status: 'FAILED',
+        errorCode: 'PROVIDER_UNAVAILABLE',
+        output: {
+          diagnostic: {
+            providerAttempt: 5,
+            maxProviderAttempts: 5,
+            contractAttempt: 1,
+            maxContractAttempts: 2,
+            model: 'gpt-5.6',
+            requestId: 'review-request-5',
+          },
+        },
+      },
+    })
+    const failed = (await repository.listEvents('run-1')).find((event) => event.type === 'tool.failed')
+    expect(failed?.payload).toMatchObject({ errorCode: 'PROVIDER_UNAVAILABLE', retryable: false })
+  })
+
+  test('converges concurrent runner failures to one persisted terminal step event', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run())
+    let calls = 0
+    let release!: () => void
+    let bothStarted!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const entered = new Promise<void>((resolve) => { bothStarted = resolve })
+    const port = {
+      async review() {
+        calls += 1
+        if (calls === 2) bothStarted()
+        await gate
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', `concurrent-${calls}`)
+      },
+    }
+    const firstRunner = new VisualReviewRunner({ repository, reviewer: port, clock: new FixedClock() })
+    const secondRunner = new VisualReviewRunner({ repository, reviewer: port, clock: new FixedClock() })
+
+    const first = firstRunner.review(request)
+    const second = secondRunner.review(request)
+    await entered
+    release()
+    await Promise.all([first, second])
+
+    expect(calls).toBe(2)
+    expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
+      'tool.started', 'tool.failed',
+    ])
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW' })
+  })
+
+  test('does not let a late success overwrite a persisted concurrent failure', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run())
+    let releaseSuccess!: () => void
+    let successStarted!: () => void
+    const gate = new Promise<void>((resolve) => { releaseSuccess = resolve })
+    const entered = new Promise<void>((resolve) => { successStarted = resolve })
+    const lateSuccessRunner = new VisualReviewRunner({
+      repository,
+      clock: new FixedClock(),
+      reviewer: {
+        async review() {
+          successStarted()
+          await gate
+          return { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
+        },
+      },
+    })
+    const failingRunner = new VisualReviewRunner({
+      repository,
+      clock: new FixedClock(),
+      reviewer: {
+        async review() {
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'winning-failure')
+        },
+      },
+    })
+
+    const lateSuccess = lateSuccessRunner.review(request)
+    await entered
+    const failed = await failingRunner.review(request)
+    releaseSuccess()
+    const converged = await lateSuccess
+
+    expect(failed).toMatchObject({ review: null, replayed: false, step: { status: 'FAILED' } })
+    expect(converged).toMatchObject({ review: null, replayed: true, step: { status: 'FAILED' } })
+    expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual([
+      'tool.started', 'tool.failed',
+    ])
   })
 })

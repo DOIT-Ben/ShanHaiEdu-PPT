@@ -78,6 +78,14 @@ describe('visual deck v4 contracts', () => {
     const inventedVisibleNumber = proposal()
     inventedVisibleNumber.slideBriefs[0]!.numbers = ['2']
     expect(() => visualDeckV4ProposalSchema.parse(inventedVisibleNumber)).toThrow()
+
+    const unboundedCriticalContent = proposal()
+    unboundedCriticalContent.slideBriefs[0]!.facts = Array.from(
+      { length: 20 },
+      (_, index) => `来源事实${index + 1}：${'必须完整进入图片生成提示词。'.repeat(40)}`.slice(0, 500),
+    )
+    expect(() => visualDeckV4ProposalSchema.parse(unboundedCriticalContent))
+      .toThrow('v4 critical slide content exceeds the lossless image prompt budget')
   })
 
   test('accepts only ordered rendered slides in a v4 manifest', () => {

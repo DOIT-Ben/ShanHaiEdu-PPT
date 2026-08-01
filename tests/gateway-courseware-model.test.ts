@@ -183,6 +183,9 @@ describe('gateway courseware model', () => {
     expect(body.tools[0]?.function.name).toBe('submit_visual_deck_v4_proposal')
     expect(body.tool_choice.function.name).toBe('submit_visual_deck_v4_proposal')
     expect(body.messages[0]?.content).toContain('最终交付是一页一张完整16:9图片')
+    expect(body.messages[0]?.content).toContain('唯一权威对象集合及精确总数')
+    expect(body.messages[0]?.content).toContain('facts中的文字绝不作为画面文案')
+    expect(body.messages[0]?.content).toContain('不得用多个关键帧重复绘制同一批可数对象')
     expect(JSON.stringify(body.tools[0]?.function.parameters)).toContain('chunk-1')
   })
 
@@ -446,11 +449,13 @@ describe('gateway courseware model', () => {
     })
 
     expect(await model.review({
-      tenantId: 'frameflow', artifactId: stored.artifactId, visualIntent: '检查完整页面',
-      layout: 'COMPOSITE:HERO', visualDirection: '儿童课堂风格', idempotencyKey: 'review-1',
+      tenantId: 'frameflow', artifactId: stored.artifactId,
+      visualIntent: '允许文字：5可以分成3和2；非展示事实核对项：整页只有5个实体圆片',
+      layout: 'VISUAL_DECK_V4', visualDirection: '儿童课堂风格', idempotencyKey: 'review-1',
     })).toEqual(review)
     expect(requestBody).not.toBeNull()
     const messages = (requestBody! as unknown as { messages: { content: unknown }[] }).messages
+    expect(String(messages[0]!.content)).toContain('非展示事实核对项')
     const userContent = messages[1]!.content as { type: string; image_url?: { url: string } }[]
     const imageUrl = userContent.find((part) => part.image_url)?.image_url?.url
     expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)
@@ -542,6 +547,17 @@ describe('gateway courseware model', () => {
     await expect(invalidJson.execute(request)).rejects.toMatchObject({
       code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-2',
     })
+
+    const invalidContract = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        choices: [{ message: { tool_calls: [{ function: { arguments: '{}' } }] } }],
+      }, { headers: { 'x-request-id': 'request-safe-3' } }),
+    })
+    await expect(invalidContract.execute(request)).rejects.toMatchObject({
+      code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-3',
+    })
   })
 
   test('logs only allowlisted provider rejection metadata', async () => {
@@ -576,6 +592,60 @@ describe('gateway courseware model', () => {
     expect(records[0]).not.toContain('private provider response')
   })
 
+  test('retries only ambiguous invalid-request rejections without an explicit client error', async () => {
+    const original = console.error
+    console.error = () => undefined
+    try {
+      const ambiguous = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({ error: { type: 'invalid_request_error' } }, { status: 400 }),
+      })
+      await expect(ambiguous.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-ambiguous-400',
+      })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', retryable: true })
+
+      const explicit = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({
+          error: { code: 'invalid_tool_schema', type: 'invalid_request_error', param: 'tools.0.function.parameters' },
+        }, { status: 400 }),
+      })
+      await expect(explicit.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-explicit-400',
+      })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', retryable: false })
+
+      for (const [idempotencyKey, error] of [
+        ['plan-numeric-code-400', { type: 'invalid_request_error', code: 400 }],
+        ['plan-unsafe-param-400', { type: 'invalid_request_error', param: 'tools[0] invalid parameter' }],
+      ] as const) {
+        const malformedDetail = new GatewayCoursewareModel({
+          baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+          artifacts: new MockArtifactPort(),
+          fetchImpl: async () => Response.json({ error }, { status: 400 }),
+        })
+        await expect(malformedDetail.execute({
+          operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey,
+        })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', retryable: false })
+      }
+
+      const detailCode = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({
+          error: { type: 'invalid_request_error', code: ' ' },
+          detail: { code: 'invalid_tool_schema' },
+        }, { status: 400 }),
+      })
+      await expect(detailCode.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-detail-code-400',
+      })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', retryable: false })
+    } finally {
+      console.error = original
+    }
+  })
+
   test('treats a gateway upstream error as retryable even when wrapped in HTTP 404', async () => {
     const original = console.error
     console.error = () => undefined
@@ -592,6 +662,31 @@ describe('gateway courseware model', () => {
         operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-upstream',
       })).rejects.toMatchObject({
         code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-upstream-404', model: 'gpt-5.6',
+      })
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('treats a gateway bad response status as retryable even when wrapped in HTTP 403', async () => {
+    const original = console.error
+    console.error = () => undefined
+    try {
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({
+          error: { code: 'bad_response_status_code', type: 'bad_response_status_code' },
+        }, {
+          status: 403,
+          headers: { 'x-request-id': 'request-upstream-403' },
+        }),
+      })
+      await expect(model.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
+        idempotencyKey: 'plan-upstream-403',
+      })).rejects.toMatchObject({
+        code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-upstream-403', model: 'gpt-5.6',
       })
     } finally {
       console.error = original

@@ -252,12 +252,40 @@ function providerRejectionMetadata(payload: unknown) {
     }).passthrough().optional(),
     detail: z.object({ code: z.unknown().optional() }).passthrough().optional(),
   }).passthrough().safeParse(payload)
-  if (!parsed.success) return { providerCode: null, providerType: null, providerParam: null }
-  return {
-    providerCode: safeProviderField(parsed.data.error?.code ?? parsed.data.detail?.code),
-    providerType: safeProviderField(parsed.data.error?.type),
-    providerParam: safeProviderField(parsed.data.error?.param),
+  if (!parsed.success) {
+    return {
+      log: { providerCode: null, providerType: null, providerParam: null },
+      hasExplicitClientDetail: false,
+    }
   }
+  const rawErrorCode = parsed.data.error?.code
+  const rawDetailCode = parsed.data.detail?.code
+  const rawParam = parsed.data.error?.param
+  const nonEmpty = (value: unknown) => value !== undefined && value !== null
+    && !(typeof value === 'string' && value.trim().length === 0)
+  return {
+    log: {
+      providerCode: safeProviderField(rawErrorCode) ?? safeProviderField(rawDetailCode),
+      providerType: safeProviderField(parsed.data.error?.type),
+      providerParam: safeProviderField(rawParam),
+    },
+    hasExplicitClientDetail: nonEmpty(rawErrorCode) || nonEmpty(rawDetailCode) || nonEmpty(rawParam),
+  }
+}
+
+function retryableProviderRejection(
+  status: number,
+  rejection: ReturnType<typeof providerRejectionMetadata>,
+) {
+  const ambiguousInvalidRequest = status === 400
+    && rejection.log.providerType === 'invalid_request_error'
+    && !rejection.hasExplicitClientDetail
+  const upstreamResponseFailure = rejection.log.providerCode === 'bad_response_status_code'
+    || rejection.log.providerType === 'bad_response_status_code'
+  return status === 429 || status === 408 || status >= 500
+    || rejection.log.providerType === 'upstream_error'
+    || upstreamResponseFailure
+    || ambiguousInvalidRequest
 }
 
 export class GatewayCoursewareModel implements
@@ -325,9 +353,12 @@ sourceUnderstanding必须逐字保留输入instruction并列出真实来源，CO
 presentationSpec必须原样采用输入的sourceMode、deckType、language、slideCount以及明确提供的audience和focus，并补全目标、风格、必须覆盖和禁止内容。deckPlan要有清楚的开场、展开、应用和收束，章节必须完整且不重复覆盖全部页面。
 slideBriefs必须严格等于指定页数，pageNumber从1连续。第一页建立主题，最后一页完成总结；中间页面根据内容使用情境、问题、解释、对比、过程、练习等不同作用。每页只承担一个主要任务，标题和核心观点不能重复。
 每页使用普通用户能理解的标题、keyClaim和audienceTakeaway。title不超过120字；lockedCopy最多8条，列出除title之外图片内允许出现的全部最终文字，包括“分/合”“摆一摆”等短标签；不在title或lockedCopy中的标签禁止让图片模型自行补充。facts保存不可改变的知识事实；numbers和formulas只列图片中必须逐字出现的数字/公式，而且每一项必须已经原样出现在title或lockedCopy中。“两堆”等汉字数量不得另行写成数字2。每个SOURCE_GROUNDED页面必须引用支持本页内容的真实sourceChunkIds。
+facts只能写对象、关系、数量和结论等非展示语义约束，不得抄录教材原句、页码、引号内提问、教学说明、来源说明或可直接充当页脚的句子；facts中的文字绝不作为画面文案。需要展示的任何文字必须完整移入title或lockedCopy。
 visualMetaphor和composition必须具体说明当前页看见什么、视觉中心是什么、对象如何组织，不能只写“简洁、美观、信息图”。informationHierarchy写清阅读顺序。前后页关系必须形成连续讲述。
+涉及数学数量、实验器材、人物、动物或其他可数教学对象时，facts必须明确本页唯一权威对象集合及精确总数，composition必须保证整页可见的完整对象总数与该事实一致。移动、飞行、搬运、放大观察、前后状态和整体/部分关系不得通过复制同一批完整对象来表达；只能使用箭头、轨迹、虚线轮廓、空位或非实体符号，禁止用额外的完整对象或残影造成重复计数。整体和部分需要同页出现时，必须使用容器、抽象符号或明确分区，不能把同一组实物重复画两遍。
+deckPlan.title、presentationSpec.focus和requiredCoverage不得比实际slideBriefs覆盖的知识范围更宽；提交前必须检查每个重点和必备内容至少由一页明确承担，并删除重复总结、重复练习和无法在指定页数内兑现的范围。
 visualContract统一整套配色、字体感觉、媒介、信息密度和连续性，但不得要求每页复制同一构图。最终交付是一页一张完整16:9图片，不规划可编辑文字层、组件层或多页拼贴。
-最终产物是静态图片型PPTX，不支持真正的视频、音频、动画、可点击控件或交互组件。来源中的“播放视频、点击、动画演示”等要求必须改编为可在一张静态页面中完成的观察情境、连续动作示意或关键帧，不得绘制播放按钮、编辑器控件或伪装成可操作界面的元素。
+最终产物是静态图片型PPTX，不支持真正的视频、音频、动画、可点击控件或交互组件。来源中的“播放视频、点击、动画演示”等要求必须改编为可在一张静态页面中完成的观察情境；数量敏感内容只能使用箭头、轨迹、虚线轮廓或空位表达动作，不得用多个关键帧重复绘制同一批可数对象。不得绘制播放按钮、编辑器控件或伪装成可操作界面的元素。
 如果输入包含contractRepairIssues，必须保持instruction、sourceMode、deckOptions、页数、受众、重点和全部真实来源不变，重新提交完整规划并逐项修正列出的字段合同问题。
 只提交工具参数，不输出解释、Markdown或思维过程。`,
         user: userContent,
@@ -397,14 +428,20 @@ ${assetStrategyInstruction}
       model: this.dependencies.visionModel ?? this.dependencies.textModel,
       system: visualDeckV4
         ? `你是整页视觉演示质检员。输入图片是最终16:9幻灯片，只允许包含visualIntent中列出的允许文字、数字和公式。
+visualIntent中的“非展示事实核对项”只用于核对对象数量、知识关系和结论准确性，不属于允许文字；画面抄录、改写或展示其中句子必须作为额外文字拒绝。
 严格检查允许内容是否准确、清楚可读，是否出现乱码、错字、错误数字、错误公式、未列入允许文字的标签、Logo或水印；同时检查知识相关性、主体残缺、裁切、遮挡、层级、对比度、构图和整体完成度。空格、换行以及不改变含义的普通标点差异可以接受；替换字词、改变数字或公式、增添标签、遗漏关键信息必须拒绝。
 只有阻断课堂使用的问题才可approved=false：错误或额外文字、数字、公式，错误对象数量，方向或知识关系矛盾，核心教学对象缺失，明显遮挡裁切、不可读或严重失衡。不得仅因装饰图标、卡片形状、放大镜/手势/虚线的精确位置、轻微间距、颜色或构图没有逐项复刻visualIntent而拒绝；核心含义正确且visualScore达到80时应approved=true，可在reasons中记录非阻断建议。
-textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true。拒绝时给出当前页可直接执行的修复指令。`
+textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true。拒绝时给出当前页可直接执行的修复指令。若输入包含contractRepairIssues，保持图片和审查范围不变，逐项修正输出合同。`
         : `你是儿童课件视觉质检员。严格检查图片内错误文字、数字、公式、Logo、水印、知识不相关、年龄不适宜、主体残缺和低质量问题。
 当 layout 以 COMPOSITE: 开头时，还必须检查最终页面中的文字可读性、遮挡、越界、层级、留白和元素冲突；合成页中的原生课件文字允许存在，不得因此判 textDetected=true。
 只有所有检查通过才可 approved=true。拒绝时给出可直接用于重新生成或重新布局的明确指令。`,
       user: [
-        { type: 'text', text: boundedJson({ visualIntent: input.visualIntent, layout: input.layout, visualDirection: input.visualDirection }) },
+        { type: 'text', text: boundedJson({
+          visualIntent: input.visualIntent,
+          layout: input.layout,
+          visualDirection: input.visualDirection,
+          ...(input.contractRepairIssues ? { contractRepairIssues: input.contractRepairIssues } : {}),
+        }) },
         image,
       ],
       toolName: 'submit_visual_review',
@@ -451,6 +488,7 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
         blueprint: input.blueprint,
         sourceChunks: input.sourceChunks,
         slides: input.slides.map(({ artifactId: _artifactId, ...slide }) => slide),
+        ...(input.contractRepairIssues ? { contractRepairIssues: input.contractRepairIssues } : {}),
       })}`,
     }]
     for (const slide of input.slides) {
@@ -460,7 +498,7 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
     return this.request({
       model: this.dependencies.visionModel ?? this.dependencies.textModel,
       system: `你是学校课件终审专家。对照教材和全部最终组装页，检查知识覆盖、事实准确、教学叙事、封面冲击力、跨页一致性、重复素材、布局冲突和儿童可读性。
-每个问题必须定位到真实 slideId；知识或事实问题必须引用真实 sourceChunkIds，并把 repairDomain 标为 KNOWLEDGE、ASSET 或 LAYOUT。不得虚构引用。`,
+每个问题必须定位到真实 slideId；知识或事实问题必须引用真实 sourceChunkIds，并把 repairDomain 标为 KNOWLEDGE、ASSET 或 LAYOUT。不得虚构引用。若输入包含contractRepairIssues，保持课件、来源、评分范围不变，逐项修正输出合同。`,
       user: content,
       toolName: 'submit_deck_review',
       description: '提交整套课件质量评分和可执行问题清单。',
@@ -473,7 +511,9 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
     return this.request({
       model: this.dependencies.textModel,
       system: `你是课件修订规划器。只处理审查发现的问题，不得扩大范围。
-KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 RELAYOUT。V3 的 REGENERATE_IMAGE 必须填写 targetElementId，确保只重做目标素材并保持其他元素不变。`,
+每个 WARNING 和 CRITICAL 问题 ID 都必须被至少一个 operation 精确引用，不得虚构问题 ID、slideId 或 sourceChunkId；operation.slideId 必须属于所引用问题的 slideIds。repairDomain是权威修复边界：KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 RELAYOUT；缺少repairDomain时，CURRICULUM_GAP和FACTUAL_RISK按KNOWLEDGE处理，IMAGE_QUALITY和ASSET_RELEVANCE按ASSET处理，其他问题按LAYOUT处理。知识或事实问题必须保留该问题引用的真实sourceChunkIds。允许同页且修复类型相同的问题合并，修复类型不同必须拆开，不得遗漏问题。
+V3 的 REGENERATE_IMAGE 必须填写 targetElementId，确保只重做目标素材并保持其他元素不变。V4 是整页图片，UPDATE_CONTENT、REGENERATE_IMAGE 和 RELAYOUT 都会重绘目标页。
+如果输入包含 contractRepairIssues，必须保持审查问题、页码、来源和修订范围不变，重新提交完整修订计划并逐项修正合同问题。`,
       user: boundedJson(input),
       toolName: 'submit_revision_plan',
       description: '提交严格限定范围的课件修订计划。',
@@ -483,14 +523,19 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
   }
 
   async apply(input: Parameters<RevisionApplicationPort['apply']>[0]) {
+    const visualDeckV4 = input.blueprint.renderMode === 'VISUAL_DECK_V4'
     return this.request({
       model: this.dependencies.textModel,
-      system: `你是课件蓝图修订执行器。严格按 revision plan 返回完整 BlueprintDraft。
-未被操作命中的页面和元素必须逐字逐字段保持不变；REGENERATE_IMAGE 只能更新目标元素的提示词，RELAYOUT 不得触发重新出图，UPDATE_CONTENT 必须有教材来源。`,
+      system: visualDeckV4
+        ? `你是NotebookLM式整页视觉演示的修订执行器。严格按 revision plan 返回完整 VisualDeckV4ProposalDraft，不要返回 compilerVersion、Blueprint 或解释。
+sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字逐字段保持不变；未被 operation 命中的 slideBrief 必须逐字逐字段保持不变。UPDATE_CONTENT 只能修正目标页的内容字段及与新内容直接相关的视觉表达，必须使用 operation.sourceChunkIds 中的真实来源；RELAYOUT 只能调整目标页视觉构思、构图和信息顺序；REGENERATE_IMAGE 不修改规划字段。
+页数、pageNumber、role、来源范围和用户原始要求不得改变。所有 numbers/formulas 必须逐字出现在 title 或 lockedCopy。若输入包含 contractRepairIssues，保持修订范围不变并逐项修正合同问题。`
+        : `你是课件蓝图修订执行器。严格按 revision plan 返回完整 BlueprintDraft。
+未被操作命中的页面和元素必须逐字逐字段保持不变；REGENERATE_IMAGE 只能更新目标元素的提示词，RELAYOUT 不得触发重新出图，UPDATE_CONTENT 必须有教材来源。若输入包含 contractRepairIssues，保持修订范围不变并逐项修正合同问题。`,
       user: boundedJson(input),
       toolName: 'submit_revised_blueprint',
-      description: '提交按计划局部修改后的完整课件蓝图。',
-      schema: blueprintDraftSchema,
+      description: visualDeckV4 ? '提交按计划局部修改后的完整 V4 演示规划。' : '提交按计划局部修改后的完整课件蓝图。',
+      schema: visualDeckV4 ? visualDeckV4ProposalDraftSchema : blueprintDraftSchema,
       idempotencyKey: input.idempotencyKey,
     })
   }
@@ -588,15 +633,14 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
         status: response.status,
         requestId,
         model: input.model,
-        ...rejection,
+        ...rejection.log,
       }))
       const code = response.status === 429
         ? 'PROVIDER_RATE_LIMIT'
         : [408, 504].includes(response.status)
           ? 'PROVIDER_TIMEOUT'
           : 'PROVIDER_UNAVAILABLE'
-      const retryable = response.status === 429 || response.status === 408 || response.status >= 500 ||
-        rejection.providerType === 'upstream_error'
+      const retryable = retryableProviderRejection(response.status, rejection)
       throw new StructuredModelError(code, retryable, input.model, requestId)
     }
     let raw: string
@@ -625,7 +669,14 @@ KNOWLEDGE 使用 UPDATE_CONTENT，ASSET 使用 REGENERATE_IMAGE，LAYOUT 使用 
     } catch {
       throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
     }
-    return input.schema.parse(omitOptionalNulls(parsed, outputSchema))
+    try {
+      return input.schema.parse(omitOptionalNulls(parsed, outputSchema))
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
+      }
+      throw error
+    }
   }
 
   private requestId(response: Response) {

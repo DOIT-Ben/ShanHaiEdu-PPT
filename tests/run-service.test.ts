@@ -3,10 +3,12 @@ import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
+import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { deliveryStepKey } from '../src/core/delivery-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { RunService, RunServiceError } from '../src/core/run-service'
+import { appendV4LifecycleEvent } from '../src/core/v4-lifecycle'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 const request = {
@@ -297,6 +299,138 @@ describe('run service', () => {
     expect(approved).toMatchObject({ status: 'REVISING', revisionRound: 1, version: 5 })
   })
 
+  test('closes a legacy active v4 revision lifecycle when the teacher rejects the plan', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-reject-revision-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        status: 'AWAITING_REVISION_APPROVAL',
+        version: 4,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0, total: 1, pageNumbers: [2], revisionKind: 'DECK_VISUAL', revisionRound: 1,
+      })
+    })
+
+    const rejected = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'REJECT_REVISION',
+      expectedVersion: 4,
+      reason: '当前修订方向不符合本节课的教学安排。',
+    }, 'reject-revision-0001')
+
+    expect(rejected.status).toBe('NEEDS_HUMAN')
+    const revisions = (await repository.listEvents(created.run.id))
+      .filter((event) => event.type.startsWith('revision.'))
+    expect(revisions.map((event) => event.type)).toEqual(['revision.started', 'revision.completed'])
+    expect(revisions[1]).toMatchObject({
+      payload: { reason: 'REVISION_REJECTED_BY_USER', pageNumbers: [2], revisionRound: 1 },
+    })
+  })
+
+  test('closes an active v4 revision lifecycle before cancelling the run', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-cancel-revision-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        status: 'REVISING',
+        revisionRound: 1,
+        version: 4,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0, total: 2, pageNumbers: [1, 2], revisionKind: 'DECK_VISUAL', revisionRound: 1,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.progress', {
+        completed: 1, total: 2, pageNumbers: [1, 2], revisionKind: 'DECK_VISUAL', revisionRound: 1,
+      })
+    })
+
+    const cancelled = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'CANCEL',
+      expectedVersion: 4,
+      reason: '用户终止当前生成任务。',
+    }, 'cancel-revision-0001')
+
+    expect(cancelled.status).toBe('CANCELLED')
+    const events = await repository.listEvents(created.run.id)
+    const relevant = events.filter((event) => event.type.startsWith('revision.')
+      || event.type === 'phase.changed' || event.type === 'run.cancelled')
+    expect(relevant.map((event) => event.type)).toEqual([
+      'revision.started', 'revision.progress', 'revision.completed', 'phase.changed', 'run.cancelled',
+    ])
+    expect(relevant[2]).toMatchObject({
+      payload: {
+        completed: 1, total: 2, pageNumbers: [1, 2], revisionRound: 1,
+        reason: 'CANCELLED_BY_USER', requiresUserAction: false, nextAction: null,
+      },
+    })
+  })
+
+  test('closes active v4 generation before cancelling the run', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-cancel-generation-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4', status: 'EXECUTING', version: 4 })
+      appendV4LifecycleEvent(transaction, 'generation.started', {
+        completed: 0, total: 2, pageNumbers: [1, 2],
+      })
+      appendV4LifecycleEvent(transaction, 'generation.progress', {
+        completed: 1, total: 2, pageNumbers: [1, 2],
+      })
+    })
+
+    expect(await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION, type: 'CANCEL', expectedVersion: 4,
+      reason: '用户终止当前生成任务。',
+    }, 'cancel-generation-0001')).toMatchObject({ status: 'CANCELLED' })
+
+    const relevant = (await repository.listEvents(created.run.id)).filter((event) =>
+      event.type.startsWith('generation.') || event.type === 'phase.changed' || event.type === 'run.cancelled')
+    expect(relevant.map((event) => event.type)).toEqual([
+      'generation.started', 'generation.progress', 'generation.completed', 'phase.changed', 'run.cancelled',
+    ])
+    expect(relevant[2]).toMatchObject({
+      payload: { completed: 1, total: 2, reason: 'CANCELLED_BY_USER', retryable: false },
+    })
+  })
+
+  test('closes the suspended v4 generation when a paused run is cancelled', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-pause-cancel-generation-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4', status: 'EXECUTING', version: 4 })
+      appendV4LifecycleEvent(transaction, 'generation.started', {
+        completed: 0, total: 2, pageNumbers: [1, 2],
+      })
+      appendV4LifecycleEvent(transaction, 'generation.progress', {
+        completed: 1, total: 2, pageNumbers: [1, 2],
+      })
+    })
+    const paused = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION, type: 'PAUSE', expectedVersion: 4,
+    }, 'pause-generation-0001')
+    expect(paused).toMatchObject({ status: 'PAUSED', version: 5 })
+
+    expect(await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION, type: 'CANCEL', expectedVersion: 5,
+      reason: '用户在暂停后终止任务。',
+    }, 'cancel-paused-generation-0001')).toMatchObject({ status: 'CANCELLED' })
+
+    const events = await repository.listEvents(created.run.id)
+    const completed = events.filter((event) => event.type === 'generation.completed')
+    expect(completed).toHaveLength(1)
+    expect(completed[0]).toMatchObject({
+      payload: { completed: 1, total: 2, reason: 'CANCELLED_BY_USER' },
+    })
+    expect(events.findIndex((event) => event.type === 'generation.completed'))
+      .toBeLessThan(events.findIndex((event) => event.type === 'run.cancelled'))
+  })
+
   test('turns a teacher limited page request into a persisted revision plan', async () => {
     const { repository, service } = fixture()
     const created = await service.create(request, 'frameflow-create-limited-0001')
@@ -326,6 +460,58 @@ describe('run service', () => {
       tool: 'plan_revision', status: 'COMPLETED',
       output: { revisionRound: 1, operations: [{ slideId: `${created.run.id}:slide:2`, kind: 'RELAYOUT' }] },
     })
+  })
+
+  test('rejects an over-budget v4 limited revision before entering revising', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-limited-over-budget-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      const now = transaction.run.updatedAt
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        status: 'NEEDS_HUMAN',
+        revisionRound: 1,
+        maxRevisionRounds: 4,
+        version: 4,
+      })
+      transaction.putStep({
+        id: 'step-blueprint-r1', runId: created.run.id,
+        idempotencyKey: revisionBlueprintStepKey(created.run.id, 1), inputHash: 'blueprint-r1',
+        tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null, output: blueprint(), createdAt: now, updatedAt: now,
+      })
+      transaction.putStep({
+        id: 'step-prior-plan-r1', runId: created.run.id,
+        idempotencyKey: revisionPlanStepKey(created.run.id, 1), inputHash: 'prior-plan-r1',
+        tool: 'plan_revision', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null,
+        output: {
+          id: 'prior-plan-r1', reviewId: 'review-r0', revisionRound: 1, createdAt: now,
+          summary: '上一轮包含两项必须无损保留的页面视觉修复。',
+          operations: [1, 2].map((index) => ({
+            id: `prior-operation-${index}`, slideId: `${created.run.id}:slide:2`, kind: 'RELAYOUT',
+            issueIds: [`prior-issue-${index}`], instruction: String(index).repeat(2_000), sourceChunkIds: [],
+          })),
+        },
+        createdAt: now, updatedAt: now,
+      })
+    })
+
+    await expect(service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'SUBMIT_LIMITED_REVISION',
+      expectedVersion: 4,
+      slideId: `${created.run.id}:slide:2`,
+      repairDomain: 'LAYOUT',
+      instruction: '继续修复当前页面，同时完整保留所有历史视觉约束。'.repeat(20),
+    }, 'limited-revision-over-budget-0001')).rejects.toMatchObject({
+      status: 422,
+      code: 'REVISION_INSTRUCTION_BUDGET_EXCEEDED',
+    })
+    expect(await repository.getRun(created.run.id)).toMatchObject({ status: 'NEEDS_HUMAN', revisionRound: 1, version: 4 })
+    expect((await repository.listSteps(created.run.id)).some((step) =>
+      step.idempotencyKey === revisionPlanStepKey(created.run.id, 2))).toBe(false)
   })
 
   test('retries failed planning with distinct attempts and enforces the retry limit', async () => {

@@ -31,8 +31,8 @@ import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
 import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
-const MAX_PROVIDER_ATTEMPTS = 3
-const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000] as const
+const MAX_PROVIDER_ATTEMPTS = 5
+const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000, 60_000, 120_000] as const
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
@@ -709,7 +709,11 @@ export class PlanningRunner {
             : '分析教材并规划逐页蓝图',
         },
       })
-      appendV4LifecycleEvent(transaction, 'planning.started', { completed: 0, total: 1 })
+      appendV4LifecycleEvent(transaction, 'planning.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       return { run: updatedRun, step, blueprint: null, replayed: false }
     })
   }

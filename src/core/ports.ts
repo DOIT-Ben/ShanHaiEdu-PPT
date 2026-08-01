@@ -77,6 +77,11 @@ export class StructuredModelError extends Error {
   }
 }
 
+export type ContractRepairIssue = Readonly<{
+  path: string
+  message: string
+}>
+
 export type MediaSubmissionState = 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
 
 export class MediaSubmissionError extends Error {
@@ -178,6 +183,7 @@ export interface VisualReviewPort {
     layout: string
     visualDirection: string
     idempotencyKey: string
+    contractRepairIssues?: readonly ContractRepairIssue[]
   }>): Promise<unknown>
 }
 
@@ -204,6 +210,7 @@ export interface DeckReviewPort {
       }>[]
     }>[]
     idempotencyKey: string
+    contractRepairIssues?: readonly ContractRepairIssue[]
   }>): Promise<unknown>
 }
 
@@ -215,6 +222,7 @@ export interface RevisionPlanningPort {
     sourceChunks: readonly SourceChunk[]
     targetRevisionRound: number
     idempotencyKey: string
+    contractRepairIssues?: readonly ContractRepairIssue[]
   }>): Promise<unknown>
 }
 
@@ -225,6 +233,7 @@ export interface RevisionApplicationPort {
     plan: RevisionPlan
     sourceChunks: readonly SourceChunk[]
     idempotencyKey: string
+    contractRepairIssues?: readonly ContractRepairIssue[]
   }>): Promise<unknown>
 }
 

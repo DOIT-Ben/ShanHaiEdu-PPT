@@ -552,7 +552,7 @@ describe('planning runner', () => {
       modelName: 'gpt-5.6',
       async execute(input) {
         executions.push(structuredClone(input))
-        if (executions.length === 1) {
+        if (executions.length < 5) {
           throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', 'request-transient-1')
         }
         return draft()
@@ -570,11 +570,11 @@ describe('planning runner', () => {
     const result = await runner.plan(request)
 
     expect(result.step.status).toBe('COMPLETED')
-    expect(executions).toHaveLength(2)
-    expect(executions[0]!.idempotencyKey).toBe(executions[1]!.idempotencyKey)
-    expect(delays).toEqual([5_000])
+    expect(executions).toHaveLength(5)
+    expect(new Set(executions.map((execution) => execution.idempotencyKey)).size).toBe(1)
+    expect(delays).toEqual([5_000, 30_000, 60_000, 120_000])
     expect((await repository.listEvents('run-1')).some((event) =>
-      event.type === 'tool.progress' && event.payload.summary?.includes('自动重试 2/3'))).toBe(true)
+      event.type === 'tool.progress' && event.payload.summary?.includes('自动重试 5/5'))).toBe(true)
   })
 
   test.each([
@@ -603,7 +603,7 @@ describe('planning runner', () => {
 
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode })
     expect(issue?.type === 'issue.detected' && issue.payload.planningFailure).toMatchObject({
-      errorCode, retryable: true, suggestedAction: 'RETRY', attempt: 3, maxAttempts: 3,
+      errorCode, retryable: true, suggestedAction: 'RETRY', attempt: 5, maxAttempts: 5,
       requestId: 'request-safe-1', model: 'gpt-5.6', contractVersion: '1',
     })
   })

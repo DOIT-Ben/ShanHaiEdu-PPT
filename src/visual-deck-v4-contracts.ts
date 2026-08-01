@@ -32,6 +32,8 @@ export const visualDeckV4ConfigSchema = z.object({
 const identifierSchema = z.string().trim().min(1).max(160)
 const boundedText = (maximum: number) => z.string().trim().min(1).max(maximum)
 
+export const VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH = 6_000
+
 export const visualDeckV4SourceModeSchema = z.enum(['SOURCE_GROUNDED', 'OPEN_KNOWLEDGE'])
 
 export const visualDeckV4SourceUnderstandingSchema = z.object({
@@ -120,7 +122,22 @@ export const visualDeckV4SlideBriefSchema = z.object({
   informationHierarchy: z.array(boundedText(300)).min(1).max(12),
   previousSlideRelation: boundedText(500).nullable(),
   nextSlideRelation: boundedText(500).nullable(),
-}).strict()
+}).strict().superRefine((value, context) => {
+  const criticalContentLength = [
+    value.title,
+    ...value.lockedCopy,
+    ...value.facts,
+    ...value.numbers,
+    ...value.formulas,
+  ].join('').length
+  if (criticalContentLength > VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH) {
+    context.addIssue({
+      code: 'custom',
+      path: ['facts'],
+      message: 'v4 critical slide content exceeds the lossless image prompt budget',
+    })
+  }
+})
 
 export const visualDeckV4VisualContractSchema = z.object({
   artDirection: boundedText(1_000),
