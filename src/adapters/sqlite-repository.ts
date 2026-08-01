@@ -8,6 +8,7 @@ import type {
   PlanningFailureFilters,
   RunRecord,
   StepRecord,
+  TenantRevisionRoundsSettings,
 } from '../core/ports'
 import type { DeliveryRecord } from '../presentation-contracts'
 import { buildOperationsReport, type OperationalRun, type OperationalStep } from '../core/operations'
@@ -82,6 +83,13 @@ export class SqliteAgentRepository implements AgentRepository {
         lease_until TEXT,
         updated_at TEXT NOT NULL DEFAULT ''
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS agent_tenant_settings (
+        tenant_id TEXT PRIMARY KEY,
+        max_revision_rounds INTEGER NOT NULL DEFAULT 2,
+        version INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT,
+        updated_by TEXT
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS agent_steps (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
@@ -142,6 +150,43 @@ export class SqliteAgentRepository implements AgentRepository {
 
   close() {
     this.#database.close(true)
+  }
+
+  async getTenantRevisionRoundsSettings(tenantId: string) {
+    const row = this.#database.query<{
+      maxRevisionRounds: number
+      version: number
+      updatedAt: string | null
+      updatedBy: string | null
+    }, [string]>(`
+      SELECT max_revision_rounds AS maxRevisionRounds, version, updated_at AS updatedAt, updated_by AS updatedBy
+      FROM agent_tenant_settings WHERE tenant_id = ?
+    `).get(tenantId)
+    return row
+      ? { ...row, isConfigured: true }
+      : { maxRevisionRounds: 2, version: 0, isConfigured: false, updatedAt: null, updatedBy: null }
+  }
+
+  async updateTenantRevisionRoundsSettings(input: Readonly<{
+    tenantId: string
+    maxRevisionRounds: number
+    expectedVersion: number
+    updatedBy: string
+    updatedAt: string
+  }>) {
+    const result = this.#database.query<unknown, [string, number, string, string, number]>(`
+      INSERT INTO agent_tenant_settings (tenant_id, max_revision_rounds, version, updated_at, updated_by)
+      VALUES (?, ?, 1, ?, ?)
+      ON CONFLICT(tenant_id) DO UPDATE SET
+        max_revision_rounds = excluded.max_revision_rounds,
+        version = agent_tenant_settings.version + 1,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+      WHERE agent_tenant_settings.version = ?
+    `)
+    const outcome = result.run(input.tenantId, input.maxRevisionRounds, input.updatedAt, input.updatedBy, input.expectedVersion)
+    if (outcome.changes !== 1) return null
+    return this.getTenantRevisionRoundsSettings(input.tenantId)
   }
 
   async createRun(run: RunRecord) {

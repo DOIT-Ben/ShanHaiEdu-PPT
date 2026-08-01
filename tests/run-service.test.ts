@@ -67,6 +67,23 @@ describe('run service', () => {
     expect((await repository.listEvents(first.run.id)).map((event) => event.type)).toEqual(['run.started'])
   })
 
+  test('uses the configured tenant revision-round setting over caller input', async () => {
+    const { repository, service } = fixture()
+    await repository.updateTenantRevisionRoundsSettings({
+      tenantId: host.tenantId,
+      maxRevisionRounds: 4,
+      expectedVersion: 0,
+      updatedBy: 'admin-1',
+      updatedAt: '2026-08-02T00:00:00.000Z',
+    })
+
+    const inherited = await service.create(request, 'frameflow-create-settings-default')
+    const explicit = await service.create({ ...request, maxRevisionRounds: 1 }, 'frameflow-create-settings-explicit')
+
+    expect(inherited.run.maxRevisionRounds).toBe(4)
+    expect(explicit.run.maxRevisionRounds).toBe(4)
+  })
+
   test('rejects a changed request under the same creation key', async () => {
     const { service } = fixture()
     await service.create(request, 'frameflow-create-0001')

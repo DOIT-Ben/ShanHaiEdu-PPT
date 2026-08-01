@@ -31,6 +31,7 @@ describe('OpenAPI v1 contract', () => {
       '/v1/admin/operations',
       '/v1/admin/operations/{runId}/actions',
       '/v1/admin/planning-failures',
+      '/v1/admin/settings/revision-rounds',
       '/v1/runs',
       '/v1/runs/{runId}',
       '/v1/runs/{runId}/actions',
@@ -48,6 +49,8 @@ describe('OpenAPI v1 contract', () => {
     expect(document.paths['/v1/admin/planning-failures']?.get).toBeDefined()
     expect(document.paths['/v1/admin/operations']?.get).toBeDefined()
     expect(document.paths['/v1/admin/operations/{runId}/actions']?.post).toBeDefined()
+    expect(document.paths['/v1/admin/settings/revision-rounds']?.get).toBeDefined()
+    expect(document.paths['/v1/admin/settings/revision-rounds']?.patch).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
     expect(document.paths['/health/ready']?.get).toBeDefined()
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
@@ -74,6 +77,7 @@ describe('OpenAPI v1 contract', () => {
       .toEqual(['SLIDE_IMAGE_V2', 'SLIDE_IMAGE_V2_1', 'LAYERED_COURSEWARE_V3', 'VISUAL_DECK_V4'])
     expect(document.components.schemas.CreateRunRequest?.properties?.visualDeckV4).toBeDefined()
     expect(document.components.schemas.VisualDeckV4GenerationPlan).toBeDefined()
+    expect(document.components.schemas.AdminRevisionRoundsSettings).toBeDefined()
     expect(document.components.schemas.RunDetailEnvelope).toBeDefined()
     expect(document.components.schemas.AgentEventEnvelope?.required).toEqual(expect.arrayContaining([
       'schemaVersion', 'id', 'eventId', 'runId', 'sequence', 'type', 'payload',

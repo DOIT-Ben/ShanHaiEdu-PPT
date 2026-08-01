@@ -402,6 +402,14 @@ export type RunRecord = Readonly<{
 
 export type RunListCursor = Readonly<Pick<RunRecord, 'updatedAt' | 'id'>>
 
+export type TenantRevisionRoundsSettings = Readonly<{
+  maxRevisionRounds: number
+  version: number
+  isConfigured: boolean
+  updatedAt: string | null
+  updatedBy: string | null
+}>
+
 export type OwnedRunPage = Readonly<{
   runs: readonly RunRecord[]
   hasMore: boolean
@@ -524,6 +532,14 @@ export interface AgentTransaction {
 }
 
 export interface AgentRepository {
+  getTenantRevisionRoundsSettings(tenantId: string): Promise<TenantRevisionRoundsSettings>
+  updateTenantRevisionRoundsSettings(input: Readonly<{
+    tenantId: string
+    maxRevisionRounds: number
+    expectedVersion: number
+    updatedBy: string
+    updatedAt: string
+  }>): Promise<TenantRevisionRoundsSettings | null>
   createRun(run: RunRecord): Promise<void>
   getRun(runId: string): Promise<RunRecord | null>
   listRuns(): Promise<readonly RunRecord[]>

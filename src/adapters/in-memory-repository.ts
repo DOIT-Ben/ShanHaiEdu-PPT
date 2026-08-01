@@ -7,6 +7,7 @@ import type {
   PlanningFailureFilters,
   RunRecord,
   StepRecord,
+  TenantRevisionRoundsSettings,
 } from '../core/ports'
 import type { DeliveryRecord } from '../presentation-contracts'
 import { isPendingMediaReconciliationStep } from '../core/media-reconciliation'
@@ -26,6 +27,43 @@ function clone<T>(value: T): T {
 export class InMemoryAgentRepository implements AgentRepository {
   readonly #runs = new Map<string, StoredRun>()
   readonly #gates = new Map<string, Promise<void>>()
+  readonly #revisionRounds = new Map<string, TenantRevisionRoundsSettings>()
+
+  async getTenantRevisionRoundsSettings(tenantId: string) {
+    return clone(this.#revisionRounds.get(tenantId) ?? {
+      maxRevisionRounds: 2,
+      version: 0,
+      isConfigured: false,
+      updatedAt: null,
+      updatedBy: null,
+    })
+  }
+
+  async updateTenantRevisionRoundsSettings(input: Readonly<{
+    tenantId: string
+    maxRevisionRounds: number
+    expectedVersion: number
+    updatedBy: string
+    updatedAt: string
+  }>) {
+    const current = this.#revisionRounds.get(input.tenantId) ?? {
+      maxRevisionRounds: 2,
+      version: 0,
+      isConfigured: false,
+      updatedAt: null,
+      updatedBy: null,
+    }
+    if (current.version !== input.expectedVersion) return null
+    const updated: TenantRevisionRoundsSettings = {
+      maxRevisionRounds: input.maxRevisionRounds,
+      version: current.version + 1,
+      isConfigured: true,
+      updatedAt: input.updatedAt,
+      updatedBy: input.updatedBy,
+    }
+    this.#revisionRounds.set(input.tenantId, updated)
+    return clone(updated)
+  }
 
   async createRun(run: RunRecord) {
     if (this.#runs.has(run.id)) throw new Error(`run already exists: ${run.id}`)

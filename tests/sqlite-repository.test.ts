@@ -68,6 +68,24 @@ async function databasePath() {
 }
 
 describe('SQLite repository', () => {
+  test('persists tenant revision-round settings with optimistic versioning', async () => {
+    const filename = await databasePath()
+    const first = new SqliteAgentRepository(filename)
+    expect(await first.getTenantRevisionRoundsSettings('frameflow')).toMatchObject({ maxRevisionRounds: 2, version: 0, isConfigured: false })
+    expect(await first.updateTenantRevisionRoundsSettings({
+      tenantId: 'frameflow', maxRevisionRounds: 4, expectedVersion: 0,
+      updatedBy: 'admin-1', updatedAt: '2026-08-02T00:00:00.000Z',
+    })).toMatchObject({ maxRevisionRounds: 4, version: 1, isConfigured: true })
+    first.close()
+
+    const reopened = new SqliteAgentRepository(filename)
+    expect(await reopened.getTenantRevisionRoundsSettings('frameflow')).toMatchObject({ maxRevisionRounds: 4, version: 1, isConfigured: true })
+    expect(await reopened.updateTenantRevisionRoundsSettings({
+      tenantId: 'frameflow', maxRevisionRounds: 1, expectedVersion: 0,
+      updatedBy: 'admin-2', updatedAt: '2026-08-02T00:00:01.000Z',
+    })).toBeNull()
+    reopened.close()
+  })
   test('persists runs, steps and event sequence across process reopen', async () => {
     const filename = await databasePath()
     const first = new SqliteAgentRepository(filename)
