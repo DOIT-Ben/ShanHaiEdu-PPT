@@ -23,6 +23,12 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
 }
 
 describe('mock runtime', () => {
+  test('rejects an image concurrency value outside the gateway batch limit', () => {
+    expect(() => createMockRuntime({
+      repository: new InMemoryAgentRepository(), artifacts: new MockArtifactPort(), apiToken: token, imageConcurrency: 51,
+    })).toThrow('IMAGE_CONCURRENCY_INVALID')
+  })
+
   test('runs a notebooklm-style v4 request through approval to a raster-only pptx', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()

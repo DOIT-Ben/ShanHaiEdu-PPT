@@ -191,6 +191,7 @@ describe('media step runner', () => {
     expect(completed.step.output).toEqual({
       slideId: request.slideId,
       versionId: request.versionId,
+      backgroundMode: 'OPAQUE',
       artifactId: 'artifact-slide-1-v1',
     })
     expect(replay).toMatchObject({ changed: false, step: { status: 'COMPLETED' } })

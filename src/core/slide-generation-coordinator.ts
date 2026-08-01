@@ -2,6 +2,7 @@ import { CONTRACT_VERSION } from '../contracts'
 import { slideVisualReviewSchema, type PresentationBlueprint, type SlideVisualReview } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
+import { mapWithConcurrency } from './concurrency'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type {
@@ -41,6 +42,8 @@ export type RefreshBlueprintImagesResult = Readonly<{
 export const ASSET_CANDIDATE_QUALITY_THRESHOLD = 80
 
 export class SlideGenerationCoordinator {
+  private readonly imageConcurrency: number
+
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     media: MediaStepRunner
@@ -49,7 +52,13 @@ export class SlideGenerationCoordinator {
     discovery?: AssetDiscoveryPort
     candidateReviewer?: AssetCandidateReviewPort
     clock: ClockPort
-  }>) {}
+    imageConcurrency?: number
+  }>) {
+    this.imageConcurrency = dependencies.imageConcurrency ?? 50
+    if (!Number.isSafeInteger(this.imageConcurrency) || this.imageConcurrency < 1 || this.imageConcurrency > 50) {
+      throw new Error('IMAGE_CONCURRENCY_INVALID')
+    }
+  }
 
   async submitBlueprintImages(runId: string, unitBudgetUnits: number): Promise<SubmitBlueprintImagesResult> {
     if (!Number.isSafeInteger(unitBudgetUnits) || unitBudgetUnits <= 0) throw new Error('INVALID_UNIT_BUDGET')
@@ -71,7 +80,7 @@ export class SlideGenerationCoordinator {
     const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
-    const sequentialPageExecution = run.source.kind === 'APPROVED_PAGE_DESIGN'
+    const sequentialPageExecution = !isVisualDeckV4(run) && run.source.kind === 'APPROVED_PAGE_DESIGN'
     const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status))
     if (blockingStep) {
       await this.requireHuman(runId, blockingStep)
@@ -133,6 +142,40 @@ export class SlideGenerationCoordinator {
       if (!decision.allowed) throw new Error(decision.reason)
     }
 
+    if (isVisualDeckV4(run)) {
+      const outcomes = await mapWithConcurrency(unresolvedRequirements, this.imageConcurrency, async (requirement) => {
+        try {
+          return { step: await this.submitGeneratedImage(run, requirement, unitBudgetUnits) }
+        } catch (error) {
+          // Keep dispatching the approved batch; a later recovery pass can reconcile already submitted operations.
+          return { error }
+        }
+      })
+      const unexpected = outcomes.find((outcome): outcome is { error: unknown } => 'error' in outcome)
+      if (unexpected) throw unexpected.error
+      const submittedOutcomes = outcomes.filter((outcome): outcome is { step: StepRecord } => 'step' in outcome)
+      for (const outcome of submittedOutcomes) {
+        const step = outcome.step
+        const existingIndex = steps.findIndex((candidate) => candidate.idempotencyKey === step.idempotencyKey)
+        if (existingIndex === -1) steps.push(step)
+        else steps[existingIndex] = step
+      }
+      const failed = submittedOutcomes.find((outcome) => isMediaFailureStepStatus(outcome.step.status))
+      if (failed) await this.requireHuman(runId, failed.step)
+      else {
+        for (const [index, outcome] of submittedOutcomes.entries()) {
+          await this.appendProgress(runId, outcome.step.id, index + 1, requirements.length)
+        }
+      }
+      const latest = await this.dependencies.repository.getRun(runId)
+      return {
+        status: latest?.status ?? 'FAILED',
+        submitted: steps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
+        total: requirements.length,
+        steps,
+      }
+    }
+
     const needsSourceAssets = unresolvedRequirements.some((requirement) =>
       requirement.sourceAssetStrategy === 'REUSE_ORIGINAL' || requirement.sourceAssetStrategy === 'REFERENCE_GENERATION')
     const document = needsSourceAssets
@@ -140,7 +183,6 @@ export class SlideGenerationCoordinator {
       : null
     const sourceAssets = new Map((document?.assets ?? []).map((asset) => [asset.id, asset]))
     for (const requirement of unresolvedRequirements) {
-      const key = requirement.idempotencyKey
       const versionId = requirement.elementId === null
         ? `${runId}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
         : `${runId}:slide:${requirement.pageNumber}:element:${requirement.elementId}:r${run.revisionRound}:v1`
@@ -159,26 +201,7 @@ export class SlideGenerationCoordinator {
         await this.appendProgress(runId, completed.id, steps.length, requirements.length)
         continue
       }
-      const result = await this.dependencies.media.submitSlideImage({
-        runId,
-        stepId: `step-${runId}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
-        idempotencyKey: key,
-        slideId: requirement.slideId,
-        versionId,
-        prompt: requirement.prompt,
-        ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
-        model: run.imageModel,
-        budgetUnits: unitBudgetUnits,
-        aspectRatio: requirement.aspectRatio,
-        backgroundMode: requirement.backgroundMode,
-        ...(requirement.elementId ? { elementId: requirement.elementId } : {}),
-        ...(requirement.reuseKey ? { assetReuseKey: requirement.reuseKey } : {}),
-        ...(sourceAsset ? { referenceImage: {
-          mimeType: sourceAsset.mimeType,
-          bytes: sourceAsset.bytes,
-          sha256: sourceAsset.sha256,
-        } } : {}),
-      })
+      const result = { step: await this.submitGeneratedImage(run, requirement, unitBudgetUnits, sourceAsset) }
       const existingIndex = steps.findIndex((step) => step.idempotencyKey === result.step.idempotencyKey)
       if (existingIndex === -1) steps.push(result.step)
       else steps[existingIndex] = result.step
@@ -260,6 +283,38 @@ export class SlideGenerationCoordinator {
   private artifactId(step: StepRecord) {
     const output = step.output as { artifactId?: unknown } | null
     return output && typeof output.artifactId === 'string' ? output.artifactId : null
+  }
+
+  private async submitGeneratedImage(
+    run: RunRecord,
+    requirement: ReturnType<typeof blueprintImageRequirements>[number],
+    unitBudgetUnits: number,
+    sourceAsset?: SourceAsset | null,
+  ) {
+    const versionId = requirement.elementId === null
+      ? `${run.id}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
+      : `${run.id}:slide:${requirement.pageNumber}:element:${requirement.elementId}:r${run.revisionRound}:v1`
+    const result = await this.dependencies.media.submitSlideImage({
+      runId: run.id,
+      stepId: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
+      idempotencyKey: requirement.idempotencyKey,
+      slideId: requirement.slideId,
+      versionId,
+      prompt: requirement.prompt,
+      ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
+      model: run.imageModel,
+      budgetUnits: unitBudgetUnits,
+      aspectRatio: requirement.aspectRatio,
+      backgroundMode: requirement.backgroundMode,
+      ...(requirement.elementId ? { elementId: requirement.elementId } : {}),
+      ...(requirement.reuseKey ? { assetReuseKey: requirement.reuseKey } : {}),
+      ...(sourceAsset ? { referenceImage: {
+        mimeType: sourceAsset.mimeType,
+        bytes: sourceAsset.bytes,
+        sha256: sourceAsset.sha256,
+      } } : {}),
+    })
+    return result.step
   }
 
   private async completeSourceAssetReuse(

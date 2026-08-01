@@ -281,10 +281,26 @@ describe('slide generation coordinator', () => {
     expect(budget.reservations.size).toBe(3)
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 30 })
     expect(result.steps.map((step) => step.output)).toEqual([
-      { slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1' },
-      { slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1' },
-      { slideId: 'run-1:slide:3', versionId: 'run-1:slide:3:r0:v1' },
+      { slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1', backgroundMode: 'OPAQUE' },
+      { slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1', backgroundMode: 'OPAQUE' },
+      { slideId: 'run-1:slide:3', versionId: 'run-1:slide:3:r0:v1', backgroundMode: 'OPAQUE' },
     ])
+  })
+
+  test('submits a V4 deck concurrently while preserving one step and budget allocation per page', async () => {
+    const { repository, budget, images, coordinator } = await fixture()
+    images.submissionDelayMs = 15
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+
+    const result = await coordinator.submitBlueprintImages('run-1', 10)
+
+    expect(result).toMatchObject({ status: 'EXECUTING', submitted: 3, total: 3 })
+    expect(images.maxConcurrentSubmissions).toBe(3)
+    expect(images.operations.size).toBe(3)
+    expect(budget.reservations.size).toBe(3)
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 30 })
   })
 
   test('replays a completed batch without duplicate provider calls or progress events', async () => {
@@ -408,7 +424,7 @@ describe('slide generation coordinator', () => {
     expect(budget.reservations.size).toBe(0)
   })
 
-  test('stops the batch immediately when a provider submission is unknown', async () => {
+  test('submits the remaining V4 pages when a provider submission is unknown', async () => {
     const { repository, images, coordinator } = await fixture()
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
@@ -416,9 +432,9 @@ describe('slide generation coordinator', () => {
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')
     const result = await coordinator.submitBlueprintImages('run-1', 10)
 
-    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 0, total: 3 })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 10 })
-    expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')).toHaveLength(1)
+    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 2, total: 3 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 30 })
+    expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')).toHaveLength(3)
     expect((await repository.listEvents('run-1')).find((event) => event.type === 'generation.completed'))
       .toMatchObject({
         payload: {

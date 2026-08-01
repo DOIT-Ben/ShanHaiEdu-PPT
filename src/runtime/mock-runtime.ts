@@ -389,6 +389,7 @@ type RuntimeInput = Readonly<{
   stepSlaMs?: number
   workerId?: string
   workerConcurrency?: number
+  imageConcurrency?: number
   reviewConcurrency?: number
   runLeaseTtlMs?: number
   createRunRateLimitPerMinute?: number
@@ -401,9 +402,13 @@ export function createAgentRuntime(input: RuntimeInput) {
   const clock = input.clock ?? new SystemClock()
   const workerId = input.workerId?.trim() || `worker-${randomUUID()}`
   const workerConcurrency = input.workerConcurrency ?? 2
+  const imageConcurrency = input.imageConcurrency ?? 50
   const runLeaseTtlMs = input.runLeaseTtlMs ?? 60_000
   if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency < 1 || workerConcurrency > 8) {
     throw new Error('WORKER_CONCURRENCY_INVALID')
+  }
+  if (!Number.isSafeInteger(imageConcurrency) || imageConcurrency < 1 || imageConcurrency > 50) {
+    throw new Error('IMAGE_CONCURRENCY_INVALID')
   }
   if (!Number.isSafeInteger(runLeaseTtlMs) || runLeaseTtlMs < 5_000 || runLeaseTtlMs > 15 * 60_000) {
     throw new Error('RUN_LEASE_TTL_INVALID')
@@ -466,6 +471,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     ...(input.discovery ? { discovery: input.discovery } : {}),
     ...(candidateReviewer ? { candidateReviewer } : {}),
     clock,
+    imageConcurrency,
   })
   const visual = new VisualReviewRunner({
     repository: input.repository,

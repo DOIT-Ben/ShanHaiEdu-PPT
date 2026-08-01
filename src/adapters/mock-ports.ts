@@ -77,20 +77,30 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   readonly statuses = new Map<string, Awaited<ReturnType<ImageGenerationPort['inspect']>>>()
   readonly requests = new Map<string, Parameters<ImageGenerationPort['submit']>[0]>()
   nextFailure: MediaSubmissionError | null = null
+  submissionDelayMs = 0
+  activeSubmissions = 0
+  maxConcurrentSubmissions = 0
 
   async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
-    const existing = this.operations.get(input.idempotencyKey)
-    if (existing) return { operationId: existing, state: 'QUEUED' as const }
-    if (this.nextFailure) {
-      const failure = this.nextFailure
-      this.nextFailure = null
-      throw failure
+    this.activeSubmissions += 1
+    this.maxConcurrentSubmissions = Math.max(this.maxConcurrentSubmissions, this.activeSubmissions)
+    try {
+      if (this.submissionDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.submissionDelayMs))
+      const existing = this.operations.get(input.idempotencyKey)
+      if (existing) return { operationId: existing, state: 'QUEUED' as const }
+      if (this.nextFailure) {
+        const failure = this.nextFailure
+        this.nextFailure = null
+        throw failure
+      }
+      const operationId = `image:${input.tenantId}:${input.idempotencyKey}`
+      this.operations.set(input.idempotencyKey, operationId)
+      this.requests.set(input.idempotencyKey, structuredClone(input))
+      this.statuses.set(operationId, { state: 'QUEUED' })
+      return { operationId, state: 'QUEUED' as const }
+    } finally {
+      this.activeSubmissions -= 1
     }
-    const operationId = `image:${input.tenantId}:${input.idempotencyKey}`
-    this.operations.set(input.idempotencyKey, operationId)
-    this.requests.set(input.idempotencyKey, structuredClone(input))
-    this.statuses.set(operationId, { state: 'QUEUED' })
-    return { operationId, state: 'QUEUED' as const }
   }
 
   async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {

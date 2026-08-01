@@ -54,6 +54,7 @@ const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_00
 const waitingSlaMs = boundedInteger('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
 const stepSlaMs = boundedInteger('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
 const workerConcurrency = boundedInteger('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
+const imageConcurrency = boundedInteger('PPT_AGENT_IMAGE_CONCURRENCY', 50, 1, 50)
 const reviewConcurrency = boundedInteger('PPT_AGENT_REVIEW_CONCURRENCY', 1, 1, 8)
 const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
 const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
@@ -130,6 +131,7 @@ const runtime = runtimeMode === 'gateway'
         waitingSlaMs,
         stepSlaMs,
         workerConcurrency,
+        imageConcurrency,
         reviewConcurrency,
         runLeaseTtlMs,
         createRunRateLimitPerMinute,
@@ -138,7 +140,7 @@ const runtime = runtimeMode === 'gateway'
     })()
   : createMockRuntime({
       repository, artifacts, apiToken, appVersion, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
-      workerConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
+      workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
     })
 let ticking = false
 const timer = setInterval(async () => {
