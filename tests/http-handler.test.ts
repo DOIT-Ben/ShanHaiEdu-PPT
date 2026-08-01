@@ -93,7 +93,9 @@ describe('HTTP v1 handler', () => {
     const adminHeaders = { 'X-Test-Role': 'ADMIN' }
     const initial = await handle(request(path, { headers: adminHeaders }))
     expect(initial.status).toBe(200)
-    expect(await initial.json()).toMatchObject({ data: { maxRevisionRounds: 2, version: 0, isConfigured: false, updatedAt: null } })
+    expect(await initial.json()).toEqual({
+      data: { maxRevisionRounds: 2, version: 0, isConfigured: false, updatedAt: null },
+    })
 
     const updated = await handle(request(path, {
       method: 'PATCH',

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { HostContext } from '../contracts'
 import {
+  adminRevisionRoundsSettingsSchema,
   adminRevisionRoundsUpdateSchema,
   apiErrorSchema,
   MAX_PLANNING_RETRIES,
@@ -86,7 +87,12 @@ function publicRevisionRoundsSettings(settings: Readonly<{
   isConfigured: boolean
   updatedAt: string | null
 }>) {
-  return adminRevisionRoundsSettingsSchema.parse(settings)
+  return adminRevisionRoundsSettingsSchema.parse({
+    maxRevisionRounds: settings.maxRevisionRounds,
+    version: settings.version,
+    isConfigured: settings.isConfigured,
+    updatedAt: settings.updatedAt,
+  })
 }
 
 function enforceRateLimit(
