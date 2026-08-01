@@ -38,6 +38,7 @@ import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 5
+const MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS = 2
 const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000, 60_000, 120_000] as const
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
@@ -279,16 +280,41 @@ export class PlanningRunner {
       protocol,
       parse: visualDeckV4DeckVisualStageSchema.parse,
     }))
-    const slideBriefs = visualDeckV4SlideBriefsStageSchema.parse(await this.runV4PlanningStage(input, {
+    const createSlideBriefs = async (
+      repairAttempt: number,
+      contractRepairIssues: readonly { path: string; message: string }[] = [],
+    ) => visualDeckV4SlideBriefsStageSchema.parse(await this.runV4PlanningStage(input, {
       stage: 'slide-briefs',
       tool: 'compile_v4_slide_briefs',
       operation: 'create_visual_deck_v4_slide_briefs',
       schemaName: 'ppt_agent_v4_slide_briefs_v1',
-      payload: { ...basePayload, ...sourceSpec, ...deckVisual },
+      payload: {
+        ...basePayload,
+        ...sourceSpec,
+        ...deckVisual,
+        ...(contractRepairIssues.length > 0 ? { contractRepairIssues } : {}),
+      },
       protocol,
+      repairAttempt,
       parse: visualDeckV4SlideBriefsStageSchema.parse,
     }))
-    const proposalDraft = visualDeckV4ProposalDraftSchema.parse({ ...sourceSpec, ...deckVisual, ...slideBriefs })
+    let slideBriefs = await createSlideBriefs(0)
+    let proposalDraft: ReturnType<typeof visualDeckV4ProposalDraftSchema.parse> | null = null
+    for (let repairAttempt = 0; repairAttempt < MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS; repairAttempt += 1) {
+      try {
+        proposalDraft = visualDeckV4ProposalDraftSchema.parse({ ...sourceSpec, ...deckVisual, ...slideBriefs })
+        break
+      } catch (error) {
+        const repairIssues = this.v4SlideBriefContractIssues(error)
+        if (!repairIssues || repairAttempt === MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS - 1) {
+          throw new PlanningFailureError(this.contractFailure(
+            input, error, repairAttempt + 1, MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS, true,
+          ))
+        }
+        slideBriefs = await createSlideBriefs(repairAttempt + 1, repairIssues)
+      }
+    }
+    if (!proposalDraft) throw new Error('V4_SLIDE_BRIEF_CONTRACT_REPAIR_EXHAUSTED')
     await this.runV4PlanningStage(input, {
       stage: 'final-coherence',
       tool: 'review_v4_final_coherence',
@@ -392,9 +418,12 @@ export class PlanningRunner {
     payload: unknown
     sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
     protocol: StructuredGenerationProtocol
+    repairAttempt?: number
     parse: (value: unknown) => unknown
   }>) {
-    const key = visualDeckV4PlanningStageStepKey(input.runId, request.stage, input.attempt ?? 0)
+    const key = visualDeckV4PlanningStageStepKey(
+      input.runId, request.stage, input.attempt ?? 0, request.repairAttempt ?? 0,
+    )
     const inputHash = hashInput({ tool: request.tool, operation: request.operation, schemaName: request.schemaName, payload: request.payload, protocol: request.protocol })
     const existing = await this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(key)
@@ -806,6 +835,15 @@ export class PlanningRunner {
       return [{ path: 'blueprint', message: error.code }]
     }
     return null
+  }
+
+  private v4SlideBriefContractIssues(error: unknown) {
+    const issues = this.contractIssues(error)
+    if (!issues || issues.length === 0 || !issues.every((issue) =>
+      issue.path === 'slideBriefs' || issue.path.startsWith('slideBriefs.'))) {
+      return null
+    }
+    return issues
   }
 
   private async requireRun(runId: string) {

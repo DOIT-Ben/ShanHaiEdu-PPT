@@ -29,8 +29,10 @@ export function visualDeckV4PlanningStageStepKey(
   runId: string,
   stage: VisualDeckV4PlanningStage,
   attempt = 0,
+  repairAttempt = 0,
 ) {
-  return `${runId}:v4:${stage}:planning:${attempt}`
+  const key = `${runId}:v4:${stage}:planning:${attempt}`
+  return repairAttempt === 0 ? key : `${key}:repair:${repairAttempt}`
 }
 
 export function visualDeckV4PlanningArtifactStepKey(

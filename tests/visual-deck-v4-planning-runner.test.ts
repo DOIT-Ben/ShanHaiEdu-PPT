@@ -87,10 +87,12 @@ function stagedModel(
   input: ReturnType<typeof request>,
   clock: FixedClock,
   failSlideBriefsOnce = false,
+  repairSlideBriefsOnce = false,
 ) {
   let proposal: ReturnType<typeof compileVisualDeckV4Proposal> | null = null
   let shouldFail = failSlideBriefsOnce
   const operations: string[] = []
+  const repairPayloads: unknown[] = []
   const model: StructuredModelPort & { preflightStructuredGeneration: () => Promise<{ protocol: 'RESPONSES_JSON_SCHEMA' }> } = {
     async preflightStructuredGeneration() { return { protocol: 'RESPONSES_JSON_SCHEMA' } },
     async execute(modelInput) {
@@ -108,13 +110,24 @@ function stagedModel(
           shouldFail = false
           throw new Error('TEST_SLIDE_BRIEFS_FAILURE')
         }
-        return { slideBriefs: proposal.slideBriefs }
+        const slideBriefs = structuredClone(proposal.slideBriefs)
+        if (repairSlideBriefsOnce) {
+          const payload = modelInput.payload as { contractRepairIssues?: unknown }
+          if (!payload.contractRepairIssues) {
+            slideBriefs[1]!.numbers = ['999']
+          } else {
+            repairPayloads.push(payload.contractRepairIssues)
+            slideBriefs[1]!.numbers = ['999']
+            slideBriefs[1]!.lockedCopy.push('999')
+          }
+        }
+        return { slideBriefs }
       }
       if (modelInput.operation === 'review_visual_deck_v4_coherence') return coherenceReview()
       throw new Error(`TEST_OPERATION_UNEXPECTED:${modelInput.operation}`)
     },
   }
-  return { model, operations }
+  return { model, operations, repairPayloads }
 }
 
 describe('visual deck v4 planning runner', () => {
@@ -205,5 +218,47 @@ describe('visual deck v4 planning runner', () => {
       'create_visual_deck_v4_slide_briefs',
       'review_visual_deck_v4_coherence',
     ])
+  })
+
+  test('repairs a cross-field Slide Brief contract without rerunning prior V4 stages', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-slide-brief-contract-repair-0001')
+    const { model, operations, repairPayloads } = stagedModel(created, inputRequest, clock, false, true)
+    const runner = new PlanningRunner({ repository, documents: documents(), model, clock })
+    const input = {
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    } as const
+
+    const result = await runner.plan(input)
+
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(10)
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[1]?.lockedCopy).toContain('999')
+    expect(await repository.getRun(created.run.id)).toMatchObject({
+      status: 'AWAITING_BLUEPRINT_APPROVAL', committedBudgetUnits: 0,
+    })
+    expect(operations).toEqual([
+      'create_visual_deck_v4_source_spec',
+      'create_visual_deck_v4_deck_visual',
+      'create_visual_deck_v4_slide_briefs',
+      'create_visual_deck_v4_slide_briefs',
+      'review_visual_deck_v4_coherence',
+    ])
+    expect(repairPayloads).toEqual([[
+      { path: 'slideBriefs.1.numbers.0', message: 'v4 visible numbers must occur in title or lockedCopy' },
+    ]])
+    const steps = await repository.listSteps(created.run.id)
+    expect(steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(
+      created.run.id, 'slide-briefs', 0, 1,
+    ))).toMatchObject({ status: 'COMPLETED' })
   })
 })
