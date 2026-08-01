@@ -3,6 +3,7 @@ import type {
   DeckReviewPort,
   RevisionApplicationPort,
   RevisionPlanningPort,
+  StructuredGenerationPreflightPort,
   StructuredModelPort,
   VisualReviewPort,
 } from '../core/ports'
@@ -34,6 +35,20 @@ export class FallbackCoursewareModel implements CoursewareModelPorts {
 
   execute(input: Parameters<StructuredModelPort['execute']>[0]) {
     return this.withFallback('execute', input)
+  }
+
+  async preflightStructuredGeneration(input: Parameters<StructuredGenerationPreflightPort['preflightStructuredGeneration']>[0]) {
+    const primary = this.dependencies.primary as CoursewareModelPorts & Partial<StructuredGenerationPreflightPort>
+    const fallback = this.dependencies.fallback as CoursewareModelPorts & Partial<StructuredGenerationPreflightPort>
+    if (!primary.preflightStructuredGeneration || !fallback.preflightStructuredGeneration) {
+      throw new Error('STRUCTURED_GENERATION_PREFLIGHT_UNAVAILABLE')
+    }
+    try {
+      return await primary.preflightStructuredGeneration(input)
+    } catch (error) {
+      if (!(error instanceof StructuredModelError) || !FALLBACK_ERROR_CODES.has(error.code)) throw error
+      return fallback.preflightStructuredGeneration(input)
+    }
   }
 
   reviewCandidate(input: Parameters<AssetCandidateReviewPort['reviewCandidate']>[0]) {

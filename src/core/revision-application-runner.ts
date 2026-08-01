@@ -166,6 +166,7 @@ export class RevisionApplicationRunner {
             sourceChunks: input.document.chunks,
             idempotencyKey: revisionContractAttemptKey(input.idempotencyKey, contractAttempt),
             ...(contractRepairIssues ? { contractRepairIssues } : {}),
+            ...(input.run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: input.run.v4StructuredGenerationProtocol } : {}),
           })
           if (input.base.renderMode === 'VISUAL_DECK_V4') {
             const draft = visualDeckV4ProposalDraftSchema.parse(raw)

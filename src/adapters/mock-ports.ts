@@ -134,6 +134,10 @@ export class MockStructuredModelPort implements StructuredModelPort {
 
   constructor(public response: unknown) {}
 
+  async preflightStructuredGeneration() {
+    return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
+  }
+
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
     if (this.executions.has(input.idempotencyKey)) return this.executions.get(input.idempotencyKey)
     if (this.nextFailure) {

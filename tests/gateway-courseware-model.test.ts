@@ -112,6 +112,23 @@ function responsesCompletion(name: string, argumentsValue: unknown) {
   })
 }
 
+function streamedResponsesTextCompletion(value: string) {
+  return new Response([
+    `data: ${JSON.stringify({ type: 'response.created', response: { status: 'in_progress' } })}`,
+    `data: ${JSON.stringify({
+      type: 'response.output_text.delta', delta: value.slice(0, Math.ceil(value.length / 2)),
+    })}`,
+    `data: ${JSON.stringify({
+      type: 'response.output_text.delta', delta: value.slice(Math.ceil(value.length / 2)),
+    })}`,
+    `data: ${JSON.stringify({
+      type: 'response.output_text.done', text: value,
+    })}`,
+    `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
+    '',
+  ].join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
+}
+
 function strictLayeredBlueprintDraft() {
   const value = structuredClone(layeredBlueprintDraft()) as Record<string, any>
   value.curriculum.sourceAssetIds = null
@@ -160,7 +177,68 @@ describe('gateway courseware model', () => {
     expect(() => visualDeckV4TextTransport('AUTO')).toThrow('PPT_AGENT_V4_TEXT_TRANSPORT_INVALID')
   })
 
-  test('requests a source-grounded full-raster v4 proposal through a typed tool', async () => {
+  test('rejects the removed one-shot V4 planning operation', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+    })
+    await expect(model.execute({
+      operation: 'create_visual_deck_v4_proposal', schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      idempotencyKey: 'removed-v4-one-shot-0001', payload: {},
+    })).rejects.toThrow('V4_ONE_SHOT_PLANNING_REMOVED')
+  })
+
+  test('preflights Responses JSON Schema and falls back to strict Responses Function only when unsupported', async () => {
+    const requests: { body: Record<string, unknown>; key: string | null }[] = []
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requests.push({
+          body: JSON.parse(String(init?.body)),
+          key: new Headers(init?.headers).get('Idempotency-Key'),
+        })
+        if (requests.length === 1) {
+          return Response.json({ error: { code: 'json_schema_unsupported', type: 'invalid_request_error' } }, { status: 400 })
+        }
+        return responsesCompletion('confirm_structured_generation_ready', { ready: true })
+      },
+    })
+    const original = console.error
+    console.error = () => undefined
+    try {
+      expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-0001' }))
+        .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+    } finally {
+      console.error = original
+    }
+    expect(requests).toHaveLength(2)
+    expect((requests[0]!.body.text as { format: { type: string; strict: boolean } }).format)
+      .toMatchObject({ type: 'json_schema', strict: true })
+    expect(requests[0]!.body.tools).toBeUndefined()
+    expect((requests[1]!.body.tools as { strict: boolean }[])[0]).toMatchObject({ strict: true })
+    expect(requests.map((request) => request.key)).toEqual([
+      'v4-preflight-0001:responses-json-schema',
+      'v4-preflight-0001:responses-function',
+    ])
+  })
+
+  test('treats a successful Responses payload without output text as JSON Schema incompatibility during preflight', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { text?: unknown }
+        return body.text
+          ? Response.json({ object: 'response', status: 'completed', output: [{ type: 'function_call', name: 'unexpected', arguments: '{}' }] })
+          : responsesCompletion('confirm_structured_generation_ready', { ready: true })
+      },
+    })
+    expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-missing-text-0001' }))
+      .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+  })
+
+  test('requests the first V4 planning stage through streamed Structured Outputs', async () => {
     const source = { kind: 'TEXT' as const, name: '分数教材.txt', text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。'.repeat(4) }
     const document = {
       name: source.name,
@@ -181,7 +259,10 @@ describe('gateway courseware model', () => {
       runId: 'run-v4-gateway', inputHash: 'input-v4-gateway', source, document, config,
       slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', createdAt: '2026-07-30T00:00:00.000Z',
     })
-    const { compilerVersion: _compilerVersion, ...draft } = proposal
+    const sourceSpec = {
+      sourceUnderstanding: proposal.sourceUnderstanding,
+      presentationSpec: proposal.presentationSpec,
+    }
     let requestBody: Record<string, unknown> | null = null
     let requestUrl = ''
     const model = new GatewayCoursewareModel({
@@ -190,44 +271,47 @@ describe('gateway courseware model', () => {
       fetchImpl: async (url, init) => {
         requestUrl = String(url)
         requestBody = JSON.parse(String(init?.body))
-        return responsesCompletion('submit_visual_deck_v4_proposal', draft)
+        return streamedResponsesTextCompletion(JSON.stringify(sourceSpec))
       },
     })
 
     expect(await model.execute({
-      operation: 'create_visual_deck_v4_proposal',
-      schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      operation: 'create_visual_deck_v4_source_spec',
+      schemaName: 'ppt_agent_v4_source_spec_v1',
       idempotencyKey: 'v4-plan-1',
       payload: {
         presentationMode: 'VISUAL_DECK_V4', instruction: config.instruction, sourceMode: config.sourceMode,
         deckOptions: config.deckOptions, slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', document,
       },
-    })).toEqual(draft)
+    })).toEqual(sourceSpec)
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/responses')
     const body = requestBody! as unknown as {
       input: { content: { type: string; text?: string }[] }[]
-      tools: { name: string; parameters: unknown }[]
-      tool_choice: { name: string }
+      text: { format: { type: string; name: string; strict: boolean; schema: unknown } }
+      tools?: unknown
+      tool_choice?: unknown
     }
-    expect(body.tools[0]?.name).toBe('submit_visual_deck_v4_proposal')
-    expect(body.tool_choice.name).toBe('submit_visual_deck_v4_proposal')
-    expect(body.input[0]?.content[0]?.text).toContain('最终交付是一页一张完整16:9图片')
-    expect(body.input[0]?.content[0]?.text).toContain('唯一权威对象集合及精确总数')
-    expect(body.input[0]?.content[0]?.text).toContain('facts中的文字绝不作为画面文案')
-    expect(body.input[0]?.content[0]?.text).toContain('不得用多个关键帧重复绘制同一批可数对象')
-    expect(JSON.stringify(body.tools[0]?.parameters)).toContain('chunk-1')
+    expect(body.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_source_spec_v1', strict: true,
+    })
+    expect(body.tools).toBeUndefined()
+    expect(body.tool_choice).toBeUndefined()
+    expect((requestBody! as { stream?: boolean }).stream).toBe(true)
+    expect(body.input[0]?.content[0]?.text).toContain('当前只执行第一阶段')
+    expect(body.input[0]?.content[0]?.text).toContain('不要规划章节或页面')
+    expect(JSON.stringify(body.text.format.schema)).toContain('chunk-1')
 
     const compatibilityModel = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
       artifacts: new MockArtifactPort(), visualDeckV4Transport: 'CHAT_COMPLETIONS',
       fetchImpl: async (url) => {
         requestUrl = String(url)
-        return completion(draft)
+        return completion(sourceSpec)
       },
     })
     await compatibilityModel.execute({
-      operation: 'create_visual_deck_v4_proposal',
-      schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      operation: 'create_visual_deck_v4_source_spec',
+      schemaName: 'ppt_agent_v4_source_spec_v1',
       idempotencyKey: 'v4-plan-chat-fallback',
       payload: {
         presentationMode: 'VISUAL_DECK_V4', instruction: config.instruction, sourceMode: config.sourceMode,
@@ -268,10 +352,10 @@ describe('gateway courseware model', () => {
       artifacts: new MockArtifactPort(),
       fetchImpl: async (url, init) => {
         requestUrls.push(String(url))
-        const request = JSON.parse(String(init?.body)) as { tools: { name: string }[] }
-        return request.tools[0]?.name === 'submit_revision_plan'
-          ? responsesCompletion('submit_revision_plan', revisionPlan)
-          : responsesCompletion('submit_revised_blueprint', revisedDraft)
+        const request = JSON.parse(String(init?.body)) as { text?: { format?: { name?: string } } }
+        return request.text?.format?.name === 'ppt_agent_v4_revision_plan_v1'
+          ? streamedResponsesTextCompletion(JSON.stringify(revisionPlan))
+          : streamedResponsesTextCompletion(JSON.stringify(revisedDraft))
       },
     })
     const blueprint = { renderMode: 'VISUAL_DECK_V4' } as never
@@ -290,18 +374,18 @@ describe('gateway courseware model', () => {
     ])
   })
 
-  test('rejects an incomplete V4 Responses result before using its tool arguments', async () => {
+  test('rejects an incomplete V4 staged response before using its structured text', async () => {
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => Response.json({
         object: 'response', status: 'incomplete',
-        output: [{ type: 'function_call', name: 'submit_visual_deck_v4_proposal', arguments: '{}' }],
+        output: [{ type: 'message', content: [{ type: 'output_text', text: '{}' }] }],
       }),
     })
 
     await expect(model.execute({
-      operation: 'create_visual_deck_v4_proposal', schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      operation: 'create_visual_deck_v4_source_spec', schemaName: 'ppt_agent_v4_source_spec_v1',
       idempotencyKey: 'v4-incomplete-response',
       payload: { document: { chunks: [{ id: 'chunk-1' }] } },
     })).rejects.toMatchObject({ code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6' })
@@ -558,7 +642,7 @@ describe('gateway courseware model', () => {
       fetchImpl: async (url, init) => {
         requestUrl = String(url)
         requestBody = JSON.parse(String(init?.body))
-        return responsesCompletion('submit_visual_review', review)
+        return streamedResponsesTextCompletion(JSON.stringify(review))
       },
     })
 

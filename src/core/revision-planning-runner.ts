@@ -234,6 +234,7 @@ export class RevisionPlanningRunner {
             targetRevisionRound: input.targetRevisionRound,
             idempotencyKey: revisionContractAttemptKey(input.idempotencyKey, contractAttempt),
             ...(contractRepairIssues ? { contractRepairIssues } : {}),
+            ...(input.run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: input.run.v4StructuredGenerationProtocol } : {}),
           })
           const draft = revisionPlanDraftSchema.parse(raw)
           this.validatePlan(draft, input.run.id, input.blueprint, input.review, input.sourceChunks, input.steps)

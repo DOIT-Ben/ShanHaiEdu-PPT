@@ -37,6 +37,7 @@ export type ReviewSlideInput = Readonly<{
   visualIntent: string
   layout: string
   visualDirection: string
+  structuredGenerationProtocol?: import('./ports').StructuredGenerationProtocol
 }>
 
 export type ReviewSlideResult = Readonly<{
@@ -65,6 +66,7 @@ export class VisualReviewRunner {
         layout: input.layout,
         visualDirection: input.visualDirection,
         idempotencyKey: input.idempotencyKey,
+        ...(input.structuredGenerationProtocol ? { structuredGenerationProtocol: input.structuredGenerationProtocol } : {}),
       })
       return this.complete(input, review)
     } catch (error) {

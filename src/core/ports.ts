@@ -62,7 +62,21 @@ export interface StructuredModelPort {
     payload: unknown
     sourceAssets?: readonly SourceAsset[]
     idempotencyKey: string
+    structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
+}
+
+/** The protocol is selected once during V4 preflight and remains fixed for a run. */
+export type StructuredGenerationProtocol =
+  | 'RESPONSES_JSON_SCHEMA'
+  | 'RESPONSES_FUNCTION'
+  | 'CHAT_LEGACY'
+
+export interface StructuredGenerationPreflightPort {
+  preflightStructuredGeneration(input: Readonly<{
+    tenantId?: string
+    idempotencyKey: string
+  }>): Promise<Readonly<{ protocol: StructuredGenerationProtocol }>>
 }
 
 export class StructuredModelError extends Error {
@@ -71,6 +85,7 @@ export class StructuredModelError extends Error {
     readonly retryable: boolean,
     readonly model: string,
     readonly requestId: string | null,
+    readonly status: number | null = null,
   ) {
     super(code)
     this.name = 'StructuredModelError'
@@ -186,6 +201,7 @@ export interface VisualReviewPort {
     visualDirection: string
     idempotencyKey: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
 
@@ -213,6 +229,7 @@ export interface DeckReviewPort {
     }>[]
     idempotencyKey: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
 
@@ -225,6 +242,7 @@ export interface RevisionPlanningPort {
     targetRevisionRound: number
     idempotencyKey: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
 
@@ -236,6 +254,7 @@ export interface RevisionApplicationPort {
     sourceChunks: readonly SourceChunk[]
     idempotencyKey: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
 
@@ -361,6 +380,7 @@ export type RunRecord = Readonly<{
   maxRevisionRounds: number
   revisionRound: number
   planningAttempt?: number
+  v4StructuredGenerationProtocol?: StructuredGenerationProtocol
   qualityScore: number | null
   status: RunStatus
   resumeState: RunStatus | null
