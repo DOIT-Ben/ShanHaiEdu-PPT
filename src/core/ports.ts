@@ -1,5 +1,6 @@
 import type { KnownAgentEvent as AgentEvent, CreateRunRequest, HostContext, RunStatus } from '../contracts'
 import type { AssetIntent, DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } from '../presentation-contracts'
+import type { ReleaseIdentity } from '../release-identity'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -377,6 +378,7 @@ export type RunRecord = Readonly<{
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
   visualDeckV4?: CreateRunRequest['visualDeckV4']
+  release?: ReleaseIdentity
   maxRevisionRounds: number
   revisionRound: number
   planningAttempt?: number

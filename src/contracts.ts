@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { visualDeckV4ConfigSchema, visualDeckV4SourceRoleSchema } from './visual-deck-v4-contracts'
+import { releaseIdentitySchema } from './release-identity'
 
 export const CONTRACT_VERSION = '1' as const
 export const MAX_PLANNING_RETRIES = 2
@@ -315,6 +316,7 @@ export const runSnapshotSchema = z.object({
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
   assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
+  release: releaseIdentitySchema.optional(),
   issues: z.array(issueSummarySchema),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),

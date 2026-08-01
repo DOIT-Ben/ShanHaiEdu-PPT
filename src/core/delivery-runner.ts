@@ -156,6 +156,7 @@ export class DeliveryRunner {
           sha256: sources.sha256,
           byteLength: sourcesBytes.length,
         },
+        ...(run.release ? { release: run.release } : {}),
         createdAt: this.dependencies.clock.now().toISOString(),
       })
       return this.complete(run, idempotencyKey, delivery)

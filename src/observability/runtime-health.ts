@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { ClockPort, RunRecord } from '../core/ports'
+import { buildIdentity, type BuildIdentity } from '../release-identity'
 
 export type WorkerFailureContext = Readonly<{
   runId: string | null
@@ -48,6 +49,7 @@ export class RuntimeHealthMonitor {
     private readonly clock: ClockPort,
     private readonly options: Readonly<{
       version: string
+      buildIdentity?: BuildIdentity
       heartbeatStaleMs?: number
       tickStaleMs?: number
     }>,
@@ -106,10 +108,12 @@ export class RuntimeHealthMonitor {
 
   liveness() {
     const now = this.clock.now()
+    const release = buildIdentity({ softwareVersion: this.options.version, ...this.options.buildIdentity })
     return {
       service: 'ppt-agent' as const,
       status: 'UP' as const,
-      version: this.options.version,
+      version: release.softwareVersion,
+      release,
       checkedAt: now.toISOString(),
       startedAt: this.startedAt,
       uptimeMs: Math.max(0, now.getTime() - Date.parse(this.startedAt)),
@@ -118,6 +122,7 @@ export class RuntimeHealthMonitor {
 
   readiness() {
     const now = this.clock.now()
+    const release = buildIdentity({ softwareVersion: this.options.version, ...this.options.buildIdentity })
     const heartbeatAgeMs = this.lastHeartbeatAt === null
       ? null
       : Math.max(0, now.getTime() - Date.parse(this.lastHeartbeatAt))
@@ -141,7 +146,8 @@ export class RuntimeHealthMonitor {
       service: 'ppt-agent' as const,
       status: reason ? 'NOT_READY' as const : 'READY' as const,
       reason,
-      version: this.options.version,
+      version: release.softwareVersion,
+      release,
       checkedAt: now.toISOString(),
       worker: {
         tickInProgress: this.tickInProgress,

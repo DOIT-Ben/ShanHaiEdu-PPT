@@ -1,4 +1,5 @@
 import type { CreateRunRequest } from '../contracts'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
 import { presentationBlueprintSchema, type PresentationBlueprint } from '../presentation-contracts'
 import {
   visualDeckV4ProposalSchema,
@@ -10,7 +11,7 @@ import {
 import { hashInput } from './hash'
 import type { DocumentResult, SourceMaterial } from './ports'
 
-export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-1'
+export { VISUAL_DECK_V4_COMPILER_VERSION }
 
 export type VisualDeckV4PlanningArtifact =
   | 'source-understanding'
