@@ -23,6 +23,7 @@ import type {
 } from './ports'
 import { StructuredModelError } from './ports'
 import { transitionRun } from './policy'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import {
   MAX_REVISION_CONTRACT_ATTEMPTS,
   revisionContractAttemptKey,
@@ -113,7 +114,11 @@ export class RevisionPlanningRunner {
       const ids = new Set(sourceChunks.map((chunk) => chunk.id))
       if (review.reviewedSourceChunkIds.some((id) => !ids.has(id))) throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
     } catch (error) {
-      return this.requireHuman(run, error instanceof Error ? error.message : 'REVISION_INPUT_FAILED')
+      const errorCode = error instanceof Error ? error.message : 'REVISION_INPUT_FAILED'
+      if (run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)) {
+        return this.recoverTechnicalInputFailure(run, errorCode)
+      }
+      return this.requireHuman(run, errorCode)
     }
 
     const targetRevisionRound = run.revisionRound + 1
@@ -406,22 +411,39 @@ export class RevisionPlanningRunner {
       if (step.status !== 'RUNNING') throw new Error('REVISION_PLAN_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
+      const policy = v4TechnicalFailure ? transaction.run : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedStep: StepRecord = {
         ...step,
-        status: 'FAILED',
+        status: v4TechnicalFailure ? 'RUNNING' : 'FAILED',
         errorCode: diagnostic.errorCode,
         output: { diagnostic },
         updatedAt: now,
       }
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       transaction.putStep(updatedStep)
-      transaction.putRun(updatedRun)
+      if (!v4TechnicalFailure) transaction.putRun(updatedRun)
+      const technicalRecovery = v4TechnicalFailure
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
+        : null
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: false },
+        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: technicalRecovery?.technicalRecovery?.retryable ?? false },
       })
+      if (technicalRecovery) {
+        const started = activeRevisionLifecycle(transaction)
+        if (started) appendV4LifecycleEvent(transaction, 'revision.completed', {
+          completed: 0,
+          total: started.payload.total,
+          pageNumbers: started.payload.pageNumbers,
+          revisionKind: started.payload.revisionKind,
+          revisionRound: started.payload.revisionRound,
+          reason: 'REVISION_FAILED',
+          retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+        })
+        return { status: transaction.run.status, step: updatedStep, plan: null, replayed: false }
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
@@ -485,6 +507,13 @@ export class RevisionPlanningRunner {
       }
       return next
     })
+    return { status: updated.status, step: null, plan: null, replayed: false }
+  }
+
+  private async recoverTechnicalInputFailure(run: RunRecord, errorCode: string): Promise<RevisionPlanningResult> {
+    const updated = await this.dependencies.repository.transact(run.id, (transaction) =>
+      beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode))
+    if (!updated) return this.requireHuman(run, errorCode)
     return { status: updated.status, step: null, plan: null, replayed: false }
   }
 

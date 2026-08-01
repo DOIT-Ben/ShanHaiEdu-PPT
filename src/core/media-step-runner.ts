@@ -15,6 +15,7 @@ import { isPendingMediaReconciliationStep } from './media-reconciliation'
 import { releaseBudget, reserveBudget, transitionRun } from './policy'
 import { appendFixedIssueResolutions } from './v4-lifecycle'
 import { recoverV4AfterMediaRecovery } from './v4-media-recovery'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 
 const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
   'FAILED',
@@ -33,6 +34,10 @@ export type SubmitSlideImageInput = Readonly<{
   runId: string
   stepId: string
   idempotencyKey: string
+  /** Internal accounting key. Provider submission always uses idempotencyKey above. */
+  budgetReservationKey?: string
+  /** V4 initial generation uses one reservation owned by GenerationBatch. */
+  batchReservation?: Readonly<{ batchId: string; reservationId: string }>
   slideId: string
   versionId: string
   prompt: string
@@ -59,6 +64,14 @@ export type RefreshSlideImageResult = Readonly<{
   step: StepRecord
   changed: boolean
 }>
+
+function budgetReservationKey(input: Pick<SubmitSlideImageInput, 'idempotencyKey' | 'budgetReservationKey'>) {
+  return input.budgetReservationKey ?? input.idempotencyKey
+}
+
+function isBatchReserved(input: SubmitSlideImageInput) {
+  return input.batchReservation !== undefined
+}
 
 function mergePolicy(run: RunRecord, policy: ReturnType<typeof reserveBudget>, updatedAt: string): RunRecord {
   return { ...run, ...policy, updatedAt }
@@ -93,13 +106,13 @@ export class MediaStepRunner {
     }
 
     let reservationId = prepared.step.budgetReservationId
-    if (!reservationId) {
+    if (!reservationId && !isBatchReserved(input)) {
       try {
         const reservation = await this.dependencies.budget.reserve({
           host: prepared.run.host,
           model: input.model,
           units: input.budgetUnits,
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey: budgetReservationKey(input),
         })
         reservationId = reservation.reservationId
       } catch (error) {
@@ -112,6 +125,7 @@ export class MediaStepRunner {
         return { step, replayed: false }
       }
     }
+    if (!reservationId) throw new Error('BATCH_BUDGET_RESERVATION_MISSING')
 
     try {
       await this.markSubmitting(input, reservationId)
@@ -130,13 +144,18 @@ export class MediaStepRunner {
     } catch (error) {
       const submissionState = error instanceof MediaSubmissionError ? error.submissionState : 'UNKNOWN'
       const errorCode = error instanceof MediaSubmissionError ? error.code : 'MEDIA_SUBMISSION_UNKNOWN'
-      if (submissionState === 'NOT_SUBMITTED' && reservationId) {
+      if (submissionState === 'NOT_SUBMITTED' && reservationId && !isBatchReserved(input)) {
         await this.markReleasing(input, reservationId, errorCode)
         await this.dependencies.budget.release({
           host: prepared.run.host,
           reservationId,
-          idempotencyKey: `release:${input.idempotencyKey}`,
+          idempotencyKey: `release:${budgetReservationKey(input)}`,
         })
+        const step = await this.markDefiniteFailure(input, reservationId, errorCode)
+        return { step, replayed: false }
+      }
+
+      if (submissionState === 'NOT_SUBMITTED' && reservationId) {
         const step = await this.markDefiniteFailure(input, reservationId, errorCode)
         return { step, replayed: false }
       }
@@ -155,9 +174,9 @@ export class MediaStepRunner {
     if (step.status === 'RELEASING') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
       await this.dependencies.budget.release({
-        host: run.host,
-        reservationId: step.budgetReservationId,
-        idempotencyKey: `release:${idempotencyKey}`,
+          host: run.host,
+          reservationId: step.budgetReservationId,
+          idempotencyKey: `release:${budgetReservationKey(this.reconstructInput(step, run.imageModel))}`,
       })
       return {
         step: await this.markDefiniteFailure(
@@ -185,34 +204,44 @@ export class MediaStepRunner {
     }
     if (status.state === 'COMPLETED') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
-      await this.dependencies.budget.settle({
-        host: run.host,
-        reservationId: step.budgetReservationId,
-        idempotencyKey: `settle:${idempotencyKey}`,
-      })
+      if (!isBatchReserved(mediaInput)) {
+        await this.dependencies.budget.settle({
+          host: run.host,
+          reservationId: step.budgetReservationId,
+          idempotencyKey: `settle:${budgetReservationKey(mediaInput)}`,
+        })
+      }
       return { step: await this.markCompleted(runId, idempotencyKey, status.artifactId), changed: true }
     }
     if (status.state !== 'FAILED') return { step, changed: false }
-    if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId) {
+    if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId && !isBatchReserved(mediaInput)) {
       const input = this.reconstructInput(step, run.imageModel)
       await this.markReleasing(input, step.budgetReservationId, status.errorCode)
       await this.dependencies.budget.release({
         host: run.host,
         reservationId: step.budgetReservationId,
-        idempotencyKey: `release:${idempotencyKey}`,
+        idempotencyKey: `release:${budgetReservationKey(input)}`,
       })
       return {
         step: await this.markDefiniteFailure(input, step.budgetReservationId, status.errorCode),
         changed: true,
       }
     }
+    if (status.billingState === 'NOT_CHARGED') {
+      return {
+        step: await this.markDefiniteFailure(mediaInput, step.budgetReservationId, status.errorCode),
+        changed: true,
+      }
+    }
     if (status.billingState === 'CHARGED') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
-      await this.dependencies.budget.settle({
-        host: run.host,
-        reservationId: step.budgetReservationId,
-        idempotencyKey: `settle:${idempotencyKey}`,
-      })
+      if (!isBatchReserved(mediaInput)) {
+        await this.dependencies.budget.settle({
+          host: run.host,
+          reservationId: step.budgetReservationId,
+          idempotencyKey: `settle:${budgetReservationKey(mediaInput)}`,
+        })
+      }
     }
     return {
       step: await this.markResultFailure(runId, idempotencyKey, status.errorCode, status.billingState),
@@ -255,7 +284,48 @@ export class MediaStepRunner {
         if (existing.id !== input.stepId || existing.inputHash !== inputHash || existing.tool !== 'generate_slide_image') {
           throw new Error('STEP_IDEMPOTENCY_CONFLICT')
         }
-        if (['WAITING', 'COMPLETED', 'FAILED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN',
+        const canRetryReleasedV4Submission = existing.status === 'FAILED'
+          && transaction.run.presentationMode === 'VISUAL_DECK_V4'
+          && ['EXECUTING', 'REVISING'].includes(transaction.run.status)
+          && transaction.run.technicalRecovery?.active === false
+          && isTechnicalFailureCode(existing.errorCode ?? '')
+          && typeof input.budgetReservationKey === 'string'
+        if (canRetryReleasedV4Submission) {
+          const output = existing.output && typeof existing.output === 'object'
+            ? existing.output as Record<string, unknown>
+            : {}
+          const retriedRun = isBatchReserved(input)
+            ? transaction.run
+            : mergePolicy(transaction.run, reserveBudget(transaction.run, input.budgetUnits), this.dependencies.clock.now().toISOString())
+          const retrying: StepRecord = {
+            ...existing,
+            status: 'RESERVED',
+            budgetReservationId: input.batchReservation?.reservationId ?? null,
+            errorCode: null,
+            output: {
+              ...output,
+              budgetReservationKey: input.budgetReservationKey,
+              ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
+            },
+            updatedAt: this.dependencies.clock.now().toISOString(),
+          }
+          if (!isBatchReserved(input)) transaction.putRun(retriedRun)
+          transaction.putStep(retrying)
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'tool.started',
+            payload: { stepId: retrying.id, tool: retrying.tool, label: '自动恢复并重新提交页面图片任务' },
+          })
+          if (!isBatchReserved(input)) {
+            transaction.appendEvent({
+              schemaVersion: CONTRACT_VERSION,
+              type: 'budget.updated',
+              payload: { budgetUnits: retriedRun.budgetUnits, committedBudgetUnits: retriedRun.committedBudgetUnits },
+            })
+          }
+          return { run: retriedRun, step: retrying, replayed: false as const }
+        }
+        if (['WAITING', 'COMPLETED', 'FAILED',
           'COMPLETED_AFTER_CANCEL', 'FAILED_NOT_CHARGED', 'FAILED_CHARGED', 'BILLING_UNKNOWN'].includes(existing.status)) {
           return { run: transaction.run, step: existing, replayed: true as const }
         }
@@ -263,8 +333,9 @@ export class MediaStepRunner {
       }
 
       const now = this.dependencies.clock.now().toISOString()
-      const policy = reserveBudget(transaction.run, input.budgetUnits)
-      const run = mergePolicy(transaction.run, policy, now)
+      const run = isBatchReserved(input)
+        ? transaction.run
+        : mergePolicy(transaction.run, reserveBudget(transaction.run, input.budgetUnits), now)
       const step: StepRecord = {
         id: input.stepId,
         runId: input.runId,
@@ -273,31 +344,35 @@ export class MediaStepRunner {
         tool: 'generate_slide_image',
         status: 'RESERVED',
         budgetUnits: input.budgetUnits,
-        budgetReservationId: null,
+        budgetReservationId: input.batchReservation?.reservationId ?? null,
         externalOperationId: null,
         errorCode: null,
         output: {
           slideId: input.slideId,
           versionId: input.versionId,
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
+          ...(input.budgetReservationKey ? { budgetReservationKey: input.budgetReservationKey } : {}),
+          ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
         },
         createdAt: now,
         updatedAt: now,
       }
-      transaction.putRun(run)
+      if (!isBatchReserved(input)) transaction.putRun(run)
       transaction.putStep(step)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.started',
         payload: { stepId: input.stepId, tool: step.tool, label: '生成页面视觉素材' },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'budget.updated',
-        payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
-      })
+      if (!isBatchReserved(input)) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'budget.updated',
+          payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
+        })
+      }
       return { run, step, replayed: false as const }
     })
   }
@@ -331,6 +406,8 @@ export class MediaStepRunner {
           slideId: input.slideId,
           versionId: input.versionId,
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
+          ...(input.budgetReservationKey ? { budgetReservationKey: input.budgetReservationKey } : {}),
+          ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
         },
@@ -347,7 +424,13 @@ export class MediaStepRunner {
   }
 
   private reconstructInput(step: StepRecord, model: string): SubmitSlideImageInput {
-    const output = step.output as { slideId?: unknown; versionId?: unknown; backgroundMode?: unknown } | null
+    const output = step.output as {
+      slideId?: unknown
+      versionId?: unknown
+      backgroundMode?: unknown
+      budgetReservationKey?: unknown
+      batchId?: unknown
+    } | null
     if (!output || typeof output.slideId !== 'string' || typeof output.versionId !== 'string') {
       throw new Error('MEDIA_STEP_OUTPUT_INVALID')
     }
@@ -360,6 +443,10 @@ export class MediaStepRunner {
       prompt: '',
       model,
       budgetUnits: step.budgetUnits,
+      ...(typeof output.budgetReservationKey === 'string' ? { budgetReservationKey: output.budgetReservationKey } : {}),
+      ...(typeof output.batchId === 'string' && typeof step.budgetReservationId === 'string'
+        ? { batchReservation: { batchId: output.batchId, reservationId: step.budgetReservationId } }
+        : {}),
       ...(output.backgroundMode === 'TRANSPARENT' || output.backgroundMode === 'OPAQUE'
         ? { backgroundMode: output.backgroundMode }
         : {}),
@@ -437,7 +524,8 @@ export class MediaStepRunner {
       const cancelled = transaction.run.status === 'CANCELLED'
       const fromStatus = transaction.run.status
       const transitionRequired = !cancelled && fromStatus !== 'NEEDS_HUMAN'
-      const policy = !transitionRequired
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)
+      const policy = !transitionRequired || v4TechnicalFailure
         ? transaction.run
         : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
@@ -451,6 +539,7 @@ export class MediaStepRunner {
       }
       transaction.putRun(run)
       transaction.putStep(updated)
+      const technicalRecovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
@@ -459,7 +548,7 @@ export class MediaStepRunner {
           errorCode: (updated.status === 'FAILED_CHARGED' ? `FAILED_CHARGED:${errorCode}`
             : updated.status === 'FAILED_NOT_CHARGED' ? `FAILED_NOT_CHARGED:${errorCode}`
               : updated.status === 'BILLING_UNKNOWN' ? `BILLING_UNKNOWN:${errorCode}` : errorCode).slice(0, 100),
-          retryable: false,
+          retryable: technicalRecovery?.technicalRecovery?.retryable ?? false,
         },
       })
       transaction.appendEvent({
@@ -479,7 +568,7 @@ export class MediaStepRunner {
           status: 'OPEN',
         },
       })
-      if (transitionRequired) {
+      if (transitionRequired && !technicalRecovery) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
@@ -514,31 +603,35 @@ export class MediaStepRunner {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = releaseBudget(transaction.run, input.budgetUnits)
-      const run = mergePolicy(transaction.run, policy, now)
+      const run = isBatchReserved(input)
+        ? transaction.run
+        : mergePolicy(transaction.run, releaseBudget(transaction.run, input.budgetUnits), now)
       const updated: StepRecord = {
         ...step,
         status: transaction.run.status === 'CANCELLED' ? 'FAILED_NOT_CHARGED' : 'FAILED',
-        budgetReservationId: reservationId,
+        budgetReservationId: input.batchReservation?.reservationId ?? null,
         errorCode,
         updatedAt: now,
       }
-      transaction.putRun(run)
+      if (!isBatchReserved(input)) transaction.putRun(run)
       transaction.putStep(updated)
+      const technicalRecovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
         payload: {
           stepId: step.id,
           errorCode: (updated.status === 'FAILED_NOT_CHARGED' ? `FAILED_NOT_CHARGED:${errorCode}` : errorCode).slice(0, 100),
-          retryable: false,
+          retryable: technicalRecovery?.technicalRecovery?.retryable ?? false,
         },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'budget.updated',
-        payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
-      })
+      if (!isBatchReserved(input)) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'budget.updated',
+          payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
+        })
+      }
       return updated
     })
   }
@@ -555,7 +648,8 @@ export class MediaStepRunner {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
       const transitionRequired = !['NEEDS_HUMAN', 'CANCELLED'].includes(fromStatus)
-      const policy = transitionRequired ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)
+      const policy = transitionRequired && !v4TechnicalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updated: StepRecord = {
         ...step,
@@ -566,6 +660,7 @@ export class MediaStepRunner {
       }
       if (transitionRequired) transaction.putRun(run)
       transaction.putStep(updated)
+      const technicalRecovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
       const issueId = `${input.stepId}:submission-unknown`
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -582,7 +677,7 @@ export class MediaStepRunner {
           status: 'OPEN',
         },
       })
-      if (transitionRequired) {
+      if (transitionRequired && !technicalRecovery) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',

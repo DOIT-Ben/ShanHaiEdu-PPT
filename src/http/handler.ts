@@ -45,6 +45,7 @@ function publicRun(run: RunRecord) {
     host: run.host,
     status: run.status,
     resumeState: run.resumeState,
+    ...(run.technicalRecovery ? { technicalRecovery: run.technicalRecovery } : {}),
     version: run.version,
     slideCount: run.slideCount,
     visualDirection: run.visualDirection,

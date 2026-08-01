@@ -25,6 +25,7 @@ function option(name) {
 function assertRelease(expectedSha) {
   assert(/^[0-9a-f]{40}$/.test(expectedSha), 'RECOVERY_EXPECTED_SHA_INVALID')
   const manifest = JSON.parse(readFileSync(new URL('../release-manifest.json', import.meta.url), 'utf8'))
+  assert(manifest?.softwareVersion === '4.0.0' && manifest?.contractVersion === '1', 'RECOVERY_RELEASE_IDENTITY_INVALID')
   assert(manifest?.gitSha === expectedSha, 'RECOVERY_RELEASE_SHA_MISMATCH')
 }
 

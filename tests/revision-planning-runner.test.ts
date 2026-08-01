@@ -211,6 +211,7 @@ async function fixture(
   })
   return {
     repository,
+    documents,
     planner,
     runner: new RevisionPlanningRunner({
       repository, documents, planner, clock: new FixedClock(), sleep: async () => {},
@@ -740,15 +741,32 @@ describe('revision planning runner', () => {
 
     expect(attempts).toBe(5)
     expect(result).toMatchObject({
-      status: 'NEEDS_HUMAN',
+      status: 'RECOVERING',
       plan: null,
       step: {
-        status: 'FAILED',
+        status: 'RUNNING',
         errorCode: 'PROVIDER_TIMEOUT',
         output: { diagnostic: { providerAttempt: 5, requestId: 'revision-plan-timeout-5' } },
       },
     })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING' })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'technical.recovery.started')).toBe(true)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('recovers a transient V4 source-resolution failure instead of asking the user to retry', async () => {
+    const { repository, documents, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+    documents.resolve = async () => { throw new Error('GATEWAY_HTTP_500') }
+
+    expect(await runner.plan('run-1')).toMatchObject({ status: 'RECOVERING', step: null, plan: null })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      technicalRecovery: { resumeState: 'DECK_REVIEW', reason: 'GATEWAY_HTTP_500', retryable: true },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'technical.recovery.started')).toBe(true)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('replays a completed supervised plan without another planner call', async () => {

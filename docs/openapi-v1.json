@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "PPT Agent API",
-    "version": "1.0.0",
+    "version": "4.0.0",
     "description": "Host-independent API for durable PPT Agent runs. Bearer credentials are tenant-bound; user and administrator credentials are distinct, and host identity headers are canonicalized by the service."
   },
   "servers": [{ "url": "/" }],
@@ -499,6 +499,32 @@
           }
         ]
       },
+      "GenerationBatchEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AgentEventEnvelope" },
+          {
+            "type": "object",
+            "required": ["type", "payload"],
+            "properties": {
+              "type": { "enum": ["generation.batch.created", "generation.batch.updated"] },
+              "payload": { "$ref": "#/components/schemas/GenerationBatch" }
+            }
+          }
+        ]
+      },
+      "TechnicalRecoveryEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AgentEventEnvelope" },
+          {
+            "type": "object",
+            "required": ["type", "payload"],
+            "properties": {
+              "type": { "enum": ["technical.recovery.started", "technical.recovery.completed"] },
+              "payload": { "$ref": "#/components/schemas/TechnicalRecovery" }
+            }
+          }
+        ]
+      },
       "ForwardCompatibleAgentEvent": {
         "allOf": [
           { "$ref": "#/components/schemas/AgentEventEnvelope" },
@@ -506,7 +532,7 @@
             "properties": {
               "type": {
                 "not": {
-                  "enum": ["planning.started", "planning.completed", "generation.started", "generation.progress", "generation.completed", "page_review.started", "page_review.completed", "revision.started", "revision.progress", "revision.completed", "deck_review.started", "deck_review.completed", "delivery.started", "delivery.completed", "run.paused", "run.completed", "run.failed", "run.cancelled"]
+                  "enum": ["planning.started", "planning.completed", "generation.started", "generation.progress", "generation.completed", "generation.batch.created", "generation.batch.updated", "technical.recovery.started", "technical.recovery.completed", "page_review.started", "page_review.completed", "revision.started", "revision.progress", "revision.completed", "deck_review.started", "deck_review.completed", "delivery.started", "delivery.completed", "run.paused", "run.completed", "run.failed", "run.cancelled"]
                 }
               }
             }
@@ -550,6 +576,8 @@
         "description": "Forward-compatible durable event contract. Known V4 lifecycle events use the typed variant; consumers must ignore unhandled future type values and use sequence for ordering and deduplication.",
         "oneOf": [
           { "$ref": "#/components/schemas/V4LifecycleEvent" },
+          { "$ref": "#/components/schemas/GenerationBatchEvent" },
+          { "$ref": "#/components/schemas/TechnicalRecoveryEvent" },
           { "$ref": "#/components/schemas/LegacyTerminalAgentEvent" },
           { "$ref": "#/components/schemas/ForwardCompatibleAgentEvent" }
         ]
@@ -849,7 +877,11 @@
         "properties": {
           "id": { "type": "string" },
           "host": { "$ref": "#/components/schemas/HostContext" },
-          "status": { "type": "string" },
+          "status": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "RECOVERING", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] },
+          "resumeState": { "type": ["string", "null"] },
+          "technicalRecovery": { "$ref": "#/components/schemas/TechnicalRecovery" },
+          "release": { "$ref": "#/components/schemas/ReleaseIdentity" },
+          "generationBatch": { "$ref": "#/components/schemas/GenerationBatch" },
           "version": { "type": "integer" },
           "slideCount": { "type": "integer" },
           "visualDirection": { "type": "string" },
@@ -883,12 +915,57 @@
           "updatedAt": { "type": "string", "format": "date-time" }
         }
       },
+      "TechnicalRecovery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resumeState", "reason", "retryable", "attempt", "maxAttempts", "nextAttemptAt", "active"],
+        "properties": {
+          "resumeState": { "enum": ["PLANNING", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "REVISING", "DELIVERING"] },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "retryable": { "type": "boolean" },
+          "attempt": { "type": "integer", "minimum": 1, "maximum": 5 },
+          "maxAttempts": { "const": 5 },
+          "nextAttemptAt": { "type": ["string", "null"], "format": "date-time" },
+          "active": { "type": "boolean" }
+        }
+      },
+      "ReleaseIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["softwareVersion", "presentationMode", "compilerVersion", "contractVersion", "gitSha", "releaseId"],
+        "properties": {
+          "softwareVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3", "VISUAL_DECK_V4"] },
+          "compilerVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "contractVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "gitSha": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "releaseId": { "type": "string", "minLength": 1, "maxLength": 160 }
+        }
+      },
+      "GenerationBatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["batchId", "proposalHash", "revisionRound", "submissionMode", "pageCount", "pages", "accounting", "progress", "status", "createdAt", "updatedAt"],
+        "properties": {
+          "batchId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "proposalHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "revisionRound": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "submissionMode": { "const": "GATEWAY_INDIVIDUAL_OPERATIONS" },
+          "pageCount": { "type": "integer", "minimum": 1, "maximum": 50 },
+          "pages": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "object", "additionalProperties": false, "required": ["pageNumber", "idempotencyKey", "promptHash"], "properties": { "pageNumber": { "type": "integer", "minimum": 1, "maximum": 50 }, "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 160 }, "promptHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" } } } },
+          "accounting": { "type": "object", "additionalProperties": false, "required": ["estimatedUnits", "committedUnits", "settledUnits", "releasedUnits", "reconciliationUnits", "authorization", "settlement"], "properties": { "estimatedUnits": { "type": "integer", "minimum": 0 }, "committedUnits": { "type": "integer", "minimum": 0 }, "settledUnits": { "type": "integer", "minimum": 0 }, "releasedUnits": { "type": "integer", "minimum": 0 }, "reconciliationUnits": { "type": "integer", "minimum": 0 }, "authorization": { "enum": ["PENDING", "RESERVED", "UNKNOWN", "REJECTED"] }, "settlement": { "enum": ["NOT_READY", "PENDING", "SETTLED", "RELEASED", "UNKNOWN"] } } },
+          "progress": { "type": "object", "additionalProperties": false, "required": ["submitted", "completed", "failed"], "properties": { "submitted": { "type": "integer", "minimum": 0 }, "completed": { "type": "integer", "minimum": 0 }, "failed": { "type": "integer", "minimum": 0 } } },
+          "status": { "enum": ["PREPARED", "PROCESSING", "RECONCILIATION_REQUIRED", "COMPLETED"] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
       "PlanningFailure": {
         "type": "object",
         "additionalProperties": false,
         "required": ["errorCode", "retryable", "attempt", "maxAttempts", "suggestedAction", "diagnosticCode", "fieldPaths", "correlationId", "requestId", "model", "contractVersion"],
         "properties": {
-          "errorCode": { "enum": ["SOURCE_INCOMPLETE", "PROVIDER_TIMEOUT", "PROVIDER_RATE_LIMIT", "PROVIDER_UNAVAILABLE", "MODEL_JSON_INVALID", "BLUEPRINT_SCHEMA_INVALID", "BLUEPRINT_SLIDE_COUNT_MISMATCH", "BLUEPRINT_SOURCE_REFERENCE_INVALID", "BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID", "BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE", "V3_LAYER_CONTRACT_INVALID", "VISUAL_ASSET_LIMIT_EXCEEDED"] },
+          "errorCode": { "enum": ["SOURCE_INCOMPLETE", "PROVIDER_TIMEOUT", "PROVIDER_RATE_LIMIT", "PROVIDER_UNAVAILABLE", "MODEL_AUTH_FAILED", "MODEL_FORBIDDEN", "MODEL_NOT_FOUND", "MODEL_JSON_INVALID", "BLUEPRINT_SCHEMA_INVALID", "BLUEPRINT_SLIDE_COUNT_MISMATCH", "BLUEPRINT_SOURCE_REFERENCE_INVALID", "BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID", "BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE", "V3_LAYER_CONTRACT_INVALID", "VISUAL_ASSET_LIMIT_EXCEEDED"] },
           "terminalCode": { "const": "CONTRACT_REPAIR_EXHAUSTED" },
           "retryable": { "type": "boolean" },
           "attempt": { "type": "integer", "minimum": 0 },

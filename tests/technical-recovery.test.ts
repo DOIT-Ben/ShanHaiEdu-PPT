@@ -1,0 +1,84 @@
+import { describe, expect, test } from 'bun:test'
+import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
+import { FixedClock } from '../src/adapters/mock-ports'
+import type { RunRecord } from '../src/core/ports'
+import { beginTechnicalRecovery, isTechnicalFailureCode, resumeTechnicalRecovery } from '../src/core/technical-recovery'
+
+function run(): RunRecord {
+  return {
+    id: 'run-1',
+    creationKey: 'create-run-1',
+    requestHash: 'request-hash',
+    host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+    source: { kind: 'TEXT', text: '用于验证技术恢复上限的完整教材内容。' },
+    slideCount: 2,
+    visualDirection: '清晰课堂信息图',
+    imageModel: 'image-2',
+    automationLevel: 'SUPERVISED',
+    maxRevisionRounds: 2,
+    revisionRound: 0,
+    qualityScore: null,
+    status: 'EXECUTING',
+    resumeState: null,
+    version: 0,
+    budgetUnits: 100,
+    committedBudgetUnits: 0,
+    qualityOverride: false,
+    qualityOverrideReason: null,
+    qualityOverrideBy: null,
+    leaseToken: null,
+    leaseUntil: null,
+    leaseVersion: 0,
+    presentationMode: 'VISUAL_DECK_V4',
+    createdAt: '2026-07-21T00:00:00.000Z',
+    updatedAt: '2026-07-21T00:00:00.000Z',
+  }
+}
+
+describe('technical recovery', () => {
+  test('stops retrying after the fifth transient failure without requesting user approval', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await repository.createRun(run())
+
+    const errorCodes = ['PROVIDER_TIMEOUT', 'GATEWAY_HTTP_500', 'RATE_LIMITED', 'NETWORK_TIMEOUT', 'PROVIDER_TIMEOUT']
+    for (const [index, errorCode] of errorCodes.entries()) {
+      const attempt = index + 1
+      await repository.transact('run-1', (transaction) => beginTechnicalRecovery(transaction, clock, errorCode))
+      if (attempt === 5) break
+      expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING', technicalRecovery: { attempt, active: true } })
+      clock.advance(60_000)
+      await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+    }
+
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN',
+      technicalRecovery: { attempt: 5, reason: 'PROVIDER_TIMEOUT', retryable: false, active: false, nextAttemptAt: null },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.at(-1)).toMatchObject({ type: 'technical.recovery.completed', payload: { attempt: 5, active: false } })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('routes model authorization failures to administrator technical handling without user approval', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await repository.createRun(run())
+
+    await repository.transact('run-1', (transaction) => beginTechnicalRecovery(transaction, clock, 'MODEL_FORBIDDEN'))
+
+    expect(isTechnicalFailureCode('MODEL_FORBIDDEN')).toBe(true)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN',
+      technicalRecovery: {
+        reason: 'MODEL_FORBIDDEN', retryable: false, active: false, nextAttemptAt: null,
+      },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'phase.changed',
+      payload: expect.objectContaining({ reason: 'TECHNICAL_CONFIGURATION_REQUIRED' }),
+    }))
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+})

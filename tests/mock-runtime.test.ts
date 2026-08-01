@@ -3,13 +3,16 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
+import type { FrameFlowBackendClient } from '../src/adapters/frameflow-host'
 import {
   MockArtifactPort,
   MockPresentationRendererPort,
   MockVisualReviewPort,
+  FixedClock,
 } from '../src/adapters/mock-ports'
 import type { DeckReviewPort, RevisionApplicationPort, RevisionPlanningPort } from '../src/core/ports'
 import { createAgentRuntime, createMockRuntime } from '../src/runtime/mock-runtime'
+import { PPT_AGENT_CONTRACT_VERSION, PPT_AGENT_SOFTWARE_VERSION } from '../src/release-identity'
 import { validateLifecycle } from '../scripts/run-v4-real-evaluation'
 
 const token = 'test-runtime-token-0001'
@@ -23,6 +26,128 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
 }
 
 describe('mock runtime', () => {
+  test('recovers a V4 source-port outage through the worker without creating a new Run', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    let sourceAttempts = 0
+    const backend: FrameFlowBackendClient = {
+      async getDocumentAttachment() {
+        sourceAttempts += 1
+        if (sourceAttempts === 1) throw new Error('NETWORK_TIMEOUT')
+        return {
+          name: '分数教材.txt',
+          text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。判断分数前必须先判断是否平均分。'.repeat(4),
+        }
+      },
+      async reserveCredits(input) { return { reservationId: `budget:${input.idempotencyKey}` } },
+      async settleCredits() {},
+      async releaseCredits() {},
+      async finalizeCredits() {},
+      async preflightBatchFinalization() {},
+    }
+    const runtime = createMockRuntime({ repository, artifacts, apiToken: token, clock, frameFlowBackend: backend })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'runtime-source-recovery-v4' },
+      body: JSON.stringify({
+        schemaVersion: '1',
+        host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: { kind: 'HOST_ATTACHMENT', attachmentId: 'lesson-source-1', roleHint: 'CONTENT_SOURCE' },
+        slideCount: 2,
+        visualDirection: '温暖、清晰、有故事感的小学课堂绘本视觉',
+        imageModel: 'nanobanana',
+        automationLevel: 'BOUNDED_AUTO',
+        budgetUnits: 2,
+        maxRevisionRounds: 2,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '制作一套让三年级学生理解平均分和二分之一的完整视觉演示',
+          sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+            audience: '小学三年级学生', focus: '平均分与二分之一', styleHint: '温暖的儿童绘本课堂视觉',
+          },
+        },
+      }),
+    }))
+    const runId = (await created.json() as { data: { id: string } }).data.id
+
+    await runtime.tick()
+    expect(await repository.getRun(runId)).toMatchObject({
+      status: 'RECOVERING', technicalRecovery: { resumeState: 'PLANNING', reason: 'NETWORK_TIMEOUT', attempt: 1 },
+    })
+    expect((await repository.listEvents(runId)).some((event) => event.type === 'approval.required')).toBe(false)
+
+    clock.advance(2_000)
+    await runtime.tick()
+    expect(await repository.getRun(runId)).toMatchObject({ status: 'PLANNING' })
+    await runtime.tick()
+
+    expect(await repository.getRun(runId)).toMatchObject({ status: 'AWAITING_BLUEPRINT_APPROVAL' })
+    expect(sourceAttempts).toBe(2)
+    expect((await repository.listSteps(runId)).filter((step) => step.tool === 'resolve_source'))
+      .toEqual([expect.objectContaining({ status: 'COMPLETED', errorCode: null })])
+  })
+
+  test('claims a due recovering run and restores its phase before the next worker tick', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    const runtime = createMockRuntime({ repository, artifacts, apiToken: token, clock })
+    await repository.createRun({
+      id: 'recovery-runtime-run',
+      creationKey: 'recovery-runtime-create',
+      requestHash: 'recovery-runtime-hash',
+      host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+      source: { kind: 'TEXT', text: '用于验证恢复 worker 的完整教材内容。' },
+      slideCount: 2,
+      visualDirection: '清晰课堂信息图',
+      imageModel: 'mock-image',
+      automationLevel: 'BOUNDED_AUTO',
+      maxRevisionRounds: 2,
+      revisionRound: 0,
+      qualityScore: null,
+      status: 'RECOVERING',
+      resumeState: null,
+      technicalRecovery: {
+        resumeState: 'EXECUTING', reason: 'PROVIDER_TIMEOUT', retryable: true,
+        attempt: 1, maxAttempts: 5, nextAttemptAt: '2026-07-21T00:00:00.000Z', active: true,
+      },
+      version: 3,
+      budgetUnits: 2,
+      committedBudgetUnits: 0,
+      qualityOverride: false,
+      qualityOverrideReason: null,
+      qualityOverrideBy: null,
+      leaseToken: null,
+      leaseUntil: null,
+      leaseVersion: 0,
+      presentationMode: 'VISUAL_DECK_V4',
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
+    })
+    await repository.transact('recovery-runtime-run', (transaction) => {
+      transaction.putStep({
+        id: 'recovery-image-step', runId: transaction.run.id,
+        idempotencyKey: 'recovery-runtime-run:slide:1:image:r0:v1', inputHash: 'recovery-image-input',
+        tool: 'generate_slide_image', status: 'FAILED', budgetUnits: 1, budgetReservationId: null,
+        externalOperationId: null, errorCode: 'PROVIDER_TIMEOUT', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    await runtime.tick()
+
+    expect(await repository.getRun('recovery-runtime-run')).toMatchObject({
+      status: 'EXECUTING',
+      technicalRecovery: { active: false, nextAttemptAt: null },
+    })
+    expect((await repository.listSteps('recovery-runtime-run')).at(0)).toMatchObject({
+      idempotencyKey: 'recovery-runtime-run:slide:1:image:r0:v1',
+    })
+  })
+
   test('rejects an image concurrency value outside the gateway batch limit', () => {
     expect(() => createMockRuntime({
       repository: new InMemoryAgentRepository(), artifacts: new MockArtifactPort(), apiToken: token, imageConcurrency: 51,
@@ -61,17 +186,47 @@ describe('mock runtime', () => {
       }),
     }))
     expect(created.status).toBe(201)
-    const runId = (await created.json() as { data: { id: string } }).data.id
+    const createdPayload = await created.json() as { data: {
+      id: string
+      release: {
+        softwareVersion: string
+        presentationMode: string
+        compilerVersion: string
+        contractVersion: string
+        gitSha: string
+        releaseId: string
+      }
+    } }
+    const runId = createdPayload.data.id
+    expect(createdPayload.data.release).toEqual({
+      softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
+      presentationMode: 'VISUAL_DECK_V4',
+      compilerVersion: 'visual-deck-v4-chain-1',
+      contractVersion: PPT_AGENT_CONTRACT_VERSION,
+      gitSha: 'development',
+      releaseId: 'development',
+    })
+    const liveness = await runtime.handler(new Request('http://127.0.0.1:4310/health/live'))
+    expect(await liveness.json()).toMatchObject({
+      version: PPT_AGENT_SOFTWARE_VERSION,
+      release: { softwareVersion: PPT_AGENT_SOFTWARE_VERSION, contractVersion: PPT_AGENT_CONTRACT_VERSION },
+    })
 
     await runtime.tick()
     const plannedResponse = await runtime.handler(request(`/v1/runs/${runId}`))
     const planned = await plannedResponse.json() as { data: {
       status: string
       version: number
+      release: { softwareVersion: string; presentationMode: string; contractVersion: string }
       blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } }
       generationPlan?: { title: string; slideCount: number; pages: unknown[]; output: { editable: boolean } }
     } }
     expect(planned.data.status).toBe('AWAITING_BLUEPRINT_APPROVAL')
+    expect(planned.data.release).toMatchObject({
+      softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
+      presentationMode: 'VISUAL_DECK_V4',
+      contractVersion: PPT_AGENT_CONTRACT_VERSION,
+    })
     expect(planned.data.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(3)
     expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
     expect(planned.data.generationPlan?.pages).toHaveLength(3)

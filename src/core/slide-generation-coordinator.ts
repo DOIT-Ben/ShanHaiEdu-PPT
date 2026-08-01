@@ -3,7 +3,15 @@ import { slideVisualReviewSchema, type PresentationBlueprint, type SlideVisualRe
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
 import { mapWithConcurrency } from './concurrency'
-import { ensureGenerationBatch, refreshGenerationBatch } from './generation-batch'
+import {
+  ensureGenerationBatch,
+  finalizeGenerationBatch,
+  preflightGenerationBatchFinalization,
+  refreshGenerationBatch,
+  reserveGenerationBatch,
+  type GenerationBatchReservation,
+} from './generation-batch'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type {
@@ -11,6 +19,7 @@ import type {
   AgentRepository,
   ArtifactPort,
   AssetCandidateReviewPort,
+  BatchBudgetPort,
   AssetDiscoveryPort,
   ClockPort,
   DocumentPort,
@@ -40,6 +49,12 @@ export type RefreshBlueprintImagesResult = Readonly<{
   artifactIds: readonly string[]
 }>
 
+function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefined) {
+  return isVisualDeckV4(run)
+    && step?.status === 'FAILED'
+    && isTechnicalFailureCode(step.errorCode ?? '')
+}
+
 export const ASSET_CANDIDATE_QUALITY_THRESHOLD = 80
 
 export class SlideGenerationCoordinator {
@@ -48,6 +63,7 @@ export class SlideGenerationCoordinator {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     media: MediaStepRunner
+    batchBudget: BatchBudgetPort
     documents: DocumentPort
     artifacts: ArtifactPort
     discovery?: AssetDiscoveryPort
@@ -65,7 +81,7 @@ export class SlideGenerationCoordinator {
     if (!Number.isSafeInteger(unitBudgetUnits) || unitBudgetUnits <= 0) throw new Error('INVALID_UNIT_BUDGET')
     const run = await this.dependencies.repository.getRun(runId)
     if (!run) throw new Error('RUN_NOT_FOUND')
-    if (run.status === 'PAUSED' || run.status === 'NEEDS_HUMAN') {
+    if (run.status === 'PAUSED' || run.status === 'NEEDS_HUMAN' || run.status === 'RECOVERING') {
       return { status: run.status, submitted: 0, total: run.slideCount, steps: [] }
     }
     if (run.status !== 'EXECUTING') throw new Error('RUN_NOT_EXECUTING')
@@ -87,12 +103,66 @@ export class SlideGenerationCoordinator {
         requirements,
         unitBudgetUnits,
       })
+      const batchStep = (await this.dependencies.repository.listSteps(runId))
+        .find((step) => step.idempotencyKey === `${runId}:generation-batch:r${run.revisionRound}`)
+      if (!batchStep) throw new Error('GENERATION_BATCH_STEP_NOT_FOUND')
+      if (!batchStep.budgetReservationId) {
+        const supported = await preflightGenerationBatchFinalization({
+          repository: this.dependencies.repository,
+          budget: this.dependencies.batchBudget,
+          clock: this.dependencies.clock,
+          runId,
+          revisionRound: run.revisionRound,
+        })
+        if (!supported) {
+          const latest = await this.dependencies.repository.getRun(runId)
+          return { status: latest?.status ?? 'FAILED', submitted: 0, total: requirements.length, steps: [] }
+        }
+      }
+    }
+
+    let batchReservation: GenerationBatchReservation | undefined
+    if (isVisualDeckV4(run)) {
+      const batchStep = (await this.dependencies.repository.listSteps(runId))
+        .find((step) => step.idempotencyKey === `${runId}:generation-batch:r${run.revisionRound}`)
+      if (!batchStep) throw new Error('GENERATION_BATCH_STEP_NOT_FOUND')
+      const decision = evaluateBudget(run, batchStep.budgetUnits)
+      const needsInitialBudgetCheck = !batchStep.budgetReservationId
+        && !['RESERVED', 'RESERVATION_UNKNOWN'].includes(batchStep.status)
+      if (needsInitialBudgetCheck && !decision.allowed) {
+        if (decision.reason === 'BUDGET_EXCEEDED') {
+          const paused = await this.pauseForBudget(run, batchStep.budgetUnits)
+          return { status: paused.status, submitted: 0, total: requirements.length, steps: [] }
+        }
+        throw new Error(decision.reason)
+      }
+      const reservation = await reserveGenerationBatch({
+        repository: this.dependencies.repository,
+        budget: this.dependencies.batchBudget,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+        model: run.imageModel,
+      })
+      if (!reservation) {
+        const latest = await this.dependencies.repository.getRun(runId)
+        const latestBatchStep = (await this.dependencies.repository.listSteps(runId))
+          .find((step) => step.idempotencyKey === `${runId}:generation-batch:r${run.revisionRound}`)
+        if (latest?.status === 'EXECUTING' && latestBatchStep?.status === 'FAILED') {
+          const paused = await this.pauseForBudget(latest, latestBatchStep.budgetUnits)
+          return { status: paused.status, submitted: 0, total: requirements.length, steps: [] }
+        }
+        return { status: latest?.status ?? 'FAILED', submitted: 0, total: requirements.length, steps: [] }
+      }
+      batchReservation = reservation
     }
     const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const sequentialPageExecution = !isVisualDeckV4(run) && run.source.kind === 'APPROVED_PAGE_DESIGN'
-    const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status))
+    const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status)
+      && !(isVisualDeckV4(run) && ['RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
+      && !canRetryReleasedV4Submission(run, step))
     if (blockingStep) {
       await this.requireHuman(runId, blockingStep)
       return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
@@ -109,7 +179,9 @@ export class SlideGenerationCoordinator {
     const existingByKey = new Map(existingSteps.map((step) => [step.idempotencyKey, step]))
     const pendingRequirements = requirements.filter((requirement) => {
       const existing = existingByKey.get(requirement.idempotencyKey)
-      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status)
+      return !existing
+        || ['RESERVED', 'SUBMITTING', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(existing.status)
+        || canRetryReleasedV4Submission(run, existing)
     })
 
     if (pendingRequirements.length === 0) {
@@ -150,7 +222,8 @@ export class SlideGenerationCoordinator {
     }
 
     const chargeableCount = unresolvedRequirements.filter((requirement) =>
-      !existingByKey.has(requirement.idempotencyKey)
+      (!existingByKey.has(requirement.idempotencyKey)
+        || canRetryReleasedV4Submission(run, existingByKey.get(requirement.idempotencyKey)))
       && requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
     if (chargeableCount > 0) {
       const decision = evaluateBudget(run, chargeableCount * unitBudgetUnits)
@@ -164,7 +237,14 @@ export class SlideGenerationCoordinator {
     if (isVisualDeckV4(run)) {
       const outcomes = await mapWithConcurrency(unresolvedRequirements, this.imageConcurrency, async (requirement) => {
         try {
-          return { step: await this.submitGeneratedImage(run, requirement, unitBudgetUnits) }
+          return { step: await this.submitGeneratedImage(
+            run,
+            requirement,
+            unitBudgetUnits,
+            undefined,
+            existingByKey.get(requirement.idempotencyKey),
+            batchReservation,
+          ) }
         } catch (error) {
           // Keep dispatching the approved batch; a later recovery pass can reconcile already submitted operations.
           return { error }
@@ -270,9 +350,17 @@ export class SlideGenerationCoordinator {
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const failed = refreshed.find((step) => isMediaFailureStepStatus(step.status))
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step) !== null)
+    let batchFinalized = !isVisualDeckV4(run)
     if (isVisualDeckV4(run)) {
       await refreshGenerationBatch({
         repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+      })
+      batchFinalized = await finalizeGenerationBatch({
+        repository: this.dependencies.repository,
+        budget: this.dependencies.batchBudget,
         clock: this.dependencies.clock,
         runId,
         revisionRound: run.revisionRound,
@@ -281,6 +369,14 @@ export class SlideGenerationCoordinator {
     if (failed) await this.requireHuman(runId, failed)
     else await this.appendCompletedPageProgress(runId, completed.length, requirements.length)
     const latest = await this.dependencies.repository.getRun(runId)
+    if (!failed && !batchFinalized) {
+      return {
+        status: latest?.status ?? 'FAILED',
+        completed: completed.length,
+        total: requirements.length,
+        artifactIds: completed.map((step) => this.artifactId(step)!),
+      }
+    }
     if (!failed && completed.length === requirements.length && latest?.status === 'EXECUTING') {
       await this.dependencies.repository.transact(runId, (transaction) => {
         if (transaction.run.status !== 'EXECUTING') return
@@ -313,6 +409,29 @@ export class SlideGenerationCoordinator {
     }
   }
 
+  /**
+   * A cancelled Run no longer advances presentation phases, but Provider image
+   * tasks can still complete. Reconcile the durable V4 batch without reviving
+   * the cancelled Run or resubmitting any page.
+   */
+  async reconcileTerminalGenerationBatch(runId: string) {
+    const run = await this.dependencies.repository.getRun(runId)
+    if (!run || !isVisualDeckV4(run) || !['CANCELLED', 'FAILED'].includes(run.status)) return false
+    await refreshGenerationBatch({
+      repository: this.dependencies.repository,
+      clock: this.dependencies.clock,
+      runId,
+      revisionRound: run.revisionRound,
+    })
+    return finalizeGenerationBatch({
+      repository: this.dependencies.repository,
+      budget: this.dependencies.batchBudget,
+      clock: this.dependencies.clock,
+      runId,
+      revisionRound: run.revisionRound,
+    })
+  }
+
   private artifactId(step: StepRecord) {
     const output = step.output as { artifactId?: unknown } | null
     return output && typeof output.artifactId === 'string' ? output.artifactId : null
@@ -323,6 +442,8 @@ export class SlideGenerationCoordinator {
     requirement: ReturnType<typeof blueprintImageRequirements>[number],
     unitBudgetUnits: number,
     sourceAsset?: SourceAsset | null,
+    existingStep?: StepRecord,
+    batchReservation?: GenerationBatchReservation,
   ) {
     const versionId = requirement.elementId === null
       ? `${run.id}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
@@ -331,6 +452,10 @@ export class SlideGenerationCoordinator {
       runId: run.id,
       stepId: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
       idempotencyKey: requirement.idempotencyKey,
+      ...(batchReservation ? { batchReservation } : {}),
+      ...(canRetryReleasedV4Submission(run, existingStep) ? {
+        budgetReservationKey: `${requirement.idempotencyKey}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
+      } : {}),
       slideId: requirement.slideId,
       versionId,
       prompt: requirement.prompt,
@@ -627,6 +752,24 @@ export class SlideGenerationCoordinator {
     await this.dependencies.repository.transact(runId, (transaction) => {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
+      const technical = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && step.errorCode !== 'SOURCE_ASSET_NOT_FOUND'
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, step.errorCode ?? 'IMAGE_SUBMISSION_FAILED')
+        : null
+      if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && (technical || fromStatus === 'RECOVERING')) {
+        const completed = transaction.listSteps().filter((candidate) =>
+          candidate.tool === 'generate_slide_image' && candidate.status === 'COMPLETED').length
+        appendV4LifecycleEvent(transaction, 'generation.completed', {
+          completed: Math.min(completed, transaction.run.slideCount),
+          total: transaction.run.slideCount,
+          pageNumbers: allPageNumbers(transaction.run),
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+          retryable: technical?.technicalRecovery?.retryable
+            ?? transaction.run.technicalRecovery?.retryable
+            ?? false,
+        })
+        return
+      }
       if (fromStatus !== 'NEEDS_HUMAN') {
         const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
         transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })

@@ -25,6 +25,7 @@ export const runStatusSchema = z.enum([
   'AWAITING_REVISION_APPROVAL',
   'REVISING',
   'PAUSED',
+  'RECOVERING',
   'NEEDS_HUMAN',
   'DELIVERING',
   'COMPLETED',
@@ -33,6 +34,16 @@ export const runStatusSchema = z.enum([
 ])
 
 export const automationLevelSchema = z.enum(['SUPERVISED', 'BOUNDED_AUTO'])
+
+export const technicalRecoverySchema = z.object({
+  resumeState: z.enum(['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING']),
+  reason: z.string().trim().min(1).max(100),
+  retryable: z.boolean(),
+  attempt: z.number().int().min(1).max(5),
+  maxAttempts: z.literal(5),
+  nextAttemptAt: z.string().datetime().nullable(),
+  active: z.boolean(),
+}).strict()
 export const presentationModeSchema = z.enum([
   'SLIDE_IMAGE_V2',
   'SLIDE_IMAGE_V2_1',
@@ -246,6 +257,9 @@ export const planningFailureSchema = z.object({
     'PROVIDER_TIMEOUT',
     'PROVIDER_RATE_LIMIT',
     'PROVIDER_UNAVAILABLE',
+    'MODEL_AUTH_FAILED',
+    'MODEL_FORBIDDEN',
+    'MODEL_NOT_FOUND',
     'MODEL_JSON_INVALID',
     'BLUEPRINT_SCHEMA_INVALID',
     'BLUEPRINT_SLIDE_COUNT_MISMATCH',
@@ -303,6 +317,7 @@ export const runSnapshotSchema = z.object({
   host: hostContextSchema,
   status: runStatusSchema,
   resumeState: runStatusSchema.nullable(),
+  technicalRecovery: technicalRecoverySchema.optional(),
   version: z.number().int().nonnegative(),
   slideCount: z.number().int().min(2).max(50),
   revisionRound: z.number().int().nonnegative(),
@@ -334,6 +349,9 @@ export const runSnapshotSchema = z.object({
   }
   if (value.status !== 'PAUSED' && value.resumeState !== null) {
     context.addIssue({ code: 'custom', path: ['resumeState'], message: 'resumeState is only valid while paused' })
+  }
+  if (value.status === 'RECOVERING' && (!value.technicalRecovery || !value.technicalRecovery.active)) {
+    context.addIssue({ code: 'custom', path: ['technicalRecovery'], message: 'recovering run requires active technical recovery' })
   }
 })
 
@@ -467,6 +485,8 @@ const knownAgentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('generation.completed'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
   z.object({ ...eventBase, type: z.literal('generation.batch.created'), payload: generationBatchSchema }).strict(),
   z.object({ ...eventBase, type: z.literal('generation.batch.updated'), payload: generationBatchSchema }).strict(),
+  z.object({ ...eventBase, type: z.literal('technical.recovery.started'), payload: technicalRecoverySchema }).strict(),
+  z.object({ ...eventBase, type: z.literal('technical.recovery.completed'), payload: technicalRecoverySchema }).strict(),
   z.object({ ...eventBase, type: z.literal('page_review.started'), payload: v4LifecyclePayloadSchema('PAGE_REVIEW') }).strict(),
   z.object({ ...eventBase, type: z.literal('page_review.completed'), payload: v4LifecyclePayloadSchema('PAGE_REVIEW') }).strict(),
   z.object({ ...eventBase, type: z.literal('revision.started'), payload: v4LifecyclePayloadSchema('REVISION') }).strict(),
@@ -518,6 +538,7 @@ export const apiErrorSchema = z.object({
 
 export type HostContext = z.infer<typeof hostContextSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
+export type TechnicalRecovery = z.infer<typeof technicalRecoverySchema>
 export type PresentationMode = z.infer<typeof presentationModeSchema>
 export type CoverDesignMode = z.infer<typeof coverDesignModeSchema>
 export type AssetAcquisitionPolicy = z.infer<typeof assetAcquisitionPolicySchema>

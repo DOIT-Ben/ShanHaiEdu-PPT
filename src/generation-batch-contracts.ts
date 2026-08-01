@@ -17,6 +17,8 @@ export const generationBatchSchema = z.object({
     settledUnits: z.number().int().nonnegative(),
     releasedUnits: z.number().int().nonnegative(),
     reconciliationUnits: z.number().int().nonnegative(),
+    authorization: z.enum(['PENDING', 'RESERVED', 'UNKNOWN', 'REJECTED']),
+    settlement: z.enum(['NOT_READY', 'PENDING', 'SETTLED', 'RELEASED', 'UNKNOWN']),
   }).strict(),
   progress: z.object({
     submitted: z.number().int().nonnegative(),

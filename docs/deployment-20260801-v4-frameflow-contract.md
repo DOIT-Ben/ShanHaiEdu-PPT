@@ -6,11 +6,14 @@
 - 运行提交：`78310f558e45b15febd4ba90b8b7be3eb3eb01fa`
 - 合并 PR：[PPT Agent #18](https://github.com/DOIT-Ben/ShanHaiEdu-PPT/pull/18)
 - 正式 release：`/opt/ppt-agent/releases/20260801-232500-78310f5-v4-frameflow-contract`
-- 当前版本：`0.1.0`
+- 本次历史发布的软件版本：`0.1.0`
 - 范围：V4 FrameFlow HTTP/SSE/幂等/交付合同文档、管理员修订轮次设置公开响应修复。
 
 FrameFlow 未在本次发布中修改。V4 继续通过统一 `/v1/runs` 接口和
 `presentationMode: VISUAL_DECK_V4` 接入。
+
+> 本文记录的是 2026-08-01 的历史发布。运行中的准确软件、模式和合同身份必须读取
+> `/health/*` 与 Run 详情的 `release`，不能把这份历史记录当作当前版本来源。
 
 ## 验证证据
 

@@ -32,6 +32,7 @@ import type {
   ArtifactPort,
   AssetCandidateReviewPort,
   AssetDiscoveryPort,
+  BatchBudgetPort,
   BudgetPort,
   ClockPort,
   DeckReviewPort,
@@ -48,6 +49,7 @@ import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
 import { failVisualDeckV4Run } from '../core/v4-lifecycle'
+import { resumeTechnicalRecovery } from '../core/technical-recovery'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 import { buildIdentity, type BuildIdentity } from '../release-identity'
 
@@ -62,6 +64,8 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
   }
   async settleCredits() {}
   async releaseCredits() {}
+  async finalizeCredits() {}
+  async preflightBatchFinalization() {}
 }
 
 class DeterministicPlanningModel implements StructuredModelPort, StructuredGenerationPreflightPort {
@@ -425,7 +429,7 @@ type RuntimeInput = Readonly<{
   createRunRateLimitPerMinute?: number
   runActionRateLimitPerMinute?: number
   rateLimiter?: PrincipalRateLimiterPort
-  budget?: BudgetPort
+  budget?: BudgetPort & BatchBudgetPort
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -506,6 +510,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const generation = new SlideGenerationCoordinator({
     repository: input.repository,
     media,
+    batchBudget: budget,
     documents,
     artifacts: input.artifacts,
     ...(input.discovery ? { discovery: input.discovery } : {}),
@@ -559,8 +564,16 @@ export function createAgentRuntime(input: RuntimeInput) {
     let phase = candidate.status
     try {
       await media.reconcilePendingRun(candidate.id)
-      const run = await input.repository.getRun(candidate.id)
+      let run = await input.repository.getRun(candidate.id)
       if (!run) return
+      if (run.status === 'RECOVERING') {
+        const resumed = await input.repository.transact(run.id, (transaction) =>
+          resumeTechnicalRecovery(transaction, clock))
+        if (!resumed) return
+        // Resume is its own durable worker operation. The restored phase is
+        // picked up on the next tick with the original idempotency keys.
+        return
+      }
       phase = run.status
       if (run.status === 'PLANNING') {
         const planningAttempt = run.planningAttempt ?? 0
@@ -670,7 +683,10 @@ export function createAgentRuntime(input: RuntimeInput) {
       })
       if (!lease) return false
       await health.trackTickOperation(`reconcile:${runId}`, () =>
-        withRenewedLease(runId, lease, () => media.reconcilePendingRun(runId)))
+        withRenewedLease(runId, lease, async () => {
+          await media.reconcilePendingRun(runId)
+          await generation.reconcileTerminalGenerationBatch(runId)
+        }))
       return true
     }))
     const failure = [...runnableResults, ...reconciliationResults]

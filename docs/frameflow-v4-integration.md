@@ -9,8 +9,19 @@
 | `presentationMode` | `VISUAL_DECK_V4` |
 | HTTP `schemaVersion` | `"1"` |
 
-完整机器合同见 [`docs/openapi-v1.json`](./openapi-v1.json)。本文只说明 FrameFlow 必须实现的
-调用顺序和用户交互语义。
+统一版本身份以 Run 详情的 `release` 为准，不能只看目录名、历史发布记录或模式名。健康接口
+的 `version` 必须与 `release.softwareVersion` 一致：
+
+| 字段 | 语义 |
+| --- | --- |
+| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.0.0` |
+| `presentationMode` | 本次 Run 的能力模式，V4 固定为 `VISUAL_DECK_V4` |
+| `compilerVersion` | V4 链式规划与整页图片编译器版本 |
+| `contractVersion` | HTTP/SSE 数据合同版本，当前为 `"1"` |
+| `gitSha` / `releaseId` | 可用于生产问题定位和发布追溯 |
+
+完整机器合同见 [`docs/openapi-v1.json`](./openapi-v1.json)。宿主无关的能力与账务端口见
+[`docs/ppt-agent-v4-api.md`](./ppt-agent-v4-api.md)；本文只说明 FrameFlow 必须实现的调用顺序和用户交互语义。
 
 ## 1. 边界与部署地址
 
@@ -264,6 +275,42 @@ Content-Type: application/json
 确认成功后状态进入 `EXECUTING`，Agent 会在图片 Provider 允许的并发范围内提交独立页面任务。
 FrameFlow 不需要也不能自行调用 Nano Banana；图片任务的幂等、计费、轮询和断点恢复由 Agent 负责。
 
+### 批次并发与统一计费
+
+确认后 Agent 会先冻结完整规划，并建立一个持久化的 `generationBatch`。当前 Nano Banana 网关提供的是
+逐页 `image-task` 操作，而不是网关原生 batch API，因此 `generationBatch.submissionMode` 固定为
+`GATEWAY_INDIVIDUAL_OPERATIONS`：它是 **PPT Agent 的业务批次**，不是伪造的 Provider `batchId`。
+
+- Agent 在受控并发上限内全量提交相互独立的页面；每页持有稳定图片幂等键，崩溃恢复不会重复出图；
+- 用户确认时，PPT Agent 通过宿主实现的 `BatchBudgetPort` 创建一笔整单预授权/积分冻结；用户界面只展示整套预算，不展示逐页扣费；
+- 页面步骤只记录本地进度与账务分摊，不能调用宿主的预授权、结算或释放接口；整笔 reservation 由持久化的批次步骤持有；
+- 所有页面终态后，宿主以同一 `finalize:<batch-key>` 原子结算已收费页面并释放明确未收费余额；全完成和全未提交只是这个操作的两个特例。提交或计费未知会保留原键并进入恢复，绝不以新键重扣。
+
+Run 详情在出图开始后会返回：
+
+```json
+{
+  "generationBatch": {
+    "batchId": "genbatch_...",
+    "submissionMode": "GATEWAY_INDIVIDUAL_OPERATIONS",
+    "pageCount": 10,
+    "status": "PROCESSING",
+    "accounting": {
+      "estimatedUnits": 100,
+      "committedUnits": 100,
+      "settledUnits": 0,
+      "releasedUnits": 0,
+      "reconciliationUnits": 0,
+      "authorization": "RESERVED",
+      "settlement": "PENDING"
+    },
+    "progress": { "submitted": 10, "completed": 0, "failed": 0 }
+  }
+}
+```
+
+`pages` 中的 `promptHash` 与原始 Provider 幂等键只用于可审计恢复，不应展示给终端用户。
+
 常用动作：
 
 | `type` | 用途 | 允许的主要状态 |
@@ -323,6 +370,8 @@ V4 关键事件包括：
 ```text
 planning.started / planning.completed
 generation.started / generation.progress / generation.completed
+generation.batch.created / generation.batch.updated
+technical.recovery.started / technical.recovery.completed
 page_review.started / page_review.completed
 revision.started / revision.progress / revision.completed
 deck_review.started / deck_review.completed
@@ -366,6 +415,7 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | `PLANNING` | 显示“正在理解资料和规划”，继续监听事件 |
 | `AWAITING_BLUEPRINT_APPROVAL` | 展示 `generationPlan` 和费用/预算说明，等待用户确认 |
 | `EXECUTING` | 显示图片生成进度；`generation.progress` 的 `completed/total` 是页面进度 |
+| `RECOVERING` | 显示“正在自动恢复技术任务”；读取 `technicalRecovery.nextAttemptAt`，不显示用户审批按钮，也不得重新创建 Run 或更换幂等键 |
 | `PAGE_REVIEW` | 显示逐页质量检查，不要重复提交图片 |
 | `DECK_REVIEW` | 显示整套连贯性检查，不要重复提交图片 |
 | `AWAITING_REVISION_APPROVAL` | 展示修订摘要，等待 `APPROVE_REVISION` 或拒绝 |
@@ -376,9 +426,12 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | `NEEDS_HUMAN` | 读取 `issues` 和最新事件的 `nextAction`；按要求重试、修订、接受或联系管理员 |
 | `FAILED` / `CANCELLED` | 终止进度监听，保留错误/取消原因和已有审计记录 |
 
-技术故障进入 `NEEDS_HUMAN` 时，不要把它当作用户质量确认。应展示机器可读的 `reason`、`retryable`
-和 `nextAction`，并只重试失败阶段。未知计费或提交状态时，Agent 会保留原幂等键等待恢复；FrameFlow
-不得通过换键强制重新扣费。
+超时、限流、网关波动、已知任务的查询失败和审查服务暂时不可用，会进入 `RECOVERING`，由 Agent 在
+有界退避后恢复原阶段；同一恢复阶段累计第五次失败会转入可审计的技术处置状态 `NEEDS_HUMAN`，不会无限重试或
+停留在不可推进的恢复状态。`MODEL_AUTH_FAILED`、`MODEL_FORBIDDEN` 与 `MODEL_NOT_FOUND` 等模型鉴权、权限和配置
+故障直接进入该技术处置状态，**不产生** `approval.required`，只能由管理员修复上游配置。来源、合同和内容质量等真正
+需要选择的情形，才使用用户审批。
+未知计费或提交状态时，Agent 会保留原幂等键等待恢复；FrameFlow 不得通过换键强制重新扣费。
 
 ## 9. 交付下载
 
@@ -431,9 +484,12 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 
 预算字段的语义是：
 
-- `budgetUnits`：Run 的积分/预算上限，由 FrameFlow 在创建时传入；
+- `budgetUnits`：Run 的积分/预算上限，由宿主在创建时传入；
 - `committedBudgetUnits`：Agent 已提交或保留的媒体预算累计值；
-- FrameFlow 负责把积分换算成用户可理解的价格，Agent 不返回价格字符串；
+- 用户确认蓝图后，PPT Agent 通过 `BatchBudgetPort` 为整套初始页面执行**一次**预授权；并发页面只写本地分摊状态，不能逐页调用宿主积分接口；
+- 全部页面完成后，PPT Agent 使用同一批次幂等键执行**一次**结算。`generationBatch.accounting.authorization` 与 `settlement` 公开授权、结算和恢复状态，但不公开宿主 reservationId；
+- 授权或结算响应未知时，保留 `batchId`、内部 reservationId 和原幂等键进入 `RECOVERING`，不得创建第二笔预授权；
+- `generationBatch.accounting` 是整单对账汇总；宿主不能将内部页面分摊映射成多次用户扣费记录；
 - 任务超预算会进入 `PAUSED` 或等待预算动作，不能由模型自行提高预算；
 - 任何出图 POST 超时都必须用原幂等键恢复，不能以“看起来没返回”为理由再次收费。
 
@@ -447,5 +503,7 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 - [ ] 使用事件 `sequence` 去重；断线先读 `events/history`，再从 `after` 打开 SSE。
 - [ ] 不在 FrameFlow 生成 Deck Plan、Slide Brief、Visual Contract 或图片 Prompt。
 - [ ] 不自行调用 Nano Banana、不轮询未知的 Provider 任务、不重复扣费。
-- [ ] 对 `NEEDS_HUMAN` 显示机器可读原因和下一动作，不把所有技术错误翻译成“请人工审核”。
+- [ ] 展示 `release` 作为唯一版本身份，记录 `gitSha` 和 `releaseId` 以便问题追溯。
+- [ ] 对 `RECOVERING` 显示自动恢复状态；只对 `NEEDS_HUMAN` 显示人工决策入口。
+- [ ] 将 `generationBatch` 作为整单进度和账务汇总展示，不将内部页级 reservation 映射为多次用户扣费。
 - [ ] 只从 `deliveries` 的受保护内容接口下载 PNG/PPTX/来源清单。

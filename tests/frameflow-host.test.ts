@@ -18,6 +18,8 @@ function client(overrides: Partial<FrameFlowBackendClient> = {}): FrameFlowBacke
     async reserveCredits(input) { return { reservationId: `credit:${input.idempotencyKey}` } },
     async settleCredits() {},
     async releaseCredits() {},
+    async finalizeCredits() {},
+    async preflightBatchFinalization() {},
     ...overrides,
   }
 }
@@ -201,9 +203,13 @@ describe('FrameFlow host adapter', () => {
   test('maps budget operations without exposing FrameFlow internals to core', async () => {
     const settlements: string[] = []
     const releases: string[] = []
+    const finalizations: Parameters<FrameFlowBackendClient['finalizeCredits']>[0][] = []
+    const preflightUsers: string[] = []
     const adapter = new FrameFlowHostAdapter(client({
       async settleCredits(input) { settlements.push(input.reservationId) },
       async releaseCredits(input) { releases.push(input.reservationId) },
+      async finalizeCredits(input) { finalizations.push(input) },
+      async preflightBatchFinalization(input) { preflightUsers.push(input.externalUserId) },
     }))
     const reservation = await adapter.reserve({
       host,
@@ -213,10 +219,20 @@ describe('FrameFlow host adapter', () => {
     })
     await adapter.settle({ host, reservationId: reservation.reservationId, idempotencyKey: 'settle:run-1:slide-1' })
     await adapter.release({ host, reservationId: reservation.reservationId, idempotencyKey: 'release:run-1:slide-1' })
+    await adapter.preflightBatchFinalization({ host })
+    await adapter.finalizeBatch({
+      host, reservationId: reservation.reservationId, batchId: 'batch-1',
+      settledUnits: 8, releasedUnits: 2, idempotencyKey: 'finalize:batch-1',
+    })
 
     expect(reservation.reservationId).toBe('credit:run-1:slide-1')
     expect(settlements).toEqual(['credit:run-1:slide-1'])
     expect(releases).toEqual(['credit:run-1:slide-1'])
+    expect(preflightUsers).toEqual(['user-1'])
+    expect(finalizations).toEqual([{
+      externalUserId: 'user-1', reservationId: 'credit:run-1:slide-1', batchId: 'batch-1',
+      settledUnits: 8, releasedUnits: 2, idempotencyKey: 'finalize:batch-1',
+    }])
   })
 
   test('accepts host-neutral inline packages without calling the FrameFlow backend', async () => {

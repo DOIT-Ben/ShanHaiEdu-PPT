@@ -48,6 +48,20 @@ const request = {
   visualDirection: '清晰的课堂科学信息图风格',
 } as const
 
+const visualDeckV4 = {
+  instruction: '制作一套帮助七年级学生理解光合作用条件与产物的完整视觉演示。',
+  sourceMode: 'SOURCE_GROUNDED' as const,
+  deckOptions: {
+    deckType: 'DETAILED_DECK' as const,
+    language: 'zh-CN',
+    length: { slideCount: 2 },
+    aspectRatio: '16:9' as const,
+    audience: '七年级学生',
+    focus: '光合作用的条件与产物',
+    styleHint: '清晰的课堂科学信息图风格',
+  },
+} as const
+
 test('maps both reviewed split directions and explicit cover layouts', () => {
   expect(approvedPageLayout('左侧文字、右侧课堂插图', 1)).toBe('SPLIT')
   expect(approvedPageLayout('左侧插图、右侧文字和要点', 1)).toBe('EDITORIAL')
@@ -540,6 +554,82 @@ describe('planning runner', () => {
     expect(issue?.type === 'issue.detected' && issue.payload.planningFailure).toMatchObject({
       errorCode: 'SOURCE_INCOMPLETE', retryable: false, suggestedAction: 'MODIFY_SOURCE',
       attempt: 0, maxAttempts: 0, fieldPaths: ['source'], contractVersion: '1',
+    })
+  })
+
+  test('recovers a V4 source-port outage into planning without a user approval event', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await repository.createRun({
+      ...run(), presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO', visualDeckV4,
+    })
+    let sourceAttempts = 0
+    const documents: DocumentPort = {
+      async resolve() {
+        sourceAttempts += 1
+        if (sourceAttempts === 1) throw new Error('NETWORK_TIMEOUT')
+        return document()
+      },
+    }
+    const runner = new PlanningRunner({
+      repository,
+      documents,
+      model: { async execute() { throw new Error('model must not run while source resolution is unavailable') } },
+      clock,
+    })
+    const input = { ...request, presentationMode: 'VISUAL_DECK_V4' as const, visualDeckV4 }
+
+    const first = await runner.plan(input)
+    expect(first.step).toMatchObject({
+      tool: 'resolve_source', status: 'FAILED', idempotencyKey: `${request.idempotencyKey}:source-resolution`,
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING', technicalRecovery: { resumeState: 'PLANNING', reason: 'NETWORK_TIMEOUT', attempt: 1 },
+    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+
+    clock.advance(2_000)
+    const { resumeTechnicalRecovery } = await import('../src/core/technical-recovery')
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+    await runner.plan(input)
+
+    expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'resolve_source'))
+      .toEqual([expect.objectContaining({ status: 'COMPLETED', errorCode: null })])
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'tool.completed' && event.payload.stepId === first.step.id)).toBe(true)
+  })
+
+  test('sends a V4 model permission error to administrator technical handling without retrying', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    let calls = 0
+    const model = {
+      modelName: 'gpt-5.6',
+      async preflightStructuredGeneration() {
+        return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
+      },
+      async execute() {
+        calls += 1
+        throw new StructuredModelError('MODEL_FORBIDDEN', false, 'gpt-5.6', 'request-model-forbidden')
+      },
+    }
+    await repository.createRun({
+      ...run(), presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO', visualDeckV4,
+    })
+    const runner = new PlanningRunner({ repository, documents: new MutableDocumentPort(document()), model, clock })
+
+    const result = await runner.plan({ ...request, presentationMode: 'VISUAL_DECK_V4', visualDeckV4 })
+
+    expect(calls).toBe(1)
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'MODEL_FORBIDDEN' })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN',
+      technicalRecovery: { resumeState: 'PLANNING', reason: 'MODEL_FORBIDDEN', retryable: false, active: false },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'planning.completed')).toMatchObject({
+      payload: { requiresUserAction: false, nextAction: null },
     })
   })
 
