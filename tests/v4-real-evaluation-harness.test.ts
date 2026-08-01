@@ -60,23 +60,21 @@ function completedLifecycleEvents(): LifecycleEvent[] {
 }
 
 describe('V4 real evaluation harness', () => {
-  test('normalizes an existing V4 request to the bounded smoke-test page count', () => {
-    const normalized = normalizeEvaluationRequest(request(), 2)
+  test('executes an already matching V4 request without editing it', () => {
+    const input = request()
+    const normalized = normalizeEvaluationRequest(input, 10)
 
-    expect(normalized.slideCount).toBe(2)
-    expect(normalized.visualDeckV4?.deckOptions.length).toEqual({ slideCount: 2 })
-    expect(normalized.visualDeckV4?.instruction).toContain('严格输出 2 页')
-    expect(normalized.visualDeckV4?.instruction).toContain('请制作一套10页课堂PPT。')
+    expect(normalized.visualDeckV4?.instruction).toBe(input.visualDeckV4.instruction)
+    expect(normalized.slideCount).toBe(10)
+    expect(normalized.visualDeckV4?.deckOptions.length).toEqual({ slideCount: 10 })
   })
 
-  test('does not rewrite page references inside the original instruction', () => {
+  test('rejects a page-count mismatch instead of rewriting the original instruction', () => {
     const value = request()
     value.visualDeckV4.instruction = '第12页展示课堂练习，整套原计划为12页。'
 
-    const normalized = normalizeEvaluationRequest(value, 10)
-
-    expect(normalized.visualDeckV4?.instruction).toContain('第12页展示课堂练习，整套原计划为12页。')
-    expect(normalized.visualDeckV4?.instruction).toContain('严格输出 10 页')
+    expect(() => normalizeEvaluationRequest(value, 2)).toThrow('V4_EVAL_SLIDE_COUNT_MISMATCH')
+    expect(value.visualDeckV4.instruction).toBe('第12页展示课堂练习，整套原计划为12页。')
   })
 
   test('hashes evaluation request contents and case identities instead of the directory path', () => {

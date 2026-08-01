@@ -131,10 +131,6 @@ function evaluationConfig(): EvaluationConfig {
   }
 }
 
-function updatePageCountInstruction(instruction: string, slideCount: number) {
-  return `${instruction.trimEnd()}\n严格输出 ${slideCount} 页；不得增页、减页或把多页内容拼成一页。`
-}
-
 export function evaluationInputContentHash(files: readonly Readonly<{ caseId: string; bytes: Uint8Array }>[]) {
   const digest = createHash('sha256')
   for (const file of files) {
@@ -146,10 +142,13 @@ export function evaluationInputContentHash(files: readonly Readonly<{ caseId: st
   return digest.digest('hex')
 }
 
-async function evaluationInputRootHash(inputRoot: string, caseIds: readonly string[]) {
+async function evaluationExecutedRequestHash(inputRoot: string, caseIds: readonly string[], slideCount: number) {
   const files = await Promise.all(caseIds.map(async (caseId) => ({
     caseId,
-    bytes: new Uint8Array(await readFile(path.join(inputRoot, caseId, 'request.json'))),
+    bytes: new TextEncoder().encode(JSON.stringify(normalizeEvaluationRequest(
+      JSON.parse(await readFile(path.join(inputRoot, caseId, 'request.json'), 'utf8')),
+      slideCount,
+    ))),
   })))
   return evaluationInputContentHash(files)
 }
@@ -159,18 +158,11 @@ export function normalizeEvaluationRequest(value: unknown, slideCount: number): 
   if (request.presentationMode !== 'VISUAL_DECK_V4' || !request.visualDeckV4) {
     throw new Error('V4_EVAL_REQUEST_MODE_INVALID')
   }
-  return createRunRequestSchema.parse({
-    ...request,
-    slideCount,
-    visualDeckV4: {
-      ...request.visualDeckV4,
-      instruction: updatePageCountInstruction(request.visualDeckV4.instruction, slideCount),
-      deckOptions: {
-        ...request.visualDeckV4.deckOptions,
-        length: { slideCount },
-      },
-    },
-  })
+  const length = request.visualDeckV4.deckOptions.length
+  if (request.slideCount !== slideCount || typeof length !== 'object' || length.slideCount !== slideCount) {
+    throw new Error('V4_EVAL_SLIDE_COUNT_MISMATCH')
+  }
+  return request
 }
 
 export function validateLifecycle(events: readonly HistoryEvent[], status: string, expectedRevisionRound: number) {
@@ -862,7 +854,7 @@ async function main() {
     serviceUrl: config.serviceUrl,
     slideCount: config.slideCount,
     cases: config.caseIds,
-    inputRootHash: await evaluationInputRootHash(config.inputRoot, config.caseIds),
+    executedRequestHash: await evaluationExecutedRequestHash(config.inputRoot, config.caseIds, config.slideCount),
     policy: {
       presentationMode: 'VISUAL_DECK_V4',
       intervention: 'Approve the initial plan once; never edit prompts, revise manually, or override quality gates.',

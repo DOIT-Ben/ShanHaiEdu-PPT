@@ -29,6 +29,7 @@ import type {
 } from './ports'
 import { StructuredModelError } from './ports'
 import { revisionContractRepairIssues } from './revision-contract-repair'
+import { compileVisualDeckV4RevisionIssueGroups } from './revision-plan-representability'
 import { transitionRun } from './policy'
 import { allPageNumbers, appendFixedIssueResolutions, appendV4LifecycleEvent, isVisualDeckV4 } from './v4-lifecycle'
 
@@ -162,6 +163,13 @@ export class DeckReviewRunner {
           })
           const draft = deckReviewDraftSchema.parse(raw)
           this.validateReferences(draft, run.id, blueprint, sourceChunks)
+          if (blueprint.renderMode === 'VISUAL_DECK_V4') {
+            const repairableIssues = draft.issues.filter((issue) => issue.severity !== 'INFO'
+              && (draft.qualityScore < DECK_QUALITY_THRESHOLD
+                || issue.severity === 'CRITICAL'
+                || issue.category === 'FACTUAL_RISK'))
+            compileVisualDeckV4RevisionIssueGroups(repairableIssues)
+          }
           return deckReviewSchema.parse({
             ...draft,
             id: `${run.id}:deck-review:r${run.revisionRound}`,
@@ -515,6 +523,8 @@ function deckReviewContractInvalid(error: unknown) {
     'DECK_REVIEW_SOURCE_COVERAGE_INCOMPLETE',
     'DECK_REVIEW_SOURCE_REFERENCE_INVALID',
     'DECK_REVIEW_SLIDE_REFERENCE_INVALID',
+    'REVISION_PLAN_OPERATION_BUDGET_EXCEEDED',
+    'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
   ].includes(error.message)
 }
 

@@ -72,6 +72,41 @@ describe('runtime health monitor', () => {
     await pending
   })
 
+  test('does not let one active Run hide another stuck Run', async () => {
+    const clock = new FixedClock()
+    const health = new RuntimeHealthMonitor(clock, { version: 'test', heartbeatStaleMs: 1_000, tickStaleMs: 10_000 })
+    let progressFirst!: () => void
+    let finishFirst!: () => void
+    let finishSecond!: () => void
+    const firstProgress = new Promise<void>((resolve) => { progressFirst = resolve })
+    const firstDone = new Promise<void>((resolve) => { finishFirst = resolve })
+    const secondDone = new Promise<void>((resolve) => { finishSecond = resolve })
+    const pending = health.runTick(async () => {
+      await Promise.all([
+        health.trackTickOperation('run:first', async () => {
+          await firstProgress
+          health.tickActivity()
+          await firstDone
+        }),
+        health.trackTickOperation('run:second', () => secondDone),
+      ])
+      return { scannedRuns: 2, activeRuns: 2 }
+    })
+    clock.advance(9_000)
+    progressFirst()
+    await Promise.resolve()
+    clock.advance(2_000)
+    health.heartbeat()
+
+    expect(health.readiness()).toMatchObject({
+      status: 'NOT_READY', reason: 'WORKER_TICK_STUCK',
+      worker: { activeOperationCount: 2, tickAgeMs: 11_000 },
+    })
+    finishFirst()
+    finishSecond()
+    await pending
+  })
+
   test('redacts arbitrary error messages and emits allowlisted structured fields', () => {
     expect(safeWorkerErrorCode(new Error('prompt contained private lesson text'))).toBe('WORKER_TICK_FAILED')
     expect(safeWorkerErrorCode(new Error('PROVIDER_TIMEOUT'))).toBe('PROVIDER_TIMEOUT')
