@@ -6,6 +6,7 @@ import { MediaStepRunner } from '../src/core/media-step-runner'
 import type { RunRecord } from '../src/core/ports'
 import { hashInput } from '../src/core/hash'
 import { reserveBudget } from '../src/core/policy'
+import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -55,7 +56,7 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
   const images = new MockImageGenerationPort()
   const clock = new FixedClock()
   await repository.createRun(run(overrides))
-  return { repository, budget, images, runner: new MediaStepRunner({ repository, budget, images, clock }) }
+  return { repository, budget, images, clock, runner: new MediaStepRunner({ repository, budget, images, clock }) }
 }
 
 describe('media step runner', () => {
@@ -102,19 +103,43 @@ describe('media step runner', () => {
     expect(budget.released.size).toBe(1)
   })
 
-  test('keeps budget and requires a human when submission state is unknown', async () => {
-    const { repository, budget, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+  test('recovers an unknown V4 submission with the original key and no duplicate budget hold', async () => {
+    const { repository, budget, images, clock, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')
     const result = await runner.submitSlideImage(request)
 
     expect(result.step).toMatchObject({ status: 'SUBMISSION_UNKNOWN', errorCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' })
-    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10, status: 'NEEDS_HUMAN' })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10, status: 'RECOVERING' })
     expect(budget.released.size).toBe(0)
     const events = await repository.listEvents('run-1')
     expect(events.map((event) => event.type)).toContain('issue.detected')
     expect(events.find((event) => event.type === 'phase.changed')?.payload)
-      .toMatchObject({ from: 'EXECUTING', to: 'NEEDS_HUMAN' })
-    expect(events.map((event) => event.type)).toContain('approval.required')
+      .toMatchObject({ from: 'EXECUTING', to: 'RECOVERING' })
+    expect(events.map((event) => event.type)).toContain('technical.recovery.started')
+    expect(events.map((event) => event.type)).not.toContain('approval.required')
+
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+    const recovered = await runner.submitSlideImage(request)
+
+    expect(recovered.step).toMatchObject({ status: 'WAITING', budgetReservationId: expect.any(String) })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10, status: 'EXECUTING' })
+    expect(images.operations.size).toBe(1)
+    expect(budget.reservations.size).toBe(1)
+  })
+
+  test('routes a V4 model permission failure to administrator technical handling without user approval', async () => {
+    const { repository, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+    images.failNext('MODEL_FORBIDDEN', 'NOT_SUBMITTED')
+
+    const result = await runner.submitSlideImage(request)
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'MODEL_FORBIDDEN' })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN',
+      technicalRecovery: { reason: 'MODEL_FORBIDDEN', retryable: false, active: false },
+    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('releases Agent budget without calling Provider when the host account is frozen', async () => {

@@ -61,6 +61,8 @@ function documents() {
     async reserveCredits(): Promise<never> { throw new Error('budget access is not expected') },
     async settleCredits(): Promise<never> { throw new Error('budget access is not expected') },
     async releaseCredits(): Promise<never> { throw new Error('budget access is not expected') },
+    async finalizeCredits(): Promise<never> { throw new Error('budget access is not expected') },
+    async preflightBatchFinalization(): Promise<never> { throw new Error('budget access is not expected') },
   })
 }
 

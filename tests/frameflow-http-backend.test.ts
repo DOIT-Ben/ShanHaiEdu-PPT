@@ -143,7 +143,7 @@ describe('FrameFlow internal source backend', () => {
     })
   })
 
-  test('settles and releases reservations through distinct idempotent endpoints', async () => {
+  test('settles, releases and atomically finalizes reservations through idempotent endpoints', async () => {
     const requests: Request[] = []
     const backend = new HttpFrameFlowBackend({
       baseUrl: 'http://127.0.0.1:3010',
@@ -151,7 +151,7 @@ describe('FrameFlow internal source backend', () => {
       fetchImpl: async (input, init) => {
         const request = new Request(input, init)
         requests.push(request)
-        const status = request.url.endsWith('/settle') ? 'SETTLED' : 'RELEASED'
+        const status = request.url.endsWith('/settle') ? 'SETTLED' : request.url.endsWith('/release') ? 'RELEASED' : 'FINALIZED'
         return Response.json({
           data: {
             reservationId: 'reservation/with space',
@@ -166,14 +166,35 @@ describe('FrameFlow internal source backend', () => {
 
     await backend.settleCredits({ ...context, idempotencyKey: 'settle:step-1' })
     await backend.releaseCredits({ ...context, idempotencyKey: 'release:step-1' })
+    await backend.finalizeCredits({
+      ...context, batchId: 'batch-1', settledUnits: 7, releasedUnits: 3, idempotencyKey: 'finalize:batch-1',
+    })
 
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
       '/api/internal/ppt-agent/credits/reservations/reservation%2Fwith%20space/settle',
       '/api/internal/ppt-agent/credits/reservations/reservation%2Fwith%20space/release',
+      '/api/internal/ppt-agent/credits/reservations/reservation%2Fwith%20space/finalize',
     ])
     expect(requests.map((request) => request.headers.get('Idempotency-Key'))).toEqual([
       'settle:step-1',
       'release:step-1',
+      'finalize:batch-1',
     ])
+    expect(await requests[2]!.json()).toEqual({ batchId: 'batch-1', settledUnits: 7, releasedUnits: 3 })
+  })
+
+  test('requires an explicit host capability before V4 submits paid images', async () => {
+    let request = new Request('http://localhost')
+    const backend = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async (input, init) => {
+        request = new Request(input, init)
+        return Response.json({ data: { atomicBatchFinalization: true } })
+      },
+    })
+
+    await backend.preflightBatchFinalization({ externalUserId: 'teacher-1' })
+    expect(new URL(request.url).pathname).toBe('/api/internal/ppt-agent/credits/batch-finalization-capability')
+    expect(request.headers.get('X-PPT-Agent-User')).toBe('teacher-1')
   })
 })

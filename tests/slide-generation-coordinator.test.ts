@@ -10,11 +10,13 @@ import {
 } from '../src/adapters/mock-ports'
 import { getActiveBlueprint, revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { blueprintImageRequirements } from '../src/core/blueprint-assets'
+import { refreshGenerationBatch } from '../src/core/generation-batch'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { AssetCandidate, AssetCandidateReviewPort, AssetDiscoveryPort, DocumentResult, RunRecord } from '../src/core/ports'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
+import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { presentationBlueprintSchema } from '../src/presentation-contracts'
 
 function run(budgetUnits = 100): RunRecord {
@@ -144,6 +146,7 @@ candidateReviewer?: AssetCandidateReviewPort) {
   const coordinator = new SlideGenerationCoordinator({
     repository,
     media,
+    batchBudget: budget,
     documents,
     artifacts,
     clock,
@@ -288,7 +291,7 @@ describe('slide generation coordinator', () => {
     ])
   })
 
-  test('submits a V4 deck concurrently while preserving one step and budget allocation per page', async () => {
+  test('submits a V4 deck concurrently through one batch reservation', async () => {
     const { repository, budget, images, coordinator } = await fixture()
     images.submissionDelayMs = 15
     await repository.transact('run-1', (transaction) => {
@@ -300,8 +303,22 @@ describe('slide generation coordinator', () => {
     expect(result).toMatchObject({ status: 'EXECUTING', submitted: 3, total: 3 })
     expect(images.maxConcurrentSubmissions).toBe(3)
     expect(images.operations.size).toBe(3)
-    expect(budget.reservations.size).toBe(3)
+    expect(budget.reservations.size).toBe(0)
+    expect(budget.batchReservations.size).toBe(1)
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 30 })
+    const batch = (await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch')
+    expect(batch?.output).toMatchObject({
+      batchId: expect.stringMatching(/^genbatch_[a-f0-9]{32}$/),
+      submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS',
+      pageCount: 3,
+      accounting: {
+        estimatedUnits: 30, committedUnits: 30, settledUnits: 0,
+        authorization: 'RESERVED', settlement: 'PENDING',
+      },
+      progress: { submitted: 3, completed: 0, failed: 0 },
+      status: 'PROCESSING',
+    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'generation.batch.created')).toBe(true)
   })
 
   test('replays a completed batch without duplicate provider calls or progress events', async () => {
@@ -425,7 +442,49 @@ describe('slide generation coordinator', () => {
     expect(budget.reservations.size).toBe(0)
   })
 
-  test('submits the remaining V4 pages when a provider submission is unknown', async () => {
+  test('pauses a V4 batch when the host definitely rejects its single authorization', async () => {
+    const { repository, budget, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    budget.failNext('HOST_BALANCE_INSUFFICIENT', 'NOT_RESERVED')
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'PAUSED', submitted: 0 })
+    expect(images.operations.size).toBe(0)
+    expect(budget.batchReservations.size).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'PAUSED', resumeState: 'EXECUTING', committedBudgetUnits: 0,
+    })
+  })
+
+  test('stops before image submission when atomic batch finalization is unsupported by the host', async () => {
+    const { repository, budget, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    budget.nextBatchFinalizationPreflightFailure = new Error('HOST_BATCH_FINALIZATION_UNSUPPORTED')
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 0 })
+    expect(images.operations.size).toBe(0)
+    expect(budget.batchReservations.size).toBe(0)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'FAILED', errorCode: 'BATCH_BUDGET_FINALIZATION_UNSUPPORTED' })
+  })
+
+  test('does not re-run the host capability preflight after a batch reservation exists', async () => {
+    const { repository, budget, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    budget.nextBatchFinalizationPreflightFailure = new Error('HOST_BATCH_FINALIZATION_UNSUPPORTED')
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'EXECUTING', submitted: 3 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', committedBudgetUnits: 30 })
+  })
+
+  test('moves a V4 batch into technical recovery when a provider submission is unknown', async () => {
     const { repository, images, coordinator } = await fixture()
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
@@ -433,20 +492,43 @@ describe('slide generation coordinator', () => {
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')
     const result = await coordinator.submitBlueprintImages('run-1', 10)
 
-    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 2, total: 3 })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 30 })
+    expect(result).toMatchObject({ status: 'RECOVERING', submitted: 2, total: 3 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING', committedBudgetUnits: 30 })
     expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image')).toHaveLength(3)
     expect((await repository.listEvents('run-1')).find((event) => event.type === 'generation.completed'))
       .toMatchObject({
         payload: {
-          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false,
-          requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: true,
+          requiresUserAction: false, nextAction: null,
         },
       })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'technical.recovery.started')).toBe(true)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
   })
 
-  test('moves to page review only after every image has a controlled artifact', async () => {
-    const { repository, images, coordinator } = await fixture()
+  test('resubmits a confirmed-unsubmitted V4 batch page after recovery without changing its image key', async () => {
+    const { repository, images, clock, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    const failedKey = 'run-1:slide:1:image:r0:v1'
+    images.failNext('NO_HEALTHY_ROUTE_BEFORE_SUBMIT', 'NOT_SUBMITTED')
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'RECOVERING', total: 3 })
+    expect(images.operations.has(failedKey)).toBe(false)
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'EXECUTING', submitted: 3, total: 3 })
+    expect(images.operations.has(failedKey)).toBe(true)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', committedBudgetUnits: 30 })
+  })
+
+  test('settles a V4 batch once after every image has a controlled artifact', async () => {
+    const { repository, images, budget, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
     await coordinator.submitBlueprintImages('run-1', 10)
     const keys = [...images.operations.keys()]
     images.complete(keys[0]!, 'artifact-1')
@@ -466,10 +548,157 @@ describe('slide generation coordinator', () => {
       total: 3,
       artifactIds: ['artifact-1', 'artifact-2', 'artifact-3'],
     })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', version: 5 })
+    expect(budget.settled.size).toBe(1)
+    expect(budget.reservations.size).toBe(0)
+    expect(budget.batchReservations.size).toBe(1)
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'SETTLED', settledUnits: 30 } } })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', version: 3 })
     expect((await repository.getRunEventSnapshot('run-1')).progress).toContainEqual(expect.objectContaining({
       stepId: 'run-1:completed-pages', completed: 3, total: 3,
     }))
+  })
+
+  test('recovers a V4 batch settlement with its original reservation and idempotency key', async () => {
+    const { repository, images, budget, coordinator, clock } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    const keys = [...images.operations.keys()]
+    for (const [index, key] of keys.entries()) images.complete(key, `artifact-${index + 1}`)
+    budget.failNextSettlement('HOST_SETTLEMENT_UNKNOWN')
+
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'RECOVERING', completed: 3 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      technicalRecovery: { resumeState: 'EXECUTING', reason: 'BATCH_BUDGET_FINALIZATION_UNKNOWN', active: true },
+    })
+    expect(budget.batchReservations.size).toBe(1)
+    expect(budget.reservations.size).toBe(0)
+    const batchBeforeRecovery = (await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch')!
+    const reservationId = batchBeforeRecovery.budgetReservationId
+
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 3 })
+    const batchAfterRecovery = (await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch')!
+    expect(batchAfterRecovery).toMatchObject({
+      budgetReservationId: reservationId,
+      status: 'COMPLETED',
+      output: { accounting: { settlement: 'SETTLED' } },
+    })
+    expect(budget.batchReservations.size).toBe(1)
+    expect(budget.settled.size).toBe(1)
+  })
+
+  test('releases one V4 batch authorization when every page is definitely unsubmitted', async () => {
+    const { repository, images, budget, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    for (const key of images.operations.keys()) images.fail(key, 'INVALID_IMAGE_PROMPT', 'NOT_CHARGED')
+
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 0 })
+    expect(budget.released.size).toBe(1)
+    expect(budget.reservations.size).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'RELEASED', releasedUnits: 30 } } })
+  })
+
+  test('settles a cancelled V4 batch after its submitted pages complete during terminal reconciliation', async () => {
+    const { repository, images, budget, media, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+    })
+    for (const [index, key] of [...images.operations.keys()].entries()) images.complete(key, `late-artifact-${index + 1}`)
+
+    await media.reconcilePendingRun('run-1')
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 30 })
+    expect(budget.settled.size).toBe(1)
+    expect(budget.reservations.size).toBe(0)
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'SETTLED', settledUnits: 30 } } })
+  })
+
+  test('releases a cancelled V4 batch after every submitted page is confirmed uncharged', async () => {
+    const { repository, images, budget, media, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+    })
+    for (const key of images.operations.keys()) images.fail(key, 'CANCELLED_BEFORE_START', 'NOT_CHARGED')
+
+    await media.reconcilePendingRun('run-1')
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 0 })
+    expect(budget.released.size).toBe(1)
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'RELEASED', releasedUnits: 30 } } })
+  })
+
+  test('atomically settles completed pages and releases uncharged pages after cancellation', async () => {
+    const { repository, images, budget, media, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+    })
+    const [first, ...remaining] = [...images.operations.keys()]
+    images.complete(first!, 'late-artifact-1')
+    for (const key of remaining) images.fail(key, 'CANCELLED_BEFORE_START', 'NOT_CHARGED')
+
+    await media.reconcilePendingRun('run-1')
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      settledUnits: 10,
+      releasedUnits: 20,
+      idempotencyKey: 'finalize:run-1:generation-batch:r0',
+    })])
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 10 })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: {
+        settlement: 'SETTLED', settledUnits: 10, releasedUnits: 20, reconciliationUnits: 0,
+      } } })
+  })
+
+  test('retries a cancelled batch finalization with the original atomic idempotency key', async () => {
+    const { repository, images, budget, media, coordinator, clock } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+    })
+    for (const [index, key] of [...images.operations.keys()].entries()) images.complete(key, `late-artifact-${index + 1}`)
+    await media.reconcilePendingRun('run-1')
+    budget.failNextSettlement('HOST_BATCH_FINALIZATION_TIMEOUT')
+
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(false)
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'BILLING_UNKNOWN', errorCode: 'BATCH_BUDGET_FINALIZATION_UNKNOWN' })
+    await refreshGenerationBatch({ repository, clock, runId: 'run-1', revisionRound: 0 })
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'BILLING_UNKNOWN', output: { accounting: { settlement: 'UNKNOWN' } } })
+
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(budget.batchFinalizationAttempts).toHaveLength(2)
+    expect(new Set(budget.batchFinalizationAttempts.map((input) => input.idempotencyKey))).toEqual(
+      new Set(['finalize:run-1:generation-batch:r0']),
+    )
   })
 
   test('submits approved page designs one page at a time and waits for completion before the next page', async () => {

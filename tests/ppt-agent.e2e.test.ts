@@ -155,7 +155,7 @@ describe('PPT Agent mock end-to-end', () => {
     expect(await repository.getRun(runId)).toMatchObject({ status: 'EXECUTING' })
 
     const media = new MediaStepRunner({ repository, budget, images, clock })
-    const generation = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock })
+    const generation = new SlideGenerationCoordinator({ repository, media, batchBudget: budget, documents, artifacts, clock })
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
       expect(await generation.submitBlueprintImages(runId, 1)).toMatchObject({ submitted: pageNumber, total: pageCount })
       expect(images.operations.size).toBe(pageNumber)
@@ -281,7 +281,7 @@ describe('PPT Agent mock end-to-end', () => {
     expect(approved.status).toBe('EXECUTING')
 
     const media = new MediaStepRunner({ repository, budget, images, clock })
-    const generation = new SlideGenerationCoordinator({ repository, media, documents, artifacts, clock })
+    const generation = new SlideGenerationCoordinator({ repository, media, batchBudget: budget, documents, artifacts, clock })
     const submitted = await generation.submitBlueprintImages(runId, 2)
     expect(submitted).toMatchObject({ submitted: 15, total: 15 })
     expect(images.operations.size).toBe(15)

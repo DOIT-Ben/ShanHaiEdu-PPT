@@ -32,7 +32,8 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 | `src/adapters/` | 内存、FrameFlow、ShanHaiEdu 和 Provider 适配器 |
 | `tests/` | 合同、策略、恢复和宿主兼容测试 |
 | `docs/decisions/` | 架构决策 |
-| `docs/frameflow-v4-integration.md` | FrameFlow 对接 V4 的 HTTP、SSE、幂等和交付接口文档 |
+| `docs/ppt-agent-v4-api.md` | 宿主无关的 V4 HTTP、SSE、幂等、批次账务和交付接口文档 |
+| `docs/frameflow-v4-integration.md` | FrameFlow 作为首个宿主的接入示例与迁移约束 |
 | `docs/deployment-20260723-hardening-plan.md` | 本轮加固的发布、备份、验证与回退 runbook |
 | `docs/deployment-20260723-hardening.md` | 本轮加固正式部署、备份与回退记录 |
 | `docs/shanhai-v1-integration.md` | ShanHaiEdu V1 节点、身份、制品与幂等接入规范 |

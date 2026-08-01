@@ -1,5 +1,5 @@
 import type { AgentRepository, ClockPort, RunRecord } from './ports'
-import { isPendingMediaReconciliationStep } from './media-reconciliation'
+import { isPendingRunReconciliationStep } from './media-reconciliation'
 import { isTerminalStatus } from './policy'
 
 const RUNNABLE_STATES = new Set([
@@ -9,6 +9,7 @@ const RUNNABLE_STATES = new Set([
   'DECK_REVIEW',
   'REVISING',
   'DELIVERING',
+  'RECOVERING',
 ])
 
 export type RunLease = Readonly<{
@@ -75,7 +76,7 @@ export async function acquireMediaReconciliationLease(input: Readonly<{
   return input.repository.transact(input.runId, (transaction) => {
     const now = input.clock.now()
     const hasPendingMedia = transaction.listSteps()
-      .some(isPendingMediaReconciliationStep)
+      .some(isPendingRunReconciliationStep)
     if (!hasPendingMedia || isLeaseActive(transaction.run, now)) return null
     const lease: RunLease = {
       token: input.token,

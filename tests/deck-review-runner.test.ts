@@ -517,7 +517,7 @@ describe('deck review runner', () => {
     expect(result).toMatchObject({
       review: null,
       step: {
-        status: 'FAILED',
+        status: 'RUNNING',
         errorCode: 'PROVIDER_TIMEOUT',
         output: {
           diagnostic: {
@@ -533,9 +533,12 @@ describe('deck review runner', () => {
     })
     const events = await repository.listEvents('run-1')
     expect(events.find((event) => event.type === 'tool.failed')?.payload)
-      .toMatchObject({ errorCode: 'PROVIDER_TIMEOUT', retryable: false })
+      .toMatchObject({ errorCode: 'PROVIDER_TIMEOUT', retryable: true })
     expect(events.find((event) => event.type === 'deck_review.completed')?.payload)
-      .toMatchObject({ reason: 'DECK_REVIEW_FAILED', retryable: false })
+      .toMatchObject({ reason: 'DECK_REVIEW_FAILED', retryable: true, requiresUserAction: false, nextAction: null })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING' })
+    expect(events.some((event) => event.type === 'technical.recovery.started')).toBe(true)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('replays a completed deck review without another evaluator call', async () => {

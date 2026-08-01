@@ -373,6 +373,25 @@ describe('SQLite repository', () => {
     repository.close()
   })
 
+  test('selects only due technical recoveries without starving active runs', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({
+      ...run(), id: 'future-recovery', creationKey: 'future-recovery-create', status: 'RECOVERING',
+      technicalRecovery: {
+        resumeState: 'EXECUTING', reason: 'PROVIDER_TIMEOUT', retryable: true,
+        attempt: 1, maxAttempts: 5, nextAttemptAt: '2026-07-22T00:01:00.000Z', active: true,
+      },
+    })
+    await repository.createRun({ ...run(), id: 'executing', creationKey: 'executing-create' })
+
+    expect((await repository.listRunnableRuns({ now: '2026-07-22T00:00:00.000Z', limit: 2 }))
+      .map((candidate) => candidate.id)).toEqual(['executing'])
+    expect((await repository.listRunnableRuns({ now: '2026-07-22T00:01:00.000Z', limit: 2 }))
+      .map((candidate) => candidate.id)).toEqual(['executing', 'future-recovery'])
+    repository.close()
+  })
+
   test('uses the owner index for stable keyset pages', async () => {
     const filename = await databasePath()
     const repository = new SqliteAgentRepository(filename)
@@ -487,6 +506,21 @@ describe('SQLite repository', () => {
     await repository.createRun({ ...run(), status: 'NEEDS_HUMAN' })
     await repository.transact('run-1', (transaction) => {
       transaction.putStep({ ...waitingStep(), status: 'BILLING_UNKNOWN', errorCode: 'RATE_LIMITED' })
+    })
+
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    repository.close()
+  })
+
+  test('keeps a billing-unknown V4 batch finalization visible without a pending page media operation', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({ ...run(), status: 'CANCELLED' })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        ...waitingStep(), tool: 'generate_image_batch', status: 'BILLING_UNKNOWN',
+        idempotencyKey: 'run-1:generation-batch:r0', externalOperationId: null,
+      })
     })
 
     expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])

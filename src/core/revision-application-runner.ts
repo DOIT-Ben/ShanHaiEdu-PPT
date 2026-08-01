@@ -22,6 +22,7 @@ import type {
 } from './ports'
 import { StructuredModelError } from './ports'
 import { transitionRun } from './policy'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import {
   MAX_REVISION_CONTRACT_ATTEMPTS,
   revisionContractAttemptKey,
@@ -385,22 +386,37 @@ export class RevisionApplicationRunner {
       }
       if (step.status !== 'RUNNING') throw new Error('REVISION_APPLICATION_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
+      const policy = v4TechnicalFailure ? transaction.run : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updatedStep: StepRecord = {
         ...step,
-        status: 'FAILED',
+        status: v4TechnicalFailure ? 'RUNNING' : 'FAILED',
         errorCode: diagnostic.errorCode,
         output: { diagnostic },
         updatedAt: now,
       }
       transaction.putStep(updatedStep)
-      transaction.putRun(updatedRun)
+      if (!v4TechnicalFailure) transaction.putRun(updatedRun)
+      const technicalRecovery = v4TechnicalFailure
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
+        : null
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: false },
+        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: technicalRecovery?.technicalRecovery?.retryable ?? false },
       })
+      if (technicalRecovery) {
+        const details = revisionDetails(plan)
+        appendV4LifecycleEvent(transaction, 'revision.completed', {
+          completed: 0,
+          total: details.pageNumbers.length,
+          ...details,
+          reason: 'REVISION_FAILED',
+          retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+        })
+        return { status: transaction.run.status, step: updatedStep, blueprint: null, requiresMedia: requiresRevisionMedia(plan), replayed: false }
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',

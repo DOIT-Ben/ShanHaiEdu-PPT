@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { layoutPresentationText } from './presentation-text-layout'
+import { releaseIdentitySchema } from './release-identity'
 import { visualDeckV4ProposalSchema } from './visual-deck-v4-contracts'
 
 const identifierSchema = z.string().trim().min(1).max(160)
@@ -502,6 +503,7 @@ export const deliveryRecordSchema = z.object({
     mimeType: z.literal('application/vnd.openxmlformats-officedocument.presentationml.presentation'),
   }).strict(),
   sources: deliveryArtifactSchema.extend({ mimeType: z.literal('application/json') }).strict().optional(),
+  release: releaseIdentitySchema.optional(),
   createdAt: z.string().datetime(),
 }).strict()
 

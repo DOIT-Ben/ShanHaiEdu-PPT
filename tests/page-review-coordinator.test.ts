@@ -569,17 +569,19 @@ describe('page review coordinator', () => {
       runOverrides: { presentationMode: 'VISUAL_DECK_V4' },
     })
 
-    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'RECOVERING' })
     const completed = (await repository.listEvents('run-1'))
       .filter((event) => event.type === 'page_review.completed')
     expect(completed).toHaveLength(1)
     expect(completed[0]).toMatchObject({
       payload: {
         completed: 0, total: 3, pageNumbers: [1, 2, 3],
-        reason: 'PAGE_REVIEW_FAILED', retryable: false,
-        requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+        reason: 'PAGE_REVIEW_FAILED', retryable: true,
+        requiresUserAction: false, nextAction: null,
       },
     })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'technical.recovery.started')).toBe(true)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('prioritizes an execution failure over content rejections in the same v4 batch', async () => {
@@ -610,7 +612,7 @@ describe('page review coordinator', () => {
     })
 
     expect(await coordinator.reviewAll('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN', approved: 0, rejected: 1, total: 3,
+      status: 'RECOVERING', approved: 0, rejected: 1, total: 3,
     })
     const events = await repository.listEvents('run-1')
     expect(events.filter((event) => event.type === 'phase.changed')).toHaveLength(1)
@@ -620,7 +622,7 @@ describe('page review coordinator', () => {
       completed: 1,
       total: 3,
       reason: 'PAGE_REVIEW_FAILED',
-      retryable: false,
+      retryable: true,
     })
   })
 })

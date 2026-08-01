@@ -53,10 +53,13 @@ const envelopeSchema = z.object({ data: z.union([readySchema, failedSchema]) }).
 const creditEnvelopeSchema = z.object({
   data: z.object({
     reservationId: identifierSchema,
-    status: z.enum(['RESERVED', 'SETTLED', 'RELEASED']),
+    status: z.enum(['RESERVED', 'SETTLED', 'RELEASED', 'FINALIZED']),
     reservedCredits: z.number().nonnegative(),
     settledCredits: z.number().nonnegative().nullable(),
   }).strict(),
+}).strict()
+const batchFinalizationCapabilityEnvelopeSchema = z.object({
+  data: z.object({ atomicBatchFinalization: z.literal(true) }).strict(),
 }).strict()
 const errorEnvelopeSchema = z.object({
   error: z.object({ code: z.string().trim().min(1).max(160) }).passthrough(),
@@ -208,6 +211,56 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
 
   async releaseCredits(input: Parameters<FrameFlowBackendClient['releaseCredits']>[0]) {
     await this.completeCreditOperation('release', input, 'RELEASED')
+  }
+
+  async finalizeCredits(input: Parameters<FrameFlowBackendClient['finalizeCredits']>[0]) {
+    let response: Response
+    try {
+      response = await this.fetchImpl(
+        `${this.baseUrl}/api/internal/ppt-agent/credits/reservations/${encodeURIComponent(input.reservationId)}/finalize`,
+        {
+          method: 'POST',
+          headers: this.creditHeaders(input.externalUserId, input.idempotencyKey, true),
+          body: JSON.stringify({
+            batchId: input.batchId,
+            settledUnits: input.settledUnits,
+            releasedUnits: input.releasedUnits,
+          }),
+          signal: AbortSignal.timeout(15_000),
+        },
+      )
+    } catch {
+      throw new Error('HOST_BUDGET_FINALIZE_UNKNOWN')
+    }
+    if (!response.ok) {
+      throw new Error(await this.errorCode(response, `HOST_BUDGET_FINALIZE_HTTP_${response.status}`))
+    }
+    const parsed = creditEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success || parsed.data.data.reservationId !== input.reservationId
+      || parsed.data.data.status !== 'FINALIZED') {
+      throw new Error('HOST_BUDGET_FINALIZE_RESPONSE_INVALID')
+    }
+  }
+
+  async preflightBatchFinalization(input: Parameters<FrameFlowBackendClient['preflightBatchFinalization']>[0]) {
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/api/internal/ppt-agent/credits/batch-finalization-capability`, {
+        headers: this.creditHeaders(input.externalUserId, 'ppt-agent:batch-finalization-preflight'),
+        signal: AbortSignal.timeout(5_000),
+      })
+    } catch {
+      throw new Error('HOST_BATCH_FINALIZATION_CAPABILITY_UNKNOWN')
+    }
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      throw new Error('HOST_BATCH_FINALIZATION_UNSUPPORTED')
+    }
+    if (!response.ok) {
+      throw new Error(await this.errorCode(response, `HOST_BATCH_FINALIZATION_CAPABILITY_HTTP_${response.status}`))
+    }
+    if (!batchFinalizationCapabilityEnvelopeSchema.safeParse(await response.json().catch(() => null)).success) {
+      throw new Error('HOST_BATCH_FINALIZATION_UNSUPPORTED')
+    }
   }
 
   private creditHeaders(userId: string, idempotencyKey: string, json = false) {

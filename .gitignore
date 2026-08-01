@@ -5,3 +5,5 @@ coverage/
 .env.*
 !.env.example
 *.log
+# Generated for an immutable deployment only; never commit a stale release identity.
+release-manifest.json

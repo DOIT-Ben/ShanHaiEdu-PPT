@@ -16,6 +16,7 @@ import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRe
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
+import { buildIdentity, releaseIdentityForMode, type BuildIdentity } from '../release-identity'
 import {
   allPageNumbers,
   activeRevisionLifecycle,
@@ -48,6 +49,7 @@ export class RunService {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     clock: ClockPort
+    buildIdentity?: BuildIdentity
   }>) {}
 
   async create(request: unknown, idempotencyKey: string) {
@@ -90,6 +92,7 @@ export class RunService {
       assetAcquisitionPolicy: parsed.data.assetAcquisitionPolicy,
       maxVisualAssetsPerSlide: parsed.data.maxVisualAssetsPerSlide,
       ...(parsed.data.visualDeckV4 ? { visualDeckV4: parsed.data.visualDeckV4 } : {}),
+      release: releaseIdentityForMode(buildIdentity(this.dependencies.buildIdentity), parsed.data.presentationMode),
       maxRevisionRounds,
       revisionRound: 0,
       planningAttempt: 0,

@@ -947,6 +947,28 @@ describe('gateway courseware model', () => {
     }
   })
 
+  test('classifies a direct gateway 403 as a non-retryable model permission failure', async () => {
+    const original = console.error
+    console.error = () => undefined
+    try {
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({
+          error: { code: 'model_forbidden', type: 'insufficient_permissions' },
+        }, { status: 403, headers: { 'x-request-id': 'request-model-forbidden' } }),
+      })
+      await expect(model.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
+        idempotencyKey: 'plan-model-forbidden',
+      })).rejects.toMatchObject({
+        code: 'MODEL_FORBIDDEN', retryable: false, requestId: 'request-model-forbidden', model: 'gpt-5.6',
+      })
+    } finally {
+      console.error = original
+    }
+  })
+
   test('classifies an aborted gateway request as a provider timeout', async () => {
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',

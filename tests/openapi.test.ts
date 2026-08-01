@@ -23,7 +23,7 @@ describe('OpenAPI v1 contract', () => {
     }
 
     expect(document.openapi).toBe('3.1.0')
-    expect(document.info.version).toBe('1.0.0')
+    expect(document.info.version).toBe('4.0.0')
     expect(document.security).toEqual([{ bearerAuth: [] }])
     expect(Object.keys(document.paths).sort()).toEqual([
       '/health/live',
@@ -69,6 +69,17 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(document.paths['/v1/runs']?.get)).toContain('keyset')
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
+    expect(document.components.schemas.PublicRun?.properties?.technicalRecovery).toBeDefined()
+    expect(document.components.schemas.PublicRun?.properties?.generationBatch).toBeDefined()
+    expect(document.components.schemas.PublicRun?.properties?.release).toBeDefined()
+    expect(document.components.schemas.TechnicalRecovery).toBeDefined()
+    expect(document.components.schemas.TechnicalRecovery?.properties?.resumeState?.enum)
+      .toEqual(['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING'])
+    expect(document.components.schemas.GenerationBatch).toBeDefined()
+    expect(document.components.schemas.GenerationBatch?.properties?.accounting).toBeDefined()
+    expect(JSON.stringify(document.components.schemas.GenerationBatch?.properties?.accounting))
+      .toContain('"settlement"')
+    expect(document.components.schemas.ReleaseIdentity).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.presentationMode?.enum)
       .toContain('VISUAL_DECK_V4')
     expect(document.components.schemas.CreateRunRequest?.properties?.assetAcquisitionPolicy?.enum)
@@ -84,9 +95,15 @@ describe('OpenAPI v1 contract', () => {
     ]))
     expect(document.components.schemas.AgentEvent?.oneOf?.map((item) => item.$ref)).toEqual([
       '#/components/schemas/V4LifecycleEvent',
+      '#/components/schemas/GenerationBatchEvent',
+      '#/components/schemas/TechnicalRecoveryEvent',
       '#/components/schemas/LegacyTerminalAgentEvent',
       '#/components/schemas/ForwardCompatibleAgentEvent',
     ])
+    expect(JSON.stringify(document.components.schemas.GenerationBatchEvent))
+      .toContain('generation.batch.updated')
+    expect(JSON.stringify(document.components.schemas.TechnicalRecoveryEvent))
+      .toContain('technical.recovery.completed')
     expect(document.components.schemas.V4LifecyclePayload?.properties?.reason?.enum).toEqual(expect.arrayContaining([
       'BUDGET_INSUFFICIENT', 'PROVIDER_TEMPORARILY_UNAVAILABLE', 'REVISION_LIMIT_REACHED',
       'USER_CONFIRMATION_REQUIRED',

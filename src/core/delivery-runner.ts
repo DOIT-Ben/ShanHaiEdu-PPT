@@ -20,6 +20,7 @@ import type {
   StepRecord,
 } from './ports'
 import { transitionRun } from './policy'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import {
   allPageNumbers,
   appendV4LifecycleEvent,
@@ -156,6 +157,7 @@ export class DeliveryRunner {
           sha256: sources.sha256,
           byteLength: sourcesBytes.length,
         },
+        ...(run.release ? { release: run.release } : {}),
         createdAt: this.dependencies.clock.now().toISOString(),
       })
       return this.complete(run, idempotencyKey, delivery)
@@ -279,16 +281,30 @@ export class DeliveryRunner {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)
+      const policy = v4TechnicalFailure ? transaction.run : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updatedStep: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
       transaction.putStep(updatedStep)
-      transaction.putRun(updatedRun)
+      if (!v4TechnicalFailure) transaction.putRun(updatedRun)
+      const technicalRecovery = v4TechnicalFailure
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
+        : null
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode, retryable: true },
+        payload: { stepId: step.id, errorCode, retryable: technicalRecovery?.technicalRecovery?.retryable ?? true },
       })
+      if (technicalRecovery) {
+        appendV4LifecycleEvent(transaction, 'delivery.completed', {
+          completed: 0,
+          total: 1,
+          pageNumbers: allPageNumbers(transaction.run),
+          reason: 'DELIVERY_FAILED',
+          retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+        })
+        return { status: transaction.run.status, step: updatedStep, delivery: null, replayed: false }
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',

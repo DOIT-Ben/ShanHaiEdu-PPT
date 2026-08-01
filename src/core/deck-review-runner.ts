@@ -31,6 +31,7 @@ import { StructuredModelError } from './ports'
 import { revisionContractRepairIssues } from './revision-contract-repair'
 import { compileVisualDeckV4RevisionIssueGroups } from './revision-plan-representability'
 import { transitionRun } from './policy'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import { allPageNumbers, appendFixedIssueResolutions, appendV4LifecycleEvent, isVisualDeckV4 } from './v4-lifecycle'
 
 export const DECK_QUALITY_THRESHOLD = 80
@@ -384,22 +385,34 @@ export class DeckReviewRunner {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
       const transitionRequired = fromStatus !== 'NEEDS_HUMAN'
-      const policy = transitionRequired ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
+      const policy = transitionRequired && !v4TechnicalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
       const updatedStep: StepRecord = {
         ...step,
-        status: 'FAILED',
+        status: v4TechnicalFailure ? 'RUNNING' : 'FAILED',
         errorCode: diagnostic.errorCode,
         output: { diagnostic },
         updatedAt: now,
       }
       transaction.putStep(updatedStep)
-      if (transitionRequired) transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      if (transitionRequired && !v4TechnicalFailure) transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      const technicalRecovery = v4TechnicalFailure
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
+        : null
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: false },
+        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: technicalRecovery?.technicalRecovery?.retryable ?? false },
       })
-      if (transitionRequired) {
+      if (technicalRecovery) {
+        appendV4LifecycleEvent(transaction, 'deck_review.completed', {
+          completed: 0,
+          total: 1,
+          pageNumbers: allPageNumbers(transaction.run),
+          reason: 'DECK_REVIEW_FAILED',
+          retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+        })
+      } else if (transitionRequired) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',

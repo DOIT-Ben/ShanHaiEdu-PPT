@@ -1,6 +1,7 @@
 import { CONTRACT_VERSION } from '../contracts'
 import { revisionPlanSchema, type PresentationBlueprint } from '../presentation-contracts'
 import { mapWithConcurrency } from './concurrency'
+import { beginTechnicalRecovery } from './technical-recovery'
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements, latestCompletedAssetStep, visualDeckV4AllowedCopy } from './blueprint-assets'
 import { hashInput } from './hash'
@@ -354,6 +355,23 @@ export class PageReviewCoordinator {
     await this.dependencies.repository.transact(runId, (transaction) => {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
+      const technical = transaction.run.presentationMode === 'VISUAL_DECK_V4' && !reason.includes('REJECTED')
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, reason)
+        : null
+      if (technical || fromStatus === 'RECOVERING') {
+        for (const step of transaction.listSteps()) {
+          if (step.tool !== 'review_slide_image' || step.status !== 'FAILED') continue
+          transaction.putStep({ ...step, status: 'RESERVED', errorCode: null, output: null, updatedAt: now })
+        }
+        appendV4LifecycleEvent(transaction, 'page_review.completed', {
+          completed: progress?.completed ?? 0,
+          total: progress?.total ?? transaction.run.slideCount,
+          pageNumbers: progress?.pageNumbers ?? allPageNumbers(transaction.run),
+          reason: 'PAGE_REVIEW_FAILED',
+          retryable: technical?.technicalRecovery?.retryable ?? false,
+        })
+        return
+      }
       if (fromStatus !== 'NEEDS_HUMAN') {
         const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
         transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })

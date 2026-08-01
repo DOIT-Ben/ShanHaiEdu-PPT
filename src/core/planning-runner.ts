@@ -21,6 +21,7 @@ import type {
 } from './ports'
 import { transitionRun } from './policy'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import {
   createVisualDeckV4BlueprintFromProposal,
   type VisualDeckV4PlanningStage,
@@ -183,7 +184,18 @@ export class PlanningRunner {
       presentationMode,
       ...(visualDeckV4 ? { visualDeckV4 } : {}),
     }
-    const document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
+    let document: DocumentResult
+    try {
+      document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
+    } catch (error) {
+      const errorCode = error instanceof Error ? error.message : 'SOURCE_RESOLUTION_FAILED'
+      if (presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)) {
+        const step = await this.failTechnicalSourceResolution(effectiveInput, errorCode)
+        return { step, blueprint: null, replayed: false }
+      }
+      throw error
+    }
+    await this.completeTechnicalSourceResolution(effectiveInput, document)
     const prepared = await this.prepare(effectiveInput, document)
     if (prepared.replayed) return prepared
 
@@ -1077,10 +1089,16 @@ export class PlanningRunner {
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'FAILED') return step
       const now = this.dependencies.clock.now().toISOString()
-      const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
-      const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
+      const technicalRecovery = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && isTechnicalFailureCode(failure.errorCode)
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, failure.errorCode)
+        : null
+      const policy = technicalRecovery ? null : transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const run: RunRecord = policy
+        ? { ...transaction.run, ...policy, updatedAt: now }
+        : transaction.run
       const updated: StepRecord = { ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: now }
-      transaction.putRun(run)
+      if (!technicalRecovery) transaction.putRun(run)
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -1103,22 +1121,100 @@ export class PlanningRunner {
           planningFailure: failure,
         },
       })
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'phase.changed',
-        payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: failure.errorCode },
-      })
+      if (!technicalRecovery) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'phase.changed',
+          payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: failure.errorCode },
+        })
+      }
       appendV4LifecycleEvent(transaction, 'planning.completed', {
         completed: 0,
         total: 1,
         reason: ['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'PROVIDER_UNAVAILABLE'].includes(failure.errorCode)
           ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
           : 'PLANNING_FAILED',
-        retryable: failure.retryable,
-        requiresUserAction: true,
-        nextAction: failure.retryable ? 'RETRY' : 'REVIEW_RESULT',
+        retryable: technicalRecovery?.technicalRecovery?.retryable ?? failure.retryable,
+        requiresUserAction: !technicalRecovery,
+        nextAction: technicalRecovery ? null : failure.retryable ? 'RETRY' : 'REVIEW_RESULT',
       })
       return updated
+    })
+  }
+
+  /** Records a source-port outage before a planning step exists, preserving the original planning key. */
+  private async failTechnicalSourceResolution(input: PlanPresentationInput, errorCode: string) {
+    const idempotencyKey = `${input.idempotencyKey}:source-resolution`
+    const inputHash = hashInput({ tool: 'resolve_source', source: input.source })
+    return this.dependencies.repository.transact(input.runId, (transaction) => {
+      const existing = transaction.getStep(idempotencyKey)
+      if (existing && (existing.inputHash !== inputHash || existing.tool !== 'resolve_source')) {
+        throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      const step: StepRecord = existing
+        ? { ...existing, status: 'FAILED', errorCode, updatedAt: now }
+        : {
+            id: `step-${hashInput({ idempotencyKey }).slice(0, 28)}`,
+            runId: input.runId,
+            idempotencyKey,
+            inputHash,
+            tool: 'resolve_source',
+            status: 'FAILED',
+            budgetUnits: 0,
+            budgetReservationId: null,
+            externalOperationId: null,
+            errorCode,
+            output: null,
+            createdAt: now,
+            updatedAt: now,
+          }
+      transaction.putStep(step)
+      const recovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
+      if (!recovery) throw new Error('TECHNICAL_SOURCE_RECOVERY_NOT_ALLOWED')
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.failed',
+        payload: { stepId: step.id, errorCode, retryable: recovery.technicalRecovery?.retryable ?? false },
+      })
+      appendV4LifecycleEvent(transaction, 'planning.completed', {
+        completed: 0,
+        total: 1,
+        reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+        retryable: recovery.technicalRecovery?.retryable ?? false,
+      })
+      return step
+    })
+  }
+
+  /** Closes the prior durable source outage before the original planning key resumes. */
+  private async completeTechnicalSourceResolution(input: PlanPresentationInput, document: DocumentResult) {
+    const idempotencyKey = `${input.idempotencyKey}:source-resolution`
+    const inputHash = hashInput({ tool: 'resolve_source', source: input.source })
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      const existing = transaction.getStep(idempotencyKey)
+      if (!existing) return
+      if (existing.inputHash !== inputHash || existing.tool !== 'resolve_source') {
+        throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      }
+      if (existing.status === 'COMPLETED') return
+      const updated: StepRecord = {
+        ...existing,
+        status: 'COMPLETED',
+        errorCode: null,
+        output: {
+          name: document.name,
+          chunkCount: document.chunks.length,
+          isComplete: document.isComplete,
+        },
+        updatedAt: this.dependencies.clock.now().toISOString(),
+      }
+      transaction.putStep(updated)
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: updated.id, summary: '来源资料已恢复可访问，继续执行原规划任务' },
+      })
     })
   }
 

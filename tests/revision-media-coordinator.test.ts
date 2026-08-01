@@ -16,6 +16,7 @@ import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
+import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
@@ -525,7 +526,7 @@ describe('revision media coordinator', () => {
     }
   })
 
-  test('moves a v4 revision to human review when the redraw provider fails before submission', async () => {
+  test('moves a v4 revision to technical recovery when the redraw provider route is unavailable', async () => {
     const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
@@ -535,15 +536,35 @@ describe('revision media coordinator', () => {
     await coordinator.submit('run-1', 5)
     const result = await coordinator.refresh('run-1')
 
-    expect(result.status).toBe('NEEDS_HUMAN')
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(result.status).toBe('RECOVERING')
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING' })
     expect((await repository.listEvents('run-1')).find((event) => event.type === 'revision.completed'))
       .toMatchObject({
         payload: {
-          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false,
-          requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: true,
+          requiresUserAction: false, nextAction: null,
         },
       })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'technical.recovery.started')).toBe(true)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('resubmits a confirmed-unsubmitted V4 redraw after recovery with the original image key', async () => {
+    const { repository, images, clock, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    const key = 'run-1:slide:2:image:r1:v1'
+    images.failNext('NO_HEALTHY_ROUTE_BEFORE_SUBMIT', 'NOT_SUBMITTED')
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'RECOVERING', submitted: 1, total: 1 })
+    expect(images.operations.size).toBe(0)
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(images.operations.get(key)).toBeDefined()
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 25, status: 'REVISING' })
   })
 
   test('ends a v4 revision once when the submitted redraw later fails', async () => {

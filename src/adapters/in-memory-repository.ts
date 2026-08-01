@@ -10,7 +10,7 @@ import type {
   TenantRevisionRoundsSettings,
 } from '../core/ports'
 import type { DeliveryRecord } from '../presentation-contracts'
-import { isPendingMediaReconciliationStep } from '../core/media-reconciliation'
+import { isPendingRunReconciliationStep } from '../core/media-reconciliation'
 import { buildOperationsReport } from '../core/operations'
 
 type StoredRun = {
@@ -95,7 +95,11 @@ export class InMemoryAgentRepository implements AgentRepository {
     const now = Date.parse(input.now)
     return [...this.#runs.values()]
       .map((stored) => stored.run)
-      .filter((run) => ['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING'].includes(run.status))
+      .filter((run) => ['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING', 'RECOVERING'].includes(run.status))
+      .filter((run) => run.status !== 'RECOVERING'
+        || (run.technicalRecovery?.active === true
+          && run.technicalRecovery.nextAttemptAt !== null
+          && Date.parse(run.technicalRecovery.nextAttemptAt) <= now))
       .filter((run) => run.leaseUntil === null || Date.parse(run.leaseUntil) <= now)
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id))
       .slice(0, input.limit)
@@ -104,7 +108,7 @@ export class InMemoryAgentRepository implements AgentRepository {
 
   async listRunsWithPendingMedia(limit: number) {
     return [...this.#runs.values()]
-      .filter((stored) => [...stored.steps.values()].some(isPendingMediaReconciliationStep))
+      .filter((stored) => [...stored.steps.values()].some(isPendingRunReconciliationStep))
       .sort((left, right) => left.run.updatedAt.localeCompare(right.run.updatedAt) || left.run.id.localeCompare(right.run.id))
       .slice(0, limit)
       .map((stored) => stored.run.id)

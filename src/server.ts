@@ -15,6 +15,7 @@ import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
+import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
 
 const hostname = process.env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
 if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1') {
@@ -52,7 +53,14 @@ if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !=
 }
 const fallbackModelEnabled = fallbackModelValue === 'true'
 const visualDeckV4Transport = visualDeckV4TextTransport(process.env.PPT_AGENT_V4_TEXT_TRANSPORT)
-const appVersion = process.env.PPT_AGENT_APP_VERSION?.trim() || '0.1.0'
+const appVersion = process.env.PPT_AGENT_SOFTWARE_VERSION?.trim()
+  || process.env.PPT_AGENT_APP_VERSION?.trim()
+  || PPT_AGENT_SOFTWARE_VERSION
+const releaseIdentity = buildIdentity({
+  softwareVersion: appVersion,
+  gitSha: process.env.PPT_AGENT_GIT_SHA?.trim() || 'unknown',
+  releaseId: process.env.PPT_AGENT_RELEASE_ID?.trim() || 'unversioned',
+})
 const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
 // A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
 const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_000, 60 * 60_000)
@@ -136,6 +144,7 @@ const runtime = runtimeMode === 'gateway'
           budget: new ExternallyAuthorizedBudgetPort(tenantId),
         }),
         appVersion,
+        buildIdentity: releaseIdentity,
         heartbeatStaleMs,
         tickStaleMs,
         waitingSlaMs,
@@ -149,7 +158,7 @@ const runtime = runtimeMode === 'gateway'
       })
     })()
   : createMockRuntime({
-      repository, artifacts, apiToken, appVersion, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
+      repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
     })
 let ticking = false

@@ -12,6 +12,7 @@ import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import {
   allPageNumbers,
@@ -38,17 +39,21 @@ export class RevisionMediaCoordinator {
   async submit(runId: string, unitBudgetUnits: number): Promise<RevisionMediaResult> {
     if (!Number.isSafeInteger(unitBudgetUnits) || unitBudgetUnits <= 0) throw new Error('INVALID_UNIT_BUDGET')
     const run = await this.requireRun(runId)
-    if (run.status === 'PAUSED' || run.status === 'NEEDS_HUMAN') return this.summary(run)
+    if (run.status === 'PAUSED' || run.status === 'NEEDS_HUMAN' || run.status === 'RECOVERING') return this.summary(run)
     if (run.status !== 'REVISING') throw new Error('RUN_NOT_REVISING')
     const targets = await this.targets(run)
     if (targets.length === 0) throw new Error('REVISION_MEDIA_NOT_REQUIRED')
     const steps = await this.currentSteps(run, targets)
     const stepsByKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
+    const canRetryReleasedSubmission = (step: StepRecord | undefined) => isVisualDeckV4(run)
+      && step?.status === 'FAILED'
+      && isTechnicalFailureCode(step.errorCode ?? '')
     const pending = targets.filter((target) => {
       const existing = stepsByKey.get(target.idempotencyKey)
-      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status)
+      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status) || canRetryReleasedSubmission(existing)
     })
-    const newTargetCount = pending.filter((target) => !stepsByKey.has(target.idempotencyKey)).length
+    const newTargetCount = pending.filter((target) =>
+      !stepsByKey.has(target.idempotencyKey) || canRetryReleasedSubmission(stepsByKey.get(target.idempotencyKey))).length
     const decision = evaluateBudget(run, newTargetCount * unitBudgetUnits)
     if (newTargetCount > 0 && !decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
       await this.pauseForBudget(run, newTargetCount * unitBudgetUnits)
@@ -58,10 +63,14 @@ export class RevisionMediaCoordinator {
 
     for (const target of pending) {
       const key = target.idempotencyKey
+      const existing = stepsByKey.get(key)
       const result = await this.dependencies.media.submitSlideImage({
         runId,
         stepId: target.stepId,
         idempotencyKey: key,
+        ...(canRetryReleasedSubmission(existing) ? {
+          budgetReservationKey: `${key}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
+        } : {}),
         slideId: target.slideId,
         versionId: target.versionId,
         prompt: target.prompt,
@@ -251,27 +260,28 @@ export class RevisionMediaCoordinator {
       const fromStatus = transaction.run.status
       if (fromStatus === 'REVISING') {
         const now = this.dependencies.clock.now().toISOString()
-        const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
-        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'phase.changed',
-          payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: failed.errorCode ?? 'REVISION_MEDIA_FAILED' },
-        })
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'approval.required',
-          payload: { kind: 'HUMAN_REVIEW', summary: '局部重绘失败，需要人工核对后重试。' },
-        })
+        const recovery = beginTechnicalRecovery(transaction, this.dependencies.clock, failed.errorCode ?? 'REVISION_MEDIA_FAILED')
+        if (!recovery) {
+          const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
+          transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'phase.changed',
+            payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: failed.errorCode ?? 'REVISION_MEDIA_FAILED' },
+          })
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'approval.required',
+            payload: { kind: 'HUMAN_REVIEW', summary: '局部重绘失败，需要人工核对后重试。' },
+          })
+        }
       }
       appendV4LifecycleEvent(transaction, 'revision.completed', {
         completed,
         total,
         ...details,
         reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
-        retryable: false,
-        requiresUserAction: true,
-        nextAction: 'REVIEW_RESULT',
+        retryable: transaction.run.technicalRecovery?.retryable ?? false,
       })
     })
   }

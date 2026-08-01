@@ -36,6 +36,17 @@ function run(id: string, status: RunRecord['status'] = 'PLANNING'): RunRecord {
     qualityScore: null,
     status,
     resumeState: status === 'PAUSED' ? 'EXECUTING' : null,
+    ...(status === 'RECOVERING' ? {
+      technicalRecovery: {
+        resumeState: 'EXECUTING' as const,
+        reason: 'PROVIDER_TIMEOUT',
+        retryable: true,
+        attempt: 1,
+        maxAttempts: 5 as const,
+        nextAttemptAt: '2026-07-21T00:00:00.000Z',
+        active: true,
+      },
+    } : {}),
     version: 0,
     budgetUnits: 100,
     committedBudgetUnits: 0,
@@ -98,13 +109,31 @@ describe('run lease', () => {
       repository,
       run('planning', 'PLANNING'),
       run('executing', 'EXECUTING'),
+      run('recovering', 'RECOVERING'),
       run('approval', 'AWAITING_BLUEPRINT_APPROVAL'),
       run('paused', 'PAUSED'),
       run('human', 'NEEDS_HUMAN'),
       run('done', 'COMPLETED'),
     )
 
-    expect(await listRecoverableRunIds({ repository, clock })).toEqual(['executing', 'planning'])
+    expect(await listRecoverableRunIds({ repository, clock })).toEqual(['executing', 'planning', 'recovering'])
+    expect(await acquireRunLease({ repository, clock, runId: 'recovering', token: 'recovery-worker', ttlMs: 5_000 }))
+      .not.toBeNull()
+  })
+
+  test('does not let a deferred recovery consume a runnable worker slot', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await seed(
+      repository,
+      { ...run('future-recovery', 'RECOVERING'), technicalRecovery: {
+        ...run('future-recovery', 'RECOVERING').technicalRecovery!,
+        nextAttemptAt: '2026-07-21T00:01:00.000Z',
+      } },
+      run('executing', 'EXECUTING'),
+    )
+
+    expect(await listRecoverableRunIds({ repository, clock, limit: 1 })).toEqual(['executing'])
   })
 
   test('persists lease ownership across SQLite reopen', async () => {
@@ -191,6 +220,26 @@ describe('run lease', () => {
     expect(await repository.listRunsWithPendingMedia(10)).toEqual(['billing-unknown'])
     expect(await acquireMediaReconciliationLease({
       repository, clock, runId: 'billing-unknown', token: 'worker-a', ttlMs: 5_000,
+    })).not.toBeNull()
+  })
+
+  test('leases a terminal Run whose V4 batch finalization response is unknown', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await seed(repository, run('cancelled-batch', 'CANCELLED'))
+    await repository.transact('cancelled-batch', (transaction) => {
+      transaction.putStep({
+        id: 'batch-step', runId: 'cancelled-batch', idempotencyKey: 'cancelled-batch:generation-batch:r0',
+        inputHash: 'batch-input', tool: 'generate_image_batch', status: 'BILLING_UNKNOWN', budgetUnits: 3,
+        budgetReservationId: 'batch-reservation-1', externalOperationId: null,
+        errorCode: 'BATCH_BUDGET_FINALIZATION_UNKNOWN', output: {},
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['cancelled-batch'])
+    expect(await acquireMediaReconciliationLease({
+      repository, clock, runId: 'cancelled-batch', token: 'worker-a', ttlMs: 5_000,
     })).not.toBeNull()
   })
 })

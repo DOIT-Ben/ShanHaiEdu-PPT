@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type {
+  BatchBudgetPort,
   BudgetPort,
   DocumentPort,
   DocumentResult,
@@ -47,6 +48,19 @@ export interface FrameFlowBackendClient {
     externalUserId: string
     reservationId: string
     idempotencyKey: string
+  }>): Promise<void>
+
+  finalizeCredits(input: Readonly<{
+    externalUserId: string
+    reservationId: string
+    batchId: string
+    settledUnits: number
+    releasedUnits: number
+    idempotencyKey: string
+  }>): Promise<void>
+
+  preflightBatchFinalization(input: Readonly<{
+    externalUserId: string
   }>): Promise<void>
 }
 
@@ -115,7 +129,7 @@ export function chunkDocumentText(text: string, maxChunkChars = DEFAULT_CHUNK_CH
   return chunks.map((chunk, index) => ({ ...chunkId(index, chunk), text: chunk }))
 }
 
-export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
+export class FrameFlowHostAdapter implements DocumentPort, BudgetPort, BatchBudgetPort {
   constructor(private readonly client: FrameFlowBackendClient) {}
 
   async resolve(input: Parameters<DocumentPort['resolve']>[0]): Promise<DocumentResult> {
@@ -265,6 +279,33 @@ export class FrameFlowHostAdapter implements DocumentPort, BudgetPort {
     await this.client.releaseCredits({
       externalUserId: input.host.externalUserId,
       reservationId: input.reservationId,
+      idempotencyKey: input.idempotencyKey,
+    })
+  }
+
+  async reserveBatch(input: Parameters<BatchBudgetPort['reserveBatch']>[0]) {
+    if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
+    return this.client.reserveCredits({
+      externalUserId: input.host.externalUserId,
+      model: input.model,
+      units: input.units,
+      idempotencyKey: input.idempotencyKey,
+    })
+  }
+
+  async preflightBatchFinalization(input: Parameters<BatchBudgetPort['preflightBatchFinalization']>[0]) {
+    if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
+    await this.client.preflightBatchFinalization({ externalUserId: input.host.externalUserId })
+  }
+
+  async finalizeBatch(input: Parameters<BatchBudgetPort['finalizeBatch']>[0]) {
+    if (input.host.tenantId !== 'frameflow') throw new Error('FRAMEFLOW_TENANT_REQUIRED')
+    await this.client.finalizeCredits({
+      externalUserId: input.host.externalUserId,
+      reservationId: input.reservationId,
+      batchId: input.batchId,
+      settledUnits: input.settledUnits,
+      releasedUnits: input.releasedUnits,
       idempotencyKey: input.idempotencyKey,
     })
   }

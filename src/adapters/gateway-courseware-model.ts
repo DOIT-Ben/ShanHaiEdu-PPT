@@ -401,6 +401,20 @@ function retryableProviderRejection(
     || ambiguousInvalidRequest
 }
 
+function modelConfigurationRejectionCode(
+  status: number,
+  rejection: ReturnType<typeof providerRejectionMetadata>,
+) {
+  const gatewayWrappedUpstreamFailure = rejection.log.providerType === 'upstream_error'
+    || rejection.log.providerCode === 'bad_response_status_code'
+    || rejection.log.providerType === 'bad_response_status_code'
+  if (gatewayWrappedUpstreamFailure) return null
+  if (status === 401) return 'MODEL_AUTH_FAILED' as const
+  if (status === 403) return 'MODEL_FORBIDDEN' as const
+  if (status === 404) return 'MODEL_NOT_FOUND' as const
+  return null
+}
+
 export class GatewayCoursewareModel implements
   StructuredModelPort,
   StructuredGenerationPreflightPort,
@@ -1011,12 +1025,19 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
       model,
       ...rejection.log,
     }))
-    const code = response.status === 429
+    const configurationError = modelConfigurationRejectionCode(response.status, rejection)
+    const code = configurationError ?? (response.status === 429
       ? 'PROVIDER_RATE_LIMIT'
       : [408, 504].includes(response.status)
         ? 'PROVIDER_TIMEOUT'
-        : 'PROVIDER_UNAVAILABLE'
-    throw new StructuredModelError(code, retryableProviderRejection(response.status, rejection), model, requestId, response.status)
+        : 'PROVIDER_UNAVAILABLE')
+    throw new StructuredModelError(
+      code,
+      configurationError === null && retryableProviderRejection(response.status, rejection),
+      model,
+      requestId,
+      response.status,
+    )
   }
 
   private throwToolResponseError(error: unknown, model: string, requestId: string | null): never {

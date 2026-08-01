@@ -247,14 +247,22 @@ export class SqliteAgentRepository implements AgentRepository {
   }
 
   async listRunnableRuns(input: Readonly<{ now: string; limit: number }>) {
-    return this.#database.query<JsonRow, [string, number]>(`
+    return this.#database.query<JsonRow, [string, string, number]>(`
       SELECT data
       FROM agent_runs
-      WHERE status IN ('PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING')
+      WHERE status IN ('PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING', 'RECOVERING')
+        AND (
+          status <> 'RECOVERING'
+          OR (
+            json_extract(data, '$.technicalRecovery.active') = 1
+            AND json_extract(data, '$.technicalRecovery.nextAttemptAt') IS NOT NULL
+            AND json_extract(data, '$.technicalRecovery.nextAttemptAt') <= ?
+          )
+        )
         AND (lease_until IS NULL OR lease_until <= ?)
       ORDER BY updated_at ASC, id ASC
       LIMIT ?
-    `).all(input.now, input.limit).map((row) => JSON.parse(row.data) as RunRecord)
+    `).all(input.now, input.now, input.limit).map((row) => JSON.parse(row.data) as RunRecord)
   }
 
   async listRunsWithPendingMedia(limit: number) {
@@ -262,13 +270,18 @@ export class SqliteAgentRepository implements AgentRepository {
       SELECT DISTINCT agent_runs.id
       FROM agent_steps
       JOIN agent_runs ON agent_runs.id = agent_steps.run_id
-      WHERE agent_steps.tool = 'generate_slide_image'
+      WHERE (
+        agent_steps.tool = 'generate_image_batch'
+        AND agent_steps.status = 'BILLING_UNKNOWN'
+      ) OR (
+        agent_steps.tool = 'generate_slide_image'
         AND (
           agent_steps.status IN ('WAITING', 'RELEASING')
           OR (agent_steps.status = 'BILLING_UNKNOWN'
             AND json_extract(agent_steps.data, '$.externalOperationId') IS NOT NULL
             AND json_extract(agent_steps.data, '$.externalOperationId') <> '')
         )
+      )
       ORDER BY agent_runs.updated_at ASC, agent_runs.id ASC
       LIMIT ?
     `).all(limit).map((row) => row.id)

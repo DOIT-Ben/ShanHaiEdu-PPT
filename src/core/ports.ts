@@ -1,5 +1,6 @@
-import type { KnownAgentEvent as AgentEvent, CreateRunRequest, HostContext, RunStatus } from '../contracts'
+import type { KnownAgentEvent as AgentEvent, CreateRunRequest, HostContext, RunStatus, TechnicalRecovery } from '../contracts'
 import type { AssetIntent, DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } from '../presentation-contracts'
+import type { ReleaseIdentity } from '../release-identity'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -81,7 +82,8 @@ export interface StructuredGenerationPreflightPort {
 
 export class StructuredModelError extends Error {
   constructor(
-    readonly code: 'PROVIDER_TIMEOUT' | 'PROVIDER_RATE_LIMIT' | 'PROVIDER_UNAVAILABLE' | 'MODEL_JSON_INVALID',
+    readonly code: 'PROVIDER_TIMEOUT' | 'PROVIDER_RATE_LIMIT' | 'PROVIDER_UNAVAILABLE'
+      | 'MODEL_AUTH_FAILED' | 'MODEL_FORBIDDEN' | 'MODEL_NOT_FOUND' | 'MODEL_JSON_INVALID',
     readonly retryable: boolean,
     readonly model: string,
     readonly requestId: string | null,
@@ -279,6 +281,38 @@ export interface BudgetPort {
   }>): Promise<void>
 }
 
+/**
+ * V4 charges an approved initial deck as one durable batch. Page steps retain
+ * local allocation only; they must not create user-visible credit operations.
+ */
+export interface BatchBudgetPort {
+  /** Verifies that the host can atomically settle and release one deck authorization. */
+  preflightBatchFinalization(input: Readonly<{
+    host: HostContext
+  }>): Promise<void>
+
+  reserveBatch(input: Readonly<{
+    host: HostContext
+    model: string
+    units: number
+    batchId: string
+    idempotencyKey: string
+  }>): Promise<Readonly<{ reservationId: string }>>
+
+  /**
+   * Atomically settles the Provider-confirmed portion and releases the rest of
+   * one authorized deck. A host must not implement this as two credit calls.
+   */
+  finalizeBatch(input: Readonly<{
+    host: HostContext
+    reservationId: string
+    batchId: string
+    settledUnits: number
+    releasedUnits: number
+    idempotencyKey: string
+  }>): Promise<void>
+}
+
 export class BudgetReservationError extends Error {
   constructor(
     readonly code: string,
@@ -377,6 +411,7 @@ export type RunRecord = Readonly<{
   assetAcquisitionPolicy?: CreateRunRequest['assetAcquisitionPolicy']
   maxVisualAssetsPerSlide?: CreateRunRequest['maxVisualAssetsPerSlide']
   visualDeckV4?: CreateRunRequest['visualDeckV4']
+  release?: ReleaseIdentity
   maxRevisionRounds: number
   revisionRound: number
   planningAttempt?: number
@@ -384,6 +419,7 @@ export type RunRecord = Readonly<{
   qualityScore: number | null
   status: RunStatus
   resumeState: RunStatus | null
+  technicalRecovery?: TechnicalRecovery
   version: number
   budgetUnits: number
   committedBudgetUnits: number

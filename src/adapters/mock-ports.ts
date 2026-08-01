@@ -1,6 +1,7 @@
 import type {
   ArtifactPort,
   AssetCandidateReviewPort,
+  BatchBudgetPort,
   BudgetPort,
   ClockPort,
   DeckReviewPort,
@@ -20,11 +21,15 @@ export class FixedClock implements ClockPort {
   advance(milliseconds: number) { this.current = new Date(this.current.getTime() + milliseconds) }
 }
 
-export class MockBudgetPort implements BudgetPort {
+export class MockBudgetPort implements BudgetPort, BatchBudgetPort {
   readonly reservations = new Map<string, string>()
+  readonly batchReservations = new Map<string, string>()
   readonly settled = new Set<string>()
   readonly released = new Set<string>()
+  readonly batchFinalizations: Parameters<BatchBudgetPort['finalizeBatch']>[0][] = []
+  readonly batchFinalizationAttempts: Parameters<BatchBudgetPort['finalizeBatch']>[0][] = []
   nextFailure: BudgetReservationError | null = null
+  nextBatchFinalizationPreflightFailure: Error | null = null
   nextSettlementFailure: Error | null = null
   nextReleaseFailure: Error | null = null
 
@@ -38,6 +43,26 @@ export class MockBudgetPort implements BudgetPort {
     }
     const reservationId = `budget:${input.host.tenantId}:${input.idempotencyKey}`
     this.reservations.set(input.idempotencyKey, reservationId)
+    return { reservationId }
+  }
+
+  async preflightBatchFinalization() {
+    if (!this.nextBatchFinalizationPreflightFailure) return
+    const failure = this.nextBatchFinalizationPreflightFailure
+    this.nextBatchFinalizationPreflightFailure = null
+    throw failure
+  }
+
+  async reserveBatch(input: Parameters<BatchBudgetPort['reserveBatch']>[0]) {
+    const existing = this.batchReservations.get(input.idempotencyKey)
+    if (existing) return { reservationId: existing }
+    if (this.nextFailure) {
+      const failure = this.nextFailure
+      this.nextFailure = null
+      throw failure
+    }
+    const reservationId = `batch-budget:${input.host.tenantId}:${input.idempotencyKey}`
+    this.batchReservations.set(input.idempotencyKey, reservationId)
     return { reservationId }
   }
 
@@ -57,6 +82,19 @@ export class MockBudgetPort implements BudgetPort {
       throw failure
     }
     this.settled.add(input.reservationId)
+  }
+
+  async finalizeBatch(input: Parameters<BatchBudgetPort['finalizeBatch']>[0]) {
+    if (input.settledUnits < 0 || input.releasedUnits < 0) throw new Error('BATCH_FINALIZATION_UNITS_INVALID')
+    this.batchFinalizationAttempts.push(structuredClone(input))
+    if (this.nextSettlementFailure) {
+      const failure = this.nextSettlementFailure
+      this.nextSettlementFailure = null
+      throw failure
+    }
+    this.batchFinalizations.push(structuredClone(input))
+    if (input.settledUnits > 0) this.settled.add(input.reservationId)
+    if (input.releasedUnits > 0) this.released.add(input.reservationId)
   }
 
   failNext(code: string, reservationState: 'NOT_RESERVED' | 'UNKNOWN') {
