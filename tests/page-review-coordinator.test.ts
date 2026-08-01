@@ -104,6 +104,7 @@ async function fixture(options: Readonly<{
   reviewConcurrency?: number
   runOverrides?: Partial<RunRecord>
   plannedBlueprint?: PresentationBlueprint
+  onReviewCompleted?: () => void
 }> = {}) {
   const repository = new InMemoryAgentRepository()
   const reviewerPort = options.reviewerPort ?? new MockVisualReviewPort({
@@ -162,12 +163,23 @@ async function fixture(options: Readonly<{
       artifacts,
       renderer,
       clock,
+      ...(options.onReviewCompleted ? { onReviewCompleted: options.onReviewCompleted } : {}),
       ...(options.reviewConcurrency === undefined ? {} : { reviewConcurrency: options.reviewConcurrency }),
     }),
   }
 }
 
 describe('page review coordinator', () => {
+  test('reports worker activity after each completed page review', async () => {
+    let completed = 0
+    const { coordinator } = await fixture({ onReviewCompleted: () => { completed += 1 } })
+
+    const result = await coordinator.reviewAll('run-1')
+
+    expect(result).toMatchObject({ status: 'DECK_REVIEW', approved: 6, total: 6 })
+    expect(completed).toBe(6)
+  })
+
   test('moves to deck review only when every page is approved', async () => {
     const { repository, reviewerPort, renderer, coordinator } = await fixture()
     const result = await coordinator.reviewAll('run-1')

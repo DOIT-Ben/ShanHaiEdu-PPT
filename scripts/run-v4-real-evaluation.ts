@@ -132,10 +132,26 @@ function evaluationConfig(): EvaluationConfig {
 }
 
 function updatePageCountInstruction(instruction: string, slideCount: number) {
-  const normalized = instruction
-    .replace(/\d+\s*页/g, `${slideCount}页`)
-    .replace(/\d+\s*page(?:s)?/gi, `${slideCount} pages`)
-  return `${normalized}\n严格输出 ${slideCount} 页；不得增页、减页或把多页内容拼成一页。`
+  return `${instruction.trimEnd()}\n严格输出 ${slideCount} 页；不得增页、减页或把多页内容拼成一页。`
+}
+
+export function evaluationInputContentHash(files: readonly Readonly<{ caseId: string; bytes: Uint8Array }>[]) {
+  const digest = createHash('sha256')
+  for (const file of files) {
+    digest.update(file.caseId)
+    digest.update('\0')
+    digest.update(file.bytes)
+    digest.update('\0')
+  }
+  return digest.digest('hex')
+}
+
+async function evaluationInputRootHash(inputRoot: string, caseIds: readonly string[]) {
+  const files = await Promise.all(caseIds.map(async (caseId) => ({
+    caseId,
+    bytes: new Uint8Array(await readFile(path.join(inputRoot, caseId, 'request.json'))),
+  })))
+  return evaluationInputContentHash(files)
 }
 
 export function normalizeEvaluationRequest(value: unknown, slideCount: number): CreateRunRequest {
@@ -846,7 +862,7 @@ async function main() {
     serviceUrl: config.serviceUrl,
     slideCount: config.slideCount,
     cases: config.caseIds,
-    inputRootHash: sha256(config.inputRoot),
+    inputRootHash: await evaluationInputRootHash(config.inputRoot, config.caseIds),
     policy: {
       presentationMode: 'VISUAL_DECK_V4',
       intervention: 'Approve the initial plan once; never edit prompts, revise manually, or override quality gates.',

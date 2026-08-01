@@ -44,6 +44,8 @@ export type RevisionPlanningResult = Readonly<{
 
 const MAX_REVISION_PROVIDER_ATTEMPTS = 5
 const REVISION_PROVIDER_RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 60_000] as const
+const MAX_FALLBACK_ISSUES_PER_OPERATION = 20
+const MAX_FALLBACK_INSTRUCTION_LENGTH = 600
 
 type RevisionPlanningFailure = Readonly<{
   errorCode: string
@@ -172,21 +174,47 @@ export class RevisionPlanningRunner {
   }>) {
     const issues = input.review.issues.filter((issue) => issue.severity !== 'INFO')
     if (issues.length === 0) throw new Error('REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES')
-    const draft = revisionPlanDraftSchema.parse({
-      summary: `根据整套审查的 ${issues.length} 个必修问题生成完整局部修订计划。`,
-      operations: issues.flatMap((issue) => issue.slideIds.map((slideId) => ({
+    const grouped = new Map<string, {
+      slideId: string
+      kind: ReturnType<typeof expectedRevisionKind>
+      issues: typeof issues
+    }>()
+    for (const issue of issues) {
+      const kind = expectedRevisionKind(issue)
+      for (const slideId of issue.slideIds) {
+        const key = `${slideId}\u0000${kind}`
+        const group = grouped.get(key) ?? { slideId, kind, issues: [] }
+        group.issues.push(issue)
+        grouped.set(key, group)
+      }
+    }
+    const operations = [...grouped.values()].flatMap((group) => {
+      const chunks = Array.from(
+        { length: Math.ceil(group.issues.length / MAX_FALLBACK_ISSUES_PER_OPERATION) },
+        (_, index) => group.issues.slice(
+          index * MAX_FALLBACK_ISSUES_PER_OPERATION,
+          (index + 1) * MAX_FALLBACK_ISSUES_PER_OPERATION,
+        ),
+      )
+      return chunks.map((chunk, chunkIndex) => ({
         id: `v4-fallback-${hashInput({
           reviewId: input.review.id,
-          issueId: issue.id,
-          slideId,
+          issueIds: chunk.map((issue) => issue.id),
+          slideId: group.slideId,
+          kind: group.kind,
+          chunkIndex,
           targetRevisionRound: input.targetRevisionRound,
         }).slice(0, 48)}`,
-        slideId,
-        kind: expectedRevisionKind(issue),
-        issueIds: [issue.id],
-        instruction: issue.summary,
-        sourceChunkIds: issue.sourceChunkIds,
-      }))),
+        slideId: group.slideId,
+        kind: group.kind,
+        issueIds: chunk.map((issue) => issue.id),
+        instruction: fallbackRevisionInstruction(chunk.map((issue) => issue.summary)),
+        sourceChunkIds: [...new Set(chunk.flatMap((issue) => issue.sourceChunkIds))],
+      }))
+    })
+    const draft = revisionPlanDraftSchema.parse({
+      summary: `根据整套审查的 ${issues.length} 个必修问题生成完整局部修订计划。`,
+      operations,
     })
     this.validatePlan(
       draft,
@@ -567,6 +595,12 @@ export class RevisionPlanningRunner {
       }
     }
   }
+}
+
+function fallbackRevisionInstruction(summaries: readonly string[]) {
+  const details = [...new Set(summaries.map((summary) => summary.trim()).filter(Boolean))].join('；')
+  const instruction = `逐项修复审查问题：${details}`
+  return instruction.slice(0, MAX_FALLBACK_INSTRUCTION_LENGTH)
 }
 
 function revisionPlanningFailure(

@@ -34,6 +34,7 @@ export class RuntimeHealthMonitor {
   private readonly startedAt: string
   private lastHeartbeatAt: string | null = null
   private lastTickStartedAt: string | null = null
+  private lastTickActivityAt: string | null = null
   private lastTickCompletedAt: string | null = null
   private lastTickFailedAt: string | null = null
   private lastFailure: WorkerFailureContext | null = null
@@ -55,10 +56,15 @@ export class RuntimeHealthMonitor {
     this.lastHeartbeatAt = this.clock.now().toISOString()
   }
 
+  tickActivity() {
+    if (this.tickInProgress) this.lastTickActivityAt = this.clock.now().toISOString()
+  }
+
   async runTick(operation: () => Promise<WorkerTickSummary>) {
     this.heartbeat()
     this.tickInProgress = true
     this.lastTickStartedAt = this.clock.now().toISOString()
+    this.lastTickActivityAt = this.lastTickStartedAt
     try {
       const summary = await operation()
       this.tickInProgress = false
@@ -92,8 +98,8 @@ export class RuntimeHealthMonitor {
     const heartbeatAgeMs = this.lastHeartbeatAt === null
       ? null
       : Math.max(0, now.getTime() - Date.parse(this.lastHeartbeatAt))
-    const tickAgeMs = this.tickInProgress && this.lastTickStartedAt
-      ? Math.max(0, now.getTime() - Date.parse(this.lastTickStartedAt))
+    const tickAgeMs = this.tickInProgress && this.lastTickActivityAt
+      ? Math.max(0, now.getTime() - Date.parse(this.lastTickActivityAt))
       : null
     const heartbeatStaleMs = this.options.heartbeatStaleMs ?? 5_000
     const tickStaleMs = this.options.tickStaleMs ?? 25 * 60_000
@@ -116,6 +122,7 @@ export class RuntimeHealthMonitor {
         lastHeartbeatAt: this.lastHeartbeatAt,
         heartbeatAgeMs,
         lastTickStartedAt: this.lastTickStartedAt,
+        lastTickActivityAt: this.lastTickActivityAt,
         lastTickCompletedAt: this.lastTickCompletedAt,
         lastTickFailedAt: this.lastTickFailedAt,
         tickAgeMs,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  evaluationInputContentHash,
   normalizeEvaluationRequest,
   presentationSlideEntries,
   referencedSlideImageEntry,
@@ -65,7 +66,33 @@ describe('V4 real evaluation harness', () => {
     expect(normalized.slideCount).toBe(2)
     expect(normalized.visualDeckV4?.deckOptions.length).toEqual({ slideCount: 2 })
     expect(normalized.visualDeckV4?.instruction).toContain('严格输出 2 页')
-    expect(normalized.visualDeckV4?.instruction).not.toContain('10页')
+    expect(normalized.visualDeckV4?.instruction).toContain('请制作一套10页课堂PPT。')
+  })
+
+  test('does not rewrite page references inside the original instruction', () => {
+    const value = request()
+    value.visualDeckV4.instruction = '第12页展示课堂练习，整套原计划为12页。'
+
+    const normalized = normalizeEvaluationRequest(value, 10)
+
+    expect(normalized.visualDeckV4?.instruction).toContain('第12页展示课堂练习，整套原计划为12页。')
+    expect(normalized.visualDeckV4?.instruction).toContain('严格输出 10 页')
+  })
+
+  test('hashes evaluation request contents and case identities instead of the directory path', () => {
+    const first = evaluationInputContentHash([
+      { caseId: '01-raw-requirement', bytes: new TextEncoder().encode('{"slideCount":10}') },
+    ])
+    const changedContent = evaluationInputContentHash([
+      { caseId: '01-raw-requirement', bytes: new TextEncoder().encode('{"slideCount":12}') },
+    ])
+    const changedCase = evaluationInputContentHash([
+      { caseId: '02-planned-outline', bytes: new TextEncoder().encode('{"slideCount":10}') },
+    ])
+
+    expect(first).toMatch(/^[a-f0-9]{64}$/)
+    expect(changedContent).not.toBe(first)
+    expect(changedCase).not.toBe(first)
   })
 
   test('accepts one ordered and unique completed lifecycle', () => {

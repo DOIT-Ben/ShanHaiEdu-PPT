@@ -54,6 +54,24 @@ describe('runtime health monitor', () => {
     await pending
   })
 
+  test('measures a running tick from its latest unit of completed work', async () => {
+    const clock = new FixedClock()
+    const health = new RuntimeHealthMonitor(clock, { version: 'test', heartbeatStaleMs: 1_000, tickStaleMs: 10_000 })
+    let finish!: (summary: { scannedRuns: number; activeRuns: number }) => void
+    const pending = health.runTick(() => new Promise((resolve) => { finish = resolve }))
+    clock.advance(9_000)
+    health.tickActivity()
+    clock.advance(9_000)
+    health.heartbeat()
+
+    expect(health.readiness()).toMatchObject({
+      status: 'READY', reason: null,
+      worker: { tickInProgress: true, tickAgeMs: 9_000, lastTickActivityAt: '2026-07-21T00:00:09.000Z' },
+    })
+    finish({ scannedRuns: 1, activeRuns: 1 })
+    await pending
+  })
+
   test('redacts arbitrary error messages and emits allowlisted structured fields', () => {
     expect(safeWorkerErrorCode(new Error('prompt contained private lesson text'))).toBe('WORKER_TICK_FAILED')
     expect(safeWorkerErrorCode(new Error('PROVIDER_TIMEOUT'))).toBe('PROVIDER_TIMEOUT')

@@ -356,6 +356,62 @@ describe('revision planning runner', () => {
     })
   })
 
+  test('normalizes short issue summaries in the deterministic v4 fallback', async () => {
+    const { repository, runner } = await fixture(
+      { presentationMode: 'VISUAL_DECK_V4' },
+      { summary: '模型未能生成任何有效的局部修订操作。', operations: [] },
+      visualDeckV4Blueprint(),
+    )
+    await repository.transact('run-1', (transaction) => {
+      const key = deckReviewStepKey(transaction.run)
+      const step = transaction.getStep(key)!
+      const output = structuredClone(step.output as ReturnType<typeof review>)
+      output.issues[0]!.summary = '错'
+      transaction.putStep({ ...step, output })
+    })
+
+    const result = await runner.plan('run-1')
+
+    expect(result).toMatchObject({ status: 'AWAITING_REVISION_APPROVAL' })
+    expect(result.plan?.operations[0]?.instruction).toBe('逐项修复审查问题：错')
+    expect(result.plan?.operations[0]?.instruction.length).toBeGreaterThanOrEqual(10)
+  })
+
+  test('groups more than fifty review issues by slide and repair kind in the deterministic fallback', async () => {
+    const { repository, runner } = await fixture(
+      { presentationMode: 'VISUAL_DECK_V4' },
+      { summary: '模型未能生成任何有效的局部修订操作。', operations: [] },
+      visualDeckV4Blueprint(),
+    )
+    await repository.transact('run-1', (transaction) => {
+      const key = deckReviewStepKey(transaction.run)
+      const step = transaction.getStep(key)!
+      const output = structuredClone(step.output as ReturnType<typeof review>)
+      output.issues.push(...Array.from({ length: 50 }, (_, index) => ({
+        id: `issue-layout-${index + 1}`,
+        category: 'COMPOSITION_CONFLICT' as const,
+        severity: 'WARNING' as const,
+        summary: `第二页构图问题 ${index + 1} 需要修复。`,
+        slideIds: ['run-1:slide:2'],
+        sourceChunkIds: [],
+        status: 'OPEN' as const,
+        repairDomain: 'LAYOUT' as const,
+      })))
+      transaction.putStep({ ...step, output })
+    })
+
+    const result = await runner.plan('run-1')
+    const operations = result.plan?.operations ?? []
+    const covered = new Set(operations.flatMap((operation) => operation.issueIds))
+
+    expect(result).toMatchObject({ status: 'AWAITING_REVISION_APPROVAL' })
+    expect(operations).toHaveLength(4)
+    expect(operations.every((operation) => operation.issueIds.length <= 20)).toBe(true)
+    expect(covered.size).toBe(51)
+    expect(covered.has('issue-1')).toBe(true)
+    expect(covered.has('issue-layout-50')).toBe(true)
+  })
+
   test('stops without a planner call at the configured revision limit', async () => {
     const { repository, planner, runner } = await fixture({
       revisionRound: 2,
@@ -532,7 +588,7 @@ describe('revision planning runner', () => {
 
     expect(await runner.plan('run-1')).toMatchObject({
       status: 'AWAITING_REVISION_APPROVAL',
-      plan: { operations: [{ instruction: '第二页中的产物描述缺少教材限定条件。' }] },
+      plan: { operations: [{ instruction: '逐项修复审查问题：第二页中的产物描述缺少教材限定条件。' }] },
     })
     expect([...planner.requests.values()][1]?.contractRepairIssues).toContainEqual({
       path: '$', message: 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',

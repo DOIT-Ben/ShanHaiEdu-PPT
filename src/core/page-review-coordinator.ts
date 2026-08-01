@@ -43,6 +43,7 @@ export class PageReviewCoordinator {
     renderer: PresentationRendererPort
     clock: ClockPort
     reviewConcurrency?: number
+    onReviewCompleted?: () => void
   }>) {
     this.reviewConcurrency = dependencies.reviewConcurrency ?? 1
     if (!Number.isSafeInteger(this.reviewConcurrency) || this.reviewConcurrency < 1 || this.reviewConcurrency > 8) {
@@ -94,6 +95,7 @@ export class PageReviewCoordinator {
         layout: fullPageRaster ? 'VISUAL_DECK_V4' : requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
       })
+      this.dependencies.onReviewCompleted?.()
       if (result.review === null) stopReviews = true
       return result
     })
@@ -128,6 +130,7 @@ export class PageReviewCoordinator {
             layout: `COMPOSITE:${slide.layout}`,
             visualDirection: blueprint.visualDirection,
           })
+          this.dependencies.onReviewCompleted?.()
           if (result.review === null) stopReviews = true
           return result
         })

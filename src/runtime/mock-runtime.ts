@@ -451,6 +451,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     artifacts: input.artifacts,
     renderer,
     clock,
+    onReviewCompleted: () => health.tickActivity(),
     ...(input.reviewConcurrency === undefined ? {} : { reviewConcurrency: input.reviewConcurrency }),
   })
   const deck = new DeckReviewRunner({
