@@ -124,6 +124,49 @@ describe('gateway image generation adapter', () => {
     ])
   })
 
+  test.each([408, 429, 500])('keeps a known image task pollable after transient gateway status %i', async (status) => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({ error: { code: 'RATE_LIMITED' } }, { status }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      idempotencyKey: 'run-1:slide:1:image:r0:v1',
+    })).resolves.toMatchObject({ state: 'PROCESSING', retryAfterMs: 2_000 })
+  })
+
+  test('honors Retry-After for a transient image task lookup', async () => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({ error: { code: 'RATE_LIMITED' } }, {
+        status: 429,
+        headers: { 'Retry-After': '7' },
+      }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+    })).resolves.toEqual({ state: 'PROCESSING', retryAfterMs: 7_000 })
+  })
+
+  test('keeps authorization failures as an explicit unknown-billing result', async () => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({ error: { code: 'MODEL_FORBIDDEN' } }, { status: 403 }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+    })).resolves.toEqual({ state: 'FAILED', errorCode: 'MODEL_FORBIDDEN', billingState: 'UNKNOWN' })
+  })
+
   test('uses a multipart image edit request for a selected source reference', async () => {
     const artifacts = new MockArtifactPort()
     const reference = await sharp({ create: { width: 32, height: 32, channels: 3, background: '#4C956C' } }).png().toBuffer()

@@ -463,6 +463,18 @@ describe('SQLite repository', () => {
     repository.close()
   })
 
+  test('keeps billing-unknown media with a known Provider operation visible to reconciliation', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({ ...run(), status: 'NEEDS_HUMAN' })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({ ...waitingStep(), status: 'BILLING_UNKNOWN', errorCode: 'RATE_LIMITED' })
+    })
+
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    repository.close()
+  })
+
   test('keeps terminal runs with interrupted host releases visible to reconciliation', async () => {
     const filename = await databasePath()
     const repository = new SqliteAgentRepository(filename)

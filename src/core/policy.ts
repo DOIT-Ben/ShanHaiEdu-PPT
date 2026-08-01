@@ -61,6 +61,22 @@ export function transitionRun(state: RunPolicyState, to: RunStatus): RunPolicySt
   return { ...state, status: to, resumeState: null, version: state.version + 1 }
 }
 
+/** Only the V4 provider-recovery guard may use this technical recovery transition. */
+export function recoverMediaExecution(state: RunPolicyState): RunPolicyState {
+  if (state.status !== 'NEEDS_HUMAN') {
+    throw new PolicyError('MEDIA_RECOVERY_NOT_ALLOWED', 'media recovery requires human-review state')
+  }
+  return { ...state, status: 'EXECUTING', resumeState: null, version: state.version + 1 }
+}
+
+/** Only the V4 provider-recovery guard may use this technical revision transition. */
+export function recoverMediaRevision(state: RunPolicyState): RunPolicyState {
+  if (state.status !== 'NEEDS_HUMAN') {
+    throw new PolicyError('MEDIA_RECOVERY_NOT_ALLOWED', 'media recovery requires human-review state')
+  }
+  return { ...state, status: 'REVISING', resumeState: null, version: state.version + 1 }
+}
+
 export function applyRunAction(state: RunPolicyState, action: RunAction): RunPolicyState {
   if (action.expectedVersion !== state.version) {
     throw new PolicyError('RUN_VERSION_CONFLICT', 'run version does not match expectedVersion')

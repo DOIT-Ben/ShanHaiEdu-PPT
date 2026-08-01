@@ -71,7 +71,7 @@ describe('operations report', () => {
     expect(report.metrics.phaseLatencyMs.EXECUTING?.p50).toBe(120_000)
     expect(report.reconciliation).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'run-failed:step-waiting:WAITING_TOO_LONG', allowedActions: ['REINSPECT'] }),
-      expect.objectContaining({ id: 'run-failed:step-billing:PROVIDER_FAILED', allowedActions: ['MARK_NOT_CHARGED', 'MARK_CHARGED'] }),
+      expect.objectContaining({ id: 'run-failed:step-billing:PROVIDER_FAILED', allowedActions: ['REINSPECT', 'MARK_NOT_CHARGED', 'MARK_CHARGED'] }),
     ]))
   })
 

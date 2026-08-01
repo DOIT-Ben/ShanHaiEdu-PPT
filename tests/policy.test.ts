@@ -6,6 +6,8 @@ import {
   canTransition,
   evaluateBudget,
   releaseBudget,
+  recoverMediaExecution,
+  recoverMediaRevision,
   reserveBudget,
   type RunPolicyState,
 } from '../src/core/policy'
@@ -61,6 +63,13 @@ describe('run transition policy', () => {
     })).toThrow(PolicyError)
     expect(canTransition('COMPLETED', 'EXECUTING')).toBe(false)
     expect(canTransition('NEEDS_HUMAN', 'COMPLETED')).toBe(false)
+    expect(canTransition('NEEDS_HUMAN', 'EXECUTING')).toBe(false)
+  })
+
+  test('allows provider recovery only from the human-review state', () => {
+    expect(recoverMediaExecution(state({ status: 'NEEDS_HUMAN' }))).toMatchObject({ status: 'EXECUTING', version: 4 })
+    expect(recoverMediaRevision(state({ status: 'NEEDS_HUMAN' }))).toMatchObject({ status: 'REVISING', version: 4 })
+    expect(() => recoverMediaExecution(state({ status: 'EXECUTING' }))).toThrow('media recovery requires human-review state')
   })
 
   test('returns a failed planning run to planning only through recovery actions', () => {
