@@ -505,6 +505,59 @@ describe('gateway courseware model', () => {
     expect(serialized).toContain('data:image/jpeg;base64,')
   })
 
+  test('uses the MiniMax M3 request profile and preserves its request id', async () => {
+    const png = new Uint8Array(await sharp({
+      create: { width: 120, height: 80, channels: 3, background: '#F4F7FA' },
+    }).png().toBuffer())
+    let requestBody: Record<string, unknown> | null = null
+    const original = console.error
+    console.error = () => undefined
+    try {
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://api.minimaxi.com/v1', apiKey: 'test-minimax-key', textModel: 'MiniMax-M3',
+        visionModel: 'MiniMax-M3', artifacts: new MockArtifactPort(), profile: 'MINIMAX_M3',
+        fetchImpl: async (_url, init) => {
+          requestBody = JSON.parse(String(init?.body))
+          return Response.json({ error: { type: 'upstream_error' } }, {
+            status: 503,
+            headers: { 'minimax-request-id': 'minimax-request-safe-1' },
+          })
+        },
+      })
+
+      await expect(model.reviewCandidate({
+        tenantId: 'frameflow',
+        candidate: {
+          provider: 'OPENVERSE', providerAssetId: 'asset-minimax', title: 'Classroom globe',
+          sourceUrl: 'https://example.org/source', downloadUrl: 'https://example.org/download',
+          creator: null, license: 'CC0', licenseUrl: 'https://creativecommons.org/publicdomain/zero/1.0/',
+          attribution: null, mimeType: 'image/png', width: 120, height: 80,
+        },
+        bytes: png,
+        intent: {
+          searchQueries: ['classroom globe'], mediaType: 'PHOTO', styleKeywords: ['bright classroom'],
+          transparencyPreference: 'EITHER',
+        },
+        knowledgePoint: '使用地球仪解释地轴倾斜', role: 'KNOWLEDGE_VISUAL',
+        visualDirection: '明亮的儿童课堂视觉', idempotencyKey: 'candidate-review-minimax',
+      })).rejects.toMatchObject({
+        code: 'PROVIDER_UNAVAILABLE', model: 'MiniMax-M3', requestId: 'minimax-request-safe-1',
+      })
+    } finally {
+      console.error = original
+    }
+
+    const body = requestBody! as unknown as {
+      thinking: { type: string }
+      reasoning_split: boolean
+      messages: { content: unknown }[]
+    }
+    expect(body.thinking).toEqual({ type: 'disabled' })
+    expect(body.reasoning_split).toBe(true)
+    const content = body.messages[1]!.content as { image_url?: { detail: string } }[]
+    expect(content.find((part) => part.image_url)?.image_url?.detail).toBe('default')
+  })
+
   test('rejects insecure public endpoints and hides network failure details', async () => {
     expect(() => new GatewayCoursewareModel({
       baseUrl: 'http://example.com/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts: new MockArtifactPort(),

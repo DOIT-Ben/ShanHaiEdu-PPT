@@ -23,10 +23,13 @@ import { StructuredModelError } from '../core/ports'
 import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+type ImageDetail = 'auto' | 'low' | 'high' | 'default'
 type ToolContent = string | readonly (
   | Readonly<{ type: 'text'; text: string }>
-  | Readonly<{ type: 'image_url'; image_url: Readonly<{ url: string; detail: 'auto' }> }>
+  | Readonly<{ type: 'image_url'; image_url: Readonly<{ url: string; detail: ImageDetail }> }>
 )[]
+
+export type GatewayCoursewareModelProfile = 'DEFAULT' | 'MINIMAX_M3'
 
 export const MAX_GATEWAY_TOOL_ARGUMENT_BYTES = 4 * 1024 * 1024
 const MAX_GATEWAY_STREAM_BUFFER_BYTES = MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 256 * 1024
@@ -298,6 +301,8 @@ export class GatewayCoursewareModel implements
   readonly modelName: string
   private readonly baseUrl: string
   private readonly fetchImpl: Fetch
+  private readonly profile: GatewayCoursewareModelProfile
+  private readonly imageDetail: ImageDetail
 
   constructor(private readonly dependencies: Readonly<{
     baseUrl: string
@@ -306,12 +311,15 @@ export class GatewayCoursewareModel implements
     visionModel?: string
     artifacts: ArtifactPort
     fetchImpl?: Fetch
+    profile?: GatewayCoursewareModelProfile
   }>) {
     this.baseUrl = normalizedBaseUrl(dependencies.baseUrl)
     if (dependencies.apiKey.trim().length < 8) throw new Error('GATEWAY_TEXT_KEY_REQUIRED')
     if (dependencies.textModel.trim().length === 0) throw new Error('GATEWAY_TEXT_MODEL_REQUIRED')
     this.modelName = dependencies.textModel
     this.fetchImpl = dependencies.fetchImpl ?? fetch
+    this.profile = dependencies.profile ?? 'DEFAULT'
+    this.imageDetail = this.profile === 'MINIMAX_M3' ? 'default' : 'auto'
   }
 
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
@@ -482,7 +490,7 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
   }
 
   async evaluate(input: Parameters<DeckReviewPort['evaluate']>[0]) {
-    const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: 'auto' } }> = [{
+    const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: ImageDetail } }> = [{
       type: 'text',
       text: `请审查整套课件。页面数据、教材来源和蓝图如下：\n${boundedJson({
         blueprint: input.blueprint,
@@ -555,7 +563,7 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
       .flatten({ background: '#F3F6F9' })
       .jpeg({ quality: 82, mozjpeg: true })
       .toBuffer()
-    return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: 'auto' as const } }
+    return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: this.imageDetail } }
   }
 
   private async sourceImageContent(asset: NonNullable<Parameters<StructuredModelPort['execute']>[0]['sourceAssets']>[number]) {
@@ -565,7 +573,7 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
       .flatten({ background: '#F3F6F9' })
       .jpeg({ quality: 82, mozjpeg: true })
       .toBuffer()
-    return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: 'auto' as const } }
+    return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: this.imageDetail } }
   }
 
   private async request<T extends z.ZodType>(input: Readonly<{
@@ -612,6 +620,10 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
           parallel_tool_calls: false,
           stream: true,
           stream_options: { include_usage: true },
+          ...(this.profile === 'MINIMAX_M3' ? {
+            thinking: { type: 'disabled' },
+            reasoning_split: true,
+          } : {}),
         }),
         signal: AbortSignal.timeout(180_000),
       })
@@ -680,7 +692,9 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
   }
 
   private requestId(response: Response) {
-    const value = response.headers.get('x-request-id') ?? response.headers.get('request-id')
+    const value = response.headers.get('x-request-id')
+      ?? response.headers.get('request-id')
+      ?? response.headers.get('minimax-request-id')
     return value && /^[A-Za-z0-9._:-]{1,160}$/.test(value) ? value : null
   }
 
