@@ -120,7 +120,7 @@ export class RunService {
       })
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: 1,
+        total: run.presentationMode === 'VISUAL_DECK_V4' ? 4 : 1,
         pageNumbers: allPageNumbers(transaction.run),
       })
     })
@@ -375,6 +375,13 @@ export class RunService {
   private planningRetryAttempt(transaction: AgentTransaction, action: RunAction) {
     if (action.type !== 'RETRY_PLANNING' && action.type !== 'REPLAN') return null
     const currentAttempt = transaction.run.planningAttempt ?? 0
+    if (action.type === 'RETRY_PLANNING' && isVisualDeckV4(transaction.run)) {
+      const failed = transaction.getStep(planningStepKey(transaction.run.id, currentAttempt))
+      if (!failed || failed.status !== 'FAILED') {
+        throw new RunServiceError(409, 'PLANNING_FAILURE_NOT_READY', 'failed planning attempt is not available')
+      }
+      return currentAttempt
+    }
     if (currentAttempt >= MAX_PLANNING_RETRIES) {
       throw new RunServiceError(422, 'PLANNING_RETRY_LIMIT_REACHED', 'planning retry limit has been reached')
     }
@@ -491,7 +498,7 @@ export class RunService {
       || action.type === 'REQUEST_BLUEPRINT_REVISION') {
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: 1,
+        total: 4,
         pageNumbers: allPageNumbers(updated),
       })
     } else if (action.type === 'RETRY_DELIVERY' || action.type === 'ACCEPT_WITH_OVERRIDE') {

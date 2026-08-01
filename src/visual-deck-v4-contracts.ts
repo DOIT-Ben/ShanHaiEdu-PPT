@@ -150,6 +150,45 @@ export const visualDeckV4VisualContractSchema = z.object({
   forbidden: z.array(boundedText(300)).max(20),
 }).strict()
 
+/**
+ * V4 planning is deliberately split into persisted model outputs.  These
+ * schemas are the hand-off contracts between planning stages, not UI models.
+ */
+export const visualDeckV4SourceSpecStageSchema = z.object({
+  sourceUnderstanding: visualDeckV4SourceUnderstandingSchema,
+  presentationSpec: visualDeckV4PresentationSpecSchema,
+}).strict()
+
+export const visualDeckV4DeckVisualStageSchema = z.object({
+  deckPlan: visualDeckV4DeckPlanSchema,
+  visualContract: visualDeckV4VisualContractSchema,
+}).strict()
+
+export const visualDeckV4SlideBriefsStageSchema = z.object({
+  slideBriefs: z.array(visualDeckV4SlideBriefSchema).min(2).max(50),
+}).strict()
+
+export const visualDeckV4FinalCoherenceReviewSchema = z.object({
+  decision: z.literal('APPROVED'),
+  summary: boundedText(1_000),
+  checks: z.array(z.object({
+    dimension: z.enum([
+      'REQUEST_BINDING',
+      'SOURCE_GROUNDING',
+      'NARRATIVE_COHERENCE',
+      'SLIDE_COVERAGE',
+      'VISUAL_COHERENCE',
+    ]),
+    passed: z.literal(true),
+    evidence: boundedText(500),
+  }).strict()).length(5),
+}).strict().superRefine((value, context) => {
+  const dimensions = value.checks.map((check) => check.dimension)
+  if (new Set(dimensions).size !== dimensions.length) {
+    context.addIssue({ code: 'custom', path: ['checks'], message: 'v4 coherence checks must be unique' })
+  }
+})
+
 export const visualDeckV4ProposalDraftSchema = z.object({
   sourceUnderstanding: visualDeckV4SourceUnderstandingSchema,
   presentationSpec: visualDeckV4PresentationSpecSchema,
@@ -227,6 +266,10 @@ export const visualDeckV4DeckManifestSchema = z.object({
 
 export type VisualDeckV4Config = z.infer<typeof visualDeckV4ConfigSchema>
 export type VisualDeckV4SourceRole = z.infer<typeof visualDeckV4SourceRoleSchema>
+export type VisualDeckV4SourceSpecStage = z.infer<typeof visualDeckV4SourceSpecStageSchema>
+export type VisualDeckV4DeckVisualStage = z.infer<typeof visualDeckV4DeckVisualStageSchema>
+export type VisualDeckV4SlideBriefsStage = z.infer<typeof visualDeckV4SlideBriefsStageSchema>
+export type VisualDeckV4FinalCoherenceReview = z.infer<typeof visualDeckV4FinalCoherenceReviewSchema>
 export type VisualDeckV4ProposalDraft = z.infer<typeof visualDeckV4ProposalDraftSchema>
 export type VisualDeckV4Proposal = z.infer<typeof visualDeckV4ProposalSchema>
 export type VisualDeckV4RenderedSlide = z.infer<typeof visualDeckV4RenderedSlideSchema>

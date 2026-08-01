@@ -40,6 +40,7 @@ import type {
   RevisionPlanningPort,
   RunRecord,
   StructuredModelPort,
+  StructuredGenerationPreflightPort,
   VisualReviewPort,
 } from '../core/ports'
 import { RunService } from '../core/run-service'
@@ -61,9 +62,28 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
   async releaseCredits() {}
 }
 
-class DeterministicPlanningModel implements StructuredModelPort {
+class DeterministicPlanningModel implements StructuredModelPort, StructuredGenerationPreflightPort {
+  async preflightStructuredGeneration() {
+    return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
+  }
+
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
-    if (input.operation === 'create_visual_deck_v4_proposal') {
+    const visualDeckV4Stage = [
+      'create_visual_deck_v4_source_spec',
+      'create_visual_deck_v4_deck_visual',
+      'create_visual_deck_v4_slide_briefs',
+      'review_visual_deck_v4_coherence',
+    ].includes(input.operation)
+    if (visualDeckV4Stage) {
+      if (input.operation === 'review_visual_deck_v4_coherence') {
+        return {
+          decision: 'APPROVED',
+          summary: '资料绑定、叙事、页面覆盖和统一视觉规则均已通过连贯性审查。',
+          checks: [
+            'REQUEST_BINDING', 'SOURCE_GROUNDING', 'NARRATIVE_COHERENCE', 'SLIDE_COVERAGE', 'VISUAL_COHERENCE',
+          ].map((dimension) => ({ dimension, passed: true, evidence: `${dimension} 已通过。` })),
+        }
+      }
       const payload = input.payload as {
         instruction: string
         sourceMode: 'AUTO' | 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE'
@@ -123,7 +143,14 @@ class DeterministicPlanningModel implements StructuredModelPort {
         createdAt: new Date(0).toISOString(),
       })
       const { compilerVersion: _compilerVersion, ...draft } = proposal
-      return draft
+      if (input.operation === 'create_visual_deck_v4_source_spec') {
+        return { sourceUnderstanding: draft.sourceUnderstanding, presentationSpec: draft.presentationSpec }
+      }
+      if (input.operation === 'create_visual_deck_v4_deck_visual') {
+        return { deckPlan: draft.deckPlan, visualContract: draft.visualContract }
+      }
+      if (input.operation === 'create_visual_deck_v4_slide_briefs') return { slideBriefs: draft.slideBriefs }
+      throw new Error(`MOCK_V4_OPERATION_UNSUPPORTED:${input.operation}`)
     }
     if (input.operation === 'reflect_blueprint') {
       const payload = input.payload as {
@@ -426,9 +453,13 @@ export function createAgentRuntime(input: RuntimeInput) {
       health.tickActivity()
     }
   }
-  const model: StructuredModelPort = {
+  const model: StructuredModelPort & Partial<StructuredGenerationPreflightPort> = {
     ...(input.model.modelName === undefined ? {} : { modelName: input.model.modelName }),
     execute: trackedCall(input.model.execute.bind(input.model)),
+    ...('preflightStructuredGeneration' in input.model
+      && typeof input.model.preflightStructuredGeneration === 'function'
+      ? { preflightStructuredGeneration: trackedCall(input.model.preflightStructuredGeneration.bind(input.model)) }
+      : {}),
   }
   const visualReviewer: VisualReviewPort = {
     review: trackedCall(input.visualReviewer.review.bind(input.visualReviewer)),

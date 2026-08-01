@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import sharp from 'sharp'
-import { GatewayCoursewareModel, MAX_GATEWAY_TOOL_ARGUMENT_BYTES } from '../src/adapters/gateway-courseware-model'
+import {
+  GatewayCoursewareModel,
+  gatewayCoursewareModelProfile,
+  visualDeckV4TextTransport,
+  MAX_GATEWAY_TOOL_ARGUMENT_BYTES,
+} from '../src/adapters/gateway-courseware-model'
 import { MockArtifactPort } from '../src/adapters/mock-ports'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
 import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
@@ -99,6 +104,31 @@ function completion(argumentsValue: unknown) {
   return Response.json({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(argumentsValue) } }] } }] })
 }
 
+function responsesCompletion(name: string, argumentsValue: unknown) {
+  return Response.json({
+    object: 'response',
+    status: 'completed',
+    output: [{ type: 'function_call', name, arguments: JSON.stringify(argumentsValue) }],
+  })
+}
+
+function streamedResponsesTextCompletion(value: string) {
+  return new Response([
+    `data: ${JSON.stringify({ type: 'response.created', response: { status: 'in_progress' } })}`,
+    `data: ${JSON.stringify({
+      type: 'response.output_text.delta', delta: value.slice(0, Math.ceil(value.length / 2)),
+    })}`,
+    `data: ${JSON.stringify({
+      type: 'response.output_text.delta', delta: value.slice(Math.ceil(value.length / 2)),
+    })}`,
+    `data: ${JSON.stringify({
+      type: 'response.output_text.done', text: value,
+    })}`,
+    `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
+    '',
+  ].join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
+}
+
 function strictLayeredBlueprintDraft() {
   const value = structuredClone(layeredBlueprintDraft()) as Record<string, any>
   value.curriculum.sourceAssetIds = null
@@ -134,7 +164,81 @@ function expectStrictObjectSchemas(value: unknown) {
 }
 
 describe('gateway courseware model', () => {
-  test('requests a source-grounded full-raster v4 proposal through a typed tool', async () => {
+  test('selects the MiniMax profile when either configured model is MiniMax M3', () => {
+    expect(gatewayCoursewareModelProfile({ textModel: 'MiniMax-M3', visionModel: 'gpt-5.6' })).toBe('MINIMAX_M3')
+    expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6', visionModel: 'minimax-m3' })).toBe('MINIMAX_M3')
+    expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6', visionModel: 'gpt-5.6' })).toBe('DEFAULT')
+  })
+
+  test('defaults V4 text calls to Responses and limits Chat to the compatibility setting', () => {
+    expect(visualDeckV4TextTransport(undefined)).toBe('RESPONSES')
+    expect(visualDeckV4TextTransport('RESPONSES')).toBe('RESPONSES')
+    expect(visualDeckV4TextTransport('CHAT_COMPLETIONS')).toBe('CHAT_COMPLETIONS')
+    expect(() => visualDeckV4TextTransport('AUTO')).toThrow('PPT_AGENT_V4_TEXT_TRANSPORT_INVALID')
+  })
+
+  test('rejects the removed one-shot V4 planning operation', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+    })
+    await expect(model.execute({
+      operation: 'create_visual_deck_v4_proposal', schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      idempotencyKey: 'removed-v4-one-shot-0001', payload: {},
+    })).rejects.toThrow('V4_ONE_SHOT_PLANNING_REMOVED')
+  })
+
+  test('preflights Responses JSON Schema and falls back to strict Responses Function only when unsupported', async () => {
+    const requests: { body: Record<string, unknown>; key: string | null }[] = []
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requests.push({
+          body: JSON.parse(String(init?.body)),
+          key: new Headers(init?.headers).get('Idempotency-Key'),
+        })
+        if (requests.length === 1) {
+          return Response.json({ error: { code: 'json_schema_unsupported', type: 'invalid_request_error' } }, { status: 400 })
+        }
+        return responsesCompletion('confirm_structured_generation_ready', { ready: true })
+      },
+    })
+    const original = console.error
+    console.error = () => undefined
+    try {
+      expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-0001' }))
+        .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+    } finally {
+      console.error = original
+    }
+    expect(requests).toHaveLength(2)
+    expect((requests[0]!.body.text as { format: { type: string; strict: boolean } }).format)
+      .toMatchObject({ type: 'json_schema', strict: true })
+    expect(requests[0]!.body.tools).toBeUndefined()
+    expect((requests[1]!.body.tools as { strict: boolean }[])[0]).toMatchObject({ strict: true })
+    expect(requests.map((request) => request.key)).toEqual([
+      'v4-preflight-0001:responses-json-schema',
+      'v4-preflight-0001:responses-function',
+    ])
+  })
+
+  test('treats a successful Responses payload without output text as JSON Schema incompatibility during preflight', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { text?: unknown }
+        return body.text
+          ? Response.json({ object: 'response', status: 'completed', output: [{ type: 'function_call', name: 'unexpected', arguments: '{}' }] })
+          : responsesCompletion('confirm_structured_generation_ready', { ready: true })
+      },
+    })
+    expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-missing-text-0001' }))
+      .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+  })
+
+  test('requests the first V4 planning stage through streamed Structured Outputs', async () => {
     const source = { kind: 'TEXT' as const, name: '分数教材.txt', text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。'.repeat(4) }
     const document = {
       name: source.name,
@@ -155,38 +259,136 @@ describe('gateway courseware model', () => {
       runId: 'run-v4-gateway', inputHash: 'input-v4-gateway', source, document, config,
       slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', createdAt: '2026-07-30T00:00:00.000Z',
     })
-    const { compilerVersion: _compilerVersion, ...draft } = proposal
+    const sourceSpec = {
+      sourceUnderstanding: proposal.sourceUnderstanding,
+      presentationSpec: proposal.presentationSpec,
+    }
     let requestBody: Record<string, unknown> | null = null
+    let requestUrl = ''
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
       artifacts: new MockArtifactPort(),
-      fetchImpl: async (_url, init) => {
+      fetchImpl: async (url, init) => {
+        requestUrl = String(url)
         requestBody = JSON.parse(String(init?.body))
-        return completion(draft)
+        return streamedResponsesTextCompletion(JSON.stringify(sourceSpec))
       },
     })
 
     expect(await model.execute({
-      operation: 'create_visual_deck_v4_proposal',
-      schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
+      operation: 'create_visual_deck_v4_source_spec',
+      schemaName: 'ppt_agent_v4_source_spec_v1',
       idempotencyKey: 'v4-plan-1',
       payload: {
         presentationMode: 'VISUAL_DECK_V4', instruction: config.instruction, sourceMode: config.sourceMode,
         deckOptions: config.deckOptions, slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', document,
       },
-    })).toEqual(draft)
+    })).toEqual(sourceSpec)
+    expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/responses')
     const body = requestBody! as unknown as {
-      messages: { content: string }[]
-      tools: { function: { name: string; parameters: unknown } }[]
-      tool_choice: { function: { name: string } }
+      input: { content: { type: string; text?: string }[] }[]
+      text: { format: { type: string; name: string; strict: boolean; schema: unknown } }
+      tools?: unknown
+      tool_choice?: unknown
     }
-    expect(body.tools[0]?.function.name).toBe('submit_visual_deck_v4_proposal')
-    expect(body.tool_choice.function.name).toBe('submit_visual_deck_v4_proposal')
-    expect(body.messages[0]?.content).toContain('最终交付是一页一张完整16:9图片')
-    expect(body.messages[0]?.content).toContain('唯一权威对象集合及精确总数')
-    expect(body.messages[0]?.content).toContain('facts中的文字绝不作为画面文案')
-    expect(body.messages[0]?.content).toContain('不得用多个关键帧重复绘制同一批可数对象')
-    expect(JSON.stringify(body.tools[0]?.function.parameters)).toContain('chunk-1')
+    expect(body.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_source_spec_v1', strict: true,
+    })
+    expect(body.tools).toBeUndefined()
+    expect(body.tool_choice).toBeUndefined()
+    expect((requestBody! as { stream?: boolean }).stream).toBe(true)
+    expect(body.input[0]?.content[0]?.text).toContain('当前只执行第一阶段')
+    expect(body.input[0]?.content[0]?.text).toContain('不要规划章节或页面')
+    expect(JSON.stringify(body.text.format.schema)).toContain('chunk-1')
+
+    const compatibilityModel = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(), visualDeckV4Transport: 'CHAT_COMPLETIONS',
+      fetchImpl: async (url) => {
+        requestUrl = String(url)
+        return completion(sourceSpec)
+      },
+    })
+    await compatibilityModel.execute({
+      operation: 'create_visual_deck_v4_source_spec',
+      schemaName: 'ppt_agent_v4_source_spec_v1',
+      idempotencyKey: 'v4-plan-chat-fallback',
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', instruction: config.instruction, sourceMode: config.sourceMode,
+        deckOptions: config.deckOptions, slideCount: 2, visualDirection: '温暖的儿童绘本课堂视觉', document,
+      },
+    })
+    expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
+  })
+
+  test('uses Responses for V4 revision planning and revision execution', async () => {
+    const requestUrls: string[] = []
+    const revisionPlan = {
+      summary: '只修订第一页的数量条件。',
+      operations: [{
+        id: 'operation-1', slideId: 'run-1:slide:1', kind: 'UPDATE_CONTENT', issueIds: ['issue-1'],
+        instruction: '依据教材修正第一页的数量条件。', sourceChunkIds: ['chunk-1'],
+      }],
+    }
+    const v4Draft = compileVisualDeckV4Proposal({
+      runId: 'run-v4-revision', inputHash: 'input-v4-revision',
+      source: { kind: 'TEXT', name: '教材.txt', text: '把一个完整图形平均分成两份，其中一份是二分之一。' },
+      document: {
+        name: '教材.txt', chunks: [{ id: 'chunk-1', text: '把一个完整图形平均分成两份，其中一份是二分之一。', sha256: 'a'.repeat(64) }],
+        isComplete: true, missingRanges: [],
+      },
+      config: {
+        instruction: '为三年级学生制作二分之一复习课件', sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: {
+          deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+          audience: '小学三年级学生', focus: '二分之一', styleHint: '温暖儿童绘本风格',
+        },
+      },
+      slideCount: 2, visualDirection: '温暖儿童绘本风格', createdAt: '2026-08-01T00:00:00.000Z',
+    })
+    const { compilerVersion: _compilerVersion, ...revisedDraft } = v4Draft
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (url, init) => {
+        requestUrls.push(String(url))
+        const request = JSON.parse(String(init?.body)) as { text?: { format?: { name?: string } } }
+        return request.text?.format?.name === 'ppt_agent_v4_revision_plan_v1'
+          ? streamedResponsesTextCompletion(JSON.stringify(revisionPlan))
+          : streamedResponsesTextCompletion(JSON.stringify(revisedDraft))
+      },
+    })
+    const blueprint = { renderMode: 'VISUAL_DECK_V4' } as never
+
+    await model.plan({
+      tenantId: 'frameflow', blueprint, review: {} as never, sourceChunks: [],
+      targetRevisionRound: 1, idempotencyKey: 'v4-revision-plan',
+    })
+    await model.apply({
+      tenantId: 'frameflow', blueprint, plan: {} as never, sourceChunks: [], idempotencyKey: 'v4-revision-apply',
+    })
+
+    expect(requestUrls).toEqual([
+      'https://newapi.doitbenai.cloud/v1/responses',
+      'https://newapi.doitbenai.cloud/v1/responses',
+    ])
+  })
+
+  test('rejects an incomplete V4 staged response before using its structured text', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        object: 'response', status: 'incomplete',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: '{}' }] }],
+      }),
+    })
+
+    await expect(model.execute({
+      operation: 'create_visual_deck_v4_source_spec', schemaName: 'ppt_agent_v4_source_spec_v1',
+      idempotencyKey: 'v4-incomplete-response',
+      payload: { document: { chunks: [{ id: 'chunk-1' }] } },
+    })).rejects.toMatchObject({ code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6' })
   })
 
   test('requests a source-grounded blueprint through a typed tool', async () => {
@@ -418,7 +620,7 @@ describe('gateway courseware model', () => {
     expect(JSON.stringify(content[0])).not.toContain(Buffer.from(bytes).toString('base64'))
   })
 
-  test('sends the controlled image to the vision reviewer and parses streamed tool arguments', async () => {
+  test('sends the controlled image to the V4 Responses vision reviewer', async () => {
     const artifacts = new MockArtifactPort()
     const png = await sharp({
       create: { width: 80, height: 60, channels: 4, background: { r: 24, g: 24, b: 24, alpha: 0 } },
@@ -432,19 +634,15 @@ describe('gateway courseware model', () => {
       idempotencyKey: 'page-source',
     })
     let requestBody: Record<string, unknown> | null = null
+    let requestUrl = ''
     const review = { approved: true, textDetected: false, visualScore: 91, reasons: [], retryInstruction: null }
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
       visionModel: 'gpt-5.6', artifacts,
-      fetchImpl: async (_url, init) => {
+      fetchImpl: async (url, init) => {
+        requestUrl = String(url)
         requestBody = JSON.parse(String(init?.body))
-        const value = JSON.stringify(review)
-        return new Response([
-          `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ function: { arguments: value.slice(0, 20) } }] }, finish_reason: null }] })}`,
-          `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ function: { arguments: value.slice(20) } }] }, finish_reason: 'tool_calls' }] })}`,
-          'data: [DONE]',
-          '',
-        ].join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
+        return streamedResponsesTextCompletion(JSON.stringify(review))
       },
     })
 
@@ -453,11 +651,14 @@ describe('gateway courseware model', () => {
       visualIntent: '允许文字：5可以分成3和2；非展示事实核对项：整页只有5个实体圆片',
       layout: 'VISUAL_DECK_V4', visualDirection: '儿童课堂风格', idempotencyKey: 'review-1',
     })).toEqual(review)
+    expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/responses')
     expect(requestBody).not.toBeNull()
-    const messages = (requestBody! as unknown as { messages: { content: unknown }[] }).messages
-    expect(String(messages[0]!.content)).toContain('非展示事实核对项')
-    const userContent = messages[1]!.content as { type: string; image_url?: { url: string } }[]
-    const imageUrl = userContent.find((part) => part.image_url)?.image_url?.url
+    const input = (requestBody! as unknown as {
+      input: { content: { type: string; text?: string; image_url?: string }[] }[]
+    }).input
+    expect(input[0]?.content[0]?.text).toContain('非展示事实核对项')
+    const userContent = input[1]!.content
+    const imageUrl = userContent.find((part) => part.type === 'input_image')?.image_url
     expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)
     const { data } = await sharp(Buffer.from(imageUrl!.split(',')[1]!, 'base64')).raw().toBuffer({ resolveWithObject: true })
     expect([...data.subarray(0, 3)].every((channel) => channel >= 240)).toBe(true)

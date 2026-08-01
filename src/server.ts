@@ -3,7 +3,11 @@ import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
 import { PublicAssetDiscoveryPort } from './adapters/public-asset-discovery'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
-import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
+import {
+  GatewayCoursewareModel,
+  gatewayCoursewareModelProfile,
+  visualDeckV4TextTransport,
+} from './adapters/gateway-courseware-model'
 import { FallbackCoursewareModel } from './adapters/fallback-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
@@ -47,6 +51,7 @@ if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !=
   throw new Error('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
 }
 const fallbackModelEnabled = fallbackModelValue === 'true'
+const visualDeckV4Transport = visualDeckV4TextTransport(process.env.PPT_AGENT_V4_TEXT_TRANSPORT)
 const appVersion = process.env.PPT_AGENT_APP_VERSION?.trim() || '0.1.0'
 const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
 // A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
@@ -84,12 +89,16 @@ const runtime = runtimeMode === 'gateway'
         ? process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
         : undefined
       if (budgetMode === 'frameflow' && !frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
+      const textModel = process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6'
+      const visionModel = process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6'
       const primaryModel = new GatewayCoursewareModel({
         baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
         apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
-        textModel: process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6',
-        visionModel: process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6',
+        textModel,
+        visionModel,
         artifacts,
+        profile: gatewayCoursewareModelProfile({ textModel, visionModel }),
+        visualDeckV4Transport,
       })
       const model = fallbackModelEnabled
         ? new FallbackCoursewareModel({
@@ -101,6 +110,7 @@ const runtime = runtimeMode === 'gateway'
               visionModel: process.env.MINIMAX_VISION_MODEL?.trim() || 'MiniMax-M3',
               artifacts,
               profile: 'MINIMAX_M3',
+              visualDeckV4Transport,
             }),
           })
         : primaryModel

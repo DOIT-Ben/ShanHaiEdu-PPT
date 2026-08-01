@@ -160,6 +160,7 @@ export class DeckReviewRunner {
             slides,
             idempotencyKey,
             ...(contractRepairIssues ? { contractRepairIssues } : {}),
+            ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
           })
           const draft = deckReviewDraftSchema.parse(raw)
           this.validateReferences(draft, run.id, blueprint, sourceChunks)

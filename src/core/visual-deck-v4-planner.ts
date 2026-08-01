@@ -19,6 +19,22 @@ export type VisualDeckV4PlanningArtifact =
   | 'slide-briefs'
   | 'visual-contract'
 
+export type VisualDeckV4PlanningStage =
+  | 'source-spec'
+  | 'deck-visual'
+  | 'slide-briefs'
+  | 'final-coherence'
+
+export function visualDeckV4PlanningStageStepKey(
+  runId: string,
+  stage: VisualDeckV4PlanningStage,
+  attempt = 0,
+  repairAttempt = 0,
+) {
+  const key = `${runId}:v4:${stage}:planning:${attempt}`
+  return repairAttempt === 0 ? key : `${key}:repair:${repairAttempt}`
+}
+
 export function visualDeckV4PlanningArtifactStepKey(
   runId: string,
   artifact: VisualDeckV4PlanningArtifact,

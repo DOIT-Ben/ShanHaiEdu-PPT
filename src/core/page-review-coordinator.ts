@@ -94,6 +94,7 @@ export class PageReviewCoordinator {
           : requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
         layout: fullPageRaster ? 'VISUAL_DECK_V4' : requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
+        ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
       })
       this.dependencies.onReviewCompleted?.()
       if (result.review === null) stopReviews = true
@@ -129,6 +130,7 @@ export class PageReviewCoordinator {
             visualIntent: `${slide.visualIntent}；审查完整组装页面的知识相关性、文字可读性、遮挡、层级和越界`,
             layout: `COMPOSITE:${slide.layout}`,
             visualDirection: blueprint.visualDirection,
+            ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
           })
           this.dependencies.onReviewCompleted?.()
           if (result.review === null) stopReviews = true

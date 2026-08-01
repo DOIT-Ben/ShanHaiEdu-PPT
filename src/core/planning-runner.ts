@@ -23,15 +23,22 @@ import { transitionRun } from './policy'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
 import {
   createVisualDeckV4BlueprintFromProposal,
-  type VisualDeckV4PlanningArtifact,
-  visualDeckV4PlanningArtifactStepKey,
+  type VisualDeckV4PlanningStage,
+  visualDeckV4PlanningStageStepKey,
 } from './visual-deck-v4-planner'
-import type { VisualDeckV4Proposal } from '../visual-deck-v4-contracts'
-import { visualDeckV4ProposalDraftSchema } from '../visual-deck-v4-contracts'
+import {
+  visualDeckV4DeckVisualStageSchema,
+  visualDeckV4FinalCoherenceReviewSchema,
+  visualDeckV4ProposalDraftSchema,
+  visualDeckV4SlideBriefsStageSchema,
+  visualDeckV4SourceSpecStageSchema,
+} from '../visual-deck-v4-contracts'
+import type { StructuredGenerationPreflightPort, StructuredGenerationProtocol } from './ports'
 import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 5
+const MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS = 2
 const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000, 60_000, 120_000] as const
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
@@ -253,39 +260,243 @@ export class PlanningRunner {
       ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
       createdAt: this.dependencies.clock.now().toISOString(),
     }
-    let repairIssues: { path: string; message: string }[] = []
-    for (let attempt = 0; attempt < MAX_BLUEPRINT_CONTRACT_ATTEMPTS; attempt++) {
+    const protocol = await this.resolveV4StructuredGenerationProtocol(input, tenantId)
+    const sourceSpec = visualDeckV4SourceSpecStageSchema.parse(await this.runV4PlanningStage(input, {
+      stage: 'source-spec',
+      tool: 'compile_v4_source_spec',
+      operation: 'create_visual_deck_v4_source_spec',
+      schemaName: 'ppt_agent_v4_source_spec_v1',
+      payload: basePayload,
+      sourceAssets: document.assets ?? [],
+      protocol,
+      parse: visualDeckV4SourceSpecStageSchema.parse,
+    }))
+    const deckVisual = visualDeckV4DeckVisualStageSchema.parse(await this.runV4PlanningStage(input, {
+      stage: 'deck-visual',
+      tool: 'compile_v4_deck_visual',
+      operation: 'create_visual_deck_v4_deck_visual',
+      schemaName: 'ppt_agent_v4_deck_visual_v1',
+      payload: { ...basePayload, ...sourceSpec },
+      protocol,
+      parse: visualDeckV4DeckVisualStageSchema.parse,
+    }))
+    const createSlideBriefs = async (
+      repairAttempt: number,
+      contractRepairIssues: readonly { path: string; message: string }[] = [],
+    ) => visualDeckV4SlideBriefsStageSchema.parse(await this.runV4PlanningStage(input, {
+      stage: 'slide-briefs',
+      tool: 'compile_v4_slide_briefs',
+      operation: 'create_visual_deck_v4_slide_briefs',
+      schemaName: 'ppt_agent_v4_slide_briefs_v1',
+      payload: {
+        ...basePayload,
+        ...sourceSpec,
+        ...deckVisual,
+        ...(contractRepairIssues.length > 0 ? { contractRepairIssues } : {}),
+      },
+      protocol,
+      repairAttempt,
+      parse: visualDeckV4SlideBriefsStageSchema.parse,
+    }))
+    let slideBriefs = await createSlideBriefs(0)
+    let proposalDraft: ReturnType<typeof visualDeckV4ProposalDraftSchema.parse> | null = null
+    for (let repairAttempt = 0; repairAttempt < MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS; repairAttempt += 1) {
       try {
-        const modelKey = attempt === 0
-          ? input.idempotencyKey
-          : `visual-deck-v4-repair-${hashInput({ idempotencyKey: input.idempotencyKey, attempt })}`
-        const raw = await this.executeWithProviderRetry(input, {
-          tenantId,
-          operation: 'create_visual_deck_v4_proposal',
-          schemaName: 'ppt_agent_visual_deck_v4_proposal_v1',
-          idempotencyKey: modelKey,
-          payload: { ...basePayload, ...(repairIssues.length > 0 ? { contractRepairIssues: repairIssues } : {}) },
-          sourceAssets: document.assets ?? [],
-        })
-        const draft = visualDeckV4ProposalDraftSchema.parse(raw)
-        return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
+        proposalDraft = visualDeckV4ProposalDraftSchema.parse({ ...sourceSpec, ...deckVisual, ...slideBriefs })
+        break
       } catch (error) {
-        if (error instanceof PlanningFailureError) throw error
-        const issues = this.contractIssues(error)
-        if (!issues) {
+        const repairIssues = this.v4SlideBriefContractIssues(error)
+        if (!repairIssues || repairAttempt === MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS - 1) {
           throw new PlanningFailureError(this.contractFailure(
-            input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, false,
+            input, error, repairAttempt + 1, MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS, true,
           ))
         }
-        if (attempt === MAX_BLUEPRINT_CONTRACT_ATTEMPTS - 1) {
-          throw new PlanningFailureError(this.contractFailure(
-            input, error, attempt + 1, MAX_BLUEPRINT_CONTRACT_ATTEMPTS, true,
-          ))
-        }
-        repairIssues = issues
+        slideBriefs = await createSlideBriefs(repairAttempt + 1, repairIssues)
       }
     }
-    throw new Error('VISUAL_DECK_V4_CONTRACT_REPAIR_EXHAUSTED')
+    if (!proposalDraft) throw new Error('V4_SLIDE_BRIEF_CONTRACT_REPAIR_EXHAUSTED')
+    await this.runV4PlanningStage(input, {
+      stage: 'final-coherence',
+      tool: 'review_v4_final_coherence',
+      operation: 'review_visual_deck_v4_coherence',
+      schemaName: 'ppt_agent_v4_final_coherence_v1',
+      payload: proposalDraft,
+      protocol,
+      parse: visualDeckV4FinalCoherenceReviewSchema.parse,
+    })
+    return createVisualDeckV4BlueprintFromProposal(compilerInput, proposalDraft)
+  }
+
+  private async resolveV4StructuredGenerationProtocol(input: PlanPresentationInput, tenantId: string) {
+    const key = `${input.runId}:v4:structured-generation-preflight:planning:${input.attempt ?? 0}`
+    const inputHash = hashInput({ tool: 'preflight_v4_structured_generation', model: this.dependencies.model.modelName ?? null })
+    const existing = await this.dependencies.repository.transact(input.runId, (transaction) => {
+      const step = transaction.getStep(key)
+      if (!step) return null
+      if (step.inputHash !== inputHash || step.tool !== 'preflight_v4_structured_generation') {
+        throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      }
+      if (step.status === 'COMPLETED') return step.output
+      if (step.status === 'FAILED') {
+        const now = this.dependencies.clock.now().toISOString()
+        transaction.putStep({ ...step, status: 'RUNNING', errorCode: null, updatedAt: now })
+      }
+      return null
+    })
+    if (existing) {
+      const persisted = this.parseV4StructuredGenerationProtocol(existing)
+      await this.dependencies.repository.transact(input.runId, (transaction) => {
+        if (transaction.run.v4StructuredGenerationProtocol === persisted.protocol) return
+        transaction.putRun({ ...transaction.run, v4StructuredGenerationProtocol: persisted.protocol, updatedAt: this.dependencies.clock.now().toISOString() })
+      })
+      return persisted.protocol
+    }
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      if (transaction.getStep(key)) return
+      const now = this.dependencies.clock.now().toISOString()
+      transaction.putStep({
+        id: `step-${hashInput({ key }).slice(0, 28)}`,
+        runId: input.runId,
+        idempotencyKey: key,
+        inputHash,
+        tool: 'preflight_v4_structured_generation',
+        status: 'RUNNING',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+    })
+    try {
+      const candidate = this.dependencies.model as StructuredModelPort & Partial<StructuredGenerationPreflightPort>
+      if (!candidate.preflightStructuredGeneration) throw new Error('STRUCTURED_GENERATION_PREFLIGHT_UNAVAILABLE')
+      const result = this.parseV4StructuredGenerationProtocol(await candidate.preflightStructuredGeneration({
+        tenantId,
+        idempotencyKey: key,
+      }))
+      await this.dependencies.repository.transact(input.runId, (transaction) => {
+        const step = transaction.getStep(key)
+        if (!step) throw new Error('STEP_NOT_FOUND')
+        const now = this.dependencies.clock.now().toISOString()
+        transaction.putStep({ ...step, status: 'COMPLETED', output: result, errorCode: null, updatedAt: now })
+        transaction.putRun({ ...transaction.run, v4StructuredGenerationProtocol: result.protocol, updatedAt: now })
+      })
+      return result.protocol
+    } catch (error) {
+      const failure = this.providerFailure(input, error, 1) ?? this.contractFailure(input, error, 1, 1, false)
+      await this.dependencies.repository.transact(input.runId, (transaction) => {
+        const step = transaction.getStep(key)
+        if (!step || step.status === 'FAILED') return
+        transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'tool.failed',
+          payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
+        })
+      })
+      throw new PlanningFailureError(failure)
+    }
+  }
+
+  private parseV4StructuredGenerationProtocol(value: unknown): Readonly<{ protocol: StructuredGenerationProtocol }> {
+    if (!value || typeof value !== 'object' || !('protocol' in value)) throw new Error('STRUCTURED_GENERATION_PROTOCOL_INVALID')
+    const protocol = value.protocol
+    if (protocol !== 'RESPONSES_JSON_SCHEMA' && protocol !== 'RESPONSES_FUNCTION' && protocol !== 'CHAT_LEGACY') {
+      throw new Error('STRUCTURED_GENERATION_PROTOCOL_INVALID')
+    }
+    return { protocol }
+  }
+
+  private async runV4PlanningStage(input: PlanPresentationInput, request: Readonly<{
+    stage: VisualDeckV4PlanningStage
+    tool: string
+    operation: string
+    schemaName: string
+    payload: unknown
+    sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
+    protocol: StructuredGenerationProtocol
+    repairAttempt?: number
+    parse: (value: unknown) => unknown
+  }>) {
+    const key = visualDeckV4PlanningStageStepKey(
+      input.runId, request.stage, input.attempt ?? 0, request.repairAttempt ?? 0,
+    )
+    const inputHash = hashInput({ tool: request.tool, operation: request.operation, schemaName: request.schemaName, payload: request.payload, protocol: request.protocol })
+    const existing = await this.dependencies.repository.transact(input.runId, (transaction) => {
+      const step = transaction.getStep(key)
+      if (!step) return null
+      if (step.inputHash !== inputHash || step.tool !== request.tool) throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      if (step.status === 'COMPLETED') return step.output
+      if (step.status === 'FAILED') {
+        const now = this.dependencies.clock.now().toISOString()
+        transaction.putStep({ ...step, status: 'RUNNING', errorCode: null, updatedAt: now })
+      }
+      return null
+    })
+    if (existing) return existing
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      if (transaction.getStep(key)) return
+      const now = this.dependencies.clock.now().toISOString()
+      const step: StepRecord = {
+        id: `step-${hashInput({ key }).slice(0, 28)}`,
+        runId: input.runId,
+        idempotencyKey: key,
+        inputHash,
+        tool: request.tool,
+        status: 'RUNNING',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      transaction.putStep(step)
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.started',
+        payload: { stepId: step.id, tool: step.tool, label: `V4 规划阶段：${request.stage}` },
+      })
+    })
+    try {
+      const raw = await this.executeWithProviderRetry(input, {
+        tenantId: (await this.requireRun(input.runId)).host.tenantId,
+        operation: request.operation,
+        schemaName: request.schemaName,
+        payload: request.payload,
+        ...(request.sourceAssets ? { sourceAssets: request.sourceAssets } : {}),
+        idempotencyKey: key,
+        structuredGenerationProtocol: request.protocol,
+      })
+      const output = request.parse(raw)
+      return await this.dependencies.repository.transact(input.runId, (transaction) => {
+        const step = transaction.getStep(key)
+        if (!step) throw new Error('STEP_NOT_FOUND')
+        const completed: StepRecord = { ...step, status: 'COMPLETED', output, errorCode: null, updatedAt: this.dependencies.clock.now().toISOString() }
+        transaction.putStep(completed)
+        transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'tool.completed', payload: { stepId: step.id, summary: `V4 规划阶段已完成：${request.stage}` } })
+        return output
+      })
+    } catch (error) {
+      const failure = error instanceof PlanningFailureError
+        ? error.failure
+        : this.contractFailure(input, error, 1, 1, false)
+      await this.dependencies.repository.transact(input.runId, (transaction) => {
+        const step = transaction.getStep(key)
+        if (!step || step.status === 'FAILED') return
+        transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'tool.failed',
+          payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
+        })
+      })
+      throw new PlanningFailureError(failure)
+    }
   }
 
   private createApprovedBlueprint(
@@ -626,6 +837,15 @@ export class PlanningRunner {
     return null
   }
 
+  private v4SlideBriefContractIssues(error: unknown) {
+    const issues = this.contractIssues(error)
+    if (!issues || issues.length === 0 || !issues.every((issue) =>
+      issue.path === 'slideBriefs' || issue.path.startsWith('slideBriefs.'))) {
+      return null
+    }
+    return issues
+  }
+
   private async requireRun(runId: string) {
     const run = await this.dependencies.repository.getRun(runId)
     if (!run) throw new Error('RUN_NOT_FOUND')
@@ -673,6 +893,11 @@ export class PlanningRunner {
           return { run: transaction.run, step: existing, blueprint, replayed: true }
         }
         if (existing.status === 'FAILED') {
+          if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && transaction.run.status === 'PLANNING') {
+            const now = this.dependencies.clock.now().toISOString()
+            transaction.putStep({ ...existing, status: 'RUNNING', errorCode: null, updatedAt: now })
+            return { run: transaction.run, step: { ...existing, status: 'RUNNING', errorCode: null, updatedAt: now }, blueprint: null, replayed: false }
+          }
           return { run: transaction.run, step: existing, blueprint: null, replayed: true }
         }
         return { run: transaction.run, step: existing, blueprint: null, replayed: false }
@@ -711,7 +936,7 @@ export class PlanningRunner {
       })
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: 1,
+        total: transaction.run.presentationMode === 'VISUAL_DECK_V4' ? 4 : 1,
         pageNumbers: allPageNumbers(transaction.run),
       })
       return { run: updatedRun, step, blueprint: null, replayed: false }
@@ -768,9 +993,6 @@ export class PlanningRunner {
       const updated: StepRecord = { ...step, status: 'COMPLETED', output: blueprint, errorCode: null, updatedAt: now }
       transaction.putRun(run)
       transaction.putStep(updated)
-      if (blueprint.visualDeckV4Proposal) {
-        this.persistVisualDeckV4Artifacts(transaction, input, blueprint.visualDeckV4Proposal, now)
-      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
@@ -784,8 +1006,8 @@ export class PlanningRunner {
         },
       })
       appendV4LifecycleEvent(transaction, 'planning.completed', {
-        completed: 1,
-        total: 1,
+        completed: blueprint.visualDeckV4Proposal ? 4 : 1,
+        total: blueprint.visualDeckV4Proposal ? 4 : 1,
         pageNumbers: allPageNumbers(transaction.run),
         reason: approvedPageDesign ? null : 'USER_CONFIRMATION_REQUIRED',
         requiresUserAction: !approvedPageDesign,
@@ -799,6 +1021,21 @@ export class PlanningRunner {
             schemaVersion: CONTRACT_VERSION,
             type: 'issue.resolved',
             payload: { issueId: `${previous.id}:planning-failed`, resolution: 'FIXED' },
+          })
+        }
+      }
+      if (blueprint.visualDeckV4Proposal) {
+        const issueId = `${step.id}:planning-failed`
+        const issueOpen = transaction.listEvents().reduce((open, event) => {
+          if (event.type === 'issue.detected' && event.payload.id === issueId) return true
+          if (event.type === 'issue.resolved' && event.payload.issueId === issueId) return false
+          return open
+        }, false)
+        if (issueOpen) {
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'issue.resolved',
+            payload: { issueId, resolution: 'FIXED' },
           })
         }
       }
@@ -827,39 +1064,6 @@ export class PlanningRunner {
       }
       return updated
     })
-  }
-
-  private persistVisualDeckV4Artifacts(
-    transaction: AgentTransaction,
-    input: PlanPresentationInput,
-    proposal: VisualDeckV4Proposal,
-    now: string,
-  ) {
-    const artifacts: readonly [VisualDeckV4PlanningArtifact, unknown][] = [
-      ['source-understanding', proposal.sourceUnderstanding],
-      ['presentation-spec', proposal.presentationSpec],
-      ['deck-plan', proposal.deckPlan],
-      ['slide-briefs', proposal.slideBriefs],
-      ['visual-contract', proposal.visualContract],
-    ]
-    for (const [artifact, output] of artifacts) {
-      const key = visualDeckV4PlanningArtifactStepKey(input.runId, artifact, input.attempt ?? 0)
-      transaction.putStep({
-        id: `step-${hashInput({ key }).slice(0, 28)}`,
-        runId: input.runId,
-        idempotencyKey: key,
-        inputHash: hashInput({ compilerVersion: proposal.compilerVersion, artifact, output }),
-        tool: `compile_v4_${artifact.replaceAll('-', '_')}`,
-        status: 'COMPLETED',
-        budgetUnits: 0,
-        budgetReservationId: null,
-        externalOperationId: null,
-        errorCode: null,
-        output,
-        createdAt: now,
-        updatedAt: now,
-      })
-    }
   }
 
   private async fail(
