@@ -57,7 +57,9 @@ bun run check
 | `PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE` | 每租户、每用户的 Run 创建上限，默认 `10` |
 | `PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE` | 每租户、每用户的普通及管理员动作上限，默认 `60` |
 | `PPT_AGENT_WORKER_CONCURRENCY` | 同时推进的 Run 数，默认 `2`，最大 `8` |
-| `PPT_AGENT_REVIEW_CONCURRENCY` | 同时执行的页面视觉审查数，默认 `3`，最大 `8` |
+| `PPT_AGENT_REVIEW_CONCURRENCY` | 同时执行的页面视觉审查数，默认 `1`，最大 `8` |
+| `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6` |
+| `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6` |
 
 完整配置见 `deploy/aliyun/ppt-agent.env.example`。所有 Token 和模型密钥仅保存在权限 `600` 的服务端环境文件中，不进入仓库、请求 body 或日志。
 

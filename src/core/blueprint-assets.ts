@@ -1,4 +1,5 @@
 import type { PresentationBlueprint } from '../presentation-contracts'
+import { VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH } from '../visual-deck-v4-contracts'
 import { hashInput } from './hash'
 import type { RunRecord, StepRecord } from './ports'
 
@@ -19,6 +20,34 @@ export type BlueprintImageRequirement = Readonly<{
   sourceAssetIds: readonly string[]
   sourceAssetStrategy: 'REUSE_ORIGINAL' | 'REFERENCE_GENERATION' | 'SEARCH_WEB' | 'REGENERATE'
 }>
+
+export const V4_REVISION_PROMPT_MAX_LENGTH = 12_000
+// Four page-review rounds can each contribute a 1,000-character retry instruction.
+export const V4_REVISION_INSTRUCTION_MAX_LENGTH = 4_100
+
+const VISUAL_DECK_V4_SAFETY_RULES = [
+  'COUNTABLE OBJECT SAFETY: render exactly one authoritative set of every countable teaching object, with the total cardinality stated in the page facts. Never duplicate solid objects to show motion, before/after states, zoom details, or whole/part relationships.',
+  'Show motion only with arrows, paths, empty destinations, or non-countable outline symbols. Do not add solid motion copies, ghost objects, inset duplicates, or decorative instances of a counted object.',
+  'When a whole and its parts share one page, distinguish them with containers or abstract notation instead of drawing the same physical set twice. The viewer must get one unambiguous count from the static slide.',
+  'Do not invent any additional labels, captions, page numbers, interface text, or decorative words. Every visible string must be one exact, complete member of the closed visible-text allowlist; partial source sentences and paraphrases are forbidden.',
+  'Do not create a contact sheet, thumbnail grid, multi-slide collage, editor interface, frame, watermark, logo, or content from any other slide.',
+] as const
+
+const VISUAL_DECK_V4_RENDER_DIRECTIVE = 'Create one finished, full-bleed 16:9 presentation slide as a single raster image.'
+export const VISUAL_DECK_V4_NEGATIVE_PROMPT = [
+  'visible text outside the closed allowlist',
+  'source quotations',
+  'textbook prose',
+  'teacher notes',
+  'curriculum notes',
+  'page citations or page ranges',
+  'facts-field prose',
+  'core-message or audience-takeaway paraphrases',
+  'explanatory captions',
+  'footnotes',
+  'watermarks',
+  'logos',
+].join(', ')
 
 export function blueprintElementAssetKey(
   slide: PresentationBlueprint['slides'][number],
@@ -69,17 +98,47 @@ export function completeVisualDeckV4Prompt(
   const proposal = blueprint.visualDeckV4Proposal
   const brief = proposal?.slideBriefs.find((candidate) => candidate.pageNumber === slide.pageNumber)
   if (!proposal || !brief) throw new Error('VISUAL_DECK_V4_BRIEF_MISSING')
-  const allowedCopy = visualDeckV4AllowedCopy(brief)
   return [
-    'Create one finished, full-bleed 16:9 presentation slide as a single raster image.',
+    criticalVisualDeckV4Prompt(brief),
+    visualDeckV4ArtDirectionPrompt(proposal, brief),
+    ...VISUAL_DECK_V4_SAFETY_RULES,
+  ].filter(Boolean).join(' ')
+}
+
+function criticalVisualDeckV4Prompt(
+  brief: NonNullable<PresentationBlueprint['visualDeckV4Proposal']>['slideBriefs'][number],
+) {
+  const criticalContentLength = [
+    brief.title,
+    ...brief.lockedCopy,
+    ...brief.facts,
+    ...brief.numbers,
+    ...brief.formulas,
+  ].join('').length
+  if (criticalContentLength > VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH) {
+    throw new Error('V4_CRITICAL_PROMPT_CONTENT_TOO_LONG')
+  }
+  return [
+    VISUAL_DECK_V4_RENDER_DIRECTIVE,
     `Slide role: ${brief.role}.`,
+    'CLOSED VISIBLE TEXT ALLOWLIST: render text only when the complete exact string is listed in Allowed on-slide copy. Every other word, sentence, number, citation, note, or paraphrase in this prompt must remain invisible.',
     `Title: ${brief.title}.`,
-    `Core message: ${brief.keyClaim}.`,
-    `Audience takeaway: ${brief.audienceTakeaway}.`,
-    `Allowed on-slide copy (exact wording): ${allowedCopy.join(' | ')}.`,
-    brief.facts.length > 0 ? `Facts that must remain accurate: ${brief.facts.join(' | ')}.` : '',
+    `Allowed on-slide copy (exact wording): ${visualDeckV4AllowedCopy(brief).join(' | ')}.`,
+    brief.facts.length > 0
+      ? `NON-VISIBLE facts for semantic and counting accuracy only: ${brief.facts.join(' | ')}. Never transcribe, quote, paraphrase, summarize, caption, or display wording from these facts unless the complete exact string is also in Allowed on-slide copy.`
+      : '',
     brief.numbers.length > 0 ? `Numbers that must appear exactly: ${brief.numbers.join(' | ')}.` : '',
     brief.formulas.length > 0 ? `Formulas that must appear exactly: ${brief.formulas.join(' | ')}.` : '',
+  ].filter(Boolean).join(' ')
+}
+
+function visualDeckV4ArtDirectionPrompt(
+  proposal: NonNullable<PresentationBlueprint['visualDeckV4Proposal']>,
+  brief: NonNullable<PresentationBlueprint['visualDeckV4Proposal']>['slideBriefs'][number],
+) {
+  return [
+    `Core message: ${brief.keyClaim}.`,
+    `Audience takeaway: ${brief.audienceTakeaway}.`,
     `Visual idea: ${brief.visualMetaphor}.`,
     `Composition: ${brief.composition}.`,
     `Information order: ${brief.informationHierarchy.join(' -> ')}.`,
@@ -90,9 +149,36 @@ export function completeVisualDeckV4Prompt(
     `Composition rules: ${proposal.visualContract.compositionRules.join(' | ')}.`,
     `Continuity rules: ${proposal.visualContract.continuityRules.join(' | ')}.`,
     `Never include: ${[...proposal.visualContract.forbidden, ...proposal.presentationSpec.forbidden].join(' | ')}.`,
-    'Do not invent any additional labels, captions, page numbers, interface text, or decorative words. Every visible teaching label beyond the title must already be listed in the allowed on-slide copy.',
-    'Do not create a contact sheet, thumbnail grid, multi-slide collage, editor interface, frame, watermark, logo, or content from any other slide.',
   ].filter(Boolean).join(' ')
+}
+
+export function completeVisualDeckV4RevisionPrompt(
+  blueprint: Pick<PresentationBlueprint, 'visualDeckV4Proposal'>,
+  slide: PresentationBlueprint['slides'][number],
+  instructions: readonly string[],
+) {
+  const correction = compileVisualDeckV4RevisionInstructions(instructions)
+  const header = `Quality correction for this page only: ${correction} Preserve the approved page brief and all allowed copy exactly. Correction instructions are non-visible production directions and must never become slide text unless their complete exact wording is in the closed visible-text allowlist.`
+  const safetySuffix = VISUAL_DECK_V4_SAFETY_RULES.join(' ')
+  const proposal = blueprint.visualDeckV4Proposal
+  const brief = proposal?.slideBriefs.find((candidate) => candidate.pageNumber === slide.pageNumber)
+  if (!proposal || !brief) throw new Error('VISUAL_DECK_V4_BRIEF_MISSING')
+  const criticalPrompt = criticalVisualDeckV4Prompt(brief)
+  const visualPromptBudget = V4_REVISION_PROMPT_MAX_LENGTH
+    - header.length - criticalPrompt.length - safetySuffix.length - 3
+  if (visualPromptBudget < 0) throw new Error('V4_REVISION_PROMPT_BUDGET_INVALID')
+  const visualPrompt = visualDeckV4ArtDirectionPrompt(proposal, brief).slice(0, visualPromptBudget)
+  return [header, criticalPrompt, visualPrompt, safetySuffix].filter(Boolean).join(' ')
+}
+
+export function compileVisualDeckV4RevisionInstructions(instructions: readonly string[]) {
+  const unique = [...new Set(instructions.map((instruction) => instruction.trim()).filter(Boolean))]
+  if (unique.length === 0) throw new Error('V4_REVISION_INSTRUCTION_MISSING')
+  const compiled = unique.join(' | ')
+  if (compiled.length > V4_REVISION_INSTRUCTION_MAX_LENGTH) {
+    throw new Error('V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED')
+  }
+  return compiled
 }
 
 export function visualDeckV4AllowedCopy(
@@ -120,7 +206,7 @@ export function blueprintImageRequirements(
         : blueprint.renderMode === 'SLIDE_IMAGE_V2_1'
           ? completeSlideImageV21Prompt(blueprint, slide)
           : slide.visualPrompt,
-      negativePrompt: null,
+      negativePrompt: blueprint.renderMode === 'VISUAL_DECK_V4' ? VISUAL_DECK_V4_NEGATIVE_PROMPT : null,
       aspectRatio: '16:9',
       backgroundMode: 'OPAQUE',
       assetIntent: null,

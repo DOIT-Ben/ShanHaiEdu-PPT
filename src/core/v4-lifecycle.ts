@@ -1,5 +1,6 @@
 import {
   CONTRACT_VERSION,
+  type AgentEvent,
   type V4LifecycleNextAction,
   type V4LifecycleReason,
   type V4LifecycleStage,
@@ -106,6 +107,15 @@ export function appendV4LifecycleEvent(
   } as NewAgentEvent)
 }
 
+export function activeRevisionLifecycle(transaction: AgentTransaction) {
+  const events = transaction.listEvents()
+  const started = [...events].reverse().find((event): event is Extract<AgentEvent, { type: 'revision.started' }> =>
+    event.type === 'revision.started')
+  const completed = [...events].reverse().find((event): event is Extract<AgentEvent, { type: 'revision.completed' }> =>
+    event.type === 'revision.completed')
+  return started && (!completed || started.sequence > completed.sequence) ? started : null
+}
+
 export function revisionDetails(
   plan: Pick<RevisionPlan, 'operations' | 'revisionRound'>,
   pageVisual = false,
@@ -122,6 +132,60 @@ export function revisionDetails(
   return { pageNumbers, revisionKind, revisionRound: plan.revisionRound }
 }
 
+export function appendFixedIssueResolutions(
+  transaction: AgentTransaction,
+  issueIds: readonly string[],
+  stillOpenIssueIds: readonly string[] = [],
+) {
+  const openIssueIds = new Set<string>()
+  for (const event of transaction.listEvents()) {
+    if (event.type === 'issue.detected') openIssueIds.add(event.payload.id)
+    if (event.type === 'issue.resolved') openIssueIds.delete(event.payload.issueId)
+  }
+  const stillOpen = new Set(stillOpenIssueIds)
+  for (const issueId of new Set(issueIds)) {
+    if (!openIssueIds.has(issueId) || stillOpen.has(issueId)) continue
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'issue.resolved',
+      payload: { issueId, resolution: 'FIXED' },
+    })
+  }
+}
+
+const lifecycleStagePairs = [
+  { started: 'planning.started', progress: null, completed: 'planning.completed' },
+  { started: 'generation.started', progress: 'generation.progress', completed: 'generation.completed' },
+  { started: 'page_review.started', progress: null, completed: 'page_review.completed' },
+  { started: 'revision.started', progress: 'revision.progress', completed: 'revision.completed' },
+  { started: 'deck_review.started', progress: null, completed: 'deck_review.completed' },
+  { started: 'delivery.started', progress: null, completed: 'delivery.completed' },
+] as const
+
+export function closeActiveV4LifecycleStages(
+  transaction: AgentTransaction,
+  reason: Extract<V4LifecycleReason, 'INTERNAL_FAILURE' | 'CANCELLED_BY_USER'>,
+) {
+  const events = transaction.listEvents()
+  for (const pair of lifecycleStagePairs) {
+    const started = [...events].reverse().find((event) => event.type === pair.started)
+    const completed = [...events].reverse().find((event) => event.type === pair.completed)
+    if (!started || (completed && completed.sequence > started.sequence)) continue
+    const latest = [...events].reverse().find((event) => event.sequence >= started.sequence
+      && (event.type === pair.started || (pair.progress !== null && event.type === pair.progress))) ?? started
+    const payload = latest.payload as ReturnType<typeof v4LifecyclePayload>
+    appendV4LifecycleEvent(transaction, pair.completed, {
+      completed: payload.completed,
+      total: payload.total,
+      pageNumbers: payload.pageNumbers,
+      revisionKind: payload.revisionKind,
+      revisionRound: payload.revisionRound,
+      reason,
+      retryable: false,
+    })
+  }
+}
+
 export async function failVisualDeckV4Run(input: Readonly<{
   repository: AgentRepository
   clock: ClockPort
@@ -135,6 +199,7 @@ export async function failVisualDeckV4Run(input: Readonly<{
     }
     const fromStatus = transaction.run.status
     const now = input.clock.now().toISOString()
+    closeActiveV4LifecycleStages(transaction, 'INTERNAL_FAILURE')
     const policy = transitionRun(transaction.run, 'FAILED')
     const failedRun = { ...transaction.run, ...policy, updatedAt: now }
     transaction.putRun(failedRun)

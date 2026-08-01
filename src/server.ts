@@ -4,6 +4,7 @@ import { LocalArtifactPort } from './adapters/local-artifact-port'
 import { PublicAssetDiscoveryPort } from './adapters/public-asset-discovery'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
 import { GatewayCoursewareModel } from './adapters/gateway-courseware-model'
+import { FallbackCoursewareModel } from './adapters/fallback-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
@@ -41,13 +42,19 @@ const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite')
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
+const fallbackModelValue = process.env.PPT_AGENT_FALLBACK_MODEL_ENABLED?.trim()
+if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !== 'false') {
+  throw new Error('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
+}
+const fallbackModelEnabled = fallbackModelValue === 'true'
 const appVersion = process.env.PPT_AGENT_APP_VERSION?.trim() || '0.1.0'
 const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
-const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 15 * 60_000, 10_000, 60 * 60_000)
+// A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
+const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_000, 60 * 60_000)
 const waitingSlaMs = boundedInteger('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
 const stepSlaMs = boundedInteger('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
 const workerConcurrency = boundedInteger('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
-const reviewConcurrency = boundedInteger('PPT_AGENT_REVIEW_CONCURRENCY', 3, 1, 8)
+const reviewConcurrency = boundedInteger('PPT_AGENT_REVIEW_CONCURRENCY', 1, 1, 8)
 const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
 const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
 const runActionRateLimitPerMinute = boundedInteger('PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE', 60, 1, 10_000)
@@ -76,13 +83,26 @@ const runtime = runtimeMode === 'gateway'
         ? process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
         : undefined
       if (budgetMode === 'frameflow' && !frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
-      const model = new GatewayCoursewareModel({
+      const primaryModel = new GatewayCoursewareModel({
         baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
         apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
         textModel: process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6',
         visionModel: process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6',
         artifacts,
       })
+      const model = fallbackModelEnabled
+        ? new FallbackCoursewareModel({
+            primary: primaryModel,
+            fallback: new GatewayCoursewareModel({
+              baseUrl: process.env.MINIMAX_BASE_URL?.trim() || 'https://api.minimaxi.com/v1',
+              apiKey: process.env.MINIMAX_API_KEY?.trim() || '',
+              textModel: process.env.MINIMAX_TEXT_MODEL?.trim() || 'MiniMax-M3',
+              visionModel: process.env.MINIMAX_VISION_MODEL?.trim() || 'MiniMax-M3',
+              artifacts,
+              profile: 'MINIMAX_M3',
+            }),
+          })
+        : primaryModel
       return createAgentRuntime({
         repository,
         artifacts,

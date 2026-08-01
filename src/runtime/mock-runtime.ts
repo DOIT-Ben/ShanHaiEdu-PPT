@@ -413,6 +413,33 @@ export function createAgentRuntime(input: RuntimeInput) {
     ...(input.heartbeatStaleMs === undefined ? {} : { heartbeatStaleMs: input.heartbeatStaleMs }),
     ...(input.tickStaleMs === undefined ? {} : { tickStaleMs: input.tickStaleMs }),
   })
+  const trackedCall = <Input, Output>(operation: (input: Input) => Promise<Output>) => async (value: Input) => {
+    health.tickActivity()
+    try {
+      return await operation(value)
+    } finally {
+      health.tickActivity()
+    }
+  }
+  const model: StructuredModelPort = {
+    ...(input.model.modelName === undefined ? {} : { modelName: input.model.modelName }),
+    execute: trackedCall(input.model.execute.bind(input.model)),
+  }
+  const visualReviewer: VisualReviewPort = {
+    review: trackedCall(input.visualReviewer.review.bind(input.visualReviewer)),
+  }
+  const deckReviewer: DeckReviewPort = {
+    evaluate: trackedCall(input.deckReviewer.evaluate.bind(input.deckReviewer)),
+  }
+  const revisionPlanner: RevisionPlanningPort = {
+    plan: trackedCall(input.revisionPlanner.plan.bind(input.revisionPlanner)),
+  }
+  const trackedRevisionApplication: RevisionApplicationPort = {
+    apply: trackedCall(input.revisionApplication.apply.bind(input.revisionApplication)),
+  }
+  const candidateReviewer: AssetCandidateReviewPort | undefined = input.candidateReviewer
+    ? { reviewCandidate: trackedCall(input.candidateReviewer.reviewCandidate.bind(input.candidateReviewer)) }
+    : undefined
   const documents = new FrameFlowHostAdapter(input.frameFlowBackend ?? new MockFrameFlowBackend())
   const budget = input.budget ?? documents
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
@@ -426,7 +453,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const planning = new PlanningRunner({
     repository: input.repository,
     documents,
-    model: input.model,
+    model,
     clock,
   })
   const media = new MediaStepRunner({ repository: input.repository, budget, images, clock })
@@ -437,12 +464,12 @@ export function createAgentRuntime(input: RuntimeInput) {
     documents,
     artifacts: input.artifacts,
     ...(input.discovery ? { discovery: input.discovery } : {}),
-    ...(input.candidateReviewer ? { candidateReviewer: input.candidateReviewer } : {}),
+    ...(candidateReviewer ? { candidateReviewer } : {}),
     clock,
   })
   const visual = new VisualReviewRunner({
     repository: input.repository,
-    reviewer: input.visualReviewer,
+    reviewer: visualReviewer,
     clock,
   })
   const pages = new PageReviewCoordinator({
@@ -451,12 +478,13 @@ export function createAgentRuntime(input: RuntimeInput) {
     artifacts: input.artifacts,
     renderer,
     clock,
+    onReviewCompleted: () => health.tickActivity(),
     ...(input.reviewConcurrency === undefined ? {} : { reviewConcurrency: input.reviewConcurrency }),
   })
   const deck = new DeckReviewRunner({
     repository: input.repository,
     documents,
-    reviewer: input.deckReviewer,
+    reviewer: deckReviewer,
     artifacts: input.artifacts,
     renderer,
     clock,
@@ -470,13 +498,13 @@ export function createAgentRuntime(input: RuntimeInput) {
   const revisionPlanning = new RevisionPlanningRunner({
     repository: input.repository,
     documents,
-    planner: input.revisionPlanner,
+    planner: revisionPlanner,
     clock,
   })
   const revisionApplication = new RevisionApplicationRunner({
     repository: input.repository,
     documents,
-    application: input.revisionApplication,
+    application: trackedRevisionApplication,
     clock,
   })
   const revisionMedia = new RevisionMediaCoordinator({ repository: input.repository, media, clock })
@@ -582,7 +610,8 @@ export function createAgentRuntime(input: RuntimeInput) {
         ttlMs: runLeaseTtlMs,
       })
       if (!lease) return false
-      await withRenewedLease(candidate.id, lease, () => advanceRun(candidate))
+      await health.trackTickOperation(`run:${candidate.id}`, () =>
+        withRenewedLease(candidate.id, lease, () => advanceRun(candidate)))
       return true
     }))
     const reconciliationResults = await Promise.allSettled(pendingMediaIds.map(async (runId) => {
@@ -594,7 +623,8 @@ export function createAgentRuntime(input: RuntimeInput) {
         ttlMs: runLeaseTtlMs,
       })
       if (!lease) return false
-      await withRenewedLease(runId, lease, () => media.reconcilePendingRun(runId))
+      await health.trackTickOperation(`reconcile:${runId}`, () =>
+        withRenewedLease(runId, lease, () => media.reconcilePendingRun(runId)))
       return true
     }))
     const failure = [...runnableResults, ...reconciliationResults]

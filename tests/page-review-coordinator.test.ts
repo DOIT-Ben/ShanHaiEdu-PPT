@@ -7,8 +7,10 @@ import {
   MockVisualReviewPort,
 } from '../src/adapters/mock-ports'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
+import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord, VisualReviewPort } from '../src/core/ports'
+import { StructuredModelError } from '../src/core/ports'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import type { PresentationBlueprint } from '../src/presentation-contracts'
@@ -102,6 +104,7 @@ async function fixture(options: Readonly<{
   reviewConcurrency?: number
   runOverrides?: Partial<RunRecord>
   plannedBlueprint?: PresentationBlueprint
+  onReviewCompleted?: () => void
 }> = {}) {
   const repository = new InMemoryAgentRepository()
   const reviewerPort = options.reviewerPort ?? new MockVisualReviewPort({
@@ -152,6 +155,7 @@ async function fixture(options: Readonly<{
   return {
     repository,
     reviewerPort,
+    artifacts,
     renderer,
     coordinator: new PageReviewCoordinator({
       repository,
@@ -159,12 +163,23 @@ async function fixture(options: Readonly<{
       artifacts,
       renderer,
       clock,
+      ...(options.onReviewCompleted ? { onReviewCompleted: options.onReviewCompleted } : {}),
       ...(options.reviewConcurrency === undefined ? {} : { reviewConcurrency: options.reviewConcurrency }),
     }),
   }
 }
 
 describe('page review coordinator', () => {
+  test('reports worker activity after each completed page review', async () => {
+    let completed = 0
+    const { coordinator } = await fixture({ onReviewCompleted: () => { completed += 1 } })
+
+    const result = await coordinator.reviewAll('run-1')
+
+    expect(result).toMatchObject({ status: 'DECK_REVIEW', approved: 6, total: 6 })
+    expect(completed).toBe(6)
+  })
+
   test('moves to deck review only when every page is approved', async () => {
     const { repository, reviewerPort, renderer, coordinator } = await fixture()
     const result = await coordinator.reviewAll('run-1')
@@ -235,12 +250,15 @@ describe('page review coordinator', () => {
         operations: [{
           slideId: 'run-1:slide:2',
           kind: 'REGENERATE_IMAGE',
+          issueIds: ['step-image-2:review:visual-review'],
           instruction: 'Keep all allowed copy unchanged and render the Arabic numeral 2 exactly.',
         }],
       },
     })
     const requests = [...(reviewerPort as MockVisualReviewPort).requests.values()]
     expect(requests[1]?.visualIntent).toContain(`允许文字：${planned.slides[1]!.title}`)
+    expect(requests[1]?.visualIntent).toContain('非展示事实核对项')
+    expect(requests[1]?.visualIntent).toContain(planned.visualDeckV4Proposal!.slideBriefs[1]!.facts[0]!)
     const lifecycle = (await repository.listEvents('run-1'))
       .filter((event) => event.type === 'page_review.completed' || event.type === 'revision.started')
     expect(lifecycle).toHaveLength(2)
@@ -255,6 +273,237 @@ describe('page review coordinator', () => {
         pageNumbers: [2], completed: 0, total: 1,
       },
     })
+  })
+
+  test('keeps prior issues open while a redraw still fails and resolves them after the page passes', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, artifacts, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+      },
+    })
+    const original = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    const originalArtifactId = (original.output as { artifactId: string }).artifactId
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(originalArtifactId, {
+      approved: false,
+      textDetected: true,
+      visualScore: 40,
+      reasons: ['页面出现额外文字。'],
+      retryInstruction: 'Remove the extra copy and preserve only the approved title.',
+    })
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'REVISING', rejected: 1 })
+
+    const revisedArtifact = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-1', name: 'slide-2-r1.png', mimeType: 'image/png',
+      bytes: new TextEncoder().encode('revised-slide-2'), idempotencyKey: 'revised-slide-2',
+    })
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(revisedArtifact.artifactId, {
+      approved: false,
+      textDetected: true,
+      visualScore: 55,
+      reasons: ['修订页仍有未授权标签。'],
+      retryInstruction: 'Remove the remaining unauthorized label and keep the approved copy unchanged.',
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-apply-r1', runId: 'run-1', idempotencyKey: revisionBlueprintStepKey('run-1', 1),
+        inputHash: 'apply-r1-hash', tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: { ...planned, id: 'blueprint-r1' },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: 'step-image-2-r1', runId: 'run-1', idempotencyKey: 'run-1:slide:2:image:r1:v1',
+        inputHash: 'image-r1-hash', tool: 'generate_slide_image', status: 'COMPLETED', budgetUnits: 1,
+        budgetReservationId: 'budget-r1', externalOperationId: 'operation-r1', errorCode: null,
+        output: {
+          slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r1:v1', artifactId: revisedArtifact.artifactId,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putRun({
+        ...transaction.run,
+        status: 'PAGE_REVIEW',
+        revisionRound: 1,
+        version: transaction.run.version + 1,
+      })
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'REVISING', rejected: 1 })
+    expect((await repository.listEvents('run-1')).filter((event) => event.type === 'issue.resolved')).toHaveLength(0)
+
+    const finalArtifact = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-1', name: 'slide-2-r2.png', mimeType: 'image/png',
+      bytes: new TextEncoder().encode('final-slide-2'), idempotencyKey: 'final-slide-2',
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-apply-r2', runId: 'run-1', idempotencyKey: revisionBlueprintStepKey('run-1', 2),
+        inputHash: 'apply-r2-hash', tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: { ...planned, id: 'blueprint-r2' },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: 'step-image-2-r2', runId: 'run-1', idempotencyKey: 'run-1:slide:2:image:r2:v1',
+        inputHash: 'image-r2-hash', tool: 'generate_slide_image', status: 'COMPLETED', budgetUnits: 1,
+        budgetReservationId: 'budget-r2', externalOperationId: 'operation-r2', errorCode: null,
+        output: {
+          slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r2:v1', artifactId: finalArtifact.artifactId,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putRun({
+        ...transaction.run,
+        status: 'PAGE_REVIEW',
+        revisionRound: 2,
+        version: transaction.run.version + 1,
+      })
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', rejected: 0 })
+    const resolved = (await repository.listEvents('run-1')).filter((event) => event.type === 'issue.resolved')
+    expect(resolved).toHaveLength(2)
+    expect(resolved.find((event) => event.type === 'issue.resolved'
+      && event.payload.issueId === 'step-image-2:review:visual-review')).toMatchObject({
+      payload: { issueId: 'step-image-2:review:visual-review', resolution: 'FIXED' },
+    })
+  })
+
+  test('resolves only the planned issue when multiple issues target one page', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, artifacts, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+      },
+    })
+    const original = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    const originalArtifactId = (original.output as { artifactId: string }).artifactId
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(originalArtifactId, {
+      approved: false,
+      textDetected: true,
+      visualScore: 40,
+      reasons: ['页面出现未授权文字。'],
+      retryInstruction: 'Remove the unauthorized text and keep the approved copy unchanged.',
+    })
+    await coordinator.reviewAll('run-1')
+    await repository.transact('run-1', (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'issue.detected',
+        payload: {
+          id: 'independent-image-quality-issue',
+          category: 'IMAGE_QUALITY',
+          severity: 'WARNING',
+          summary: '同一页面还有未纳入本轮计划的独立清晰度问题。',
+          slideIds: ['run-1:slide:2'],
+          sourceChunkIds: [],
+          status: 'OPEN',
+        },
+      })
+    })
+    const revisedArtifact = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-1', name: 'slide-2-r1.png', mimeType: 'image/png',
+      bytes: new TextEncoder().encode('revised-slide-2'), idempotencyKey: 'revised-slide-2',
+    })
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(revisedArtifact.artifactId, {
+      approved: true,
+      textDetected: false,
+      visualScore: 92,
+      reasons: [],
+      retryInstruction: null,
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-apply-r1', runId: 'run-1', idempotencyKey: revisionBlueprintStepKey('run-1', 1),
+        inputHash: 'apply-r1-hash', tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: { ...planned, id: 'blueprint-r1' },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: 'step-image-2-r1', runId: 'run-1', idempotencyKey: 'run-1:slide:2:image:r1:v1',
+        inputHash: 'image-r1-hash', tool: 'generate_slide_image', status: 'COMPLETED', budgetUnits: 1,
+        budgetReservationId: 'budget-r1', externalOperationId: 'operation-r1', errorCode: null,
+        output: {
+          slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r1:v1', artifactId: revisedArtifact.artifactId,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putRun({
+        ...transaction.run,
+        status: 'PAGE_REVIEW',
+        revisionRound: 1,
+        version: transaction.run.version + 1,
+      })
+    })
+
+    await coordinator.reviewAll('run-1')
+    const resolvedIds = (await repository.listEvents('run-1'))
+      .filter((event) => event.type === 'issue.resolved')
+      .map((event) => event.payload.issueId)
+    expect(resolvedIds).toContain('step-image-2:review:visual-review')
+    expect(resolvedIds).not.toContain('independent-image-quality-issue')
+  })
+
+  test('moves to human review before revising when cumulative v4 instructions exceed the lossless budget', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, artifacts, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+        revisionRound: 1, maxRevisionRounds: 4,
+      },
+    })
+    const revisedArtifact = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-1', name: 'slide-2-r1.png', mimeType: 'image/png',
+      bytes: new TextEncoder().encode('revised-slide-2-over-budget'), idempotencyKey: 'revised-slide-2-over-budget',
+    })
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact(revisedArtifact.artifactId, {
+      approved: false, textDetected: false, visualScore: 55, reasons: ['页面仍有复杂视觉问题。'],
+      retryInstruction: 'C'.repeat(1_000),
+    })
+    await repository.transact('run-1', (transaction) => {
+      const now = transaction.run.updatedAt
+      transaction.putStep({
+        id: 'step-apply-r1', runId: 'run-1', idempotencyKey: revisionBlueprintStepKey('run-1', 1),
+        inputHash: 'apply-r1-hash', tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: { ...planned, id: 'blueprint-r1' }, createdAt: now, updatedAt: now,
+      })
+      transaction.putStep({
+        id: 'step-prior-plan-r1', runId: 'run-1', idempotencyKey: revisionPlanStepKey('run-1', 1),
+        inputHash: 'prior-plan-r1-hash', tool: 'plan_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: {
+          id: 'prior-plan-r1', reviewId: 'review-r0', revisionRound: 1, createdAt: now,
+          summary: '上一轮包含两项必须无损保留的视觉修复要求。',
+          operations: [1, 2].map((index) => ({
+            id: `prior-operation-${index}`, slideId: 'run-1:slide:2', kind: 'RELAYOUT',
+            issueIds: [`prior-issue-${index}`], instruction: String(index).repeat(2_000), sourceChunkIds: [],
+          })),
+        },
+        createdAt: now, updatedAt: now,
+      })
+      transaction.putStep({
+        id: 'step-image-2-r1', runId: 'run-1', idempotencyKey: 'run-1:slide:2:image:r1:v1',
+        inputHash: 'image-r1-hash', tool: 'generate_slide_image', status: 'COMPLETED', budgetUnits: 1,
+        budgetReservationId: 'budget-r1', externalOperationId: 'operation-r1', errorCode: null,
+        output: {
+          slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r1:v1', artifactId: revisedArtifact.artifactId,
+        },
+        createdAt: now, updatedAt: now,
+      })
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', rejected: 1 })
+    expect((await repository.listSteps('run-1')).some((step) =>
+      step.idempotencyKey === revisionPlanStepKey('run-1', 2))).toBe(false)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
   })
 
   test('replays a completed page-review phase without model calls', async () => {
@@ -326,9 +575,52 @@ describe('page review coordinator', () => {
     expect(completed).toHaveLength(1)
     expect(completed[0]).toMatchObject({
       payload: {
-        completed: 3, total: 3, pageNumbers: [1, 2, 3],
-        reason: 'PAGE_REVIEW_FAILED', requiresUserAction: true, nextAction: 'REVIEW_RESULT',
+        completed: 0, total: 3, pageNumbers: [1, 2, 3],
+        reason: 'PAGE_REVIEW_FAILED', retryable: false,
+        requiresUserAction: true, nextAction: 'REVIEW_RESULT',
       },
+    })
+  })
+
+  test('prioritizes an execution failure over content rejections in the same v4 batch', async () => {
+    let calls = 0
+    const reviewerPort: VisualReviewPort = {
+      async review() {
+        calls += 1
+        if (calls === 1) {
+          return {
+            approved: false,
+            textDetected: false,
+            visualScore: 72,
+            reasons: ['构图需要局部调整'],
+            retryInstruction: 'Keep the approved copy and simplify the composition.',
+          }
+        }
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'page-review-2')
+      },
+    }
+    const { repository, coordinator } = await fixture({
+      reviewerPort,
+      reviewConcurrency: 1,
+      plannedBlueprint: visualDeckV4Blueprint(),
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+      },
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN', approved: 0, rejected: 1, total: 3,
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.filter((event) => event.type === 'phase.changed')).toHaveLength(1)
+    expect(events.some((event) => event.type === 'revision.started')).toBe(false)
+    expect((await repository.listSteps('run-1')).some((step) => step.tool === 'plan_page_revision')).toBe(false)
+    expect(events.find((event) => event.type === 'page_review.completed')?.payload).toMatchObject({
+      completed: 1,
+      total: 3,
+      reason: 'PAGE_REVIEW_FAILED',
+      retryable: false,
     })
   })
 })

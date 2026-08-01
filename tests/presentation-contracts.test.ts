@@ -143,9 +143,43 @@ describe('deck review and revision contracts', () => {
       issues: [{ ...issue, sourceChunkIds: [] }],
       modelThreshold: 80,
     }).success).toBe(false)
+
+    expect(deckReviewDraftSchema.safeParse({
+      qualityScore: 76,
+      curriculumCoverageScore: 82,
+      narrativeCoherenceScore: 78,
+      visualConsistencyScore: 74,
+      compositionScore: 70,
+      summary: '整套课件结构完整，但存在一处需要依据来源修复的知识问题。',
+      reviewedSourceChunkIds: ['chunk-1'],
+      issues: [{
+        ...issue,
+        category: 'COMPOSITION_CONFLICT',
+        repairDomain: 'KNOWLEDGE',
+        sourceChunkIds: [],
+      }],
+    }).success).toBe(false)
   })
 
-  test('requires revision operations to target concrete issues within two rounds', () => {
+  test('rejects duplicate deck review issue ids before revision planning', () => {
+    const review = {
+      qualityScore: 76,
+      curriculumCoverageScore: 82,
+      narrativeCoherenceScore: 78,
+      visualConsistencyScore: 74,
+      compositionScore: 70,
+      summary: '整套课件存在两个不同页面的问题，必须分别保留并进入修订计划。',
+      reviewedSourceChunkIds: ['chunk-1', 'chunk-2'],
+      issues: [
+        issue,
+        { ...issue, slideIds: ['run-1:slide:1'], summary: '第一页存在另一项独立事实风险。' },
+      ],
+    }
+
+    expect(() => deckReviewDraftSchema.parse(review)).toThrow('deck review issue ids must be unique')
+  })
+
+  test('requires revision operations to target concrete issues within the bounded round limit', () => {
     const plan = revisionPlanSchema.parse({
       id: 'revision-plan-1',
       reviewId: 'deck-review-1',

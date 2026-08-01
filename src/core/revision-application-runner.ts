@@ -7,6 +7,7 @@ import {
   type PresentationBlueprint,
   type RevisionPlan,
 } from '../presentation-contracts'
+import { visualDeckV4ProposalDraftSchema, type VisualDeckV4ProposalDraft } from '../visual-deck-v4-contracts'
 import { getActiveBlueprint, revisionBlueprintStepKey } from './active-blueprint'
 import { hashInput } from './hash'
 import type {
@@ -17,9 +18,20 @@ import type {
   RunRecord,
   SourceChunk,
   StepRecord,
+  ContractRepairIssue,
 } from './ports'
+import { StructuredModelError } from './ports'
 import { transitionRun } from './policy'
+import {
+  MAX_REVISION_CONTRACT_ATTEMPTS,
+  revisionContractAttemptKey,
+  revisionContractRepairIssues,
+} from './revision-contract-repair'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import {
+  createVisualDeckV4BlueprintFromProposal,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+} from './visual-deck-v4-planner'
 import {
   allPageNumbers,
   appendV4LifecycleEvent,
@@ -34,27 +46,61 @@ export type RevisionApplicationResult = Readonly<{
   replayed: boolean
 }>
 
+const MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS = 5
+const REVISION_APPLICATION_RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 60_000] as const
+
+type RevisionApplicationFailure = Readonly<{
+  errorCode: string
+  diagnosticCode: string
+  providerAttempt: number
+  maxProviderAttempts: number
+  contractAttempt: number
+  maxContractAttempts: number
+  model: string | null
+  requestId: string | null
+}>
+
+class RevisionApplicationExecutionError extends Error {
+  constructor(readonly diagnostic: RevisionApplicationFailure) {
+    super(diagnostic.errorCode)
+    this.name = 'RevisionApplicationExecutionError'
+  }
+}
+
 export class RevisionApplicationRunner {
+  private readonly inFlight = new Map<string, Promise<RevisionApplicationResult>>()
+
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     documents: DocumentPort
     application: RevisionApplicationPort
     clock: ClockPort
+    sleep?: (milliseconds: number) => Promise<void>
   }>) {}
 
-  async apply(runId: string): Promise<RevisionApplicationResult> {
+  apply(runId: string): Promise<RevisionApplicationResult> {
+    const existing = this.inFlight.get(runId)
+    if (existing) return existing
+    const pending = this.applyOnce(runId).finally(() => {
+      if (this.inFlight.get(runId) === pending) this.inFlight.delete(runId)
+    })
+    this.inFlight.set(runId, pending)
+    return pending
+  }
+
+  private async applyOnce(runId: string): Promise<RevisionApplicationResult> {
     const run = await this.requireRun(runId)
     if (run.revisionRound < 1) throw new Error('REVISION_ROUND_NOT_STARTED')
     const base = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound - 1)
     const plan = await this.requirePlan(run)
-    let sourceChunks: readonly SourceChunk[]
+    let document: Awaited<ReturnType<DocumentPort['resolve']>>
     try {
-      const document = await this.dependencies.documents.resolve({ host: run.host, source: run.source })
+      document = await this.dependencies.documents.resolve({ host: run.host, source: run.source })
       if (!document.isComplete) throw new Error('SOURCE_INCOMPLETE')
-      sourceChunks = document.chunks
     } catch (error) {
       return this.failBeforeApply(run, error instanceof Error ? error.message : 'REVISION_INPUT_FAILED')
     }
+    const sourceChunks = document.chunks
     const idempotencyKey = revisionBlueprintStepKey(run.id, run.revisionRound)
     const inputHash = hashInput({
       tool: 'apply_revision',
@@ -67,7 +113,7 @@ export class RevisionApplicationRunner {
 
     try {
       if (base.renderMode === 'VISUAL_DECK_V4'
-        && plan.operations.every((operation) => operation.kind !== 'UPDATE_CONTENT')) {
+        && plan.operations.every((operation) => operation.kind === 'REGENERATE_IMAGE')) {
         const slideIds = new Set(base.slides.map((slide) => `${run.id}:slide:${slide.pageNumber}`))
         if (plan.operations.some((operation) => !slideIds.has(operation.slideId))) {
           throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
@@ -79,29 +125,120 @@ export class RevisionApplicationRunner {
         })
         return this.complete(run, idempotencyKey, blueprint, plan)
       }
-      const raw = await this.dependencies.application.apply({
-        tenantId: run.host.tenantId,
-        blueprint: base,
+      const blueprint = await this.applyWithContractRepair({
+        run,
+        base,
         plan,
-        sourceChunks,
+        document,
         idempotencyKey,
       })
-      const draft = inheritSourceLineage(base, blueprintDraftSchema.parse(raw))
-      this.validateRevision(run.id, base, draft, plan, sourceChunks)
-      const blueprint = presentationBlueprintSchema.parse({
-        ...draft,
-        id: `${run.id}:blueprint:r${run.revisionRound}`,
-        visualDirection: base.visualDirection,
-        ...(base.renderMode ? { renderMode: base.renderMode } : {}),
-        ...(base.coverDesignMode ? { coverDesignMode: base.coverDesignMode } : {}),
-        sourceManifest: base.sourceManifest,
-        sourceAssets: base.sourceAssets,
-        createdAt: this.dependencies.clock.now().toISOString(),
-      })
       return this.complete(run, idempotencyKey, blueprint, plan)
-    } catch {
-      return this.fail(run, idempotencyKey, 'REVISION_APPLICATION_FAILED', plan)
+    } catch (error) {
+      const diagnostic = error instanceof RevisionApplicationExecutionError
+        ? error.diagnostic
+        : revisionApplicationFailure(error, 1, 1)
+      return this.fail(run, idempotencyKey, diagnostic, plan)
     }
+  }
+
+  private async applyWithContractRepair(input: Readonly<{
+    run: RunRecord
+    base: PresentationBlueprint
+    plan: RevisionPlan
+    document: Awaited<ReturnType<DocumentPort['resolve']>>
+    idempotencyKey: string
+  }>) {
+    if (input.base.renderMode === 'VISUAL_DECK_V4'
+      && input.base.visualDeckV4Proposal?.compilerVersion !== VISUAL_DECK_V4_COMPILER_VERSION) {
+      throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
+    }
+    let contractRepairIssues: readonly ContractRepairIssue[] | undefined
+    let lastError: unknown = new Error('REVISION_APPLICATION_FAILED')
+    for (let contractAttempt = 0; contractAttempt < MAX_REVISION_CONTRACT_ATTEMPTS; contractAttempt += 1) {
+      for (let providerAttempt = 1;
+        providerAttempt <= MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS;
+        providerAttempt += 1) {
+        try {
+          const raw = await this.dependencies.application.apply({
+            tenantId: input.run.host.tenantId,
+            blueprint: input.base,
+            plan: input.plan,
+            sourceChunks: input.document.chunks,
+            idempotencyKey: revisionContractAttemptKey(input.idempotencyKey, contractAttempt),
+            ...(contractRepairIssues ? { contractRepairIssues } : {}),
+          })
+          if (input.base.renderMode === 'VISUAL_DECK_V4') {
+            const draft = visualDeckV4ProposalDraftSchema.parse(raw)
+            const blueprint = this.compileV4Revision(input.run, input.base, input.plan, input.document, draft)
+            this.validateV4Revision(input.run.id, input.base, blueprint, input.plan)
+            return blueprint
+          }
+          const draft = inheritSourceLineage(input.base, blueprintDraftSchema.parse(raw))
+          this.validateRevision(input.run.id, input.base, draft, input.plan, input.document.chunks)
+          return presentationBlueprintSchema.parse({
+            ...draft,
+            id: `${input.run.id}:blueprint:r${input.run.revisionRound}`,
+            visualDirection: input.base.visualDirection,
+            ...(input.base.renderMode ? { renderMode: input.base.renderMode } : {}),
+            ...(input.base.coverDesignMode ? { coverDesignMode: input.base.coverDesignMode } : {}),
+            sourceManifest: input.base.sourceManifest,
+            sourceAssets: input.base.sourceAssets,
+            createdAt: this.dependencies.clock.now().toISOString(),
+          })
+        } catch (error) {
+          lastError = error
+          const providerRetryable = error instanceof StructuredModelError
+            && error.retryable
+            && error.code !== 'MODEL_JSON_INVALID'
+          if (providerRetryable) {
+            if (providerAttempt === MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS) {
+              throw new RevisionApplicationExecutionError(
+                revisionApplicationFailure(error, providerAttempt, contractAttempt + 1),
+              )
+            }
+            await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
+              REVISION_APPLICATION_RETRY_DELAYS_MS[providerAttempt - 1]
+                ?? REVISION_APPLICATION_RETRY_DELAYS_MS.at(-1)!,
+            )
+            continue
+          }
+          const issues = revisionContractRepairIssues(error)
+          if (!issues || contractAttempt + 1 >= MAX_REVISION_CONTRACT_ATTEMPTS) {
+            throw new RevisionApplicationExecutionError(
+              revisionApplicationFailure(error, providerAttempt, contractAttempt + 1),
+            )
+          }
+          contractRepairIssues = issues
+          break
+        }
+      }
+    }
+    throw new RevisionApplicationExecutionError(
+      revisionApplicationFailure(lastError, 1, MAX_REVISION_CONTRACT_ATTEMPTS),
+    )
+  }
+
+  private compileV4Revision(
+    run: RunRecord,
+    base: PresentationBlueprint,
+    plan: RevisionPlan,
+    document: Awaited<ReturnType<DocumentPort['resolve']>>,
+    draft: VisualDeckV4ProposalDraft,
+  ) {
+    if (!run.visualDeckV4) throw new Error('VISUAL_DECK_V4_CONFIG_MISSING')
+    return createVisualDeckV4BlueprintFromProposal({
+      runId: run.id,
+      inputHash: hashInput({ baseId: base.id, plan, draft }),
+      source: run.source,
+      document,
+      config: run.visualDeckV4,
+      slideCount: run.slideCount,
+      visualDirection: run.visualDirection,
+      ...(run.targetAudience ? { targetAudience: run.targetAudience } : {}),
+      ...(run.presentationGoal ? { presentationGoal: run.presentationGoal } : {}),
+      compilerVersion: base.visualDeckV4Proposal!.compilerVersion,
+      createdAt: this.dependencies.clock.now().toISOString(),
+    }, draft)
   }
 
   private async prepare(run: RunRecord, key: string, inputHash: string, plan: RevisionPlan) {
@@ -122,7 +259,8 @@ export class RevisionApplicationRunner {
         if (existing.status === 'FAILED') {
           return { status: transaction.run.status, step: existing, blueprint: null, requiresMedia: false, replayed: true }
         }
-        return null
+        if (existing.status === 'RUNNING') return null
+        throw new Error('REVISION_APPLICATION_STEP_STATE_INVALID')
       }
       if (transaction.run.status !== 'REVISING') throw new Error('RUN_NOT_REVISING')
       const now = this.dependencies.clock.now().toISOString()
@@ -166,6 +304,20 @@ export class RevisionApplicationRunner {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const step = transaction.getStep(key)
       if (!step) throw new Error('STEP_NOT_FOUND')
+      if (step.status === 'COMPLETED') {
+        const persisted = presentationBlueprintSchema.parse(step.output)
+        return {
+          status: transaction.run.status,
+          step,
+          blueprint: persisted,
+          requiresMedia: requiresRevisionMedia(plan, persisted),
+          replayed: true,
+        }
+      }
+      if (step.status === 'FAILED') {
+        return { status: transaction.run.status, step, blueprint: null, requiresMedia: false, replayed: true }
+      }
+      if (step.status !== 'RUNNING') throw new Error('REVISION_APPLICATION_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
       const requiresMedia = requiresRevisionMedia(plan, blueprint)
       const policy = requiresMedia ? transaction.run : transitionRun(transaction.run, 'DECK_REVIEW')
@@ -205,28 +357,53 @@ export class RevisionApplicationRunner {
     const inputHash = hashInput({ tool: 'apply_revision', revisionRound: run.revisionRound, errorCode })
     const plan = await this.requirePlan(run)
     const prepared = await this.prepare(run, key, inputHash, plan)
-    return prepared ?? this.fail(run, key, errorCode, plan)
+    return prepared ?? this.fail(run, key, revisionApplicationFailure(new Error(errorCode), 0, 0), plan)
   }
 
-  private async fail(run: RunRecord, key: string, errorCode: string, plan: RevisionPlan): Promise<RevisionApplicationResult> {
+  private async fail(
+    run: RunRecord,
+    key: string,
+    diagnostic: RevisionApplicationFailure,
+    plan: RevisionPlan,
+  ): Promise<RevisionApplicationResult> {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const step = transaction.getStep(key)
       if (!step) throw new Error('STEP_NOT_FOUND')
+      if (step.status === 'COMPLETED') {
+        const persisted = presentationBlueprintSchema.parse(step.output)
+        return {
+          status: transaction.run.status,
+          step,
+          blueprint: persisted,
+          requiresMedia: requiresRevisionMedia(plan, persisted),
+          replayed: true,
+        }
+      }
+      if (step.status === 'FAILED') {
+        return { status: transaction.run.status, step, blueprint: null, requiresMedia: false, replayed: true }
+      }
+      if (step.status !== 'RUNNING') throw new Error('REVISION_APPLICATION_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
       const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
-      const updatedStep: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
+      const updatedStep: StepRecord = {
+        ...step,
+        status: 'FAILED',
+        errorCode: diagnostic.errorCode,
+        output: { diagnostic },
+        updatedAt: now,
+      }
       transaction.putStep(updatedStep)
       transaction.putRun(updatedRun)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode, retryable: false },
+        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: false },
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'phase.changed',
-        payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: errorCode },
+        payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: diagnostic.errorCode },
       })
       const details = revisionDetails(plan)
       appendV4LifecycleEvent(transaction, 'revision.completed', {
@@ -294,8 +471,95 @@ export class RevisionApplicationRunner {
         throw new Error('REVISION_SCOPE_VIOLATION')
       }
       if (revised.sourceChunkIds.some((id) => !sourceIds.has(id))) throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
+      const contentSourceChunkIds = new Set(operations
+        .filter((operation) => operation.kind === 'UPDATE_CONTENT')
+        .flatMap((operation) => operation.sourceChunkIds))
+      if (kinds.has('UPDATE_CONTENT')) {
+        validatePreservedSourceLineage(previous.sourceChunkIds, revised.sourceChunkIds, contentSourceChunkIds)
+      }
       validateLayeredRevisionScope(previous, revised, operations)
     }
+  }
+
+  private validateV4Revision(
+    runId: string,
+    base: PresentationBlueprint,
+    revised: PresentationBlueprint,
+    plan: RevisionPlan,
+  ) {
+    const before = base.visualDeckV4Proposal
+    const after = revised.visualDeckV4Proposal
+    if (!before || !after) throw new Error('VISUAL_DECK_V4_PROPOSAL_MISSING')
+    for (const field of ['sourceUnderstanding', 'presentationSpec', 'deckPlan', 'visualContract'] as const) {
+      if (JSON.stringify(before[field]) !== JSON.stringify(after[field])) throw new Error('REVISION_SCOPE_VIOLATION')
+    }
+    if (base.title !== revised.title || JSON.stringify(base.curriculum) !== JSON.stringify(revised.curriculum)) {
+      throw new Error('REVISION_SCOPE_VIOLATION')
+    }
+    const operationsBySlide = new Map<string, RevisionPlan['operations'][number][]>()
+    for (const operation of plan.operations) {
+      const operations = operationsBySlide.get(operation.slideId) ?? []
+      operations.push(operation)
+      operationsBySlide.set(operation.slideId, operations)
+    }
+    for (const [index, nextBrief] of after.slideBriefs.entries()) {
+      const previousBrief = before.slideBriefs[index]
+      if (!previousBrief) throw new Error('REVISION_SCOPE_VIOLATION')
+      const operations = operationsBySlide.get(`${runId}:slide:${nextBrief.pageNumber}`) ?? []
+      if (operations.length === 0) {
+        if (JSON.stringify(previousBrief) !== JSON.stringify(nextBrief)) throw new Error('REVISION_SCOPE_VIOLATION')
+        continue
+      }
+      const kinds = new Set(operations.map((operation) => operation.kind))
+      const contentOperations = operations.filter((operation) => operation.kind === 'UPDATE_CONTENT')
+      const requiredSourceChunkIds = new Set(contentOperations.flatMap((operation) => operation.sourceChunkIds))
+      if (contentOperations.length > 0) {
+        validatePreservedSourceLineage(
+          previousBrief.sourceChunkIds,
+          nextBrief.sourceChunkIds,
+          requiredSourceChunkIds,
+        )
+      }
+      const previousComparable = structuredClone(previousBrief) as Record<string, unknown>
+      const nextComparable = structuredClone(nextBrief) as Record<string, unknown>
+      if (kinds.has('UPDATE_CONTENT')) {
+        for (const field of ['title', 'keyClaim', 'audienceTakeaway', 'lockedCopy', 'facts', 'numbers', 'formulas', 'sourceChunkIds']) {
+          delete previousComparable[field]
+          delete nextComparable[field]
+        }
+      }
+      if (kinds.has('UPDATE_CONTENT') || kinds.has('RELAYOUT')) {
+        for (const field of ['visualMetaphor', 'composition', 'informationHierarchy', 'previousSlideRelation', 'nextSlideRelation']) {
+          delete previousComparable[field]
+          delete nextComparable[field]
+        }
+      }
+      if (JSON.stringify(previousComparable) !== JSON.stringify(nextComparable)) {
+        throw new Error('REVISION_SCOPE_VIOLATION')
+      }
+    }
+  }
+}
+
+function revisionApplicationFailure(
+  error: unknown,
+  providerAttempt: number,
+  contractAttempt: number,
+): RevisionApplicationFailure {
+  const structured = error instanceof StructuredModelError ? error : null
+  const diagnosticCode = structured?.code
+    ?? (error instanceof Error && /^[A-Z][A-Z0-9_]{2,99}$/.test(error.message)
+      ? error.message
+      : 'REVISION_APPLICATION_FAILED')
+  return {
+    errorCode: structured?.code ?? 'REVISION_APPLICATION_FAILED',
+    diagnosticCode,
+    providerAttempt,
+    maxProviderAttempts: MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS,
+    contractAttempt,
+    maxContractAttempts: MAX_REVISION_CONTRACT_ATTEMPTS,
+    model: structured?.model ?? null,
+    requestId: structured?.requestId ?? null,
   }
 }
 
@@ -351,6 +615,9 @@ function validateLayeredRevisionScope(
   const regenerated = new Set(operations
     .filter((operation) => operation.kind === 'REGENERATE_IMAGE')
     .map((operation) => operation.targetElementId))
+  const contentSourceChunkIds = new Set(operations
+    .filter((operation) => operation.kind === 'UPDATE_CONTENT')
+    .flatMap((operation) => operation.sourceChunkIds))
   for (const [index, next] of revised.layeredDesign.elements.entries()) {
     const before = previous.layeredDesign.elements[index]
     if (!before || before.elementId !== next.elementId || before.kind !== next.kind) {
@@ -364,7 +631,9 @@ function validateLayeredRevisionScope(
       delete nextComparable.placement
       delete nextComparable.zIndex
     }
-    if (kinds.has('UPDATE_CONTENT') && before.kind === 'TEXT' && next.kind === 'TEXT') {
+    if (kinds.has('UPDATE_CONTENT') && before.kind === 'TEXT' && next.kind === 'TEXT'
+      && before.text !== next.text) {
+      validatePreservedSourceLineage(before.sourceChunkIds, next.sourceChunkIds, contentSourceChunkIds)
       delete beforeComparable.text
       delete beforeComparable.sourceChunkIds
       delete nextComparable.text
@@ -386,7 +655,21 @@ function validateLayeredRevisionScope(
   }
 }
 
+function validatePreservedSourceLineage(
+  previousSourceChunkIds: readonly string[],
+  revisedSourceChunkIds: readonly string[],
+  revisionSourceChunkIds: ReadonlySet<string>,
+) {
+  const required = new Set([...previousSourceChunkIds, ...revisionSourceChunkIds])
+  if (revisedSourceChunkIds.length === 0
+    || revisedSourceChunkIds.some((id) => !required.has(id))
+    || [...required].some((id) => !revisedSourceChunkIds.includes(id))) {
+    throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
+  }
+}
+
 export function requiresRevisionMedia(plan: RevisionPlan, blueprint?: PresentationBlueprint) {
+  if (blueprint?.renderMode === 'VISUAL_DECK_V4') return plan.operations.length > 0
   if (blueprint?.renderMode === 'LAYERED_COURSEWARE_V3') {
     return plan.operations.some((operation) => operation.kind === 'REGENERATE_IMAGE')
   }

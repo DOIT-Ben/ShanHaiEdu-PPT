@@ -9,6 +9,7 @@ import {
   MockVisualReviewPort,
 } from '../src/adapters/mock-ports'
 import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
+import { V4_REVISION_PROMPT_MAX_LENGTH } from '../src/core/blueprint-assets'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { planningStepKey } from '../src/core/planning-runner'
@@ -249,10 +250,24 @@ describe('revision media coordinator', () => {
 
   test('redraws a v4 page with the complete approved brief plus the review correction', async () => {
     const base = visualDeckV4Blueprint()
-    const correction = 'Keep all allowed copy unchanged and remove the extra numeral 2 from the bird label.'
+    const brief = base.visualDeckV4Proposal!.slideBriefs[1]!
+    brief.lockedCopy = [...brief.lockedCopy, '权威对象总数：12；6+6=12']
+    brief.facts = Array.from(
+      { length: 12 },
+      (_, index) => `${index === 11 ? '最后一条权威对象总数事实：12' : `来源事实 ${index + 1}`}：${
+        '绿色植物利用光能制造有机物并释放氧气。'.repeat(20)
+      }`.slice(0, 400),
+    )
+    brief.numbers = ['12']
+    brief.formulas = ['6+6=12']
     const revision = {
       ...revisionPlan(),
-      operations: [{ ...revisionPlan().operations[0]!, instruction: correction, sourceChunkIds: ['chunk-1'] }],
+      operations: Array.from({ length: 50 }, (_, index) => ({
+        ...revisionPlan().operations[0]!,
+        id: `operation-${index + 1}`,
+        instruction: `Correction ${index + 1}: remove extra mark`,
+        sourceChunkIds: ['chunk-1'],
+      })),
     }
     const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
       blueprint: base,
@@ -264,7 +279,16 @@ describe('revision media coordinator', () => {
     const request = [...images.requests.values()][0]
     expect(request?.prompt).toContain('Create one finished, full-bleed 16:9 presentation slide')
     expect(request?.prompt).toContain(base.visualDeckV4Proposal!.slideBriefs[1]!.title)
-    expect(request?.prompt).toContain(correction)
+    expect(request?.prompt).toContain('Correction 1')
+    expect(request?.prompt).toContain('Correction 50')
+    expect(request?.prompt).toContain('最后一条权威对象总数事实：12')
+    expect(request?.prompt).toContain('Numbers that must appear exactly: 12')
+    expect(request?.prompt).toContain('Formulas that must appear exactly: 6+6=12')
+    expect(request?.prompt).toContain('COUNTABLE OBJECT SAFETY')
+    expect(request?.prompt).toContain('Do not invent any additional labels')
+    expect(request?.prompt).toContain('closed visible-text allowlist')
+    expect(request?.negativePrompt).toContain('facts-field prose')
+    expect(request?.prompt.length).toBeLessThanOrEqual(V4_REVISION_PROMPT_MAX_LENGTH)
     images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
     const lifecycle = (await repository.listEvents('run-1'))
@@ -276,6 +300,186 @@ describe('revision media coordinator', () => {
     expect(lifecycle[1]).toMatchObject({
       payload: { revisionKind: 'DECK_VISUAL', pageNumbers: [2], completed: 1, total: 1 },
     })
+  })
+
+  test('rejects oversized v4 correction instructions before any paid redraw', async () => {
+    const revision = {
+      ...revisionPlan(),
+      operations: [
+        {
+          ...revisionPlan().operations[0]!, id: 'operation-a',
+          instruction: `${'A'.repeat(1_950)} KEEP_REQUIREMENT_A`,
+        },
+        {
+          ...revisionPlan().operations[0]!, id: 'operation-b',
+          instruction: `${'B'.repeat(1_950)} KEEP_REQUIREMENT_B`,
+        },
+        {
+          ...revisionPlan().operations[0]!, id: 'operation-c',
+          instruction: `${'C'.repeat(1_950)} KEEP_REQUIREMENT_C`,
+        },
+      ],
+    }
+    const { images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revision,
+    })
+
+    expect(coordinator.submit('run-1', 5)).rejects.toThrow('V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED')
+    expect(images.operations.size).toBe(0)
+  })
+
+  test('redraws a v4 page after a source-grounded content correction', async () => {
+    const base = visualDeckV4Blueprint()
+    const correction = 'Correct the teaching claim from the cited source and redraw the complete page.'
+    const revision = {
+      ...revisionPlan(),
+      operations: [{
+        ...revisionPlan().operations[0]!,
+        kind: 'UPDATE_CONTENT' as const,
+        instruction: correction,
+        sourceChunkIds: ['chunk-1'],
+      }],
+    }
+    const { images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: base,
+      plan: revision,
+    })
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ submitted: 1, total: 1 })
+    expect([...images.requests.values()][0]?.prompt).toContain(correction)
+  })
+
+  test('carries prior page-review corrections into a later v4 redraw', async () => {
+    const currentCorrection = 'Move the teaching objects upward and preserve the approved composition.'
+    const priorCorrection = 'Remove the unauthorized Arabic numeral and keep the Chinese copy exact.'
+    const revision = {
+      ...revisionPlan(),
+      operations: [{ ...revisionPlan().operations[0]!, instruction: currentCorrection }],
+    }
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revision,
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-prior-page-review', runId: 'run-1',
+        idempotencyKey: 'run-1:slide:2:image:r0:v1:review', inputHash: 'prior-review-hash',
+        tool: 'review_slide_image', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null,
+        output: {
+          approved: false, textDetected: true, visualScore: 62,
+          reasons: ['页面出现未允许的阿拉伯数字。'], retryInstruction: priorCorrection,
+        },
+        createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+      })
+      transaction.putStep({
+        id: 'step-unrelated-page-review', runId: 'run-1',
+        idempotencyKey: 'run-1:slide:1:image:r0:v1:review', inputHash: 'unrelated-review-hash',
+        tool: 'review_slide_image', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null,
+        output: {
+          approved: false, textDetected: false, visualScore: 70,
+          reasons: ['第一页需要调整。'], retryInstruction: 'Unrelated page-one correction must not trigger a redraw.',
+        },
+        createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+      })
+    })
+
+    await coordinator.submit('run-1', 5)
+
+    const prompt = [...images.requests.values()][0]?.prompt
+    expect(prompt).toContain(priorCorrection)
+    expect(prompt).toContain(currentCorrection)
+    expect(prompt).not.toContain('Unrelated page-one correction')
+    expect(images.operations.size).toBe(1)
+  })
+
+  test('carries prior deck-review correction operations into a later v4 redraw', async () => {
+    const priorCorrection = 'Keep the two-part teaching board consistent across the sequence.'
+    const currentCorrection = 'Remove the redundant number rail while preserving the teaching board.'
+    const priorPlan = {
+      ...revisionPlan(),
+      operations: [{ ...revisionPlan().operations[0]!, kind: 'RELAYOUT' as const, instruction: priorCorrection }],
+    }
+    const { repository, images, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', revisionRound: 2, maxRevisionRounds: 4,
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: priorPlan,
+    })
+    const currentPlan = {
+      ...revisionPlan(),
+      id: 'plan-r2', reviewId: 'review-r1', revisionRound: 2,
+      operations: [{ ...revisionPlan().operations[0]!, id: 'operation-r2', instruction: currentCorrection }],
+    }
+    await repository.transact('run-1', (transaction) => {
+      const now = transaction.run.updatedAt
+      transaction.putStep({
+        id: 'apply-r2', runId: 'run-1', idempotencyKey: revisionBlueprintStepKey('run-1', 2),
+        inputHash: 'hash-apply-r2', tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: visualDeckV4Blueprint(), createdAt: now, updatedAt: now,
+      })
+      transaction.putStep({
+        id: 'revision-plan-r2', runId: 'run-1', idempotencyKey: revisionPlanStepKey('run-1', 2),
+        inputHash: 'hash-revision-plan-r2', tool: 'plan_revision', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: currentPlan, createdAt: now, updatedAt: now,
+      })
+      transaction.putStep({
+        id: 'future-page-review-r4', runId: 'run-1',
+        idempotencyKey: 'run-1:slide:2:image:r4:v1:review', inputHash: 'future-page-review-r4',
+        tool: 'review_slide_image', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null,
+        output: {
+          approved: false, textDetected: false, visualScore: 50, reasons: ['未来轮孤儿记录。'],
+          retryInstruction: 'FUTURE ROUND FOUR INSTRUCTION MUST NOT APPEAR',
+        },
+        createdAt: now, updatedAt: now,
+      })
+    })
+
+    await coordinator.submit('run-1', 5)
+
+    const prompt = [...images.requests.values()][0]?.prompt
+    expect(prompt).toContain(priorCorrection)
+    expect(prompt).toContain(currentCorrection)
+    expect(prompt).not.toContain('FUTURE ROUND FOUR INSTRUCTION')
+  })
+
+  test('preserves four full page-review instructions without truncating their tails', async () => {
+    const currentCorrection = `${'D'.repeat(970)} CURRENT_TAIL`
+    const revision = {
+      ...revisionPlan(),
+      operations: [{ ...revisionPlan().operations[0]!, instruction: currentCorrection }],
+    }
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revision,
+    })
+    await repository.transact('run-1', (transaction) => {
+      for (const [index, marker] of ['FIRST_TAIL', 'SECOND_TAIL', 'THIRD_TAIL'].entries()) {
+        transaction.putStep({
+          id: `step-prior-review-${index}`, runId: 'run-1',
+          idempotencyKey: `run-1:slide:2:image:r0:v1:review:${index}`, inputHash: `review-${index}`,
+          tool: 'review_slide_image', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+          externalOperationId: null, errorCode: null,
+          output: {
+            approved: false, textDetected: false, visualScore: 60, reasons: ['需要继续修订。'],
+            retryInstruction: `${String.fromCharCode(65 + index).repeat(970)} ${marker}`,
+          },
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        })
+      }
+    })
+
+    await coordinator.submit('run-1', 5)
+
+    const prompt = [...images.requests.values()][0]?.prompt ?? ''
+    for (const marker of ['FIRST_TAIL', 'SECOND_TAIL', 'THIRD_TAIL', 'CURRENT_TAIL']) {
+      expect(prompt).toContain(marker)
+    }
   })
 
   test('moves a v4 revision to human review when the redraw provider fails before submission', async () => {

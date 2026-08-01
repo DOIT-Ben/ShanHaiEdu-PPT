@@ -236,7 +236,7 @@ describe('PPT Agent mock end-to-end', () => {
       issues: [{
         id: 'issue-slide-8', category: 'VISUAL_CONSISTENCY', severity: 'WARNING',
         summary: '第八页视觉素材与整套课程风格不一致。',
-        slideIds: [`run-placeholder:slide:8`], sourceChunkIds: [], status: 'OPEN',
+        slideIds: [`run-placeholder:slide:8`], sourceChunkIds: [], status: 'OPEN', repairDomain: 'ASSET',
       }],
     })
     const renderer = new MockPresentationRendererPort()
@@ -258,7 +258,7 @@ describe('PPT Agent mock end-to-end', () => {
       issues: [{
         id: 'issue-slide-8', category: 'VISUAL_CONSISTENCY', severity: 'WARNING',
         summary: '第八页视觉素材与整套课程风格不一致。',
-        slideIds: [`${runId}:slide:8`], sourceChunkIds: [], status: 'OPEN',
+        slideIds: [`${runId}:slide:8`], sourceChunkIds: [], status: 'OPEN', repairDomain: 'ASSET',
       }],
     }
 

@@ -10,6 +10,7 @@ import {
 } from '../src/adapters/mock-ports'
 import type { DeckReviewPort, RevisionApplicationPort, RevisionPlanningPort } from '../src/core/ports'
 import { createAgentRuntime, createMockRuntime } from '../src/runtime/mock-runtime'
+import { validateLifecycle } from '../scripts/run-v4-real-evaluation'
 
 const token = 'test-runtime-token-0001'
 
@@ -77,10 +78,16 @@ describe('mock runtime', () => {
     expect(approved.status).toBe(200)
     for (let index = 0; index < 4; index += 1) await runtime.tick()
 
-    expect(await repository.getRun(runId)).toMatchObject({
+    const completedRun = (await repository.getRun(runId))!
+    expect(completedRun).toMatchObject({
       status: 'COMPLETED', presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 3, qualityScore: 90,
     })
     const events = await repository.listEvents(runId)
+    expect(validateLifecycle(events, completedRun.status, completedRun.revisionRound)).toMatchObject({
+      passed: true,
+      stageLifecycleValid: true,
+      revisionLifecycleValid: true,
+    })
     const lifecycleTypes = events
       .filter((event) => ['planning.started', 'planning.completed', 'generation.started', 'generation.progress',
         'generation.completed', 'page_review.started', 'page_review.completed', 'deck_review.started',

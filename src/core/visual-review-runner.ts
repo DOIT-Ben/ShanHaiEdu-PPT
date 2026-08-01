@@ -1,12 +1,31 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { ZodError } from 'zod'
 import { slideVisualReviewSchema, type SlideVisualReview } from '../presentation-contracts'
 import { hashInput } from './hash'
 import { StructuredModelError } from './ports'
-import type { AgentRepository, ClockPort, RunRecord, StepRecord, VisualReviewPort } from './ports'
-import { transitionRun } from './policy'
+import type { AgentRepository, ClockPort, ContractRepairIssue, RunRecord, StepRecord, VisualReviewPort } from './ports'
+import { revisionContractRepairIssues } from './revision-contract-repair'
 
-const MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS = 3
-const VISUAL_REVIEW_RETRY_DELAYS_MS = [2_000, 10_000] as const
+const MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS = 5
+const MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS = 2
+const VISUAL_REVIEW_RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 60_000] as const
+
+type VisualReviewFailure = Readonly<{
+  errorCode: string
+  providerAttempt: number
+  maxProviderAttempts: number
+  contractAttempt: number
+  maxContractAttempts: number
+  model: string | null
+  requestId: string | null
+}>
+
+class VisualReviewExecutionError extends Error {
+  constructor(readonly diagnostic: VisualReviewFailure) {
+    super(diagnostic.errorCode)
+    this.name = 'VisualReviewExecutionError'
+  }
+}
 
 export type ReviewSlideInput = Readonly<{
   runId: string
@@ -39,7 +58,7 @@ export class VisualReviewRunner {
     if (prepared.replayed) return prepared
 
     try {
-      const raw = await this.reviewWithProviderRetry({
+      const review = await this.reviewWithProviderRetry({
         tenantId: prepared.run.host.tenantId,
         artifactId: input.artifactId,
         visualIntent: input.visualIntent,
@@ -47,28 +66,63 @@ export class VisualReviewRunner {
         visualDirection: input.visualDirection,
         idempotencyKey: input.idempotencyKey,
       })
-      const review = slideVisualReviewSchema.parse(raw)
-      const step = await this.complete(input, review)
-      return { step, review, replayed: false }
-    } catch {
-      const step = await this.fail(input, 'VISUAL_REVIEW_FAILED')
-      return { step, review: null, replayed: false }
+      return this.complete(input, review)
+    } catch (error) {
+      const diagnostic = error instanceof VisualReviewExecutionError
+        ? error.diagnostic
+        : visualReviewFailure(error, 1, 1)
+      return this.fail(input, diagnostic)
     }
   }
 
   private async reviewWithProviderRetry(input: Parameters<VisualReviewPort['review']>[0]) {
-    for (let attempt = 1; attempt <= MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS; attempt++) {
-      try {
-        return await this.dependencies.reviewer.review(input)
-      } catch (error) {
-        if (!(error instanceof StructuredModelError) || !error.retryable
-          || attempt === MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS) throw error
-        await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
-          VISUAL_REVIEW_RETRY_DELAYS_MS[attempt - 1] ?? VISUAL_REVIEW_RETRY_DELAYS_MS.at(-1)!,
-        )
+    let contractRepairIssues: readonly ContractRepairIssue[] | undefined
+    let lastError: unknown = new Error('VISUAL_REVIEW_FAILED')
+    for (let contractAttempt = 0;
+      contractAttempt < MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS;
+      contractAttempt += 1) {
+      const idempotencyKey = visualReviewContractAttemptKey(input.idempotencyKey, contractAttempt)
+      for (let providerAttempt = 1;
+        providerAttempt <= MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS;
+        providerAttempt += 1) {
+        try {
+          const raw = await this.dependencies.reviewer.review({
+            ...input,
+            idempotencyKey,
+            ...(contractRepairIssues ? { contractRepairIssues } : {}),
+          })
+          return slideVisualReviewSchema.parse(raw)
+        } catch (error) {
+          lastError = error
+          const providerRetryable = error instanceof StructuredModelError
+            && error.retryable
+            && error.code !== 'MODEL_JSON_INVALID'
+          if (providerRetryable) {
+            if (providerAttempt === MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS) {
+              throw new VisualReviewExecutionError(
+                visualReviewFailure(error, providerAttempt, contractAttempt + 1),
+              )
+            }
+            await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
+              VISUAL_REVIEW_RETRY_DELAYS_MS[providerAttempt - 1]
+                ?? VISUAL_REVIEW_RETRY_DELAYS_MS.at(-1)!,
+            )
+            continue
+          }
+          const issues = revisionContractRepairIssues(error)
+          if (!issues || contractAttempt + 1 >= MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS) {
+            throw new VisualReviewExecutionError(
+              visualReviewFailure(error, providerAttempt, contractAttempt + 1),
+            )
+          }
+          contractRepairIssues = issues
+          break
+        }
       }
     }
-    throw new Error('VISUAL_REVIEW_PROVIDER_RETRY_LOOP_INVALID')
+    throw new VisualReviewExecutionError(
+      visualReviewFailure(lastError, 1, MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS),
+    )
   }
 
   private async prepare(input: ReviewSlideInput): Promise<ReviewSlideResult & { run: RunRecord }> {
@@ -129,11 +183,15 @@ export class VisualReviewRunner {
     })
   }
 
-  private async complete(input: ReviewSlideInput, review: SlideVisualReview) {
+  private async complete(input: ReviewSlideInput, review: SlideVisualReview): Promise<ReviewSlideResult> {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
-      if (step.status === 'COMPLETED') return step
+      if (step.status === 'COMPLETED') {
+        return { step, review: slideVisualReviewSchema.parse(step.output), replayed: true }
+      }
+      if (step.status === 'FAILED') return { step, review: null, replayed: true }
+      if (step.status !== 'RUNNING') throw new Error('VISUAL_REVIEW_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
       const updated: StepRecord = { ...step, status: 'COMPLETED', output: review, errorCode: null, updatedAt: now }
       transaction.putStep(updated)
@@ -160,41 +218,67 @@ export class VisualReviewRunner {
           },
         })
       }
-      return updated
+      return { step: updated, review, replayed: false }
     })
   }
 
-  private async fail(input: ReviewSlideInput, errorCode: string) {
+  private async fail(input: ReviewSlideInput, diagnostic: VisualReviewFailure): Promise<ReviewSlideResult> {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
+      if (step.status === 'COMPLETED') {
+        return { step, review: slideVisualReviewSchema.parse(step.output), replayed: true }
+      }
+      if (step.status === 'FAILED') return { step, review: null, replayed: true }
+      if (step.status !== 'RUNNING') throw new Error('VISUAL_REVIEW_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
-      const fromStatus = transaction.run.status
-      const transitionRequired = ['EXECUTING', 'PAGE_REVIEW', 'REVISING'].includes(fromStatus)
-      const run: RunRecord = transitionRequired
-        ? { ...transaction.run, ...transitionRun(transaction.run, 'NEEDS_HUMAN'), updatedAt: now }
-        : transaction.run
-      const updated: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
-      if (transitionRequired) transaction.putRun(run)
+      const updated: StepRecord = {
+        ...step,
+        status: 'FAILED',
+        errorCode: diagnostic.errorCode,
+        output: { diagnostic },
+        updatedAt: now,
+      }
       transaction.putStep(updated)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode, retryable: false },
+        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: false },
       })
-      if (transitionRequired) {
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'phase.changed',
-          payload: { from: fromStatus, to: 'NEEDS_HUMAN', reason: errorCode },
-        })
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'approval.required',
-          payload: { kind: 'HUMAN_REVIEW', summary: '视觉审查执行失败，需要人工处理后重试。' },
-        })
-      }
-      return updated
+      return { step: updated, review: null, replayed: false }
     })
+  }
+}
+
+function visualReviewContractAttemptKey(idempotencyKey: string, contractAttempt: number) {
+  return contractAttempt === 0
+    ? idempotencyKey
+    : `visual-review-contract-repair-${hashInput({ idempotencyKey, contractAttempt })}`
+}
+
+function visualReviewFailure(
+  error: unknown,
+  providerAttempt: number,
+  contractAttempt: number,
+): VisualReviewFailure {
+  if (error instanceof StructuredModelError) {
+    return {
+      errorCode: error.code,
+      providerAttempt,
+      maxProviderAttempts: MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS,
+      contractAttempt,
+      maxContractAttempts: MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS,
+      model: error.model,
+      requestId: error.requestId,
+    }
+  }
+  return {
+    errorCode: error instanceof ZodError ? 'MODEL_JSON_INVALID' : 'VISUAL_REVIEW_FAILED',
+    providerAttempt,
+    maxProviderAttempts: MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS,
+    contractAttempt,
+    maxContractAttempts: MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS,
+    model: null,
+    requestId: null,
   }
 }

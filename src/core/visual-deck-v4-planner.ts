@@ -37,6 +37,7 @@ type CompileVisualDeckV4Input = Readonly<{
   visualDirection: string
   targetAudience?: string
   presentationGoal?: string
+  compilerVersion?: string
   createdAt: string
 }>
 
@@ -51,6 +52,14 @@ const ROLE_LABELS = {
 
 function clipped(value: string, maximum: number) {
   return value.replace(/\s+/g, ' ').trim().slice(0, maximum)
+}
+
+function compilerVersion(input: CompileVisualDeckV4Input) {
+  const version = input.compilerVersion ?? VISUAL_DECK_V4_COMPILER_VERSION
+  if (version !== VISUAL_DECK_V4_COMPILER_VERSION) {
+    throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
+  }
+  return version
 }
 
 function resolvedRole(role: VisualDeckV4SourceRole | undefined, fallback: Exclude<VisualDeckV4SourceRole, 'AUTO'>) {
@@ -125,6 +134,7 @@ function slideRole(pageNumber: number, slideCount: number) {
 }
 
 export function compileVisualDeckV4Proposal(input: CompileVisualDeckV4Input): VisualDeckV4Proposal {
+  const resolvedCompilerVersion = compilerVersion(input)
   const sourceUnderstanding = compileSourceUnderstanding(input)
   const title = clipped(input.document.name.replace(/\.[^.]+$/, ''), 120) || '视觉演示'
   const focus = input.config.deckOptions.focus ? [input.config.deckOptions.focus] : [`围绕《${title}》建立清晰理解`]
@@ -163,7 +173,7 @@ export function compileVisualDeckV4Proposal(input: CompileVisualDeckV4Input): Vi
     }
   })
   return visualDeckV4ProposalSchema.parse({
-    compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+    compilerVersion: resolvedCompilerVersion,
     sourceUnderstanding,
     presentationSpec: {
       sourceMode: sourceUnderstanding.sourceMode,
@@ -201,9 +211,10 @@ export function createVisualDeckV4BlueprintFromProposal(
   input: CompileVisualDeckV4Input,
   draft: VisualDeckV4ProposalDraft,
 ): PresentationBlueprint {
+  const resolvedCompilerVersion = compilerVersion(input)
   const proposal = visualDeckV4ProposalSchema.parse({
     ...draft,
-    compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+    compilerVersion: resolvedCompilerVersion,
   })
   const expectedSourceMode = input.config.sourceMode === 'AUTO' ? 'SOURCE_GROUNDED' : input.config.sourceMode
   const expectedAudience = input.config.deckOptions.audience ?? input.targetAudience
@@ -237,7 +248,7 @@ export function createVisualDeckV4BlueprintFromProposal(
   const sourceChunkIds = input.document.chunks.map((chunk) => chunk.id)
   const sourceSummary = clipped(input.document.chunks.map((chunk) => chunk.text).join(' '), 4_000)
   return presentationBlueprintSchema.parse({
-    id: `blueprint-${hashInput({ runId: input.runId, inputHash: input.inputHash, compiler: VISUAL_DECK_V4_COMPILER_VERSION }).slice(0, 28)}`,
+    id: `blueprint-${hashInput({ runId: input.runId, inputHash: input.inputHash, compiler: resolvedCompilerVersion }).slice(0, 28)}`,
     title: proposal.deckPlan.title,
     curriculum: {
       subject: null,

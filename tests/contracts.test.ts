@@ -55,6 +55,8 @@ describe('public v1 contracts', () => {
     expect(result.assetAcquisitionPolicy).toBe('AI_FIRST')
     expect(result.maxVisualAssetsPerSlide).toBe(4)
     expect(result.host.tenantId).toBe('frameflow')
+    expect(createRunRequestSchema.parse({ ...result, maxRevisionRounds: 4 }).maxRevisionRounds).toBe(4)
+    expect(createRunRequestSchema.safeParse({ ...result, maxRevisionRounds: 5 }).success).toBe(false)
   })
 
   test('accepts the layered courseware mode with an explicit template exception', () => {
@@ -333,6 +335,7 @@ describe('public v1 contracts', () => {
 
     expect(() => runSnapshotSchema.parse({ ...base, status: 'PAUSED', resumeState: null })).toThrow()
     expect(() => runSnapshotSchema.parse({ ...base, status: 'EXECUTING', resumeState: 'PAGE_REVIEW' })).toThrow()
+    expect(() => runSnapshotSchema.parse({ ...base, status: 'EXECUTING', resumeState: null, revisionRound: 3 })).toThrow()
     expect(runSnapshotSchema.parse({ ...base, status: 'PAUSED', resumeState: 'DECK_REVIEW' }).resumeState).toBe('DECK_REVIEW')
   })
 

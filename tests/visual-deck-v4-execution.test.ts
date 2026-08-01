@@ -50,15 +50,25 @@ function blueprint() {
 describe('visual deck v4 execution', () => {
   test('compiles one isolated full-slide image instruction per approved brief', () => {
     const planned = blueprint()
+    planned.visualDeckV4Proposal!.slideBriefs[0]!.facts = [
+      '教材对应第20—21页，并引导学生说出本课学习结论。',
+    ]
     const requirements = blueprintImageRequirements({ id: 'run-v4-execution', revisionRound: 0 }, planned)
     const briefs = planned.visualDeckV4Proposal!.slideBriefs
 
     expect(requirements).toHaveLength(2)
     expect(requirements[0]?.prompt).toContain('single raster image')
     expect(requirements[0]?.prompt).toContain('Allowed on-slide copy')
+    expect(requirements[0]?.prompt).toContain('CLOSED VISIBLE TEXT ALLOWLIST')
+    expect(requirements[0]?.prompt).toContain('NON-VISIBLE facts for semantic and counting accuracy only')
+    expect(requirements[0]?.prompt).toContain('Never transcribe, quote, paraphrase, summarize, caption, or display')
+    expect(requirements[0]?.negativePrompt).toContain('page citations or page ranges')
+    expect(requirements[0]?.negativePrompt).toContain('facts-field prose')
     expect(requirements[0]?.prompt).toContain(briefs[0]!.title)
     expect(requirements[0]?.prompt).toContain(briefs[0]!.lockedCopy[0]!)
     expect(requirements[0]?.prompt).toContain('Do not invent any additional labels')
+    expect(requirements[0]?.prompt).toContain('COUNTABLE OBJECT SAFETY')
+    expect(requirements[0]?.prompt).toContain('Never duplicate solid objects')
     expect(requirements[0]?.prompt).not.toContain(briefs[1]!.title)
     expect(requirements[0]?.prompt).not.toContain(briefs[1]!.keyClaim)
     expect(requirements[1]?.prompt).not.toContain(briefs[0]!.keyClaim)

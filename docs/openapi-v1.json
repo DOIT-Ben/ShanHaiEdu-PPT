@@ -346,12 +346,12 @@
           },
           "revisionKind": { "type": ["string", "null"], "enum": ["PAGE_VISUAL", "DECK_CONTENT", "DECK_VISUAL", null] },
           "revisionRound": { "type": "integer", "minimum": 0 },
-          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4 },
           "budgetUnits": { "type": "integer", "minimum": 0 },
           "committedBudgetUnits": { "type": "integer", "minimum": 0 },
           "reason": {
             "type": ["string", "null"],
-            "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER", null]
+            "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "REVISION_REJECTED_BY_USER", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER", null]
           },
           "retryable": { "type": ["boolean", "null"] },
           "requiresUserAction": { "type": "boolean" },
@@ -731,7 +731,7 @@
           "imageModel": { "type": "string", "minLength": 1, "maxLength": 120 },
           "automationLevel": { "enum": ["SUPERVISED", "BOUNDED_AUTO"] },
           "budgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
-          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 2, "default": 2 },
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4, "default": 2 },
           "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3", "VISUAL_DECK_V4"], "default": "SLIDE_IMAGE_V2" },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"], "default": "INDEPENDENT" },
           "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"], "default": "AI_FIRST" },

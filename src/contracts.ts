@@ -145,7 +145,7 @@ export const createRunRequestSchema = z.object({
   imageModel: z.string().trim().min(1).max(120),
   automationLevel: automationLevelSchema,
   budgetUnits: z.number().int().positive().max(1_000_000),
-  maxRevisionRounds: z.number().int().min(0).max(2).default(2),
+  maxRevisionRounds: z.number().int().min(0).max(4).default(2),
   presentationMode: presentationModeSchema.default('SLIDE_IMAGE_V2'),
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
   assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
@@ -292,7 +292,7 @@ export const runSnapshotSchema = z.object({
   version: z.number().int().nonnegative(),
   slideCount: z.number().int().min(2).max(50),
   revisionRound: z.number().int().nonnegative(),
-  maxRevisionRounds: z.number().int().min(0).max(2),
+  maxRevisionRounds: z.number().int().min(0).max(4),
   planningAttempt: z.number().int().min(0).max(MAX_PLANNING_RETRIES),
   maxPlanningRetries: z.literal(MAX_PLANNING_RETRIES),
   budgetUnits: z.number().int().nonnegative(),
@@ -309,6 +309,9 @@ export const runSnapshotSchema = z.object({
 }).strict().superRefine((value, context) => {
   if (value.committedBudgetUnits > value.budgetUnits) {
     context.addIssue({ code: 'custom', path: ['committedBudgetUnits'], message: 'committed budget exceeds run budget' })
+  }
+  if (value.revisionRound > value.maxRevisionRounds) {
+    context.addIssue({ code: 'custom', path: ['revisionRound'], message: 'revision round exceeds configured maximum' })
   }
   if (value.status === 'PAUSED' && value.resumeState === null) {
     context.addIssue({ code: 'custom', path: ['resumeState'], message: 'paused run requires resumeState' })
@@ -350,6 +353,7 @@ export const v4LifecycleReasonSchema = z.enum([
   'DECK_REVIEW_REJECTED',
   'DECK_REVIEW_FAILED',
   'REVISION_FAILED',
+  'REVISION_REJECTED_BY_USER',
   'DELIVERY_FAILED',
   'INTERNAL_FAILURE',
   'PAUSED_BY_USER',
@@ -380,7 +384,7 @@ function v4LifecyclePayloadSchema<T extends z.ZodRawShape = Record<never, never>
       .refine((value) => new Set(value).size === value.length, 'page numbers must be unique'),
     revisionKind: v4RevisionKindSchema.nullable(),
     revisionRound: z.number().int().nonnegative(),
-    maxRevisionRounds: z.number().int().min(0).max(2),
+    maxRevisionRounds: z.number().int().min(0).max(4),
     budgetUnits: z.number().int().nonnegative(),
     committedBudgetUnits: z.number().int().nonnegative(),
     reason: v4LifecycleReasonSchema.nullable(),
@@ -402,6 +406,10 @@ function v4LifecyclePayloadSchema<T extends z.ZodRawShape = Record<never, never>
     }
     if (lifecycle.committedBudgetUnits > lifecycle.budgetUnits) {
       context.addIssue({ code: 'custom', path: ['committedBudgetUnits'], message: 'committed budget exceeds run budget' })
+    }
+    const revision = value as { revisionRound: number; maxRevisionRounds: number }
+    if (revision.revisionRound > revision.maxRevisionRounds) {
+      context.addIssue({ code: 'custom', path: ['revisionRound'], message: 'revision round exceeds configured maximum' })
     }
     if (lifecycle.requiresUserAction !== (lifecycle.nextAction !== null)) {
       context.addIssue({ code: 'custom', path: ['nextAction'], message: 'next action must match requiresUserAction' })
