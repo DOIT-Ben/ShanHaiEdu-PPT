@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { visualDeckV4ConfigSchema, visualDeckV4SourceRoleSchema } from './visual-deck-v4-contracts'
 import { releaseIdentitySchema } from './release-identity'
+import { generationBatchSchema } from './generation-batch-contracts'
 
 export const CONTRACT_VERSION = '1' as const
 export const MAX_PLANNING_RETRIES = 2
@@ -317,6 +318,7 @@ export const runSnapshotSchema = z.object({
   assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
   release: releaseIdentitySchema.optional(),
+  generationBatch: generationBatchSchema.optional(),
   issues: z.array(issueSummarySchema),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -463,6 +465,8 @@ const knownAgentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('generation.started'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
   z.object({ ...eventBase, type: z.literal('generation.progress'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
   z.object({ ...eventBase, type: z.literal('generation.completed'), payload: v4LifecyclePayloadSchema('GENERATION') }).strict(),
+  z.object({ ...eventBase, type: z.literal('generation.batch.created'), payload: generationBatchSchema }).strict(),
+  z.object({ ...eventBase, type: z.literal('generation.batch.updated'), payload: generationBatchSchema }).strict(),
   z.object({ ...eventBase, type: z.literal('page_review.started'), payload: v4LifecyclePayloadSchema('PAGE_REVIEW') }).strict(),
   z.object({ ...eventBase, type: z.literal('page_review.completed'), payload: v4LifecyclePayloadSchema('PAGE_REVIEW') }).strict(),
   z.object({ ...eventBase, type: z.literal('revision.started'), payload: v4LifecyclePayloadSchema('REVISION') }).strict(),

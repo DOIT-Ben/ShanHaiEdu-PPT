@@ -8,6 +8,7 @@ import {
   runStatusSchema,
 } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
+import { getGenerationBatch } from '../core/generation-batch'
 import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-operations'
 import {
   AdminRevisionRoundsSettingsError,
@@ -139,15 +140,24 @@ function decodeCursor(cursor: string) {
 }
 
 async function runDetail(repository: AgentRepository, run: RunRecord) {
-  const [deliveries, snapshot] = await Promise.all([
+  const [deliveries, snapshot, generationBatch] = await Promise.all([
     repository.listDeliveries(run.id),
     repository.getRunEventSnapshot(run.id),
+    getGenerationBatch(repository, run),
   ])
   const blueprint = await getActiveBlueprint(repository, run.id, run.revisionRound).catch(() => null)
   const generationPlan = blueprint?.visualDeckV4Proposal
     ? visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal)
     : null
-  return { ...publicRun(run), blueprint, generationPlan, deliveries, issues: snapshot.openIssues, progress: snapshot.progress }
+  return {
+    ...publicRun(run),
+    blueprint,
+    generationPlan,
+    ...(generationBatch ? { generationBatch } : {}),
+    deliveries,
+    issues: snapshot.openIssues,
+    progress: snapshot.progress,
+  }
 }
 
 function sseResponse(input: Readonly<{

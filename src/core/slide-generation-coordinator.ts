@@ -3,6 +3,7 @@ import { slideVisualReviewSchema, type PresentationBlueprint, type SlideVisualRe
 import { getActiveBlueprint } from './active-blueprint'
 import { blueprintImageRequirements } from './blueprint-assets'
 import { mapWithConcurrency } from './concurrency'
+import { ensureGenerationBatch, refreshGenerationBatch } from './generation-batch'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type {
@@ -77,6 +78,16 @@ export class SlideGenerationCoordinator {
     })
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const requirements = blueprintImageRequirements(run, blueprint)
+    if (isVisualDeckV4(run)) {
+      await ensureGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        run,
+        blueprint,
+        requirements,
+        unitBudgetUnits,
+      })
+    }
     const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
@@ -102,6 +113,14 @@ export class SlideGenerationCoordinator {
     })
 
     if (pendingRequirements.length === 0) {
+      if (isVisualDeckV4(run)) {
+        await refreshGenerationBatch({
+          repository: this.dependencies.repository,
+          clock: this.dependencies.clock,
+          runId,
+          revisionRound: run.revisionRound,
+        })
+      }
       return {
         status: run.status,
         submitted: existingSteps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
@@ -168,6 +187,12 @@ export class SlideGenerationCoordinator {
         }
       }
       const latest = await this.dependencies.repository.getRun(runId)
+      await refreshGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+      })
       return {
         status: latest?.status ?? 'FAILED',
         submitted: steps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
@@ -245,6 +270,14 @@ export class SlideGenerationCoordinator {
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const failed = refreshed.find((step) => isMediaFailureStepStatus(step.status))
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step) !== null)
+    if (isVisualDeckV4(run)) {
+      await refreshGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+      })
+    }
     if (failed) await this.requireHuman(runId, failed)
     else await this.appendCompletedPageProgress(runId, completed.length, requirements.length)
     const latest = await this.dependencies.repository.getRun(runId)

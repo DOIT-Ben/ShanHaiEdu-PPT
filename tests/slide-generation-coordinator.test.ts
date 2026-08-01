@@ -302,6 +302,16 @@ describe('slide generation coordinator', () => {
     expect(images.operations.size).toBe(3)
     expect(budget.reservations.size).toBe(3)
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 30 })
+    const batch = (await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch')
+    expect(batch?.output).toMatchObject({
+      batchId: expect.stringMatching(/^genbatch_[a-f0-9]{32}$/),
+      submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS',
+      pageCount: 3,
+      accounting: { estimatedUnits: 30, committedUnits: 30, settledUnits: 0 },
+      progress: { submitted: 3, completed: 0, failed: 0 },
+      status: 'PROCESSING',
+    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'generation.batch.created')).toBe(true)
   })
 
   test('replays a completed batch without duplicate provider calls or progress events', async () => {
