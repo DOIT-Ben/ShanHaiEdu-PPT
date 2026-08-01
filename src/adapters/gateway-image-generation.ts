@@ -7,6 +7,14 @@ const gatewayResponseSchema = z.object({
   data: z.array(z.object({ b64_json: z.string().min(1) }).passthrough()).min(1),
 }).passthrough()
 
+const imageOperationSchema = z.object({
+  id: z.string().regex(/^imgop_[0-9a-f]{32}$/),
+  status: z.enum(['CREATED', 'SUBMITTING', 'QUEUED', 'PROCESSING', 'COMPLETED', 'EXPIRED', 'FAILED', 'SUBMISSION_UNKNOWN']),
+  submission_state: z.enum(['NOT_SUBMITTED', 'SUBMITTED', 'UNKNOWN']),
+  result: gatewayResponseSchema.optional(),
+  error: z.object({ code: z.string().min(1) }).passthrough().optional(),
+}).passthrough()
+
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 function normalizedBaseUrl(value: string) {
@@ -31,6 +39,21 @@ function decodedImage(value: string) {
     && bytes.subarray(8, 12).toString('ascii') === 'WEBP'
   if (!png && !jpeg && !webp) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
   return { bytes: new Uint8Array(bytes), mimeType: png ? 'image/png' : jpeg ? 'image/jpeg' : 'image/webp' }
+}
+
+function operationState(status: z.infer<typeof imageOperationSchema>['status']) {
+  return status === 'PROCESSING' ? 'PROCESSING' as const
+    : status === 'COMPLETED' ? 'COMPLETED' as const
+      : 'QUEUED' as const
+}
+
+function pendingOperationState(status: 'CREATED' | 'SUBMITTING' | 'QUEUED' | 'PROCESSING') {
+  return status === 'PROCESSING' ? 'PROCESSING' as const : 'QUEUED' as const
+}
+
+function billingState(operation: z.infer<typeof imageOperationSchema>) {
+  if (operation.submission_state === 'NOT_SUBMITTED') return 'NOT_CHARGED' as const
+  return operation.submission_state === 'SUBMITTED' ? 'CHARGED' as const : 'UNKNOWN' as const
 }
 
 async function removeConnectedNeutralBackdrop(image: Uint8Array) {
@@ -120,14 +143,15 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
           resolution: '1K',
           n: 1,
         })
+    if (!reference) return this.submitImageTask(input, body)
+
     let response: Response
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${reference ? '/images/edits' : '/images/generations'}`, {
+      response = await this.fetchImpl(`${this.baseUrl}/images/edits`, {
         method: 'POST',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${this.dependencies.apiKey}`,
-          ...(!reference ? { 'Content-Type': 'application/json' } : {}),
           'Idempotency-Key': input.idempotencyKey,
         },
         body,
@@ -144,20 +168,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     }
 
     try {
-      const parsed = gatewayResponseSchema.parse(payload)
-      const image = decodedImage(parsed.data[0]!.b64_json)
-      const bytes = input.backgroundMode === 'TRANSPARENT'
-        ? await removeConnectedNeutralBackdrop(image.bytes)
-        : image.bytes
-      const runId = input.idempotencyKey.split(':')[0] || 'gateway-run'
-      const artifact = await this.dependencies.artifacts.put({
-        tenantId: input.tenantId,
-        runId,
-        name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${image.mimeType.split('/')[1]}`,
-        mimeType: image.mimeType,
-        bytes,
-        idempotencyKey: `${input.idempotencyKey}:gateway-output`,
-      })
+      const artifact = await this.storeOutput(input, gatewayResponseSchema.parse(payload))
       return { operationId: `gateway-image:${artifact.artifactId}`, state: 'COMPLETED' as const }
     } catch {
       throw new MediaSubmissionError('GATEWAY_OUTPUT_INVALID', 'UNKNOWN', 'gateway returned an invalid image result')
@@ -166,12 +177,130 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
 
   async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
     const artifactId = input.operationId.startsWith('gateway-image:') ? input.operationId.slice('gateway-image:'.length) : ''
-    if (!artifactId) {
+    if (artifactId) {
+      const artifact = await this.dependencies.artifacts.get({ tenantId: input.tenantId, artifactId })
+      return artifact
+        ? { state: 'COMPLETED' as const, artifactId }
+        : { state: 'FAILED' as const, errorCode: 'GATEWAY_ARTIFACT_MISSING', billingState: 'CHARGED' as const }
+    }
+
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/image-tasks/${encodeURIComponent(input.operationId)}`, {
+        headers: { Accept: 'application/json', Authorization: `Bearer ${this.dependencies.apiKey}` },
+        signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 30_000),
+      })
+    } catch {
+      return { state: 'PROCESSING' as const }
+    }
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) {
+      return { state: 'FAILED' as const, errorCode: gatewayErrorCode(payload, response.status), billingState: 'UNKNOWN' as const }
+    }
+
+    const parsed = imageOperationSchema.safeParse(payload)
+    if (!parsed.success) {
       return { state: 'FAILED' as const, errorCode: 'GATEWAY_OPERATION_INVALID', billingState: 'UNKNOWN' as const }
     }
-    const artifact = await this.dependencies.artifacts.get({ tenantId: input.tenantId, artifactId })
-    return artifact
-      ? { state: 'COMPLETED' as const, artifactId }
-      : { state: 'FAILED' as const, errorCode: 'GATEWAY_ARTIFACT_MISSING', billingState: 'CHARGED' as const }
+    const operation = parsed.data
+    if (operation.status === 'CREATED' || operation.status === 'SUBMITTING'
+      || operation.status === 'QUEUED' || operation.status === 'PROCESSING') {
+      return { state: pendingOperationState(operation.status) }
+    }
+    if (operation.status === 'COMPLETED') {
+      if (!operation.result) {
+        return { state: 'FAILED' as const, errorCode: 'GATEWAY_OUTPUT_MISSING', billingState: 'CHARGED' as const }
+      }
+      try {
+        const artifact = await this.storeOutput({
+          tenantId: input.tenantId,
+          idempotencyKey: input.idempotencyKey ?? input.operationId,
+          backgroundMode: input.backgroundMode ?? 'OPAQUE',
+        }, operation.result)
+        return { state: 'COMPLETED' as const, artifactId: artifact.artifactId }
+      } catch {
+        return { state: 'FAILED' as const, errorCode: 'GATEWAY_OUTPUT_INVALID', billingState: 'CHARGED' as const }
+      }
+    }
+    return {
+      state: 'FAILED' as const,
+      errorCode: operation.error?.code ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED'),
+      billingState: billingState(operation),
+    }
+  }
+
+  private async submitImageTask(
+    input: Parameters<ImageGenerationPort['submit']>[0],
+    body: string | FormData,
+  ) {
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/image-tasks`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${this.dependencies.apiKey}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': input.idempotencyKey,
+        },
+        body,
+        signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 30_000),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        const code = gatewayErrorCode(payload, response.status)
+        const state = code === 'IDEMPOTENCY_SUBMISSION_UNKNOWN'
+          ? 'UNKNOWN' as const
+          : [400, 401, 403, 404, 409, 422].includes(response.status) ? 'NOT_SUBMITTED' as const : 'UNKNOWN' as const
+        throw new MediaSubmissionError(code, state, 'gateway rejected image task')
+      }
+      const operation = imageOperationSchema.safeParse(payload)
+      if (!operation.success) {
+        throw new MediaSubmissionError('GATEWAY_OPERATION_INVALID', 'UNKNOWN', 'gateway returned an invalid image operation')
+      }
+      return { operationId: operation.data.id, state: operationState(operation.data.status) }
+    } catch (error) {
+      if (error instanceof MediaSubmissionError) throw error
+      const recovered = await this.lookupImageTask(input.idempotencyKey)
+      if (recovered) return { operationId: recovered.id, state: operationState(recovered.status) }
+      throw new MediaSubmissionError('GATEWAY_SUBMISSION_UNKNOWN', 'UNKNOWN', 'gateway submission status is unknown')
+    }
+  }
+
+  private async lookupImageTask(idempotencyKey: string) {
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/image-tasks/by-idempotency`, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${this.dependencies.apiKey}`,
+          'Idempotency-Key': idempotencyKey,
+        },
+        signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 30_000),
+      })
+      if (!response.ok) return null
+      const payload = await response.json().catch(() => null)
+      const operation = imageOperationSchema.safeParse(payload)
+      return operation.success ? operation.data : null
+    } catch {
+      return null
+    }
+  }
+
+  private async storeOutput(
+    input: Pick<Parameters<ImageGenerationPort['submit']>[0], 'tenantId' | 'idempotencyKey' | 'backgroundMode'>,
+    result: z.infer<typeof gatewayResponseSchema>,
+  ) {
+    const image = decodedImage(result.data[0]!.b64_json)
+    const bytes = input.backgroundMode === 'TRANSPARENT'
+      ? await removeConnectedNeutralBackdrop(image.bytes)
+      : image.bytes
+    const runId = input.idempotencyKey.split(':')[0] || 'gateway-run'
+    return this.dependencies.artifacts.put({
+      tenantId: input.tenantId,
+      runId,
+      name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${image.mimeType.split('/')[1]}`,
+      mimeType: image.mimeType,
+      bytes,
+      idempotencyKey: `${input.idempotencyKey}:gateway-output`,
+    })
   }
 }
