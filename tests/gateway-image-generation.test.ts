@@ -88,6 +88,16 @@ describe('gateway image generation adapter', () => {
       tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'GATEWAY_SUBMISSION_UNKNOWN' })
+
+    const submissionUnknown = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async () => Response.json({ error: { code: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' } }, { status: 409 }),
+    })
+    await expect(submissionUnknown.submit({
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
+    })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' })
   })
 
   test('recovers the persistent operation by the original idempotency key after a response loss', async () => {

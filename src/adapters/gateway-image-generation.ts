@@ -247,8 +247,11 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       })
       const payload = await response.json().catch(() => null)
       if (!response.ok) {
-        const state = [400, 401, 403, 404, 409, 422].includes(response.status) ? 'NOT_SUBMITTED' as const : 'UNKNOWN' as const
-        throw new MediaSubmissionError(gatewayErrorCode(payload, response.status), state, 'gateway rejected image task')
+        const code = gatewayErrorCode(payload, response.status)
+        const state = code === 'IDEMPOTENCY_SUBMISSION_UNKNOWN'
+          ? 'UNKNOWN' as const
+          : [400, 401, 403, 404, 409, 422].includes(response.status) ? 'NOT_SUBMITTED' as const : 'UNKNOWN' as const
+        throw new MediaSubmissionError(code, state, 'gateway rejected image task')
       }
       const operation = imageOperationSchema.safeParse(payload)
       if (!operation.success) {
