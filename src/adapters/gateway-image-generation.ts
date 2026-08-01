@@ -31,6 +31,19 @@ function gatewayErrorCode(payload: unknown, status: number) {
   return parsed.success ? parsed.data.error.code : `GATEWAY_HTTP_${status}`
 }
 
+function isTransientInspectionStatus(status: number) {
+  return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+function transientInspectionRetryAfterMs(response: Response) {
+  const value = response.headers.get('Retry-After')?.trim() ?? ''
+  const seconds = value.length > 0 ? Number(value) : Number.NaN
+  const fromSeconds = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : Number.NaN
+  const fromDate = value.length > 0 && Number.isNaN(fromSeconds) ? Date.parse(value) - Date.now() : Number.NaN
+  const delay = Number.isFinite(fromSeconds) ? fromSeconds : Number.isFinite(fromDate) ? fromDate : 2_000
+  return Math.max(1_000, Math.min(60_000, Math.ceil(delay)))
+}
+
 function decodedImage(value: string) {
   const bytes = Buffer.from(value, 'base64')
   const png = bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
@@ -191,10 +204,13 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 30_000),
       })
     } catch {
-      return { state: 'PROCESSING' as const }
+      return { state: 'PROCESSING' as const, retryAfterMs: 2_000 }
     }
     const payload = await response.json().catch(() => null)
     if (!response.ok) {
+      if (isTransientInspectionStatus(response.status)) {
+        return { state: 'PROCESSING' as const, retryAfterMs: transientInspectionRetryAfterMs(response) }
+      }
       return { state: 'FAILED' as const, errorCode: gatewayErrorCode(payload, response.status), billingState: 'UNKNOWN' as const }
     }
 

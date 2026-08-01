@@ -218,7 +218,12 @@ export class SqliteAgentRepository implements AgentRepository {
       FROM agent_steps
       JOIN agent_runs ON agent_runs.id = agent_steps.run_id
       WHERE agent_steps.tool = 'generate_slide_image'
-        AND agent_steps.status IN ('WAITING', 'RELEASING')
+        AND (
+          agent_steps.status IN ('WAITING', 'RELEASING')
+          OR (agent_steps.status = 'BILLING_UNKNOWN'
+            AND json_extract(agent_steps.data, '$.externalOperationId') IS NOT NULL
+            AND json_extract(agent_steps.data, '$.externalOperationId') <> '')
+        )
       ORDER BY agent_runs.updated_at ASC, agent_runs.id ASC
       LIMIT ?
     `).all(limit).map((row) => row.id)

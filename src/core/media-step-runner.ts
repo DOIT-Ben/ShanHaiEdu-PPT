@@ -11,7 +11,10 @@ import {
   type StepStatus,
 } from './ports'
 import { hashInput } from './hash'
+import { isPendingMediaReconciliationStep } from './media-reconciliation'
 import { releaseBudget, reserveBudget, transitionRun } from './policy'
+import { appendFixedIssueResolutions } from './v4-lifecycle'
+import { recoverV4AfterMediaRecovery } from './v4-media-recovery'
 
 const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
   'FAILED',
@@ -165,8 +168,9 @@ export class MediaStepRunner {
         changed: true,
       }
     }
-    if (step.status !== 'WAITING') return { step, changed: false }
+    if (!['WAITING', 'BILLING_UNKNOWN'].includes(step.status)) return { step, changed: false }
     if (!step.externalOperationId) throw new Error('MEDIA_OPERATION_ID_MISSING')
+    if (this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) return { step, changed: false }
 
     const mediaInput = this.reconstructInput(step, run.imageModel)
     const status = await this.dependencies.images.inspect({
@@ -175,7 +179,10 @@ export class MediaStepRunner {
       idempotencyKey,
       ...(mediaInput.backgroundMode ? { backgroundMode: mediaInput.backgroundMode } : {}),
     })
-    if (status.state === 'QUEUED' || status.state === 'PROCESSING') return { step, changed: false }
+    if (status.state === 'QUEUED' || status.state === 'PROCESSING') {
+      if (!status.retryAfterMs) return { step, changed: false }
+      return { step: await this.deferInspection(runId, idempotencyKey, status.retryAfterMs), changed: true }
+    }
     if (status.state === 'COMPLETED') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
       await this.dependencies.budget.settle({
@@ -215,7 +222,7 @@ export class MediaStepRunner {
 
   async reconcilePendingRun(runId: string) {
     const pending = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image' && ['WAITING', 'RELEASING'].includes(step.status))
+      .filter(isPendingMediaReconciliationStep)
     let changed = 0
     for (const step of pending) {
       if ((await this.refreshSlideImage(runId, step.idempotencyKey)).changed) changed += 1
@@ -359,12 +366,36 @@ export class MediaStepRunner {
     }
   }
 
+  private nextInspectionAt(step: StepRecord) {
+    const output = step.output as { nextInspectionAt?: unknown } | null
+    if (!output || typeof output.nextInspectionAt !== 'string') return 0
+    const value = Date.parse(output.nextInspectionAt)
+    return Number.isFinite(value) ? value : 0
+  }
+
+  private async deferInspection(runId: string, idempotencyKey: string, retryAfterMs: number) {
+    return this.dependencies.repository.transact(runId, (transaction) => {
+      const step = transaction.getStep(idempotencyKey)
+      if (!step) throw new Error('STEP_NOT_FOUND')
+      const delay = Math.max(1_000, Math.min(60_000, Math.ceil(retryAfterMs)))
+      const output = step.output && typeof step.output === 'object' ? step.output : {}
+      const updated: StepRecord = {
+        ...step,
+        output: { ...output, nextInspectionAt: new Date(this.dependencies.clock.now().getTime() + delay).toISOString() },
+        updatedAt: this.dependencies.clock.now().toISOString(),
+      }
+      transaction.putStep(updated)
+      return updated
+    })
+  }
+
   private async markCompleted(runId: string, idempotencyKey: string, artifactId: string) {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'COMPLETED' || step.status === 'COMPLETED_AFTER_CANCEL') return step
-      const output = step.output && typeof step.output === 'object' ? step.output : {}
+      const rawOutput = step.output && typeof step.output === 'object' ? step.output as Record<string, unknown> : {}
+      const { nextInspectionAt: _nextInspectionAt, ...output } = rawOutput
       const completedAfterCancel = transaction.run.status === 'CANCELLED'
       const updated: StepRecord = {
         ...step,
@@ -374,6 +405,10 @@ export class MediaStepRunner {
         updatedAt: this.dependencies.clock.now().toISOString(),
       }
       transaction.putStep(updated)
+      appendFixedIssueResolutions(transaction, [
+        `${step.id}:provider-result`,
+        `${step.id}:submission-unknown`,
+      ])
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',
@@ -384,6 +419,7 @@ export class MediaStepRunner {
             : '页面图片生成完成并已保存受控产物',
         },
       })
+      recoverV4AfterMediaRecovery(transaction, this.dependencies.clock)
       return updated
     })
   }

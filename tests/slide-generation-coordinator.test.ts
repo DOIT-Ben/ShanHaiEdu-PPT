@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import {
   FixedClock,
@@ -149,7 +150,7 @@ candidateReviewer?: AssetCandidateReviewPort) {
     ...(discovery ? { discovery } : {}),
     ...(webReviewer ? { candidateReviewer: webReviewer } : {}),
   })
-  return { repository, budget, images, artifacts, media, coordinator, candidateReviewer: webReviewer }
+  return { repository, budget, images, artifacts, media, coordinator, candidateReviewer: webReviewer, clock }
 }
 
 function webSearchBlueprint() {
@@ -579,6 +580,41 @@ describe('slide generation coordinator', () => {
       type: 'generation.completed',
       payload: { completed: 1, total: 3, retryable: false },
     })
+  })
+
+  test('continues a recovered V4 image batch into page review without resubmitting images', async () => {
+    const { repository, images, media, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    const keys = [...images.operations.keys()]
+    images.complete(keys[0]!, 'artifact-v4-1')
+    images.complete(keys[1]!, 'artifact-v4-2')
+    await coordinator.refreshBlueprintImages('run-1')
+
+    const target = (await repository.listSteps('run-1')).find((step) => step.idempotencyKey === keys[2])!
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: transaction.run.version + 1 })
+      transaction.putStep({ ...target, status: 'BILLING_UNKNOWN', errorCode: 'RATE_LIMITED' })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: `${target.id}:provider-result`, category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+          summary: '历史查询被网关限流。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+    })
+    images.statuses.set(target.externalOperationId!, { state: 'PROCESSING' })
+    expect(await media.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 0 })
+    images.statuses.set(target.externalOperationId!, { state: 'COMPLETED', artifactId: 'artifact-v4-3' })
+    expect(await media.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+
+    const operationCount = images.operations.size
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'EXECUTING', submitted: 3, total: 3 })
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 3, total: 3 })
+    expect(images.operations.size).toBe(operationCount)
   })
 
   test('reuses an original source image without image-provider calls or budget charge', async () => {

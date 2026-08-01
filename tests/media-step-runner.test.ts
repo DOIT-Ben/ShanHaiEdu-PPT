@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { MediaStepRunner } from '../src/core/media-step-runner'
@@ -256,6 +257,75 @@ describe('media step runner', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 10 })
     expect(budget.settled.size).toBe(1)
     expect(budget.released.size).toBe(0)
+  })
+
+  test('recovers a completed Provider operation from billing unknown without a second submission', async () => {
+    const { repository, budget, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(request.idempotencyKey)!
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: transaction.run.version + 1 })
+      transaction.putStep({ ...step, status: 'BILLING_UNKNOWN', errorCode: 'RATE_LIMITED' })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: `${step.id}:provider-result`, category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+          summary: 'Provider 查询暂时不可用。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+    })
+    images.statuses.set(operationId, { state: 'COMPLETED', artifactId: 'artifact-recovered' })
+
+    const recovered = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+
+    expect(recovered).toMatchObject({ changed: true, step: { status: 'COMPLETED', output: { artifactId: 'artifact-recovered' } } })
+    expect(images.operations.size).toBe(1)
+    expect(budget.settled.size).toBe(1)
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'issue.resolved' && event.payload.issueId === request.stepId + ':provider-result')).toBe(true)
+  })
+
+  test('reconciles a known billing-unknown operation when its next poll later completes', async () => {
+    const { repository, budget, images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(request.idempotencyKey)!
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: transaction.run.version + 1 })
+      transaction.putStep({ ...step, status: 'BILLING_UNKNOWN', errorCode: 'RATE_LIMITED' })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: `${step.id}:provider-result`, category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+          summary: 'Provider 查询暂时不可用。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+    })
+    images.statuses.set(operationId, { state: 'PROCESSING' })
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 0 })
+
+    images.statuses.set(operationId, { state: 'COMPLETED', artifactId: 'artifact-background-recovered' })
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({ status: 'COMPLETED' })
+    expect(images.operations.size).toBe(1)
+    expect(budget.settled.size).toBe(1)
+  })
+
+  test('defers the next media inspection when the Provider asks for backoff', async () => {
+    const { images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+    images.statuses.set(operationId, { state: 'PROCESSING', retryAfterMs: 2_000 })
+
+    const deferred = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+    const skipped = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+
+    expect(deferred).toMatchObject({ changed: true, step: { output: { nextInspectionAt: expect.any(String) } } })
+    expect(skipped).toMatchObject({ changed: false })
+    expect(images.inspectCalls).toBe(1)
   })
 
   test('reconciles a provider result that completes after run cancellation', async () => {

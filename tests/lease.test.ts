@@ -174,4 +174,23 @@ describe('run lease', () => {
       repository, clock, runId: 'cancelled-release', token: 'worker-a', ttlMs: 5_000,
     })).not.toBeNull()
   })
+
+  test('discovers a human-review Run with a known billing-unknown Provider operation', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await seed(repository, run('billing-unknown', 'NEEDS_HUMAN'))
+    await repository.transact('billing-unknown', (transaction) => {
+      transaction.putStep({
+        id: 'billing-unknown-step', runId: 'billing-unknown', idempotencyKey: 'billing-unknown-key', inputHash: 'billing-unknown-input',
+        tool: 'generate_slide_image', status: 'BILLING_UNKNOWN', budgetUnits: 1, budgetReservationId: 'reservation-1',
+        externalOperationId: 'operation-1', errorCode: 'RATE_LIMITED', output: {},
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['billing-unknown'])
+    expect(await acquireMediaReconciliationLease({
+      repository, clock, runId: 'billing-unknown', token: 'worker-a', ttlMs: 5_000,
+    })).not.toBeNull()
+  })
 })

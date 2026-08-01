@@ -9,6 +9,7 @@ import type {
   StepRecord,
 } from '../core/ports'
 import type { DeliveryRecord } from '../presentation-contracts'
+import { isPendingMediaReconciliationStep } from '../core/media-reconciliation'
 import { buildOperationsReport } from '../core/operations'
 
 type StoredRun = {
@@ -65,8 +66,7 @@ export class InMemoryAgentRepository implements AgentRepository {
 
   async listRunsWithPendingMedia(limit: number) {
     return [...this.#runs.values()]
-      .filter((stored) => [...stored.steps.values()].some((step) =>
-        step.tool === 'generate_slide_image' && ['WAITING', 'RELEASING'].includes(step.status)))
+      .filter((stored) => [...stored.steps.values()].some(isPendingMediaReconciliationStep))
       .sort((left, right) => left.run.updatedAt.localeCompare(right.run.updatedAt) || left.run.id.localeCompare(right.run.id))
       .slice(0, limit)
       .map((stored) => stored.run.id)

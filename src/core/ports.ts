@@ -135,7 +135,7 @@ export interface ImageGenerationPort {
     idempotencyKey?: string
     backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
   }>): Promise<
-    | Readonly<{ state: 'QUEUED' | 'PROCESSING' }>
+    | Readonly<{ state: 'QUEUED' | 'PROCESSING'; retryAfterMs?: number }>
     | Readonly<{ state: 'COMPLETED'; artifactId: string }>
     | Readonly<{ state: 'FAILED'; errorCode: string; billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN' }>
   >

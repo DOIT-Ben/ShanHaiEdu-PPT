@@ -42,7 +42,7 @@ function reconciliationItem(step: OperationalStep, now: number, filters: Operati
     errorCode = step.errorCode ?? step.status
     allowedActions = step.status === 'RESERVATION_UNKNOWN'
       ? ['MARK_NOT_CHARGED']
-      : step.status === 'SUBMISSION_UNKNOWN' && step.externalOperationId
+      : step.externalOperationId
         ? ['REINSPECT', 'MARK_NOT_CHARGED', 'MARK_CHARGED']
         : ['MARK_NOT_CHARGED', 'MARK_CHARGED']
   } else if (step.status === 'FAILED_CHARGED') {

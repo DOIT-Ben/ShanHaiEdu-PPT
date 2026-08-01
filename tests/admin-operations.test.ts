@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { AdminOperationsService } from '../src/core/admin-operations'
@@ -125,6 +126,67 @@ describe('admin operations service', () => {
     expect(result.step).toMatchObject({ status: 'COMPLETED', output: { artifactId: 'artifact-1' } })
     expect(budget.settled).toEqual(new Set(['reservation-1']))
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.resolved')).toBe(true)
+  })
+
+  test('restores a complete V4 image batch after a billing-unknown reinspection without resubmission', async () => {
+    const { repository, budget, images, service, base } = await fixture('BILLING_UNKNOWN', {
+      id: 'step-v4-image-1',
+      idempotencyKey: 'run-1:slide:1:image:r0:v1',
+      externalOperationId: 'operation-v4-1',
+      output: { slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1' },
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        committedBudgetUnits: 8,
+      })
+      transaction.putStep({
+        ...target('COMPLETED'),
+        id: 'step-v4-image-2',
+        idempotencyKey: 'run-1:slide:2:image:r0:v1',
+        budgetReservationId: 'reservation-v4-2',
+        externalOperationId: 'operation-v4-2',
+        errorCode: null,
+        output: {
+          slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1', artifactId: 'artifact-v4-2',
+        },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'step-v4-image-1:provider-result', category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+          summary: '图片结果查询遇到暂时性限流。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+    })
+    images.statuses.set('operation-v4-1', { state: 'COMPLETED', artifactId: 'artifact-v4-1' })
+
+    const result = await service.act({ ...base, action: 'REINSPECT', stepId: 'step-v4-image-1' })
+
+    expect(result).toMatchObject({ run: { status: 'EXECUTING', version: 2 }, step: { status: 'COMPLETED' } })
+    expect(images.operations.size).toBe(0)
+    expect(budget.settled).toEqual(new Set(['reservation-1']))
+    const events = await repository.listEvents('run-1')
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'issue.resolved', payload: expect.objectContaining({ issueId: 'step-v4-image-1:provider-result' }) }),
+      expect.objectContaining({ type: 'phase.changed', payload: expect.objectContaining({ from: 'NEEDS_HUMAN', to: 'EXECUTING', reason: 'PROVIDER_REINSPECTION_RECOVERED' }) }),
+      expect.objectContaining({ type: 'run.resumed', payload: expect.objectContaining({ status: 'EXECUTING' }) }),
+      expect.objectContaining({ type: 'generation.progress', payload: expect.objectContaining({ completed: 2, total: 2, pageNumbers: [1, 2] }) }),
+    ]))
+  })
+
+  test('records a reinspection without resolving approval while a historical provider task is still processing', async () => {
+    const { repository, images, service, base } = await fixture('BILLING_UNKNOWN')
+    images.statuses.set('operation-1', { state: 'PROCESSING', retryAfterMs: 2_000 })
+
+    const result = await service.act({ ...base, action: 'REINSPECT' })
+
+    expect(result).toMatchObject({ replayed: false, step: { status: 'BILLING_UNKNOWN' } })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'admin_reconciliation'))
+      .toMatchObject({ status: 'COMPLETED', output: expect.objectContaining({ resultStatus: 'BILLING_UNKNOWN' }) })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.resolved')).toBe(false)
   })
 
   test('allows only one concurrent accounting decision for a Run', async () => {

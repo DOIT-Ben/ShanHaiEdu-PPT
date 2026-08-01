@@ -80,6 +80,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   submissionDelayMs = 0
   activeSubmissions = 0
   maxConcurrentSubmissions = 0
+  inspectCalls = 0
 
   async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
     this.activeSubmissions += 1
@@ -104,6 +105,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   }
 
   async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
+    this.inspectCalls += 1
     return structuredClone(this.statuses.get(input.operationId) ?? {
       state: 'FAILED' as const,
       errorCode: 'OPERATION_NOT_FOUND',

@@ -81,7 +81,8 @@ export class AdminOperationsService implements AdminOperationsPort {
       if (!currentTarget || currentTarget.id !== input.stepId) {
         throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
       }
-      if (input.action === 'REINSPECT' && (currentTarget.status !== 'WAITING' || !currentTarget.externalOperationId)) {
+      if (input.action === 'REINSPECT'
+        && (!['WAITING', 'BILLING_UNKNOWN'].includes(currentTarget.status) || !currentTarget.externalOperationId)) {
         throw new AdminOperationsError(409, 'STEP_NOT_REINSPECTABLE', 'step cannot be reinspected')
       }
       if (input.action !== 'REINSPECT'
@@ -110,7 +111,7 @@ export class AdminOperationsService implements AdminOperationsPort {
 
     let updated: StepRecord
     if (input.action === 'REINSPECT') {
-      if (prepared.target.status !== 'WAITING' || !prepared.target.externalOperationId) {
+      if (!['WAITING', 'BILLING_UNKNOWN'].includes(prepared.target.status) || !prepared.target.externalOperationId) {
         throw new AdminOperationsError(409, 'STEP_NOT_REINSPECTABLE', 'step cannot be reinspected')
       }
       updated = (await this.dependencies.media.refreshSlideImage(input.runId, prepared.target.idempotencyKey)).step
@@ -122,6 +123,16 @@ export class AdminOperationsService implements AdminOperationsPort {
       const actionStep = transaction.getStep(actionKey)
       const current = transaction.getStep(prepared.target.idempotencyKey)
       if (!actionStep || !current) throw new AdminOperationsError(409, 'ADMIN_ACTION_STATE_MISSING', 'admin action state is unavailable')
+      if (input.action === 'REINSPECT' && ['WAITING', 'BILLING_UNKNOWN'].includes(current.status)) {
+        const now = this.dependencies.clock.now().toISOString()
+        transaction.putStep({
+          ...actionStep,
+          status: 'COMPLETED',
+          output: { ...actionStep.output as object, resultStatus: current.status },
+          updatedAt: now,
+        })
+        return { run: transaction.run, step: current }
+      }
       if (actionStep.status !== 'COMPLETED') {
         const now = this.dependencies.clock.now().toISOString()
         transaction.putStep({ ...actionStep, status: 'COMPLETED', output: { ...actionStep.output as object, resultStatus: current.status }, updatedAt: now })

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import {
   FixedClock,
@@ -172,7 +173,7 @@ async function fixture(
       mimeType: 'image/png', bytes: new TextEncoder().encode(artifactId), sha256: artifactId.padEnd(64, '0').slice(0, 64),
     })
   }
-  return { repository, images, artifacts, renderer, clock, coordinator: new RevisionMediaCoordinator({ repository, media, clock }) }
+  return { repository, images, artifacts, renderer, clock, media, coordinator: new RevisionMediaCoordinator({ repository, media, clock }) }
 }
 
 describe('revision media coordinator', () => {
@@ -212,6 +213,48 @@ describe('revision media coordinator', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 25 })
     expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === key))
       .toMatchObject({ status: 'WAITING', externalOperationId: expect.any(String) })
+  })
+
+  test('recovers a completed V4 page redraw through revision media without resubmitting it', async () => {
+    const { repository, images, media, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+    })
+    await coordinator.submit('run-1', 5)
+    const key = 'run-1:slide:2:image:r1:v1'
+    const target = (await repository.listSteps('run-1')).find((step) => step.idempotencyKey === key)!
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: transaction.run.version + 1 })
+      transaction.putStep({ ...target, status: 'BILLING_UNKNOWN', errorCode: 'RATE_LIMITED' })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-1', category: 'IMAGE_QUALITY', severity: 'WARNING',
+          summary: '待重绘页面的视觉问题保留到重新审查。', slideIds: ['run-1:slide:2'], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: `${target.id}:provider-result`, category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+          summary: '局部重绘查询遇到临时限流。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+    })
+    images.statuses.set(target.externalOperationId!, { state: 'PROCESSING' })
+    expect(await media.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 0 })
+
+    images.statuses.set(target.externalOperationId!, { state: 'COMPLETED', artifactId: 'artifact-r1-2' })
+    expect(await media.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'REVISING' })
+
+    const operationCount = images.operations.size
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
+    expect(images.operations.size).toBe(operationCount)
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'phase.changed' && event.payload.from === 'NEEDS_HUMAN' && event.payload.to === 'REVISING')).toBe(true)
   })
 
   test('pauses before any redraw when the remaining budget is insufficient', async () => {
