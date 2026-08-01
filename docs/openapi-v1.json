@@ -77,6 +77,37 @@
         }
       }
     },
+    "/v1/admin/settings/revision-rounds": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
+      "get": {
+        "operationId": "getRevisionRoundsSettings",
+        "description": "Tenant-scoped administrator setting used as the authoritative automatic revision limit for newly created Runs after it has been configured.",
+        "responses": {
+          "200": { "description": "Revision-round settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminRevisionRoundsSettingsEnvelope" } } } },
+          "403": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "patch": {
+        "operationId": "updateRevisionRoundsSettings",
+        "description": "Updates the tenant policy for future Runs only. Once configured, it takes precedence over maxRevisionRounds supplied by callers; existing Runs retain their persisted limit.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminRevisionRoundsSettingsUpdate" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated revision-round settings", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminRevisionRoundsSettingsEnvelope" } } } },
+          "403": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/admin/operations/{runId}/actions": {
       "parameters": [
         { "$ref": "#/components/parameters/TenantId" },
@@ -315,6 +346,32 @@
       }
     },
     "schemas": {
+      "AdminRevisionRoundsSettings": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxRevisionRounds", "version", "isConfigured", "updatedAt"],
+        "properties": {
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4, "default": 2 },
+          "version": { "type": "integer", "minimum": 0 },
+          "isConfigured": { "type": "boolean" },
+          "updatedAt": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "AdminRevisionRoundsSettingsUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxRevisionRounds", "expectedVersion"],
+        "properties": {
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "expectedVersion": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "AdminRevisionRoundsSettingsEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data"],
+        "properties": { "data": { "$ref": "#/components/schemas/AdminRevisionRoundsSettings" } }
+      },
       "AgentEventEnvelope": {
         "type": "object",
         "additionalProperties": false,
@@ -731,7 +788,7 @@
           "imageModel": { "type": "string", "minLength": 1, "maxLength": 120 },
           "automationLevel": { "enum": ["SUPERVISED", "BOUNDED_AUTO"] },
           "budgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
-          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4, "default": 2 },
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4, "description": "Legacy per-Run value. It is used only until the tenant administrator configures the revision-round policy; the configured tenant policy takes precedence for future Runs." },
           "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3", "VISUAL_DECK_V4"], "default": "SLIDE_IMAGE_V2" },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"], "default": "INDEPENDENT" },
           "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"], "default": "AI_FIRST" },

@@ -164,6 +164,18 @@ export const createRunRequestSchema = z.object({
   }
 })
 
+export const adminRevisionRoundsSettingsSchema = z.object({
+  maxRevisionRounds: z.number().int().min(0).max(4),
+  version: z.number().int().nonnegative(),
+  isConfigured: z.boolean(),
+  updatedAt: z.string().datetime().nullable(),
+}).strict()
+
+export const adminRevisionRoundsUpdateSchema = z.object({
+  maxRevisionRounds: z.number().int().min(0).max(4),
+  expectedVersion: z.number().int().nonnegative(),
+}).strict()
+
 const actionBase = {
   schemaVersion: z.literal(CONTRACT_VERSION),
   expectedVersion: z.number().int().nonnegative(),

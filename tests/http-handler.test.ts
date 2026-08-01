@@ -3,6 +3,7 @@ import { CONTRACT_VERSION, type HostContext } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { AdminOperationsService } from '../src/core/admin-operations'
+import { AdminRevisionRoundsSettingsService } from '../src/core/admin-revision-rounds-settings'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { RunService } from '../src/core/run-service'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
@@ -47,6 +48,7 @@ function fixture(rateLimits?: Readonly<{ createRun: number; runAction: number }>
   const images = new MockImageGenerationPort()
   const media = new MediaStepRunner({ repository, budget, images, clock })
   const operations = new AdminOperationsService({ repository, budget, media, clock })
+  const revisionRoundsSettings = new AdminRevisionRoundsSettingsService({ repository, clock })
   const health = new RuntimeHealthMonitor(clock, { version: 'test' })
   const rateLimiter = rateLimits ? new InMemoryPrincipalRateLimiter({
     createRun: { limit: rateLimits.createRun, windowMs: 60_000 },
@@ -60,6 +62,7 @@ function fixture(rateLimits?: Readonly<{ createRun: number; runAction: number }>
     authentication: new HeaderAuthentication(),
     health,
     operations,
+    revisionRoundsSettings,
     eventPollMs: 10,
     ...(rateLimiter ? { rateLimiter } : {}),
   })
@@ -82,6 +85,52 @@ async function createRun(handle: (request: Request) => Promise<Response>, key = 
 }
 
 describe('HTTP v1 handler', () => {
+  test('lets administrators configure the default automatic revision rounds for new Runs', async () => {
+    const { handle } = fixture()
+    const path = '/v1/admin/settings/revision-rounds'
+    expect((await handle(request(path))).status).toBe(403)
+
+    const adminHeaders = { 'X-Test-Role': 'ADMIN' }
+    const initial = await handle(request(path, { headers: adminHeaders }))
+    expect(initial.status).toBe(200)
+    expect(await initial.json()).toMatchObject({ data: { maxRevisionRounds: 2, version: 0, isConfigured: false, updatedAt: null } })
+
+    const updated = await handle(request(path, {
+      method: 'PATCH',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxRevisionRounds: 4, expectedVersion: 0 }),
+    }))
+    expect(updated.status).toBe(200)
+    expect(await updated.json()).toMatchObject({ data: { maxRevisionRounds: 4, version: 1, isConfigured: true } })
+
+    const conflict = await handle(request(path, {
+      method: 'PATCH',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxRevisionRounds: 1, expectedVersion: 0 }),
+    }))
+    expect(conflict.status).toBe(409)
+    expect((await conflict.json() as { error: { code: string } }).error.code).toBe('SETTINGS_VERSION_CONFLICT')
+
+    const invalid = await handle(request(path, {
+      method: 'PATCH',
+      headers: { ...adminHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ maxRevisionRounds: 5, expectedVersion: 1 }),
+    }))
+    expect(invalid.status).toBe(422)
+
+    const created = await createRun(handle, 'http-create-settings-default')
+    expect(created.status).toBe(201)
+    expect(await created.json()).toMatchObject({ data: { maxRevisionRounds: 4 } })
+
+    const explicit = await handle(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'http-create-settings-explicit' },
+      body: JSON.stringify({ ...createBody, maxRevisionRounds: 1 }),
+    }))
+    expect(explicit.status).toBe(201)
+    expect(await explicit.json()).toMatchObject({ data: { maxRevisionRounds: 4 } })
+  })
+
   test('distinguishes HTTP liveness from worker readiness without authentication', async () => {
     const { handle, health } = fixture()
     const live = await handle(new Request('http://ppt-agent.test/health/live'))

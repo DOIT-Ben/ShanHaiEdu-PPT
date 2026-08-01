@@ -1,8 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import type { HostContext } from '../contracts'
-import { apiErrorSchema, MAX_PLANNING_RETRIES, runStatusSchema } from '../contracts'
+import {
+  adminRevisionRoundsUpdateSchema,
+  apiErrorSchema,
+  MAX_PLANNING_RETRIES,
+  runStatusSchema,
+} from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
 import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-operations'
+import {
+  AdminRevisionRoundsSettingsError,
+  type AdminRevisionRoundsSettingsPort,
+} from '../core/admin-revision-rounds-settings'
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
@@ -24,6 +33,7 @@ type HandlerDependencies = Readonly<{
   waitingSlaMs?: number
   stepSlaMs?: number
   operations?: AdminOperationsPort
+  revisionRoundsSettings?: AdminRevisionRoundsSettingsPort
   rateLimiter?: PrincipalRateLimiterPort
 }>
 
@@ -68,6 +78,15 @@ function errorResponse(status: number, code: string, message: string, requestId:
     error: { code, message, requestId, ...(details === undefined ? {} : { details }) },
   })
   return json(body, status)
+}
+
+function publicRevisionRoundsSettings(settings: Readonly<{
+  maxRevisionRounds: number
+  version: number
+  isConfigured: boolean
+  updatedAt: string | null
+}>) {
+  return adminRevisionRoundsSettingsSchema.parse(settings)
 }
 
 function enforceRateLimit(
@@ -204,6 +223,28 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       const parts = url.pathname.split('/').filter(Boolean)
       if (parts[0] !== 'v1') {
         return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
+      }
+
+      if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'settings' && parts[3] === 'revision-rounds') {
+        if (!dependencies.revisionRoundsSettings) {
+          return errorResponse(503, 'ADMIN_SETTINGS_UNAVAILABLE', 'admin settings are unavailable', requestId)
+        }
+        if (request.method === 'GET') {
+          const settings = await dependencies.revisionRoundsSettings.get(host)
+          return json({ data: publicRevisionRoundsSettings(settings) })
+        }
+        if (request.method === 'PATCH') {
+          const rateLimited = enforceRateLimit(dependencies.rateLimiter, 'RUN_ACTION', host, requestId)
+          if (rateLimited) return rateLimited
+          const body = await request.json().catch(() => null)
+          const parsed = adminRevisionRoundsUpdateSchema.safeParse(body)
+          if (!parsed.success) {
+            return errorResponse(422, 'INVALID_ADMIN_SETTINGS', 'revision-round settings are invalid', requestId)
+          }
+          const settings = await dependencies.revisionRoundsSettings.update({ host, ...parsed.data })
+          return json({ data: publicRevisionRoundsSettings(settings) })
+        }
+        return errorResponse(405, 'METHOD_NOT_ALLOWED', 'method is not allowed', requestId)
       }
 
       if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'planning-failures' && request.method === 'GET') {
@@ -429,6 +470,9 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         return errorResponse(error.status, error.code, error.message, requestId)
       }
       if (error instanceof AdminOperationsError) {
+        return errorResponse(error.status, error.code, error.message, requestId)
+      }
+      if (error instanceof AdminRevisionRoundsSettingsError) {
         return errorResponse(error.status, error.code, error.message, requestId)
       }
       return errorResponse(500, 'INTERNAL_ERROR', 'an internal error occurred', requestId)

@@ -68,6 +68,10 @@ export class RunService {
     const existing = await this.dependencies.repository.getRun(runId)
     if (existing) return this.replayOrConflict(existing, requestHash)
 
+    const tenantSettings = await this.dependencies.repository.getTenantRevisionRoundsSettings(parsed.data.host.tenantId)
+    const maxRevisionRounds = tenantSettings.isConfigured
+      ? tenantSettings.maxRevisionRounds
+      : parsed.data.maxRevisionRounds
     const now = this.dependencies.clock.now().toISOString()
     const run: RunRecord = {
       id: runId,
@@ -86,7 +90,7 @@ export class RunService {
       assetAcquisitionPolicy: parsed.data.assetAcquisitionPolicy,
       maxVisualAssetsPerSlide: parsed.data.maxVisualAssetsPerSlide,
       ...(parsed.data.visualDeckV4 ? { visualDeckV4: parsed.data.visualDeckV4 } : {}),
-      maxRevisionRounds: parsed.data.maxRevisionRounds,
+      maxRevisionRounds,
       revisionRound: 0,
       planningAttempt: 0,
       qualityScore: null,

@@ -11,6 +11,7 @@ import { FrameFlowHostAdapter, type FrameFlowBackendClient } from '../adapters/f
 import { SharpPptxPresentationRenderer } from '../adapters/presentation-renderer'
 import { DeckReviewRunner } from '../core/deck-review-runner'
 import { AdminOperationsService } from '../core/admin-operations'
+import { AdminRevisionRoundsSettingsService } from '../core/admin-revision-rounds-settings'
 import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
@@ -494,6 +495,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   })
   const media = new MediaStepRunner({ repository: input.repository, budget, images, clock })
   const operations = new AdminOperationsService({ repository: input.repository, budget, media, clock })
+  const revisionRoundsSettings = new AdminRevisionRoundsSettingsService({ repository: input.repository, clock })
   const generation = new SlideGenerationCoordinator({
     repository: input.repository,
     media,
@@ -681,6 +683,7 @@ export function createAgentRuntime(input: RuntimeInput) {
       authentication: input.authentication ?? new SharedTokenAuthentication(input.apiToken),
       health,
       operations,
+      revisionRoundsSettings,
       rateLimiter,
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),

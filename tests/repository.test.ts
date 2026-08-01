@@ -34,6 +34,21 @@ function run(): RunRecord {
 }
 
 describe('in-memory repository contract', () => {
+  test('stores tenant revision-round settings with optimistic versioning', async () => {
+    const repository = new InMemoryAgentRepository()
+    expect(await repository.getTenantRevisionRoundsSettings('frameflow')).toMatchObject({
+      maxRevisionRounds: 2, version: 0, isConfigured: false, updatedAt: null,
+    })
+    const updated = await repository.updateTenantRevisionRoundsSettings({
+      tenantId: 'frameflow', maxRevisionRounds: 4, expectedVersion: 0,
+      updatedBy: 'admin-1', updatedAt: '2026-08-02T00:00:00.000Z',
+    })
+    expect(updated).toMatchObject({ maxRevisionRounds: 4, version: 1, isConfigured: true, updatedBy: 'admin-1' })
+    expect(await repository.updateTenantRevisionRoundsSettings({
+      tenantId: 'frameflow', maxRevisionRounds: 1, expectedVersion: 0,
+      updatedBy: 'admin-2', updatedAt: '2026-08-02T00:00:01.000Z',
+    })).toBeNull()
+  })
   test('commits run, step and monotonic events together', async () => {
     const repository = new InMemoryAgentRepository()
     await repository.createRun(run())
