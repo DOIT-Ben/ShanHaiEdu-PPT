@@ -29,10 +29,41 @@ type ToolContent = string | readonly (
   | Readonly<{ type: 'image_url'; image_url: Readonly<{ url: string; detail: ImageDetail }> }>
 )[]
 
+type StructuredToolRequest<T extends z.ZodType> = Readonly<{
+  model: string
+  system: string
+  user: ToolContent
+  toolName: string
+  description: string
+  schema: T
+  idempotencyKey: string
+  requireLayeredBaseImage?: boolean
+  sourceChunkIds?: readonly string[]
+  transport?: GatewayCoursewareTransport
+}>
+
 export type GatewayCoursewareModelProfile = 'DEFAULT' | 'MINIMAX_M3'
+export type GatewayCoursewareTransport = 'RESPONSES' | 'CHAT_COMPLETIONS'
 
 export const MAX_GATEWAY_TOOL_ARGUMENT_BYTES = 4 * 1024 * 1024
 const MAX_GATEWAY_STREAM_BUFFER_BYTES = MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 256 * 1024
+
+export function gatewayCoursewareModelProfile(input: Readonly<{
+  textModel: string
+  visionModel?: string
+}>): GatewayCoursewareModelProfile {
+  return [input.textModel, input.visionModel]
+    .some((model) => model?.trim().toLowerCase() === 'minimax-m3')
+    ? 'MINIMAX_M3'
+    : 'DEFAULT'
+}
+
+export function visualDeckV4TextTransport(value: string | undefined): GatewayCoursewareTransport {
+  const normalized = value?.trim()
+  if (!normalized || normalized === 'RESPONSES') return 'RESPONSES'
+  if (normalized === 'CHAT_COMPLETIONS') return 'CHAT_COMPLETIONS'
+  throw new Error('PPT_AGENT_V4_TEXT_TRANSPORT_INVALID')
+}
 
 const streamChunkSchema = z.object({
   choices: z.array(z.object({
@@ -55,6 +86,15 @@ const completionSchema = z.object({
   }).passthrough()).min(1),
 }).passthrough()
 
+const responsesCompletionSchema = z.object({
+  status: z.literal('completed'),
+  output: z.array(z.object({
+    type: z.string().min(1),
+    name: z.string().min(1).optional(),
+    arguments: z.string().optional(),
+  }).passthrough()).default([]),
+}).passthrough()
+
 function normalizedBaseUrl(value: string) {
   const url = new URL(value)
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
@@ -62,6 +102,19 @@ function normalizedBaseUrl(value: string) {
     throw new Error('GATEWAY_BASE_URL_INSECURE')
   }
   return url.toString().replace(/\/$/, '')
+}
+
+function responsesContent(value: ToolContent) {
+  const content = typeof value === 'string'
+    ? [{ type: 'input_text' as const, text: value }]
+    : value.map((part) => part.type === 'text'
+      ? { type: 'input_text' as const, text: part.text }
+      : {
+          type: 'input_image' as const,
+          image_url: part.image_url.url,
+          detail: part.image_url.detail,
+        })
+  return content
 }
 
 function jsonSchema(schema: z.ZodType) {
@@ -303,6 +356,7 @@ export class GatewayCoursewareModel implements
   private readonly fetchImpl: Fetch
   private readonly profile: GatewayCoursewareModelProfile
   private readonly imageDetail: ImageDetail
+  private readonly visualDeckV4Transport: GatewayCoursewareTransport
 
   constructor(private readonly dependencies: Readonly<{
     baseUrl: string
@@ -312,6 +366,7 @@ export class GatewayCoursewareModel implements
     artifacts: ArtifactPort
     fetchImpl?: Fetch
     profile?: GatewayCoursewareModelProfile
+    visualDeckV4Transport?: GatewayCoursewareTransport
   }>) {
     this.baseUrl = normalizedBaseUrl(dependencies.baseUrl)
     if (dependencies.apiKey.trim().length < 8) throw new Error('GATEWAY_TEXT_KEY_REQUIRED')
@@ -320,6 +375,7 @@ export class GatewayCoursewareModel implements
     this.fetchImpl = dependencies.fetchImpl ?? fetch
     this.profile = dependencies.profile ?? 'DEFAULT'
     this.imageDetail = this.profile === 'MINIMAX_M3' ? 'default' : 'auto'
+    this.visualDeckV4Transport = dependencies.visualDeckV4Transport ?? 'RESPONSES'
   }
 
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
@@ -375,6 +431,7 @@ visualContract统一整套配色、字体感觉、媒介、信息密度和连续
         schema: visualDeckV4ProposalDraftSchema,
         sourceChunkIds: planningSourceChunkIds(input.payload),
         idempotencyKey: input.idempotencyKey,
+        transport: this.visualDeckV4Transport,
       })
     }
     if (input.operation !== 'create_blueprint') throw new Error('MODEL_OPERATION_UNSUPPORTED')
@@ -456,6 +513,7 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
       description: '提交单素材或完整组装页的严格视觉审查结果。',
       schema: slideVisualReviewSchema,
       idempotencyKey: input.idempotencyKey,
+      ...(visualDeckV4 ? { transport: this.visualDeckV4Transport } : {}),
     })
   }
 
@@ -490,6 +548,7 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
   }
 
   async evaluate(input: Parameters<DeckReviewPort['evaluate']>[0]) {
+    const visualDeckV4 = input.blueprint.renderMode === 'VISUAL_DECK_V4'
     const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: ImageDetail } }> = [{
       type: 'text',
       text: `请审查整套课件。页面数据、教材来源和蓝图如下：\n${boundedJson({
@@ -512,10 +571,12 @@ textDetected只表示检测到错误、无关、乱码或无法确认准确性�
       description: '提交整套课件质量评分和可执行问题清单。',
       schema: deckReviewDraftSchema,
       idempotencyKey: input.idempotencyKey,
+      ...(visualDeckV4 ? { transport: this.visualDeckV4Transport } : {}),
     })
   }
 
   async plan(input: Parameters<RevisionPlanningPort['plan']>[0]) {
+    const visualDeckV4 = input.blueprint.renderMode === 'VISUAL_DECK_V4'
     return this.request({
       model: this.dependencies.textModel,
       system: `你是课件修订规划器。只处理审查发现的问题，不得扩大范围。
@@ -527,6 +588,7 @@ V3 的 REGENERATE_IMAGE 必须填写 targetElementId，确保只重做目标素�
       description: '提交严格限定范围的课件修订计划。',
       schema: revisionPlanDraftSchema,
       idempotencyKey: input.idempotencyKey,
+      ...(visualDeckV4 ? { transport: this.visualDeckV4Transport } : {}),
     })
   }
 
@@ -545,6 +607,7 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
       description: visualDeckV4 ? '提交按计划局部修改后的完整 V4 演示规划。' : '提交按计划局部修改后的完整课件蓝图。',
       schema: visualDeckV4 ? visualDeckV4ProposalDraftSchema : blueprintDraftSchema,
       idempotencyKey: input.idempotencyKey,
+      ...(visualDeckV4 ? { transport: this.visualDeckV4Transport } : {}),
     })
   }
 
@@ -576,17 +639,7 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
     return { type: 'image_url' as const, image_url: { url: `data:image/jpeg;base64,${jpeg.toString('base64')}`, detail: this.imageDetail } }
   }
 
-  private async request<T extends z.ZodType>(input: Readonly<{
-    model: string
-    system: string
-    user: ToolContent
-    toolName: string
-    description: string
-    schema: T
-    idempotencyKey: string
-    requireLayeredBaseImage?: boolean
-    sourceChunkIds?: readonly string[]
-  }>): Promise<z.output<T>> {
+  private async request<T extends z.ZodType>(input: StructuredToolRequest<T>): Promise<z.output<T>> {
     const outputSchema = jsonSchema(input.schema)
     const sourceConstrained = input.sourceChunkIds
       ? constrainBlueprintSourceChunkIds(structuredClone(outputSchema), input.sourceChunkIds)
@@ -594,6 +647,75 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
     const parameters = strictToolSchema(input.requireLayeredBaseImage
       ? requireLayeredBaseImage(sourceConstrained)
       : sourceConstrained)
+    const result = input.transport === 'RESPONSES'
+      ? await this.requestResponses(input, parameters)
+      : await this.requestChatCompletions(input, parameters)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(result.argumentsText)
+    } catch {
+      throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, result.requestId)
+    }
+    try {
+      return input.schema.parse(omitOptionalNulls(parsed, outputSchema))
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, result.requestId)
+      }
+      throw error
+    }
+  }
+
+  private async requestResponses(input: StructuredToolRequest<z.ZodType>, parameters: Record<string, unknown>) {
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}/responses`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.dependencies.apiKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'Idempotency-Key': input.idempotencyKey,
+        },
+        body: JSON.stringify({
+          model: input.model,
+          input: [
+            { role: 'system', content: responsesContent(input.system) },
+            { role: 'user', content: responsesContent(input.user) },
+          ],
+          tools: [{
+            type: 'function',
+            name: input.toolName,
+            description: input.description,
+            strict: true,
+            parameters,
+          }],
+          tool_choice: { type: 'function', name: input.toolName },
+          parallel_tool_calls: false,
+        }),
+        signal: AbortSignal.timeout(180_000),
+      })
+    } catch (error) {
+      const timeout = error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name)
+      throw new StructuredModelError(
+        timeout ? 'PROVIDER_TIMEOUT' : 'PROVIDER_UNAVAILABLE',
+        true,
+        input.model,
+        null,
+      )
+    }
+    const requestId = await this.requireSuccessfulResponse(response, input.model)
+    try {
+      const completion = responsesCompletionSchema.parse(await response.json())
+      const toolCall = completion.output.find((output) => output.type === 'function_call' && output.name === input.toolName)
+      if (!toolCall?.arguments?.trim()) throw new Error('GATEWAY_MODEL_TOOL_CALL_MISSING')
+      return { argumentsText: boundedToolArguments(toolCall.arguments), requestId }
+    } catch (error) {
+      this.throwToolResponseError(error, input.model, requestId)
+    }
+  }
+
+  private async requestChatCompletions(input: StructuredToolRequest<z.ZodType>, parameters: Record<string, unknown>) {
     let response: Response
     try {
       response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
@@ -636,59 +758,52 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
         null,
       )
     }
-    const requestId = this.requestId(response)
-    if (!response.ok) {
-      const rejection = providerRejectionMetadata(await response.clone().json().catch(() => null))
-      console.error(JSON.stringify({
-        service: 'ppt-agent',
-        event: 'gateway_model_rejected',
-        status: response.status,
-        requestId,
-        model: input.model,
-        ...rejection.log,
-      }))
-      const code = response.status === 429
-        ? 'PROVIDER_RATE_LIMIT'
-        : [408, 504].includes(response.status)
-          ? 'PROVIDER_TIMEOUT'
-          : 'PROVIDER_UNAVAILABLE'
-      const retryable = retryableProviderRejection(response.status, rejection)
-      throw new StructuredModelError(code, retryable, input.model, requestId)
-    }
-    let raw: string
+    const requestId = await this.requireSuccessfulResponse(response, input.model)
     try {
-      raw = response.headers.get('content-type')?.includes('application/json')
+      const argumentsText = response.headers.get('content-type')?.includes('application/json')
         ? boundedToolArguments(completionSchema.parse(await response.json()).choices[0]!.message.tool_calls[0]!.function.arguments)
         : await this.readStream(response)
+      return { argumentsText, requestId }
     } catch (error) {
-      if (error instanceof Error && error.message === 'GATEWAY_MODEL_ARGUMENTS_TOO_LARGE') {
-        throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
-      }
-      if (error instanceof Error && ['GATEWAY_MODEL_STREAM_MISSING', 'GATEWAY_MODEL_STREAM_INCOMPLETE'].includes(error.message)) {
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, input.model, requestId)
-      }
-      if (error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name)) {
-        throw new StructuredModelError('PROVIDER_TIMEOUT', true, input.model, requestId)
-      }
-      const code = error instanceof SyntaxError || error instanceof z.ZodError
-        ? 'MODEL_JSON_INVALID'
+      this.throwToolResponseError(error, input.model, requestId)
+    }
+  }
+
+  private async requireSuccessfulResponse(response: Response, model: string) {
+    const requestId = this.requestId(response)
+    if (response.ok) return requestId
+    const rejection = providerRejectionMetadata(await response.clone().json().catch(() => null))
+    console.error(JSON.stringify({
+      service: 'ppt-agent',
+      event: 'gateway_model_rejected',
+      status: response.status,
+      requestId,
+      model,
+      ...rejection.log,
+    }))
+    const code = response.status === 429
+      ? 'PROVIDER_RATE_LIMIT'
+      : [408, 504].includes(response.status)
+        ? 'PROVIDER_TIMEOUT'
         : 'PROVIDER_UNAVAILABLE'
-      throw new StructuredModelError(code, true, input.model, requestId)
+    throw new StructuredModelError(code, retryableProviderRejection(response.status, rejection), model, requestId)
+  }
+
+  private throwToolResponseError(error: unknown, model: string, requestId: string | null): never {
+    if (error instanceof Error && error.message === 'GATEWAY_MODEL_ARGUMENTS_TOO_LARGE') {
+      throw new StructuredModelError('MODEL_JSON_INVALID', true, model, requestId)
     }
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
+    if (error instanceof Error && ['GATEWAY_MODEL_STREAM_MISSING', 'GATEWAY_MODEL_STREAM_INCOMPLETE'].includes(error.message)) {
+      throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, model, requestId)
     }
-    try {
-      return input.schema.parse(omitOptionalNulls(parsed, outputSchema))
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        throw new StructuredModelError('MODEL_JSON_INVALID', true, input.model, requestId)
-      }
-      throw error
+    if (error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name)) {
+      throw new StructuredModelError('PROVIDER_TIMEOUT', true, model, requestId)
     }
+    const code = error instanceof SyntaxError || error instanceof z.ZodError
+      || (error instanceof Error && error.message === 'GATEWAY_MODEL_TOOL_CALL_MISSING')
+      ? 'MODEL_JSON_INVALID'
+      : 'PROVIDER_UNAVAILABLE'
+    throw new StructuredModelError(code, true, model, requestId)
   }
 
   private requestId(response: Response) {
