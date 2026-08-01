@@ -168,9 +168,12 @@ export class MediaStepRunner {
     if (step.status !== 'WAITING') return { step, changed: false }
     if (!step.externalOperationId) throw new Error('MEDIA_OPERATION_ID_MISSING')
 
+    const mediaInput = this.reconstructInput(step, run.imageModel)
     const status = await this.dependencies.images.inspect({
       tenantId: run.host.tenantId,
       operationId: step.externalOperationId,
+      idempotencyKey,
+      ...(mediaInput.backgroundMode ? { backgroundMode: mediaInput.backgroundMode } : {}),
     })
     if (status.state === 'QUEUED' || status.state === 'PROCESSING') return { step, changed: false }
     if (status.state === 'COMPLETED') {
@@ -269,6 +272,7 @@ export class MediaStepRunner {
         output: {
           slideId: input.slideId,
           versionId: input.versionId,
+          backgroundMode: input.backgroundMode ?? 'OPAQUE',
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
         },
@@ -319,6 +323,7 @@ export class MediaStepRunner {
         output: {
           slideId: input.slideId,
           versionId: input.versionId,
+          backgroundMode: input.backgroundMode ?? 'OPAQUE',
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
         },
@@ -335,7 +340,7 @@ export class MediaStepRunner {
   }
 
   private reconstructInput(step: StepRecord, model: string): SubmitSlideImageInput {
-    const output = step.output as { slideId?: unknown; versionId?: unknown } | null
+    const output = step.output as { slideId?: unknown; versionId?: unknown; backgroundMode?: unknown } | null
     if (!output || typeof output.slideId !== 'string' || typeof output.versionId !== 'string') {
       throw new Error('MEDIA_STEP_OUTPUT_INVALID')
     }
@@ -348,6 +353,9 @@ export class MediaStepRunner {
       prompt: '',
       model,
       budgetUnits: step.budgetUnits,
+      ...(output.backgroundMode === 'TRANSPARENT' || output.backgroundMode === 'OPAQUE'
+        ? { backgroundMode: output.backgroundMode }
+        : {}),
     }
   }
 

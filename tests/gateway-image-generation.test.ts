@@ -10,18 +10,27 @@ const config = {
 }
 
 describe('gateway image generation adapter', () => {
-  test('stores a synchronous base64 result and recovers it from the opaque operation id', async () => {
+  test('submits a persistent async operation and stores its completed output', async () => {
     const artifacts = new MockArtifactPort()
     const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 216, g: 216, b: 216 } } })
       .composite([{ input: Buffer.from('<svg width="32" height="32"><rect width="32" height="32" rx="8" fill="#D62828"/></svg>'), left: 16, top: 16 }])
       .png().toBuffer()
-    let captured: { url: string; init: RequestInit | undefined } | null = null
+    const operationId = 'imgop_0123456789abcdef0123456789abcdef'
+    const captured: { url: string; init: RequestInit | undefined }[] = []
     const adapter = new GatewayImageGenerationPort({
       ...config,
       artifacts,
       fetchImpl: async (url, init) => {
-        captured = { url: String(url), init }
-        return Response.json({ data: [{ b64_json: png.toString('base64') }] })
+        captured.push({ url: String(url), init })
+        if (String(url).endsWith('/image-tasks')) {
+          return Response.json({ id: operationId, status: 'QUEUED', submission_state: 'SUBMITTED' }, { status: 202 })
+        }
+        return Response.json({
+          id: operationId,
+          status: 'COMPLETED',
+          submission_state: 'SUBMITTED',
+          result: { data: [{ b64_json: png.toString('base64') }] },
+        })
       },
     })
     const submitted = await adapter.submit({
@@ -34,16 +43,19 @@ describe('gateway image generation adapter', () => {
       idempotencyKey: 'run-1:asset:apples:r0:v1',
     })
 
-    expect(submitted.state).toBe('COMPLETED')
-    const inspected = await adapter.inspect({ tenantId: 'frameflow', operationId: submitted.operationId })
+    expect(submitted).toEqual({ operationId, state: 'QUEUED' })
+    const inspected = await adapter.inspect({
+      tenantId: 'frameflow', operationId: submitted.operationId,
+      idempotencyKey: 'run-1:asset:apples:r0:v1', backgroundMode: 'TRANSPARENT',
+    })
     expect(inspected).toMatchObject({ state: 'COMPLETED' })
     const stored = inspected.state === 'COMPLETED' ? artifacts.artifacts.get(inspected.artifactId) : null
     const raw = await sharp(stored!.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
     const alpha = Array.from({ length: raw.info.width * raw.info.height }, (_, index) => raw.data[index * 4 + 3]!)
     expect(Math.min(...alpha)).toBe(0)
     expect(Math.max(...alpha)).toBe(255)
-    const request = captured as unknown as { url: string; init: RequestInit }
-    expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/images/generations')
+    const request = captured[0] as { url: string; init: RequestInit }
+    expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/image-tasks')
     expect(new Headers(request.init.headers).get('Idempotency-Key')).toBe('run-1:asset:apples:r0:v1')
     expect(JSON.parse(String(request.init.body))).toMatchObject({
       model: 'image-2', size: '1:1', resolution: '1K', n: 1,
@@ -76,6 +88,30 @@ describe('gateway image generation adapter', () => {
       tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'GATEWAY_SUBMISSION_UNKNOWN' })
+  })
+
+  test('recovers the persistent operation by the original idempotency key after a response loss', async () => {
+    const artifacts = new MockArtifactPort()
+    const operationId = 'imgop_0123456789abcdef0123456789abcdef'
+    const requests: string[] = []
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url) => {
+        requests.push(String(url))
+        if (String(url).endsWith('/image-tasks')) throw new Error('connection dropped after gateway accepted request')
+        return Response.json({ id: operationId, status: 'SUBMITTING', submission_state: 'UNKNOWN' })
+      },
+    })
+
+    await expect(adapter.submit({
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
+    })).resolves.toEqual({ operationId, state: 'QUEUED' })
+    expect(requests).toEqual([
+      'https://newapi.doitbenai.cloud/v1/image-tasks',
+      'https://newapi.doitbenai.cloud/v1/image-tasks/by-idempotency',
+    ])
   })
 
   test('uses a multipart image edit request for a selected source reference', async () => {

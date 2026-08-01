@@ -117,6 +117,8 @@ export interface ImageGenerationPort {
   inspect(input: Readonly<{
     tenantId: string
     operationId: string
+    idempotencyKey?: string
+    backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
   }>): Promise<
     | Readonly<{ state: 'QUEUED' | 'PROCESSING' }>
     | Readonly<{ state: 'COMPLETED'; artifactId: string }>
