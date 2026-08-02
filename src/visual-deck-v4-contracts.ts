@@ -159,6 +159,20 @@ export const visualDeckV4SourceSpecStageSchema = z.object({
   presentationSpec: visualDeckV4PresentationSpecSchema,
 }).strict()
 
+export function normalizeVisualDeckV4RequestFocus(
+  stage: z.infer<typeof visualDeckV4SourceSpecStageSchema>,
+  requestFocus: string | undefined,
+) {
+  if (!requestFocus || stage.presentationSpec.focus.includes(requestFocus)) return stage
+  return {
+    ...stage,
+    presentationSpec: {
+      ...stage.presentationSpec,
+      focus: [requestFocus, ...stage.presentationSpec.focus].slice(0, 12),
+    },
+  }
+}
+
 export const visualDeckV4DeckVisualStageSchema = z.object({
   deckPlan: visualDeckV4DeckPlanSchema,
   visualContract: visualDeckV4VisualContractSchema,

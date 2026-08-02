@@ -28,6 +28,7 @@ import {
   visualDeckV4PlanningStageStepKey,
 } from './visual-deck-v4-planner'
 import {
+  normalizeVisualDeckV4RequestFocus,
   normalizeVisualDeckV4VisibleReferences,
   visualDeckV4DeckVisualStageSchema,
   visualDeckV4FinalCoherenceReviewSchema,
@@ -274,16 +275,19 @@ export class PlanningRunner {
       createdAt: this.dependencies.clock.now().toISOString(),
     }
     const protocol = await this.resolveV4StructuredGenerationProtocol(input, tenantId)
-    const sourceSpec = visualDeckV4SourceSpecStageSchema.parse(await this.runV4PlanningStage(input, {
-      stage: 'source-spec',
-      tool: 'compile_v4_source_spec',
-      operation: 'create_visual_deck_v4_source_spec',
-      schemaName: 'ppt_agent_v4_source_spec_v1',
-      payload: basePayload,
-      sourceAssets: document.assets ?? [],
-      protocol,
-      parse: visualDeckV4SourceSpecStageSchema.parse,
-    }))
+    const sourceSpec = normalizeVisualDeckV4RequestFocus(
+      visualDeckV4SourceSpecStageSchema.parse(await this.runV4PlanningStage(input, {
+        stage: 'source-spec',
+        tool: 'compile_v4_source_spec',
+        operation: 'create_visual_deck_v4_source_spec',
+        schemaName: 'ppt_agent_v4_source_spec_v1',
+        payload: basePayload,
+        sourceAssets: document.assets ?? [],
+        protocol,
+        parse: visualDeckV4SourceSpecStageSchema.parse,
+      })),
+      config.deckOptions.focus,
+    )
     const deckVisual = visualDeckV4DeckVisualStageSchema.parse(await this.runV4PlanningStage(input, {
       stage: 'deck-visual',
       tool: 'compile_v4_deck_visual',
