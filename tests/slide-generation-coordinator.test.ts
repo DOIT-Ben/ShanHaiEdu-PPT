@@ -524,6 +524,33 @@ describe('slide generation coordinator', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', committedBudgetUnits: 30 })
   })
 
+  test('recovers an interrupted unsubmitted V4 batch page without another authorization', async () => {
+    const { repository, images, budget, media, coordinator, clock } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    const key = 'run-1:slide:1:image:r0:v1'
+    const operationId = images.operations.get(key)!
+    images.operations.delete(key)
+    images.requests.delete(key)
+    images.statuses.delete(operationId)
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(key)!
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    expect(await media.reconcilePendingRun('run-1')).toMatchObject({ inspected: 3, changed: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING' })
+    expect(budget.batchReservations.size).toBe(1)
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'EXECUTING', submitted: 3 })
+    expect(images.operations.has(key)).toBe(true)
+    expect(budget.batchReservations.size).toBe(1)
+  })
+
   test('settles a V4 batch once after every image has a controlled artifact', async () => {
     const { repository, images, budget, coordinator } = await fixture()
     await repository.transact('run-1', (transaction) => {
@@ -557,6 +584,21 @@ describe('slide generation coordinator', () => {
     expect((await repository.getRunEventSnapshot('run-1')).progress).toContainEqual(expect.objectContaining({
       stepId: 'run-1:completed-pages', completed: 3, total: 3,
     }))
+  })
+
+  test('polls completed V4 batch pages concurrently before one final settlement', async () => {
+    const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    for (const [index, key] of [...images.operations.keys()].entries()) images.complete(key, `artifact-${index + 1}`)
+    images.inspectionDelayMs = 10
+
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
+      status: 'PAGE_REVIEW', completed: 3, total: 3,
+    })
+    expect(images.maxConcurrentInspections).toBe(3)
   })
 
   test('recovers a V4 batch settlement with its original reservation and idempotency key', async () => {
@@ -625,6 +667,30 @@ describe('slide generation coordinator', () => {
     expect(budget.reservations.size).toBe(0)
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
       .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'SETTLED', settledUnits: 30 } } })
+  })
+
+  test('reconciles an interrupted V4 submission after cancellation with its original image key', async () => {
+    const { repository, images, budget, media, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    const keys = [...images.operations.keys()]
+    const interruptedKey = keys[0]!
+    for (const [index, key] of keys.entries()) images.complete(key, `artifact-${index + 1}`)
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(interruptedKey)!
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    expect(await media.reconcilePendingRun('run-1')).toMatchObject({ inspected: 3, changed: 3 })
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === interruptedKey))
+      .toMatchObject({ status: 'COMPLETED_AFTER_CANCEL', externalOperationId: expect.any(String) })
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      idempotencyKey: 'finalize:run-1:generation-batch:r0', settledUnits: 30, releasedUnits: 0,
+    })])
   })
 
   test('releases a cancelled V4 batch after every submitted page is confirmed uncharged', async () => {

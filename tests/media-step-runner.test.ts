@@ -128,6 +128,40 @@ describe('media step runner', () => {
     expect(budget.reservations.size).toBe(1)
   })
 
+  test('backs off interrupted submission reconciliation when the Provider lookup remains unknown', async () => {
+    const { repository, images, runner, clock } = await fixture({ presentationMode: 'VISUAL_DECK_V4', status: 'CANCELLED' })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'EXECUTING' })
+    })
+    await runner.submitSlideImage(request)
+    let lookups = 0
+    images.lookupByIdempotency = async () => {
+      lookups += 1
+      return { state: 'UNKNOWN' as const }
+    }
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(request.idempotencyKey)!
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    const afterFirst = await repository.listEvents('run-1')
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({
+      status: 'SUBMISSION_UNKNOWN', output: { submissionLookupAttempt: 1, nextInspectionAt: expect.any(String) },
+    })
+
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 0 })
+    expect(lookups).toBe(1)
+    expect(await repository.listEvents('run-1')).toEqual(afterFirst)
+
+    clock.advance(2_000)
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect(lookups).toBe(2)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED' })
+    expect((await repository.listEvents('run-1')).filter((event) => event.type === 'tool.failed')).toHaveLength(1)
+  })
+
   test('routes a V4 model permission failure to administrator technical handling without user approval', async () => {
     const { repository, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     images.failNext('MODEL_FORBIDDEN', 'NOT_SUBMITTED')

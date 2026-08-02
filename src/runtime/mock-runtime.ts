@@ -362,6 +362,15 @@ class LocalMockImageGeneration implements ImageGenerationPort {
     return { operationId, state: 'COMPLETED' as const }
   }
 
+  async lookupByIdempotency(
+    input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0],
+  ): ReturnType<NonNullable<ImageGenerationPort['lookupByIdempotency']>> {
+    const operationId = `mock-image:${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 32)}`
+    return this.results.has(operationId)
+      ? { state: 'SUBMITTED' as const, operationId }
+      : { state: 'NOT_SUBMITTED' as const }
+  }
+
   async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
     const artifactId = this.results.get(input.operationId)
     return artifactId
@@ -504,7 +513,13 @@ export function createAgentRuntime(input: RuntimeInput) {
     model,
     clock,
   })
-  const media = new MediaStepRunner({ repository: input.repository, budget, images, clock })
+  const media = new MediaStepRunner({
+    repository: input.repository,
+    budget,
+    images,
+    clock,
+    inspectionConcurrency: imageConcurrency,
+  })
   const operations = new AdminOperationsService({ repository: input.repository, budget, media, clock })
   const revisionRoundsSettings = new AdminRevisionRoundsSettingsService({ repository: input.repository, clock })
   const generation = new SlideGenerationCoordinator({
@@ -558,7 +573,13 @@ export function createAgentRuntime(input: RuntimeInput) {
     application: trackedRevisionApplication,
     clock,
   })
-  const revisionMedia = new RevisionMediaCoordinator({ repository: input.repository, media, clock })
+  const revisionMedia = new RevisionMediaCoordinator({
+    repository: input.repository,
+    media,
+    batchBudget: budget,
+    clock,
+    imageConcurrency,
+  })
 
   const advanceRun = async (candidate: RunRecord) => {
     let phase = candidate.status

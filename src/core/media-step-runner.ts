@@ -1,4 +1,5 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { mapWithConcurrency } from './concurrency'
 import {
   type AgentRepository,
   BudgetReservationError,
@@ -25,6 +26,10 @@ const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
   'FAILED_CHARGED',
   'BILLING_UNKNOWN',
 ])
+
+function submissionLookupRetryDelayMs(attempt: number) {
+  return [2_000, 10_000, 30_000, 60_000, 60_000][Math.max(0, Math.min(4, attempt - 1))]!
+}
 
 export function isMediaFailureStepStatus(status: StepStatus) {
   return MEDIA_FAILURE_STEP_STATUSES.has(status)
@@ -78,12 +83,20 @@ function mergePolicy(run: RunRecord, policy: ReturnType<typeof reserveBudget>, u
 }
 
 export class MediaStepRunner {
+  private readonly inspectionConcurrency: number
+
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     budget: BudgetPort
     images: ImageGenerationPort
     clock: ClockPort
-  }>) {}
+    inspectionConcurrency?: number
+  }>) {
+    this.inspectionConcurrency = dependencies.inspectionConcurrency ?? 1
+    if (!Number.isSafeInteger(this.inspectionConcurrency) || this.inspectionConcurrency < 1 || this.inspectionConcurrency > 50) {
+      throw new Error('IMAGE_CONCURRENCY_INVALID')
+    }
+  }
 
   async submitSlideImage(input: SubmitSlideImageInput): Promise<SubmitSlideImageResult> {
     const prepared = await this.prepare(input)
@@ -187,6 +200,9 @@ export class MediaStepRunner {
         changed: true,
       }
     }
+    if (['SUBMITTING', 'SUBMISSION_UNKNOWN'].includes(step.status) && !step.externalOperationId) {
+      return this.recoverUnacknowledgedSubmission(run, step)
+    }
     if (!['WAITING', 'BILLING_UNKNOWN'].includes(step.status)) return { step, changed: false }
     if (!step.externalOperationId) throw new Error('MEDIA_OPERATION_ID_MISSING')
     if (this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) return { step, changed: false }
@@ -252,10 +268,9 @@ export class MediaStepRunner {
   async reconcilePendingRun(runId: string) {
     const pending = (await this.dependencies.repository.listSteps(runId))
       .filter(isPendingMediaReconciliationStep)
-    let changed = 0
-    for (const step of pending) {
-      if ((await this.refreshSlideImage(runId, step.idempotencyKey)).changed) changed += 1
-    }
+    const results = await mapWithConcurrency(pending, this.inspectionConcurrency, (step) =>
+      this.refreshSlideImage(runId, step.idempotencyKey))
+    const changed = results.filter((result) => result.changed).length
     return { inspected: pending.length, changed }
   }
 
@@ -421,6 +436,57 @@ export class MediaStepRunner {
       })
       return updated
     })
+  }
+
+  /**
+   * A process may stop after durable SUBMITTING and before it receives the
+   * Provider operation id. Reconcile only through the original idempotency
+   * key; never submit a second image task to answer this uncertainty.
+   */
+  private async recoverUnacknowledgedSubmission(run: RunRecord, step: StepRecord): Promise<RefreshSlideImageResult> {
+    if (step.status === 'SUBMISSION_UNKNOWN' && this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) {
+      return { step, changed: false }
+    }
+    const input = this.reconstructInput(step, run.imageModel)
+    const lookup = await this.lookupSubmission(run.host.tenantId, step.idempotencyKey)
+    if (lookup.state === 'SUBMITTED') {
+      if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
+      await this.markWaiting(input, step.budgetReservationId, lookup.operationId)
+      const refreshed = await this.refreshSlideImage(run.id, step.idempotencyKey)
+      return { ...refreshed, changed: true }
+    }
+    if (lookup.state === 'NOT_SUBMITTED') {
+      if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
+      if (isBatchReserved(input)) {
+        return {
+          step: await this.markDefiniteFailure(input, step.budgetReservationId, 'PROVIDER_SUBMISSION_NOT_FOUND'),
+          changed: true,
+        }
+      }
+      await this.markReleasing(input, step.budgetReservationId, 'PROVIDER_SUBMISSION_NOT_FOUND')
+      await this.dependencies.budget.release({
+        host: run.host,
+        reservationId: step.budgetReservationId,
+        idempotencyKey: `release:${budgetReservationKey(input)}`,
+      })
+      return {
+        step: await this.markDefiniteFailure(input, step.budgetReservationId, 'PROVIDER_SUBMISSION_NOT_FOUND'),
+        changed: true,
+      }
+    }
+    return {
+      step: await this.markUnknown(input, step.budgetReservationId, 'PROVIDER_SUBMISSION_UNKNOWN', 'MEDIA'),
+      changed: true,
+    }
+  }
+
+  private async lookupSubmission(tenantId: string, idempotencyKey: string) {
+    if (!this.dependencies.images.lookupByIdempotency) return { state: 'UNKNOWN' as const }
+    try {
+      return await this.dependencies.images.lookupByIdempotency({ tenantId, idempotencyKey })
+    } catch {
+      return { state: 'UNKNOWN' as const }
+    }
   }
 
   private reconstructInput(step: StepRecord, model: string): SubmitSlideImageInput {
@@ -651,32 +717,63 @@ export class MediaStepRunner {
       const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)
       const policy = transitionRequired && !v4TechnicalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
+      const repeatedUnknown = kind === 'MEDIA'
+        && step.status === 'SUBMISSION_UNKNOWN'
+        && step.errorCode === errorCode
+      const rawOutput = step.output && typeof step.output === 'object' ? step.output as Record<string, unknown> : {}
+      const previousAttempt = typeof rawOutput.submissionLookupAttempt === 'number'
+        && Number.isSafeInteger(rawOutput.submissionLookupAttempt)
+        ? rawOutput.submissionLookupAttempt
+        : 0
+      const submissionLookupAttempt = kind === 'MEDIA' && !step.externalOperationId
+        ? Math.min(5, previousAttempt + 1)
+        : null
+      const output = submissionLookupAttempt === null
+        ? step.output
+        : {
+            ...rawOutput,
+            submissionLookupAttempt,
+            nextInspectionAt: new Date(this.dependencies.clock.now().getTime()
+              + submissionLookupRetryDelayMs(submissionLookupAttempt)).toISOString(),
+          }
       const updated: StepRecord = {
         ...step,
         status: kind === 'BUDGET' ? 'RESERVATION_UNKNOWN' : 'SUBMISSION_UNKNOWN',
         budgetReservationId: reservationId,
         errorCode,
+        output,
         updatedAt: now,
       }
       if (transitionRequired) transaction.putRun(run)
       transaction.putStep(updated)
       const technicalRecovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
       const issueId = `${input.stepId}:submission-unknown`
-      transaction.appendEvent({
-        schemaVersion: CONTRACT_VERSION,
-        type: 'issue.detected',
-        payload: {
-          id: issueId,
-          category: kind === 'BUDGET' ? 'BUDGET_RESERVATION_UNKNOWN' : 'PROVIDER_SUBMISSION_UNKNOWN',
-          severity: 'CRITICAL',
-          summary: kind === 'BUDGET'
-            ? '宿主额度预留状态未知，已停止媒体提交并保留 Agent 预算占用。'
-            : '图片任务提交状态未知，已停止自动重试并保留预算占用。',
-          slideIds: [],
-          sourceChunkIds: [],
-          status: 'OPEN',
-        },
-      })
+      if (!repeatedUnknown) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'tool.failed',
+          payload: {
+            stepId: step.id,
+            errorCode: (kind === 'BUDGET' ? `RESERVATION_UNKNOWN:${errorCode}` : `SUBMISSION_UNKNOWN:${errorCode}`).slice(0, 100),
+            retryable: technicalRecovery?.technicalRecovery?.retryable ?? false,
+          },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'issue.detected',
+          payload: {
+            id: issueId,
+            category: kind === 'BUDGET' ? 'BUDGET_RESERVATION_UNKNOWN' : 'PROVIDER_SUBMISSION_UNKNOWN',
+            severity: 'CRITICAL',
+            summary: kind === 'BUDGET'
+              ? '宿主额度预留状态未知，已停止媒体提交并保留 Agent 预算占用。'
+              : '图片任务提交状态未知，已停止自动重试并保留预算占用。',
+            slideIds: [],
+            sourceChunkIds: [],
+            status: 'OPEN',
+          },
+        })
+      }
       if (transitionRequired && !technicalRecovery) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,

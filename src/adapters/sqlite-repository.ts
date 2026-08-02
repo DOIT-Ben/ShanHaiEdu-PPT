@@ -276,7 +276,7 @@ export class SqliteAgentRepository implements AgentRepository {
       ) OR (
         agent_steps.tool = 'generate_slide_image'
         AND (
-          agent_steps.status IN ('WAITING', 'RELEASING')
+          agent_steps.status IN ('SUBMITTING', 'WAITING', 'RELEASING', 'SUBMISSION_UNKNOWN')
           OR (agent_steps.status = 'BILLING_UNKNOWN'
             AND json_extract(agent_steps.data, '$.externalOperationId') IS NOT NULL
             AND json_extract(agent_steps.data, '$.externalOperationId') <> '')

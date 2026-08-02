@@ -24,7 +24,6 @@ PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资�
 | --- | --- | --- |
 | 创建任务 | `POST /v1/runs` | 稳定业务 `Idempotency-Key` |
 | 查询规划、状态、批次和交付 | `GET /v1/runs/{runId}` | 无 |
-| 用户确认规划 | `POST /v1/runs/{runId}/actions`，`APPROVE_BLUEPRINT` | 每次动作一把稳定键 |
 | 实时进度 | `GET /v1/runs/{runId}/events?after={sequence}` | 按 `sequence` 断线续传 |
 | 历史进度 | `GET /v1/runs/{runId}/events/history?after={sequence}` | 按 `sequence` 断线续传 |
 | 下载交付 | `GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=pptx` | 无 |
@@ -40,23 +39,13 @@ X-PPT-Agent-Project: <externalProjectId>  # 可选
 
 身份由认证层绑定，请求体的 `host` 只能与该上下文一致。浏览器不得直接持有任一服务 Token。
 
-## 用户确认的规划
+## 自动执行的规划
 
-当 Run 到达 `AWAITING_BLUEPRINT_APPROVAL`，详情中的 `generationPlan` 是确认页的唯一内容源。宿主应
+V4 规划完成后自动进入 `EXECUTING`。详情中的 `generationPlan` 是生成进度页的唯一内容源，宿主应
 展示标题、受众、页数、叙事流程、每页标题/内容/视觉说明、整体风格与“整页图片型 PPTX，不可编辑”的
 输出说明；不得展示模型原始提示词、内部 Slide Brief 或 Provider 请求。
 
-确认使用详情中的最新 `version`：
-
-```json
-{
-  "schemaVersion": "1",
-  "type": "APPROVE_BLUEPRINT",
-  "expectedVersion": 7
-}
-```
-
-确认后 Agent 冻结规划，并自行向视觉 Provider 受控并发提交页面。宿主不得自行提交页面图片任务，
+Agent 冻结规划，并自行向视觉 Provider 受控并发提交页面。宿主不得自行提交页面图片任务，
 也不得从事件文案推断状态；应使用详情的状态字段和 SSE 的结构化 payload。
 
 ## 批次预算端口

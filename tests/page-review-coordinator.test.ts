@@ -15,6 +15,7 @@ import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import type { PresentationBlueprint } from '../src/presentation-contracts'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
+import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -152,9 +153,10 @@ async function fixture(options: Readonly<{
     }
   })
   const reviewer = new VisualReviewRunner({ repository, reviewer: reviewerPort, clock })
-  return {
-    repository,
-    reviewerPort,
+    return {
+      repository,
+      clock,
+      reviewerPort,
     artifacts,
     renderer,
     coordinator: new PageReviewCoordinator({
@@ -624,5 +626,40 @@ describe('page review coordinator', () => {
       reason: 'PAGE_REVIEW_FAILED',
       retryable: true,
     })
+  })
+
+  test('resumes failed V4 review work and preserves prior rejected pages for automatic revision', async () => {
+    let calls = 0
+    const reviewerPort: VisualReviewPort = {
+      async review() {
+        calls += 1
+        if (calls === 1) {
+          return {
+            approved: false,
+            textDetected: false,
+            visualScore: 72,
+            reasons: ['第一页构图需要调整'],
+            retryInstruction: 'Keep the approved copy and simplify the composition.',
+          }
+        }
+        if (calls === 2) throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'page-review-2')
+        return { approved: true, textDetected: false, visualScore: 90, reasons: [], retryInstruction: null }
+      },
+    }
+    const { repository, clock, coordinator } = await fixture({
+      reviewerPort,
+      reviewConcurrency: 1,
+      plannedBlueprint: visualDeckV4Blueprint(),
+      runOverrides: { presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO' },
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'RECOVERING', rejected: 1, total: 3 })
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'REVISING', rejected: 1, total: 3 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'REVISING', revisionRound: 1 })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'plan_page_revision'))
+      .toMatchObject({ output: { operations: [expect.objectContaining({ slideId: 'run-1:slide:1' })] } })
   })
 })

@@ -73,11 +73,6 @@ POST /v1/runs
 GET  /v1/runs/{runId}
 GET  /v1/runs/{runId}/events/history 或 GET /v1/runs/{runId}/events（SSE）
         |
-        |  AWAITING_BLUEPRINT_APPROVAL
-        |  FrameFlow 展示 generationPlan，用户确认
-        v
-POST /v1/runs/{runId}/actions  { type: "APPROVE_BLUEPRINT" }
-        |
         v
 EXECUTING -> PAGE_REVIEW -> DECK_REVIEW -> DELIVERING -> COMPLETED
         |
@@ -200,14 +195,14 @@ Content-Type: application/json
 管理员在后台设置的租户修订轮次（`0-4`）对之后新建的 Run 优先级更高；因此 FrameFlow 应以
 响应中的 `maxRevisionRounds` 为准，不要假设请求里的值一定生效。
 
-## 5. 用户确认页：读取完整生成规划
+## 5. 读取完整生成规划
 
 ```http
 GET /v1/runs/{runId}
 ```
 
-当规划完成后，状态为 `AWAITING_BLUEPRINT_APPROVAL`，详情中的 `generationPlan` 是给用户看的
-结构化规划，FrameFlow 应展示它，而不是展示内部 Prompt 或模型原始输出。其结构为：
+当规划完成后，V4 会直接进入 `EXECUTING`；详情中的 `generationPlan` 可用于向用户展示当前正在
+执行的结构化规划，而不是展示内部 Prompt 或模型原始输出。其结构为：
 
 ```json
 {
@@ -248,41 +243,23 @@ GET /v1/runs/{runId}
 3. `Slide Briefs`；
 4. `Final Coherence Review`。
 
-FrameFlow 不需要也不应该重建这四个内部工件。用户确认页可以展示 `generationPlan` 的摘要、流程、
+FrameFlow 不需要也不应该重建这四个内部工件。可在生成进度中展示 `generationPlan` 的摘要、流程、
 逐页标题/内容/视觉说明、风格和不可编辑提示。
 
-## 6. 确认规划并开始付费出图
+## 6. 自动开始付费出图
 
-读取详情中的最新 `version` 后提交：
-
-```http
-POST /v1/runs/{runId}/actions
-Idempotency-Key: frameflow-ppt-20260801-user123-run-approve-1
-Content-Type: application/json
-```
-
-```json
-{
-  "schemaVersion": "1",
-  "type": "APPROVE_BLUEPRINT",
-  "expectedVersion": 1
-}
-```
-
-`expectedVersion` 必须是用户确认前刚读取的 Run 版本。动作幂等键按“一次用户动作”生成并永久复用；
-不能把创建 Run 的键复用于动作。
-
-确认成功后状态进入 `EXECUTING`，Agent 会在图片 Provider 允许的并发范围内提交独立页面任务。
+V4 的四个规划阶段完成后，Agent 自动冻结规划并进入 `EXECUTING`，随后在图片 Provider 允许的
+并发范围内提交独立页面任务。
 FrameFlow 不需要也不能自行调用 Nano Banana；图片任务的幂等、计费、轮询和断点恢复由 Agent 负责。
 
 ### 批次并发与统一计费
 
-确认后 Agent 会先冻结完整规划，并建立一个持久化的 `generationBatch`。当前 Nano Banana 网关提供的是
+Agent 进入执行阶段时会冻结完整规划，并建立一个持久化的 `generationBatch`。当前 Nano Banana 网关提供的是
 逐页 `image-task` 操作，而不是网关原生 batch API，因此 `generationBatch.submissionMode` 固定为
 `GATEWAY_INDIVIDUAL_OPERATIONS`：它是 **PPT Agent 的业务批次**，不是伪造的 Provider `batchId`。
 
 - Agent 在受控并发上限内全量提交相互独立的页面；每页持有稳定图片幂等键，崩溃恢复不会重复出图；
-- 用户确认时，PPT Agent 通过宿主实现的 `BatchBudgetPort` 创建一笔整单预授权/积分冻结；用户界面只展示整套预算，不展示逐页扣费；
+- 规划完成自动进入执行时，PPT Agent 通过宿主实现的 `BatchBudgetPort` 创建一笔整单预授权/积分冻结；用户界面只展示整套预算，不展示逐页扣费；
 - 页面步骤只记录本地进度与账务分摊，不能调用宿主的预授权、结算或释放接口；整笔 reservation 由持久化的批次步骤持有；
 - 所有页面终态后，宿主以同一 `finalize:<batch-key>` 原子结算已收费页面并释放明确未收费余额；全完成和全未提交只是这个操作的两个特例。提交或计费未知会保留原键并进入恢复，绝不以新键重扣。
 
@@ -315,7 +292,6 @@ Run 详情在出图开始后会返回：
 
 | `type` | 用途 | 允许的主要状态 |
 | --- | --- | --- |
-| `APPROVE_BLUEPRINT` | 确认规划并开始生成 | `AWAITING_BLUEPRINT_APPROVAL` |
 | `PAUSE` / `RESUME` | 暂停或恢复 | 运行中 / `PAUSED` |
 | `CANCEL` | 停止新提交 | 所有非终态 |
 | `RETRY_PLANNING` | 规划失败后重试 | `NEEDS_HUMAN` |
@@ -383,7 +359,7 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 `maxRevisionRounds`、`budgetUnits`、`committedBudgetUnits`、`reason`、`retryable`、
 `requiresUserAction` 和 `nextAction`。FrameFlow 应优先用这些字段更新进度，不要从事件文本中解析数字。
 
-例如规划完成且等待用户确认：
+例如规划完成并自动进入出图：
 
 ```json
 {
@@ -400,10 +376,10 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
     "maxRevisionRounds": 2,
     "budgetUnits": 100,
     "committedBudgetUnits": 0,
-    "reason": "USER_CONFIRMATION_REQUIRED",
+    "reason": null,
     "retryable": null,
-    "requiresUserAction": true,
-    "nextAction": "APPROVE_BLUEPRINT"
+    "requiresUserAction": false,
+    "nextAction": null
   }
 }
 ```
@@ -413,7 +389,6 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | 状态 | FrameFlow 行为 |
 | --- | --- |
 | `PLANNING` | 显示“正在理解资料和规划”，继续监听事件 |
-| `AWAITING_BLUEPRINT_APPROVAL` | 展示 `generationPlan` 和费用/预算说明，等待用户确认 |
 | `EXECUTING` | 显示图片生成进度；`generation.progress` 的 `completed/total` 是页面进度 |
 | `RECOVERING` | 显示“正在自动恢复技术任务”；读取 `technicalRecovery.nextAttemptAt`，不显示用户审批按钮，也不得重新创建 Run 或更换幂等键 |
 | `PAGE_REVIEW` | 显示逐页质量检查，不要重复提交图片 |
@@ -486,7 +461,7 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 
 - `budgetUnits`：Run 的积分/预算上限，由宿主在创建时传入；
 - `committedBudgetUnits`：Agent 已提交或保留的媒体预算累计值；
-- 用户确认蓝图后，PPT Agent 通过 `BatchBudgetPort` 为整套初始页面执行**一次**预授权；并发页面只写本地分摊状态，不能逐页调用宿主积分接口；
+- 规划完成自动进入执行后，PPT Agent 通过 `BatchBudgetPort` 为整套初始页面执行**一次**预授权；并发页面只写本地分摊状态，不能逐页调用宿主积分接口；
 - 全部页面完成后，PPT Agent 使用同一批次幂等键执行**一次**结算。`generationBatch.accounting.authorization` 与 `settlement` 公开授权、结算和恢复状态，但不公开宿主 reservationId；
 - 授权或结算响应未知时，保留 `batchId`、内部 reservationId 和原幂等键进入 `RECOVERING`，不得创建第二笔预授权；
 - `generationBatch.accounting` 是整单对账汇总；宿主不能将内部页面分摊映射成多次用户扣费记录；
@@ -499,7 +474,6 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 - [ ] 只从认证上下文生成 `host`；不信任浏览器传入的租户、用户和角色。
 - [ ] 创建请求使用 `presentationMode: VISUAL_DECK_V4` 和 `visualDeckV4` 配置。
 - [ ] 规划完成时读取 `GET /v1/runs/{runId}`，向用户展示 `generationPlan`。
-- [ ] 确认动作使用新的、稳定的动作幂等键和最新 `expectedVersion`。
 - [ ] 使用事件 `sequence` 去重；断线先读 `events/history`，再从 `after` 打开 SSE。
 - [ ] 不在 FrameFlow 生成 Deck Plan、Slide Brief、Visual Contract 或图片 Prompt。
 - [ ] 不自行调用 Nano Banana、不轮询未知的 Provider 任务、不重复扣费。

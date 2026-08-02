@@ -41,7 +41,7 @@ function completedLifecycleEvents(): LifecycleEvent[] {
     }
     const stage = type.split('.')[0]!.toUpperCase()
     const started = type.endsWith('.started')
-    const reason = type === 'planning.completed' ? 'USER_CONFIRMATION_REQUIRED' : null
+    const reason = null
     return {
       eventId: `event-${index + 1}`,
       sequence: index + 1,
@@ -220,7 +220,7 @@ describe('V4 real evaluation harness', () => {
     const allPages = [1, 2, 3]
     const events: LifecycleEvent[] = [
       stage('planning.started', 0, 1, allPages),
-      stage('planning.completed', 1, 1, allPages, 'USER_CONFIRMATION_REQUIRED'),
+      stage('planning.completed', 1, 1, allPages),
       stage('generation.started', 0, 3, allPages),
       stage('generation.progress', 3, 3, allPages),
       stage('generation.completed', 3, 3, allPages),

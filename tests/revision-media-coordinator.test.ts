@@ -16,6 +16,7 @@ import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
+import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
@@ -141,7 +142,11 @@ function visualDeckV4Blueprint() {
 
 async function fixture(
   overrides: Partial<RunRecord> = {},
-  inputs: Readonly<{ blueprint?: unknown; plan?: ReturnType<typeof revisionPlan> }> = {},
+  inputs: Readonly<{
+    blueprint?: unknown
+    plan?: ReturnType<typeof revisionPlan>
+    imageConcurrency?: number
+  }> = {},
 ) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
@@ -174,7 +179,34 @@ async function fixture(
       mimeType: 'image/png', bytes: new TextEncoder().encode(artifactId), sha256: artifactId.padEnd(64, '0').slice(0, 64),
     })
   }
-  return { repository, images, artifacts, renderer, clock, media, coordinator: new RevisionMediaCoordinator({ repository, media, clock }) }
+  return {
+    repository,
+    budget,
+    images,
+    artifacts,
+    renderer,
+    clock,
+    media,
+    coordinator: new RevisionMediaCoordinator({
+      repository,
+      media,
+      batchBudget: budget,
+      clock,
+      ...(inputs.imageConcurrency === undefined ? {} : { imageConcurrency: inputs.imageConcurrency }),
+    }),
+    generation: new SlideGenerationCoordinator({
+      repository,
+      media,
+      batchBudget: budget,
+      documents: {
+        async resolve() {
+          return { name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [] }
+        },
+      },
+      artifacts,
+      clock,
+    }),
+  }
 }
 
 describe('revision media coordinator', () => {
@@ -256,6 +288,126 @@ describe('revision media coordinator', () => {
     expect(images.operations.size).toBe(operationCount)
     expect((await repository.listEvents('run-1')).some((event) =>
       event.type === 'phase.changed' && event.payload.from === 'NEEDS_HUMAN' && event.payload.to === 'REVISING')).toBe(true)
+  })
+
+  test('submits and settles planned V4 redraws as one concurrent internal batch', async () => {
+    const basePlan = revisionPlan()
+    const plan = {
+      ...basePlan,
+      operations: [
+        { ...basePlan.operations[0]!, id: 'operation-page-1', slideId: 'run-1:slide:1', instruction: 'Correct page one.' },
+        { ...basePlan.operations[0]!, id: 'operation-page-2', slideId: 'run-1:slide:2', instruction: 'Correct page two.' },
+      ],
+    }
+    const { repository, budget, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan,
+      imageConcurrency: 2,
+    })
+    images.submissionDelayMs = 10
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 2, total: 2 })
+    expect(images.maxConcurrentSubmissions).toBe(2)
+    expect(budget.batchReservations.size).toBe(1)
+    expect(budget.reservations.size).toBe(0)
+    expect((await repository.listSteps('run-1')).find((step) =>
+      step.idempotencyKey === 'run-1:revision-generation-batch:r1'))
+      .toMatchObject({ status: 'RUNNING', budgetUnits: 10, budgetReservationId: expect.any(String) })
+
+    images.complete('run-1:slide:1:image:r1:v1', 'artifact-r1-1')
+    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    images.inspectionDelayMs = 10
+
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 2, total: 2 })
+    expect(images.maxConcurrentInspections).toBe(2)
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      idempotencyKey: 'finalize:run-1:revision-generation-batch:r1', settledUnits: 10, releasedUnits: 0,
+    })])
+    expect((await repository.listSteps('run-1')).find((step) =>
+      step.idempotencyKey === 'run-1:revision-generation-batch:r1'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'SETTLED', settledUnits: 10 } } })
+  })
+
+  test('reconciles a cancelled V4 revision batch without leaving its authorization open', async () => {
+    const { repository, budget, images, media, coordinator, generation } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+    })
+    await coordinator.submit('run-1', 5)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+    })
+    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+
+    await media.reconcilePendingRun('run-1')
+    expect(await generation.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(await generation.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      idempotencyKey: 'finalize:run-1:revision-generation-batch:r1', settledUnits: 5, releasedUnits: 0,
+    })])
+    expect(budget.batchFinalizationAttempts).toHaveLength(1)
+  })
+
+  test('releases a cancelled V4 revision batch when its interrupted submission was never accepted', async () => {
+    const { repository, budget, images, media, coordinator, generation } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+    })
+    await coordinator.submit('run-1', 5)
+    const key = 'run-1:slide:2:image:r1:v1'
+    const operationId = images.operations.get(key)!
+    images.operations.delete(key)
+    images.requests.delete(key)
+    images.statuses.delete(operationId)
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(key)!
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    expect(await media.reconcilePendingRun('run-1')).toMatchObject({ inspected: 1, changed: 1 })
+    expect(await generation.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === key))
+      .toMatchObject({ status: 'FAILED_NOT_CHARGED', errorCode: 'PROVIDER_SUBMISSION_NOT_FOUND' })
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      idempotencyKey: 'finalize:run-1:revision-generation-batch:r1', settledUnits: 0, releasedUnits: 5,
+    })])
+  })
+
+  test('recovers an interrupted unsubmitted V4 redraw without another authorization', async () => {
+    const { repository, budget, images, media, coordinator, clock } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+    })
+    await coordinator.submit('run-1', 5)
+    const key = 'run-1:slide:2:image:r1:v1'
+    const operationId = images.operations.get(key)!
+    images.operations.delete(key)
+    images.requests.delete(key)
+    images.statuses.delete(operationId)
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(key)!
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    expect(await media.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'RECOVERING' })
+    expect(budget.batchReservations.size).toBe(1)
+    clock.advance(2_000)
+    await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(images.operations.has(key)).toBe(true)
+    expect(budget.batchReservations.size).toBe(1)
+  })
+
+  test('keeps a failed revision-batch finalization internal to the V4 event contract', async () => {
+    const { repository, budget, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+    })
+    await coordinator.submit('run-1', 5)
+    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    budget.failNextSettlement('HOST_FINALIZE_UNAVAILABLE')
+
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'RECOVERING', completed: 1, total: 1 })
+    expect((await repository.listEvents('run-1')).filter((event) => event.type === 'generation.batch.updated')).toEqual([])
   })
 
   test('pauses before any redraw when the remaining budget is insufficient', async () => {

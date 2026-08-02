@@ -188,6 +188,13 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     }
   }
 
+  async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+    const operation = await this.lookupImageTask(input.idempotencyKey)
+    if (!operation || operation.submission_state === 'UNKNOWN') return { state: 'UNKNOWN' as const }
+    if (operation.submission_state === 'NOT_SUBMITTED') return { state: 'NOT_SUBMITTED' as const }
+    return { state: 'SUBMITTED' as const, operationId: operation.id }
+  }
+
   async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
     const artifactId = input.operationId.startsWith('gateway-image:') ? input.operationId.slice('gateway-image:'.length) : ''
     if (artifactId) {

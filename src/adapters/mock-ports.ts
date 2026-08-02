@@ -116,8 +116,11 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   readonly requests = new Map<string, Parameters<ImageGenerationPort['submit']>[0]>()
   nextFailure: MediaSubmissionError | null = null
   submissionDelayMs = 0
+  inspectionDelayMs = 0
   activeSubmissions = 0
   maxConcurrentSubmissions = 0
+  activeInspections = 0
+  maxConcurrentInspections = 0
   inspectCalls = 0
 
   async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
@@ -142,13 +145,29 @@ export class MockImageGenerationPort implements ImageGenerationPort {
     }
   }
 
+  async lookupByIdempotency(
+    input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0],
+  ): ReturnType<NonNullable<ImageGenerationPort['lookupByIdempotency']>> {
+    const operationId = this.operations.get(input.idempotencyKey)
+    return operationId
+      ? { state: 'SUBMITTED' as const, operationId }
+      : { state: 'NOT_SUBMITTED' as const }
+  }
+
   async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
     this.inspectCalls += 1
-    return structuredClone(this.statuses.get(input.operationId) ?? {
-      state: 'FAILED' as const,
-      errorCode: 'OPERATION_NOT_FOUND',
-      billingState: 'UNKNOWN' as const,
-    })
+    this.activeInspections += 1
+    this.maxConcurrentInspections = Math.max(this.maxConcurrentInspections, this.activeInspections)
+    try {
+      if (this.inspectionDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.inspectionDelayMs))
+      return structuredClone(this.statuses.get(input.operationId) ?? {
+        state: 'FAILED' as const,
+        errorCode: 'OPERATION_NOT_FOUND',
+        billingState: 'UNKNOWN' as const,
+      })
+    } finally {
+      this.activeInspections -= 1
+    }
   }
 
   complete(idempotencyKey: string, artifactId: string) {

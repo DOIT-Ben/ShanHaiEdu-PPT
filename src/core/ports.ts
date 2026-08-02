@@ -131,6 +131,19 @@ export interface ImageGenerationPort {
     state: 'QUEUED' | 'PROCESSING' | 'COMPLETED'
   }>>
 
+  /**
+   * Recovers an asynchronous image-task submission after a process stops
+   * between durable SUBMITTING state and the Provider response. The original
+   * image idempotency key is the only lookup key that may be used.
+   */
+  lookupByIdempotency?(input: Readonly<{
+    tenantId: string
+    idempotencyKey: string
+  }>): Promise<
+    | Readonly<{ state: 'SUBMITTED'; operationId: string }>
+    | Readonly<{ state: 'NOT_SUBMITTED' | 'UNKNOWN' }>
+  >
+
   inspect(input: Readonly<{
     tenantId: string
     operationId: string
