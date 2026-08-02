@@ -5,6 +5,7 @@ import {
   blueprintElementAssetKey,
   blueprintImageRequirements,
   completeVisualDeckV4RevisionPrompt,
+  latestCompletedAssetStep,
   VISUAL_DECK_V4_NEGATIVE_PROMPT,
 } from './blueprint-assets'
 import { mapWithConcurrency } from './concurrency'
@@ -243,9 +244,11 @@ export class RevisionMediaCoordinator {
       })
     }
     if (!failed && batchFinalized && completed === targets.length && latest.status === 'REVISING') {
+      const deckArtifactsComplete = !isVisualDeckV4(latest) || await this.hasCompleteDeckArtifacts(latest)
       await this.dependencies.repository.transact(runId, (transaction) => {
         const now = this.dependencies.clock.now().toISOString()
-        const policy = transitionRun(transaction.run, 'PAGE_REVIEW')
+        const nextStatus = deckArtifactsComplete ? 'PAGE_REVIEW' : 'NEEDS_HUMAN'
+        const policy = transitionRun(transaction.run, nextStatus)
         transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
         appendV4LifecycleEvent(transaction, 'revision.progress', {
           completed,
@@ -260,13 +263,25 @@ export class RevisionMediaCoordinator {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
-          payload: { from: 'REVISING', to: 'PAGE_REVIEW' },
+          payload: {
+            from: 'REVISING',
+            to: nextStatus,
+            ...(deckArtifactsComplete ? {} : { reason: 'PAGE_ARTIFACTS_INCOMPLETE' }),
+          },
         })
-        appendV4LifecycleEvent(transaction, 'page_review.started', {
-          completed: 0,
-          total: transaction.run.slideCount,
-          pageNumbers: allPageNumbers(transaction.run),
-        })
+        if (deckArtifactsComplete) {
+          appendV4LifecycleEvent(transaction, 'page_review.started', {
+            completed: 0,
+            total: transaction.run.slideCount,
+            pageNumbers: allPageNumbers(transaction.run),
+          })
+        } else {
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'approval.required',
+            payload: { kind: 'HUMAN_REVIEW', summary: '仍有页面缺少有效产物，请仅修订缺失页后继续。' },
+          })
+        }
       })
     } else if (failed) {
       await this.failV4Revision(latest, failed, targets.length)
@@ -358,6 +373,14 @@ export class RevisionMediaCoordinator {
         backgroundMode: 'OPAQUE' as const,
       }
     })
+  }
+
+  private async hasCompleteDeckArtifacts(run: RunRecord) {
+    const blueprint = await getActiveBlueprint(this.dependencies.repository, run.id, run.revisionRound)
+    const completedSteps = (await this.dependencies.repository.listSteps(run.id))
+      .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
+    return blueprintImageRequirements(run, blueprint).every((requirement) =>
+      latestCompletedAssetStep(completedSteps, requirement, run.revisionRound) !== null)
   }
 
   private async currentSteps(run: RunRecord, targets: readonly Readonly<{ idempotencyKey: string }>[]) {
