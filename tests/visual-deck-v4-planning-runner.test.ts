@@ -167,7 +167,7 @@ describe('visual deck v4 planning runner', () => {
     expect(replay.replayed).toBe(true)
     expect(first.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(10)
     expect(await repository.getRun(created.run.id)).toMatchObject({
-      status: 'AWAITING_BLUEPRINT_APPROVAL', committedBudgetUnits: 0,
+      status: 'EXECUTING', committedBudgetUnits: 0,
     })
     const steps = await repository.listSteps(created.run.id)
     expect(steps).toHaveLength(6)
@@ -175,6 +175,12 @@ describe('visual deck v4 planning runner', () => {
       expect(steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(created.run.id, stage)))
         .toMatchObject({ status: 'COMPLETED' })
     }
+    const events = await repository.listEvents(created.run.id)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'planning.completed')).toMatchObject({
+      payload: { reason: null, requiresUserAction: false, nextAction: null },
+    })
+    expect(events.some((event) => event.type === 'generation.started')).toBe(true)
   })
 
   test('resumes only the failed Slide Briefs stage with its original idempotency key', async () => {
@@ -246,7 +252,7 @@ describe('visual deck v4 planning runner', () => {
     expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(10)
     expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[1]?.lockedCopy).toContain('999')
     expect(await repository.getRun(created.run.id)).toMatchObject({
-      status: 'AWAITING_BLUEPRINT_APPROVAL', committedBudgetUnits: 0,
+      status: 'EXECUTING', committedBudgetUnits: 0,
     })
     expect(operations).toEqual([
       'create_visual_deck_v4_source_spec',

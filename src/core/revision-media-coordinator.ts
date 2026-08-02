@@ -7,9 +7,19 @@ import {
   completeVisualDeckV4RevisionPrompt,
   VISUAL_DECK_V4_NEGATIVE_PROMPT,
 } from './blueprint-assets'
+import { mapWithConcurrency } from './concurrency'
+import {
+  ensureGenerationBatch,
+  finalizeGenerationBatch,
+  generationBatchStepKeyFor,
+  preflightGenerationBatchFinalization,
+  refreshGenerationBatch,
+  reserveGenerationBatch,
+  type GenerationBatchReservation,
+} from './generation-batch'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
-import type { AgentRepository, ClockPort, RunRecord, StepRecord } from './ports'
+import type { AgentRepository, BatchBudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
@@ -29,12 +39,35 @@ export type RevisionMediaResult = Readonly<{
   total: number
 }>
 
+type RevisionTarget = Readonly<{
+  pageNumber: number
+  elementId: string | null
+  assetReuseKey: string | null
+  idempotencyKey: string
+  stepId: string
+  slideId: string
+  versionId: string
+  prompt: string
+  negativePrompt: string | null
+  aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+  backgroundMode: 'OPAQUE' | 'TRANSPARENT'
+}>
+
 export class RevisionMediaCoordinator {
+  private readonly imageConcurrency: number
+
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     media: MediaStepRunner
+    batchBudget: BatchBudgetPort
     clock: ClockPort
-  }>) {}
+    imageConcurrency?: number
+  }>) {
+    this.imageConcurrency = dependencies.imageConcurrency ?? 50
+    if (!Number.isSafeInteger(this.imageConcurrency) || this.imageConcurrency < 1 || this.imageConcurrency > 50) {
+      throw new Error('IMAGE_CONCURRENCY_INVALID')
+    }
+  }
 
   async submit(runId: string, unitBudgetUnits: number): Promise<RevisionMediaResult> {
     if (!Number.isSafeInteger(unitBudgetUnits) || unitBudgetUnits <= 0) throw new Error('INVALID_UNIT_BUDGET')
@@ -54,34 +87,100 @@ export class RevisionMediaCoordinator {
     })
     const newTargetCount = pending.filter((target) =>
       !stepsByKey.has(target.idempotencyKey) || canRetryReleasedSubmission(stepsByKey.get(target.idempotencyKey))).length
-    const decision = evaluateBudget(run, newTargetCount * unitBudgetUnits)
-    if (newTargetCount > 0 && !decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
-      await this.pauseForBudget(run, newTargetCount * unitBudgetUnits)
-      return { status: 'PAUSED', completed: 0, submitted: steps.length, total: targets.length }
+    let batchReservation: GenerationBatchReservation | undefined
+    if (isVisualDeckV4(run)) {
+      const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
+      await ensureGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        run,
+        blueprint,
+        requirements: this.batchRequirements(targets),
+        unitBudgetUnits,
+        identity: { revisionRound: run.revisionRound, scope: 'REVISION' },
+      })
+      const batchKey = generationBatchStepKeyFor(runId, { revisionRound: run.revisionRound, scope: 'REVISION' })
+      const batchStep = (await this.dependencies.repository.listSteps(runId))
+        .find((step) => step.idempotencyKey === batchKey)
+      if (!batchStep) throw new Error('REVISION_GENERATION_BATCH_STEP_NOT_FOUND')
+      if (!batchStep.budgetReservationId) {
+        const supported = await preflightGenerationBatchFinalization({
+          repository: this.dependencies.repository,
+          budget: this.dependencies.batchBudget,
+          clock: this.dependencies.clock,
+          runId,
+          revisionRound: run.revisionRound,
+          scope: 'REVISION',
+        })
+        if (!supported) return this.summary(await this.requireRun(runId))
+      }
+      const latestBatchStep = (await this.dependencies.repository.listSteps(runId))
+        .find((step) => step.idempotencyKey === batchKey)
+      if (!latestBatchStep) throw new Error('REVISION_GENERATION_BATCH_STEP_NOT_FOUND')
+      const needsInitialBudgetCheck = !latestBatchStep.budgetReservationId
+        && !['RESERVED', 'RESERVATION_UNKNOWN'].includes(latestBatchStep.status)
+      if (needsInitialBudgetCheck) {
+        const decision = evaluateBudget(run, latestBatchStep.budgetUnits)
+        if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
+          await this.pauseForBudget(run, latestBatchStep.budgetUnits)
+          return { status: 'PAUSED', completed: 0, submitted: steps.length, total: targets.length }
+        }
+        if (!decision.allowed) throw new Error(decision.reason)
+      }
+      const reservation = await reserveGenerationBatch({
+        repository: this.dependencies.repository,
+        budget: this.dependencies.batchBudget,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+        model: run.imageModel,
+        scope: 'REVISION',
+      })
+      if (!reservation) return this.summary(await this.requireRun(runId))
+      batchReservation = reservation
+    } else {
+      const decision = evaluateBudget(run, newTargetCount * unitBudgetUnits)
+      if (newTargetCount > 0 && !decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
+        await this.pauseForBudget(run, newTargetCount * unitBudgetUnits)
+        return { status: 'PAUSED', completed: 0, submitted: steps.length, total: targets.length }
+      }
+      if (newTargetCount > 0 && !decision.allowed) throw new Error(decision.reason)
     }
-    if (newTargetCount > 0 && !decision.allowed) throw new Error(decision.reason)
+
+    if (isVisualDeckV4(run)) {
+      const outcomes = await mapWithConcurrency(pending, this.imageConcurrency, async (target) => {
+        const existing = stepsByKey.get(target.idempotencyKey)
+        try {
+          return { step: (await this.submitTarget(run, target, unitBudgetUnits, existing, batchReservation)).step }
+        } catch (error) {
+          return { error }
+        }
+      })
+      const unexpected = outcomes.find((outcome): outcome is { error: unknown } => 'error' in outcome)
+      if (unexpected) throw unexpected.error
+      const failed = outcomes.find((outcome): outcome is { step: StepRecord } =>
+        'step' in outcome && isMediaFailureStepStatus(outcome.step.status))
+      if (failed) await this.failV4Revision(run, failed.step, targets.length)
+      await refreshGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+        scope: 'REVISION',
+      })
+      const latest = await this.requireRun(runId)
+      return {
+        status: latest.status,
+        completed: 0,
+        submitted: (await this.currentSteps(latest, targets)).length,
+        total: targets.length,
+      }
+    }
 
     for (const target of pending) {
       const key = target.idempotencyKey
       const existing = stepsByKey.get(key)
-      const result = await this.dependencies.media.submitSlideImage({
-        runId,
-        stepId: target.stepId,
-        idempotencyKey: key,
-        ...(canRetryReleasedSubmission(existing) ? {
-          budgetReservationKey: `${key}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
-        } : {}),
-        slideId: target.slideId,
-        versionId: target.versionId,
-        prompt: target.prompt,
-        ...(target.negativePrompt ? { negativePrompt: target.negativePrompt } : {}),
-        model: run.imageModel,
-        budgetUnits: unitBudgetUnits,
-        aspectRatio: target.aspectRatio,
-        backgroundMode: target.backgroundMode,
-        ...(target.elementId ? { elementId: target.elementId } : {}),
-        ...(target.assetReuseKey ? { assetReuseKey: target.assetReuseKey } : {}),
-      })
+      const result = await this.submitTarget(run, target, unitBudgetUnits, existing)
       if (isMediaFailureStepStatus(result.step.status)) {
         await this.failV4Revision(run, result.step, targets.length)
         break
@@ -109,17 +208,41 @@ export class RevisionMediaCoordinator {
     }
     if (run.status === 'PAGE_REVIEW') return this.summary(run)
     if (run.status !== 'REVISING') return this.summary(run)
-    for (const step of initialSteps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
-      await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
-      const latest = await this.requireRun(runId)
-      if (latest.status === 'NEEDS_HUMAN') break
+    const pendingRefreshes = initialSteps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))
+    if (isVisualDeckV4(run)) {
+      await mapWithConcurrency(pendingRefreshes, this.imageConcurrency, (step) =>
+        this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey))
+    } else {
+      for (const step of pendingRefreshes) {
+        await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
+        const latest = await this.requireRun(runId)
+        if (latest.status === 'NEEDS_HUMAN') break
+      }
     }
     const refreshed = await this.currentSteps(run, targets)
     const failed = refreshed.find((step) => isMediaFailureStepStatus(step.status))
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step)).length
     const latest = await this.requireRun(runId)
     const details = await this.details(run)
-    if (!failed && completed === targets.length && latest.status === 'REVISING') {
+    let batchFinalized = !isVisualDeckV4(run)
+    if (isVisualDeckV4(run)) {
+      await refreshGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+        scope: 'REVISION',
+      })
+      batchFinalized = await finalizeGenerationBatch({
+        repository: this.dependencies.repository,
+        budget: this.dependencies.batchBudget,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: run.revisionRound,
+        scope: 'REVISION',
+      })
+    }
+    if (!failed && batchFinalized && completed === targets.length && latest.status === 'REVISING') {
       await this.dependencies.repository.transact(runId, (transaction) => {
         const now = this.dependencies.clock.now().toISOString()
         const policy = transitionRun(transaction.run, 'PAGE_REVIEW')
@@ -160,7 +283,7 @@ export class RevisionMediaCoordinator {
     return { status: finalRun.status, completed, submitted: refreshed.length, total: targets.length }
   }
 
-  private async targets(run: RunRecord) {
+  private async targets(run: RunRecord): Promise<readonly RevisionTarget[]> {
     const blueprint = await getActiveBlueprint(this.dependencies.repository, run.id, run.revisionRound)
     const steps = await this.dependencies.repository.listSteps(run.id)
     const step = steps
@@ -241,6 +364,45 @@ export class RevisionMediaCoordinator {
     const keys = new Set(targets.map((target) => target.idempotencyKey))
     return (await this.dependencies.repository.listSteps(run.id))
       .filter((step) => step.tool === 'generate_slide_image' && keys.has(step.idempotencyKey))
+  }
+
+  private batchRequirements(targets: readonly RevisionTarget[]) {
+    // Revision batches are internal-only. Keep the public batch schema unchanged
+    // while preserving the real page identities in stable image idempotency keys.
+    return targets.map((target, index) => ({
+      pageNumber: index + 1,
+      idempotencyKey: target.idempotencyKey,
+      prompt: target.prompt,
+    }))
+  }
+
+  private submitTarget(
+    run: RunRecord,
+    target: RevisionTarget,
+    unitBudgetUnits: number,
+    existing?: StepRecord,
+    batchReservation?: GenerationBatchReservation,
+  ) {
+    const key = target.idempotencyKey
+    return this.dependencies.media.submitSlideImage({
+      runId: run.id,
+      stepId: target.stepId,
+      idempotencyKey: key,
+      ...(batchReservation ? { batchReservation } : {}),
+      ...(isVisualDeckV4(run) && existing?.status === 'FAILED' && isTechnicalFailureCode(existing.errorCode ?? '') ? {
+        budgetReservationKey: `${key}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
+      } : {}),
+      slideId: target.slideId,
+      versionId: target.versionId,
+      prompt: target.prompt,
+      ...(target.negativePrompt ? { negativePrompt: target.negativePrompt } : {}),
+      model: run.imageModel,
+      budgetUnits: unitBudgetUnits,
+      aspectRatio: target.aspectRatio,
+      backgroundMode: target.backgroundMode,
+      ...(target.elementId ? { elementId: target.elementId } : {}),
+      ...(target.assetReuseKey ? { assetReuseKey: target.assetReuseKey } : {}),
+    })
   }
 
   private async details(run: RunRecord) {

@@ -12,7 +12,7 @@ import {
   type StepRecord,
 } from './ports'
 import { releaseBudget, reserveBudget } from './policy'
-import { beginTechnicalRecovery } from './technical-recovery'
+import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 
 type Requirement = Readonly<{
   pageNumber: number
@@ -20,24 +20,55 @@ type Requirement = Readonly<{
   prompt: string
 }>
 
+export type GenerationBatchScope = 'INITIAL' | 'REVISION'
+
+export type GenerationBatchIdentity = Readonly<{
+  revisionRound: number
+  scope: GenerationBatchScope
+}>
+
 export function generationBatchStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) {
-  return `${run.id}:generation-batch:r${run.revisionRound}`
+  return generationBatchStepKeyFor(run.id, { revisionRound: run.revisionRound, scope: 'INITIAL' })
+}
+
+export function generationBatchStepKeyFor(runId: string, identity: GenerationBatchIdentity) {
+  return identity.scope === 'INITIAL'
+    ? `${runId}:generation-batch:r${identity.revisionRound}`
+    : `${runId}:revision-generation-batch:r${identity.revisionRound}`
+}
+
+export function generationBatchIdentityFromStepKey(runId: string, key: string): GenerationBatchIdentity | null {
+  const initial = new RegExp(`^${escapeRegExp(runId)}:generation-batch:r(\\d+)$`).exec(key)
+  if (initial) return { revisionRound: Number(initial[1]), scope: 'INITIAL' }
+  const revision = new RegExp(`^${escapeRegExp(runId)}:revision-generation-batch:r(\\d+)$`).exec(key)
+  if (revision) return { revisionRound: Number(revision[1]), scope: 'REVISION' }
+  return null
 }
 
 function proposalHash(blueprint: PresentationBlueprint) {
   return hashInput(blueprint.visualDeckV4Proposal ?? blueprint)
 }
 
-function batchId(run: Pick<RunRecord, 'id' | 'revisionRound'>, proposal: string) {
-  return `genbatch_${hashInput({ runId: run.id, revisionRound: run.revisionRound, proposal }).slice(0, 32)}`
+function batchId(run: Pick<RunRecord, 'id'>, identity: GenerationBatchIdentity, proposal: string) {
+  const input = identity.scope === 'INITIAL'
+    ? { runId: run.id, revisionRound: identity.revisionRound, proposal }
+    : { runId: run.id, ...identity, proposal }
+  return `genbatch_${hashInput(input).slice(0, 32)}`
 }
 
-function initialBatch(run: RunRecord, blueprint: PresentationBlueprint, requirements: readonly Requirement[], unitBudgetUnits: number, now: string) {
+function initialBatch(
+  run: RunRecord,
+  identity: GenerationBatchIdentity,
+  blueprint: PresentationBlueprint,
+  requirements: readonly Requirement[],
+  unitBudgetUnits: number,
+  now: string,
+) {
   const proposal = proposalHash(blueprint)
   return generationBatchSchema.parse({
-    batchId: batchId(run, proposal),
+    batchId: batchId(run, identity, proposal),
     proposalHash: proposal,
-    revisionRound: run.revisionRound,
+    revisionRound: identity.revisionRound,
     submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS',
     pageCount: requirements.length,
     pages: requirements.map((requirement) => ({
@@ -68,8 +99,10 @@ export async function ensureGenerationBatch(input: Readonly<{
   blueprint: PresentationBlueprint
   requirements: readonly Requirement[]
   unitBudgetUnits: number
+  identity?: GenerationBatchIdentity
 }>) {
-  const key = generationBatchStepKey(input.run)
+  const identity = input.identity ?? { revisionRound: input.run.revisionRound, scope: 'INITIAL' as const }
+  const key = generationBatchStepKeyFor(input.run.id, identity)
   const proposal = proposalHash(input.blueprint)
   return input.repository.transact(input.run.id, (transaction) => {
     const existing = transaction.getStep(key)
@@ -82,9 +115,9 @@ export async function ensureGenerationBatch(input: Readonly<{
       return generationBatchSchema.parse(existing.output)
     }
     const now = input.clock.now().toISOString()
-    const batch = initialBatch(input.run, input.blueprint, input.requirements, input.unitBudgetUnits, now)
+    const batch = initialBatch(input.run, identity, input.blueprint, input.requirements, input.unitBudgetUnits, now)
     transaction.putStep({
-      id: `step-${input.run.id}-generation-batch-r${input.run.revisionRound}`,
+      id: `step-${input.run.id}-${identity.scope === 'INITIAL' ? 'generation-batch' : 'revision-generation-batch'}-r${identity.revisionRound}`,
       runId: input.run.id,
       idempotencyKey: key,
       inputHash: hashInput({
@@ -102,11 +135,7 @@ export async function ensureGenerationBatch(input: Readonly<{
       createdAt: now,
       updatedAt: now,
     })
-    transaction.appendEvent({
-      schemaVersion: CONTRACT_VERSION,
-      type: 'generation.batch.created',
-      payload: batch,
-    })
+    appendGenerationBatchEvent(transaction, 'generation.batch.created', batch, identity.scope === 'INITIAL')
     return batch
   })
 }
@@ -162,12 +191,26 @@ export async function refreshGenerationBatch(input: Readonly<{
   clock: ClockPort
   runId: string
   revisionRound: number
+  scope?: GenerationBatchScope
 }>) {
-  const key = `${input.runId}:generation-batch:r${input.revisionRound}`
-  return input.repository.transact(input.runId, (transaction) => refreshGenerationBatchInTransaction(transaction, input.clock, key))
+  const key = generationBatchStepKeyFor(input.runId, {
+    revisionRound: input.revisionRound,
+    scope: input.scope ?? 'INITIAL',
+  })
+  return input.repository.transact(input.runId, (transaction) => refreshGenerationBatchInTransaction(
+    transaction,
+    input.clock,
+    key,
+    (input.scope ?? 'INITIAL') === 'INITIAL',
+  ))
 }
 
-export function refreshGenerationBatchInTransaction(transaction: AgentTransaction, clock: ClockPort, key = generationBatchStepKey(transaction.run)) {
+export function refreshGenerationBatchInTransaction(
+  transaction: AgentTransaction,
+  clock: ClockPort,
+  key = generationBatchStepKey(transaction.run),
+  publish = true,
+) {
   const step = transaction.getStep(key)
   if (!step || step.tool !== 'generate_image_batch') return null
   const before = generationBatchSchema.parse(step.output)
@@ -186,11 +229,7 @@ export function refreshGenerationBatchInTransaction(transaction: AgentTransactio
     output: next,
     updatedAt: next.updatedAt,
   })
-  transaction.appendEvent({
-    schemaVersion: CONTRACT_VERSION,
-    type: 'generation.batch.updated',
-    payload: next,
-  })
+  appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, publish)
   return next
 }
 
@@ -231,8 +270,12 @@ export async function reserveGenerationBatch(input: Readonly<{
   runId: string
   revisionRound: number
   model: string
+  scope?: GenerationBatchScope
 }>): Promise<GenerationBatchReservation | null> {
-  const key = `${input.runId}:generation-batch:r${input.revisionRound}`
+  const key = generationBatchStepKeyFor(input.runId, {
+    revisionRound: input.revisionRound,
+    scope: input.scope ?? 'INITIAL',
+  })
   const prepared = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
     const batch = generationBatchSchema.parse(step.output)
@@ -257,7 +300,7 @@ export async function reserveGenerationBatch(input: Readonly<{
         type: 'budget.updated',
         payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
       })
-      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
       return { host: run.host, batch: next, reservationId: null }
     }
     return { host: transaction.run.host, batch, reservationId: null }
@@ -290,7 +333,7 @@ export async function reserveGenerationBatch(input: Readonly<{
         output: next,
         updatedAt: now,
       })
-      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
       return { batchId: next.batchId, reservationId: reserved.reservationId }
     })
   } catch (error) {
@@ -316,7 +359,7 @@ export async function reserveGenerationBatch(input: Readonly<{
           type: 'budget.updated',
           payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
         })
-        transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+        appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
         return
       }
       const next = updatedBatch(batch, {
@@ -331,7 +374,7 @@ export async function reserveGenerationBatch(input: Readonly<{
         type: 'tool.failed',
         payload: { stepId: step.id, errorCode, retryable: recovery?.technicalRecovery?.retryable ?? false },
       })
-      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
     })
     return null
   }
@@ -344,6 +387,7 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
   clock: ClockPort
   runId: string
   revisionRound: number
+  scope?: GenerationBatchScope
 }>): Promise<boolean> {
   const run = await input.repository.getRun(input.runId)
   if (!run) throw new Error('RUN_NOT_FOUND')
@@ -358,7 +402,10 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
         ? 'BATCH_BUDGET_FINALIZATION_UNSUPPORTED'
         : 'BATCH_BUDGET_FINALIZATION_UNKNOWN'
     await input.repository.transact(input.runId, (transaction) => {
-      const step = requireBatchStep(transaction, `${input.runId}:generation-batch:r${input.revisionRound}`)
+      const step = requireBatchStep(transaction, generationBatchStepKeyFor(input.runId, {
+        revisionRound: input.revisionRound,
+        scope: input.scope ?? 'INITIAL',
+      }))
       const batch = generationBatchSchema.parse(step.output)
       const now = input.clock.now().toISOString()
       const next = updatedBatch(batch, {
@@ -373,13 +420,13 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
         type: 'tool.failed',
         payload: { stepId: step.id, errorCode, retryable: recovery?.technicalRecovery?.retryable ?? false },
       })
-      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
     })
     return false
   }
 }
 
-function batchFinalization(batch: GenerationBatch, steps: readonly StepRecord[]): BatchFinalization | null {
+function batchFinalization(batch: GenerationBatch, steps: readonly StepRecord[], run: RunRecord): BatchFinalization | null {
   const byKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
   let settledUnits = 0
   let releasedUnits = 0
@@ -390,9 +437,20 @@ function batchFinalization(batch: GenerationBatch, steps: readonly StepRecord[])
       settledUnits += step.budgetUnits
       continue
     }
+    if (step.status === 'FAILED' && run.technicalRecovery?.active && isTechnicalFailureCode(step.errorCode ?? '')) {
+      // The existing authorization remains valid while the stable image key is
+      // being retried. Releasing it here would make recovery submit against a
+      // finalized host reservation.
+      return null
+    }
     if (['FAILED', 'FAILED_NOT_CHARGED'].includes(step.status)) {
       releasedUnits += step.budgetUnits
       continue
+    }
+    if (step.status === 'SUBMISSION_UNKNOWN') {
+      // A submission acknowledgement was lost. Its original image key must be
+      // reconciled before an atomic batch can be settled or released.
+      return null
     }
     return null
   }
@@ -409,13 +467,17 @@ export async function finalizeGenerationBatch(input: Readonly<{
   clock: ClockPort
   runId: string
   revisionRound: number
+  scope?: GenerationBatchScope
 }>): Promise<boolean> {
-  const key = `${input.runId}:generation-batch:r${input.revisionRound}`
+  const key = generationBatchStepKeyFor(input.runId, {
+    revisionRound: input.revisionRound,
+    scope: input.scope ?? 'INITIAL',
+  })
   const pending = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
     const batch = generationBatchSchema.parse(step.output)
     if (!step.budgetReservationId || ['SETTLED', 'RELEASED'].includes(batch.accounting.settlement)) return null
-    const finalization = batchFinalization(batch, transaction.listSteps())
+    const finalization = batchFinalization(batch, transaction.listSteps(), transaction.run)
     return finalization ? {
       host: transaction.run.host,
       reservationId: step.budgetReservationId,
@@ -424,7 +486,10 @@ export async function finalizeGenerationBatch(input: Readonly<{
   })
   if (!pending) {
     const run = await input.repository.getRun(input.runId)
-    const batch = run ? await getGenerationBatch(input.repository, run) : null
+    const batch = run ? await getGenerationBatch(input.repository, run, {
+      revisionRound: input.revisionRound,
+      scope: input.scope ?? 'INITIAL',
+    }) : null
     return batch?.accounting.settlement === 'SETTLED' || batch?.accounting.settlement === 'RELEASED'
   }
   try {
@@ -463,7 +528,7 @@ export async function finalizeGenerationBatch(input: Readonly<{
           retryable: recovery?.technicalRecovery?.retryable ?? false,
         },
       })
-      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
     })
     return false
   }
@@ -492,14 +557,34 @@ export async function finalizeGenerationBatch(input: Readonly<{
         payload: { budgetUnits: run.budgetUnits, committedBudgetUnits: run.committedBudgetUnits },
       })
     }
-    transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'generation.batch.updated', payload: next })
+    appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
   })
   return true
 }
 
-export async function getGenerationBatch(repository: AgentRepository, run: RunRecord) {
-  const step = (await repository.listSteps(run.id)).find((candidate) => candidate.idempotencyKey === generationBatchStepKey(run))
+export async function getGenerationBatch(
+  repository: AgentRepository,
+  run: RunRecord,
+  identity?: GenerationBatchIdentity,
+) {
+  const step = (await repository.listSteps(run.id)).find((candidate) => identity
+    ? candidate.idempotencyKey === generationBatchStepKeyFor(run.id, identity)
+    : candidate.idempotencyKey.startsWith(`${run.id}:generation-batch:r`))
   return step?.tool === 'generate_image_batch' ? generationBatchSchema.parse(step.output) : null
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function appendGenerationBatchEvent(
+  transaction: AgentTransaction,
+  type: 'generation.batch.created' | 'generation.batch.updated',
+  batch: GenerationBatch,
+  publish: boolean,
+) {
+  if (!publish) return
+  transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type, payload: batch })
 }
 
 export { generationBatchSchema, type GenerationBatch }

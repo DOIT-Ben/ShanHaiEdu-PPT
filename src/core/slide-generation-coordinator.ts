@@ -6,6 +6,7 @@ import { mapWithConcurrency } from './concurrency'
 import {
   ensureGenerationBatch,
   finalizeGenerationBatch,
+  generationBatchIdentityFromStepKey,
   preflightGenerationBatchFinalization,
   refreshGenerationBatch,
   reserveGenerationBatch,
@@ -340,10 +341,16 @@ export class SlideGenerationCoordinator {
     const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const steps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
-    for (const step of steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))) {
-      await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
-      const latest = await this.dependencies.repository.getRun(runId)
-      if (!latest || latest.status === 'NEEDS_HUMAN') break
+    const pendingRefreshes = steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))
+    if (isVisualDeckV4(run)) {
+      await mapWithConcurrency(pendingRefreshes, this.imageConcurrency, (step) =>
+        this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey))
+    } else {
+      for (const step of pendingRefreshes) {
+        await this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey)
+        const latest = await this.dependencies.repository.getRun(runId)
+        if (!latest || latest.status === 'NEEDS_HUMAN') break
+      }
     }
 
     const refreshed = (await this.dependencies.repository.listSteps(runId))
@@ -417,19 +424,32 @@ export class SlideGenerationCoordinator {
   async reconcileTerminalGenerationBatch(runId: string) {
     const run = await this.dependencies.repository.getRun(runId)
     if (!run || !isVisualDeckV4(run) || !['CANCELLED', 'FAILED'].includes(run.status)) return false
-    await refreshGenerationBatch({
-      repository: this.dependencies.repository,
-      clock: this.dependencies.clock,
-      runId,
-      revisionRound: run.revisionRound,
-    })
-    return finalizeGenerationBatch({
-      repository: this.dependencies.repository,
-      budget: this.dependencies.batchBudget,
-      clock: this.dependencies.clock,
-      runId,
-      revisionRound: run.revisionRound,
-    })
+    const identities = (await this.dependencies.repository.listSteps(runId))
+      .filter((step) => step.tool === 'generate_image_batch')
+      .flatMap((step) => {
+        const identity = generationBatchIdentityFromStepKey(runId, step.idempotencyKey)
+        return identity ? [identity] : []
+      })
+    if (identities.length === 0) return false
+    let finalized = true
+    for (const identity of identities) {
+      await refreshGenerationBatch({
+        repository: this.dependencies.repository,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: identity.revisionRound,
+        scope: identity.scope,
+      })
+      finalized = (await finalizeGenerationBatch({
+        repository: this.dependencies.repository,
+        budget: this.dependencies.batchBudget,
+        clock: this.dependencies.clock,
+        runId,
+        revisionRound: identity.revisionRound,
+        scope: identity.scope,
+      })) && finalized
+    }
+    return finalized
   }
 
   private artifactId(step: StepRecord) {

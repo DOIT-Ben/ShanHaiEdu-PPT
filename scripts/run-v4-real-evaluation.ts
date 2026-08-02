@@ -293,7 +293,7 @@ function allowedLifecycleStart(
 
 function successfulLifecycleCompletion(stage: WorkflowStage, payload: WorkflowLifecyclePayload) {
   const allowedReasons: Record<WorkflowStage, readonly (string | null)[]> = {
-    PLANNING: [null, 'USER_CONFIRMATION_REQUIRED'],
+    PLANNING: [null],
     GENERATION: [null],
     PAGE_REVIEW: [null, 'PAGE_REVIEW_REJECTED'],
     REVISION: [null],
@@ -780,26 +780,14 @@ async function runCase(config: EvaluationConfig, caseId: string) {
     config,
     request,
     runId,
-    (run) => run.status === 'AWAITING_BLUEPRINT_APPROVAL' || TERMINAL_STATUSES.has(run.status),
+    (run) => run.status !== 'PLANNING' || TERMINAL_STATUSES.has(run.status),
     config.planningTimeoutMs,
     timeline,
   )
   await writeJson(path.join(caseDirectory, 'planning.json'), planned)
-  if (planned.status === 'AWAITING_BLUEPRINT_APPROVAL') {
-    const approved = await jsonRequest<{ data: RunDetail }>(config, request, `/v1/runs/${runId}/actions`, {
-      method: 'POST',
-      headers: {
-        ...requestHeaders(request, config.apiToken, true),
-        'Idempotency-Key': `v4-eval-${caseId}-approve-${config.evaluationKey}`,
-      },
-      body: JSON.stringify({ schemaVersion: '1', type: 'APPROVE_BLUEPRINT', expectedVersion: planned.version }),
-    })
-    await writeJson(path.join(caseDirectory, 'approval.json'), approved)
-  }
-
-  const finalRun = planned.status === 'AWAITING_BLUEPRINT_APPROVAL'
-    ? await waitFor(config, request, runId, (run) => TERMINAL_STATUSES.has(run.status), config.runTimeoutMs, timeline)
-    : planned
+  const finalRun = TERMINAL_STATUSES.has(planned.status)
+    ? planned
+    : await waitFor(config, request, runId, (run) => TERMINAL_STATUSES.has(run.status), config.runTimeoutMs, timeline)
   const events = await readEventHistory(config, request, runId)
   await Promise.all([
     writeJson(path.join(caseDirectory, 'final-run.json'), finalRun),

@@ -154,6 +154,22 @@ export class VisualReviewRunner {
         if (existing.status === 'FAILED') {
           return { run: transaction.run, step: existing, review: null, replayed: true }
         }
+        if (existing.status === 'RESERVED') {
+          const retrying: StepRecord = {
+            ...existing,
+            status: 'RUNNING',
+            errorCode: null,
+            output: null,
+            updatedAt: this.dependencies.clock.now().toISOString(),
+          }
+          transaction.putStep(retrying)
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'tool.started',
+            payload: { stepId: retrying.id, tool: retrying.tool, label: '恢复页面视觉质检' },
+          })
+          return { run: transaction.run, step: retrying, review: null, replayed: false }
+        }
         return { run: transaction.run, step: existing, review: null, replayed: false }
       }
       if (!['EXECUTING', 'PAGE_REVIEW', 'REVISING'].includes(transaction.run.status)) {

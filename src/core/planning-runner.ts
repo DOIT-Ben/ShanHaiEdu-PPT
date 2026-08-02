@@ -999,7 +999,10 @@ export class PlanningRunner {
       if (step.status === 'COMPLETED') return step
       const now = this.dependencies.clock.now().toISOString()
       const approvedPageDesign = input.source.kind === 'APPROVED_PAGE_DESIGN'
-      const targetStatus = approvedPageDesign ? 'EXECUTING' as const : 'AWAITING_BLUEPRINT_APPROVAL' as const
+      // V4 owns the complete source-to-PPT workflow. Its persisted plan is an
+      // internal production artifact, not a second user approval boundary.
+      const startsExecution = approvedPageDesign || transaction.run.presentationMode === 'VISUAL_DECK_V4'
+      const targetStatus = startsExecution ? 'EXECUTING' as const : 'AWAITING_BLUEPRINT_APPROVAL' as const
       const policy = transitionRun(transaction.run, targetStatus)
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updated: StepRecord = { ...step, status: 'COMPLETED', output: blueprint, errorCode: null, updatedAt: now }
@@ -1012,6 +1015,8 @@ export class PlanningRunner {
           stepId: step.id,
           summary: approvedPageDesign
             ? `已载入教师审核的 ${blueprint.slides.length} 页设计稿，开始逐页生成`
+            : startsExecution
+            ? `已完成 ${blueprint.slides.length} 页视觉规划，开始逐页生成`
             : getPresentationModeStrategy(input.presentationMode ?? 'SLIDE_IMAGE_V2').planningKind === 'BLUEPRINT_WITH_REFLECTION'
             ? `已反思并修订 ${blueprint.slides.length} 页教学蓝图`
             : `已生成 ${blueprint.slides.length} 页教学蓝图`,
@@ -1021,9 +1026,9 @@ export class PlanningRunner {
         completed: blueprint.visualDeckV4Proposal ? 4 : 1,
         total: blueprint.visualDeckV4Proposal ? 4 : 1,
         pageNumbers: allPageNumbers(transaction.run),
-        reason: approvedPageDesign ? null : 'USER_CONFIRMATION_REQUIRED',
-        requiresUserAction: !approvedPageDesign,
-        nextAction: approvedPageDesign ? null : 'APPROVE_BLUEPRINT',
+        reason: startsExecution ? null : 'USER_CONFIRMATION_REQUIRED',
+        requiresUserAction: !startsExecution,
+        nextAction: startsExecution ? null : 'APPROVE_BLUEPRINT',
       })
       const attempt = input.attempt ?? 0
       if (attempt > 0) {
@@ -1056,18 +1061,20 @@ export class PlanningRunner {
         type: 'phase.changed',
         payload: { from: 'PLANNING', to: targetStatus },
       })
-      transaction.appendEvent(approvedPageDesign
-        ? {
-            schemaVersion: CONTRACT_VERSION,
-            type: 'approval.resolved',
-            payload: { kind: 'BLUEPRINT', actionType: 'APPROVED_PAGE_DESIGN' },
-          }
-        : {
-            schemaVersion: CONTRACT_VERSION,
-            type: 'approval.required',
-            payload: { kind: 'BLUEPRINT', summary: `请确认《${blueprint.title}》的 ${blueprint.slides.length} 页蓝图` },
-          })
       if (approvedPageDesign) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.resolved',
+          payload: { kind: 'BLUEPRINT', actionType: 'APPROVED_PAGE_DESIGN' },
+        })
+      } else if (!startsExecution) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'approval.required',
+          payload: { kind: 'BLUEPRINT', summary: `请确认《${blueprint.title}》的 ${blueprint.slides.length} 页蓝图` },
+        })
+      }
+      if (startsExecution) {
         appendV4LifecycleEvent(transaction, 'generation.started', {
           completed: 0,
           total: transaction.run.slideCount,

@@ -84,7 +84,7 @@ describe('mock runtime', () => {
     expect(await repository.getRun(runId)).toMatchObject({ status: 'PLANNING' })
     await runtime.tick()
 
-    expect(await repository.getRun(runId)).toMatchObject({ status: 'AWAITING_BLUEPRINT_APPROVAL' })
+    expect(await repository.getRun(runId)).toMatchObject({ status: 'EXECUTING' })
     expect(sourceAttempts).toBe(2)
     expect((await repository.listSteps(runId)).filter((step) => step.tool === 'resolve_source'))
       .toEqual([expect.objectContaining({ status: 'COMPLETED', errorCode: null })])
@@ -154,7 +154,7 @@ describe('mock runtime', () => {
     })).toThrow('IMAGE_CONCURRENCY_INVALID')
   })
 
-  test('runs a notebooklm-style v4 request through approval to a raster-only pptx', async () => {
+  test('runs a notebooklm-style v4 request directly to a raster-only pptx', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
     const runtime = createMockRuntime({ repository, artifacts, apiToken: token })
@@ -221,7 +221,7 @@ describe('mock runtime', () => {
       blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } }
       generationPlan?: { title: string; slideCount: number; pages: unknown[]; output: { editable: boolean } }
     } }
-    expect(planned.data.status).toBe('AWAITING_BLUEPRINT_APPROVAL')
+    expect(planned.data.status).toBe('EXECUTING')
     expect(planned.data.release).toMatchObject({
       softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
       presentationMode: 'VISUAL_DECK_V4',
@@ -231,12 +231,6 @@ describe('mock runtime', () => {
     expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
     expect(planned.data.generationPlan?.pages).toHaveLength(3)
 
-    const approved = await runtime.handler(request(`/v1/runs/${runId}/actions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-approve-v4-chain-0001' },
-      body: JSON.stringify({ schemaVersion: '1', type: 'APPROVE_BLUEPRINT', expectedVersion: planned.data.version }),
-    }))
-    expect(approved.status).toBe(200)
     for (let index = 0; index < 4; index += 1) await runtime.tick()
 
     const completedRun = (await repository.getRun(runId))!

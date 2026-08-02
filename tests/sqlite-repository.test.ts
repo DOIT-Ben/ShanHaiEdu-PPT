@@ -500,6 +500,18 @@ describe('SQLite repository', () => {
     repository.close()
   })
 
+  test('keeps an interrupted image submission visible to terminal reconciliation', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({ ...run(), status: 'CANCELLED' })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({ ...waitingStep(), status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
+    repository.close()
+  })
+
   test('keeps billing-unknown media with a known Provider operation visible to reconciliation', async () => {
     const filename = await databasePath()
     const repository = new SqliteAgentRepository(filename)
