@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  normalizeVisualDeckV4VisibleReferences,
   visualDeckV4DeckManifestSchema,
   visualDeckV4ProposalSchema,
+  visualDeckV4SlideBriefsStageSchema,
 } from '../src/visual-deck-v4-contracts'
 import { presentationBlueprintSchema } from '../src/presentation-contracts'
 
@@ -86,6 +88,35 @@ describe('visual deck v4 contracts', () => {
     )
     expect(() => visualDeckV4ProposalSchema.parse(unboundedCriticalContent))
       .toThrow('v4 critical slide content exceeds the lossless image prompt budget')
+  })
+
+  test('removes only number and formula references that are absent from visible copy', () => {
+    const stage = visualDeckV4SlideBriefsStageSchema.parse({
+      slideBriefs: proposal().slideBriefs.map((slide) => ({ ...slide })),
+    })
+    stage.slideBriefs[0] = {
+      ...stage.slideBriefs[0]!,
+      title: '互动练习：百分数小达人',
+      lockedCopy: [
+        '第1关：读写——把“百分之四十点五”写成百分数；把72%读出来。',
+        '第2关：说意义——一件商品降价20%，这里的20%表示什么？',
+        '第3关：互化——0.35=（ ）%；4/5=（ ）%。',
+        '第4关：判断——“六（1）班今天来了48人，出勤率是48%。”这句话对吗？为什么？',
+      ],
+      numbers: ['40.5', '72%', '20%', '0.35', '4/5', '48', '48%', '4'],
+      formulas: ['0.35=（ ）%', '40.5%'],
+    }
+
+    const normalized = normalizeVisualDeckV4VisibleReferences(stage)
+
+    expect(normalized.slideBriefs[0]?.numbers).toEqual(['72%', '20%', '0.35', '4/5', '48', '48%', '4'])
+    expect(normalized.slideBriefs[0]?.formulas).toEqual(['0.35=（ ）%'])
+    expect(normalized.slideBriefs[0]?.lockedCopy).toEqual(stage.slideBriefs[0]?.lockedCopy)
+    expect(stage.slideBriefs[0]?.numbers).toContain('40.5')
+    expect(() => visualDeckV4ProposalSchema.parse({
+      ...proposal(),
+      slideBriefs: normalized.slideBriefs,
+    })).not.toThrow()
   })
 
   test('accepts only ordered rendered slides in a v4 manifest', () => {

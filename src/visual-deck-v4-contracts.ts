@@ -168,6 +168,21 @@ export const visualDeckV4SlideBriefsStageSchema = z.object({
   slideBriefs: z.array(visualDeckV4SlideBriefSchema).min(2).max(50),
 }).strict()
 
+export function normalizeVisualDeckV4VisibleReferences(
+  stage: z.infer<typeof visualDeckV4SlideBriefsStageSchema>,
+) {
+  return {
+    slideBriefs: stage.slideBriefs.map((slide) => {
+      const visibleCopy = [slide.title, ...slide.lockedCopy].join('\n')
+      return {
+        ...slide,
+        numbers: slide.numbers.filter((number) => visibleCopy.includes(number)),
+        formulas: slide.formulas.filter((formula) => visibleCopy.includes(formula)),
+      }
+    }),
+  }
+}
+
 export const visualDeckV4FinalCoherenceReviewSchema = z.object({
   decision: z.literal('APPROVED'),
   summary: boundedText(1_000),

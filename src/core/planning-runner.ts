@@ -28,6 +28,7 @@ import {
   visualDeckV4PlanningStageStepKey,
 } from './visual-deck-v4-planner'
 import {
+  normalizeVisualDeckV4VisibleReferences,
   visualDeckV4DeckVisualStageSchema,
   visualDeckV4FinalCoherenceReviewSchema,
   visualDeckV4ProposalDraftSchema,
@@ -295,21 +296,23 @@ export class PlanningRunner {
     const createSlideBriefs = async (
       repairAttempt: number,
       contractRepairIssues: readonly { path: string; message: string }[] = [],
-    ) => visualDeckV4SlideBriefsStageSchema.parse(await this.runV4PlanningStage(input, {
-      stage: 'slide-briefs',
-      tool: 'compile_v4_slide_briefs',
-      operation: 'create_visual_deck_v4_slide_briefs',
-      schemaName: 'ppt_agent_v4_slide_briefs_v1',
-      payload: {
-        ...basePayload,
-        ...sourceSpec,
-        ...deckVisual,
-        ...(contractRepairIssues.length > 0 ? { contractRepairIssues } : {}),
-      },
-      protocol,
-      repairAttempt,
-      parse: visualDeckV4SlideBriefsStageSchema.parse,
-    }))
+    ) => normalizeVisualDeckV4VisibleReferences(
+      visualDeckV4SlideBriefsStageSchema.parse(await this.runV4PlanningStage(input, {
+        stage: 'slide-briefs',
+        tool: 'compile_v4_slide_briefs',
+        operation: 'create_visual_deck_v4_slide_briefs',
+        schemaName: 'ppt_agent_v4_slide_briefs_v1',
+        payload: {
+          ...basePayload,
+          ...sourceSpec,
+          ...deckVisual,
+          ...(contractRepairIssues.length > 0 ? { contractRepairIssues } : {}),
+        },
+        protocol,
+        repairAttempt,
+        parse: visualDeckV4SlideBriefsStageSchema.parse,
+      })),
+    )
     let slideBriefs = await createSlideBriefs(0)
     let proposalDraft: ReturnType<typeof visualDeckV4ProposalDraftSchema.parse> | null = null
     for (let repairAttempt = 0; repairAttempt < MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS; repairAttempt += 1) {

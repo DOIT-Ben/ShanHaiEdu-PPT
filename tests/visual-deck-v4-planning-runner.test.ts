@@ -89,7 +89,7 @@ function stagedModel(
   input: ReturnType<typeof request>,
   clock: FixedClock,
   failSlideBriefsOnce = false,
-  repairSlideBriefsOnce = false,
+  slideBriefMutation: 'NONE' | 'INVISIBLE_REFERENCES' | 'INVALID_SOURCE_CHUNK' = 'NONE',
 ) {
   let proposal: ReturnType<typeof compileVisualDeckV4Proposal> | null = null
   let shouldFail = failSlideBriefsOnce
@@ -113,14 +113,23 @@ function stagedModel(
           throw new Error('TEST_SLIDE_BRIEFS_FAILURE')
         }
         const slideBriefs = structuredClone(proposal.slideBriefs)
-        if (repairSlideBriefsOnce) {
+        if (slideBriefMutation === 'INVISIBLE_REFERENCES') {
+          slideBriefs[4]!.title = '互动练习：百分数小达人'
+          slideBriefs[4]!.lockedCopy = [
+            '第1关：读写——把“百分之四十点五”写成百分数；把72%读出来。',
+            '第2关：说意义——一件商品降价20%，这里的20%表示什么？',
+            '第3关：互化——0.35=（ ）%；4/5=（ ）%。',
+            '第4关：判断——“六（1）班今天来了48人，出勤率是48%。”这句话对吗？为什么？',
+          ]
+          slideBriefs[4]!.numbers = ['40.5', '72%', '20%', '0.35', '4/5', '48', '48%', '4']
+          slideBriefs[4]!.formulas = ['0.35=（ ）%', '40.5%']
+        }
+        if (slideBriefMutation === 'INVALID_SOURCE_CHUNK') {
           const payload = modelInput.payload as { contractRepairIssues?: unknown }
           if (!payload.contractRepairIssues) {
-            slideBriefs[1]!.numbers = ['999']
+            slideBriefs[1]!.sourceChunkIds = ['invented']
           } else {
             repairPayloads.push(payload.contractRepairIssues)
-            slideBriefs[1]!.numbers = ['999']
-            slideBriefs[1]!.lockedCopy.push('999')
           }
         }
         return { slideBriefs }
@@ -228,13 +237,15 @@ describe('visual deck v4 planning runner', () => {
     ])
   })
 
-  test('repairs a cross-field Slide Brief contract without rerunning prior V4 stages', async () => {
+  test('normalizes invisible Slide Brief references without an extra model repair', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
     const service = new RunService({ repository, clock })
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-slide-brief-contract-repair-0001')
-    const { model, operations, repairPayloads } = stagedModel(created, inputRequest, clock, false, true)
+    const { model, operations, repairPayloads } = stagedModel(
+      created, inputRequest, clock, false, 'INVISIBLE_REFERENCES',
+    )
     const runner = new PlanningRunner({ repository, documents: documents(), model, clock })
     const input = {
       runId: created.run.id,
@@ -250,10 +261,49 @@ describe('visual deck v4 planning runner', () => {
     const result = await runner.plan(input)
 
     expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(10)
-    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[1]?.lockedCopy).toContain('999')
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[4]?.numbers).toEqual([
+      '72%', '20%', '0.35', '4/5', '48', '48%', '4',
+    ])
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[4]?.formulas).toEqual(['0.35=（ ）%'])
     expect(await repository.getRun(created.run.id)).toMatchObject({
       status: 'EXECUTING', committedBudgetUnits: 0,
     })
+    expect(operations).toEqual([
+      'create_visual_deck_v4_source_spec',
+      'create_visual_deck_v4_deck_visual',
+      'create_visual_deck_v4_slide_briefs',
+      'review_visual_deck_v4_coherence',
+    ])
+    expect(repairPayloads).toEqual([])
+    const steps = await repository.listSteps(created.run.id)
+    expect(steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(
+      created.run.id, 'slide-briefs', 0, 1,
+    ))).toBeUndefined()
+  })
+
+  test('still repairs unrelated Slide Brief contract failures', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-slide-brief-source-repair-0001')
+    const { model, operations, repairPayloads } = stagedModel(
+      created, inputRequest, clock, false, 'INVALID_SOURCE_CHUNK',
+    )
+    const runner = new PlanningRunner({ repository, documents: documents(), model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(10)
     expect(operations).toEqual([
       'create_visual_deck_v4_source_spec',
       'create_visual_deck_v4_deck_visual',
@@ -262,11 +312,7 @@ describe('visual deck v4 planning runner', () => {
       'review_visual_deck_v4_coherence',
     ])
     expect(repairPayloads).toEqual([[
-      { path: 'slideBriefs.1.numbers.0', message: 'v4 visible numbers must occur in title or lockedCopy' },
+      { path: 'slideBriefs.1.sourceChunkIds', message: 'grounded v4 slides require valid source chunks' },
     ]])
-    const steps = await repository.listSteps(created.run.id)
-    expect(steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(
-      created.run.id, 'slide-briefs', 0, 1,
-    ))).toMatchObject({ status: 'COMPLETED' })
   })
 })
