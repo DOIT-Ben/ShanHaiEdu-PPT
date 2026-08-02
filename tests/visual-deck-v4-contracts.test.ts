@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  normalizeVisualDeckV4RequestFocus,
   normalizeVisualDeckV4VisibleReferences,
   visualDeckV4DeckManifestSchema,
   visualDeckV4ProposalSchema,
@@ -117,6 +118,22 @@ describe('visual deck v4 contracts', () => {
       ...proposal(),
       slideBriefs: normalized.slideBriefs,
     })).not.toThrow()
+  })
+
+  test('preserves the exact requested focus when the model splits it into separate items', () => {
+    const value = proposal()
+    const requestFocus = '准确计数；分成两个非空组；按顺序操作；不引入加减法'
+    const normalized = normalizeVisualDeckV4RequestFocus({
+      sourceUnderstanding: value.sourceUnderstanding,
+      presentationSpec: {
+        ...value.presentationSpec,
+        focus: ['准确计数', '分成两个非空组', '按顺序操作', '不引入加减法'],
+      },
+    }, requestFocus)
+
+    expect(normalized.presentationSpec.focus).toEqual([
+      requestFocus, '准确计数', '分成两个非空组', '按顺序操作', '不引入加减法',
+    ])
   })
 
   test('accepts only ordered rendered slides in a v4 manifest', () => {

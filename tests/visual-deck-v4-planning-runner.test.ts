@@ -90,6 +90,7 @@ function stagedModel(
   clock: FixedClock,
   failSlideBriefsOnce = false,
   slideBriefMutation: 'NONE' | 'INVISIBLE_REFERENCES' | 'INVALID_SOURCE_CHUNK' = 'NONE',
+  splitSourceFocus = false,
 ) {
   let proposal: ReturnType<typeof compileVisualDeckV4Proposal> | null = null
   let shouldFail = failSlideBriefsOnce
@@ -101,7 +102,13 @@ function stagedModel(
       operations.push(modelInput.operation)
       if (modelInput.operation === 'create_visual_deck_v4_source_spec') {
         proposal = proposalFromSourceStage(created, input, clock, modelInput.payload)
-        return { sourceUnderstanding: proposal.sourceUnderstanding, presentationSpec: proposal.presentationSpec }
+        return {
+          sourceUnderstanding: proposal.sourceUnderstanding,
+          presentationSpec: {
+            ...proposal.presentationSpec,
+            focus: splitSourceFocus ? ['理解统一比较', '建立统一标准'] : proposal.presentationSpec.focus,
+          },
+        }
       }
       if (!proposal) throw new Error('TEST_SOURCE_SPEC_REQUIRED')
       if (modelInput.operation === 'create_visual_deck_v4_deck_visual') {
@@ -314,5 +321,35 @@ describe('visual deck v4 planning runner', () => {
     expect(repairPayloads).toEqual([[
       { path: 'slideBriefs.1.sourceChunkIds', message: 'grounded v4 slides require valid source chunks' },
     ]])
+  })
+
+  test('restores an exact request focus after the model splits it into separate items', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-split-focus-0001')
+    const { model, operations } = stagedModel(created, inputRequest, clock, false, 'NONE', true)
+    const runner = new PlanningRunner({ repository, documents: documents(), model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.blueprint?.visualDeckV4Proposal?.presentationSpec.focus[0])
+      .toBe(inputRequest.visualDeckV4.deckOptions.focus)
+    expect(operations).toEqual([
+      'create_visual_deck_v4_source_spec',
+      'create_visual_deck_v4_deck_visual',
+      'create_visual_deck_v4_slide_briefs',
+      'review_visual_deck_v4_coherence',
+    ])
   })
 })
