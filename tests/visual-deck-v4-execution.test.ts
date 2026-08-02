@@ -76,6 +76,7 @@ describe('visual deck v4 execution', () => {
 
   test('renders previews and pptx pages as one full-slide raster without native text', async () => {
     const planned = blueprint()
+    planned.title = '5以内数的分与合'
     const renderer = new SharpPptxPresentationRenderer()
     const images = await Promise.all([
       sharp({ create: { width: 800, height: 450, channels: 3, background: '#E5484D' } }).png().toBuffer(),

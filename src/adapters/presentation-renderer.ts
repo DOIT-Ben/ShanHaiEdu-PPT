@@ -190,7 +190,8 @@ function slideByPage(input: RenderInput) {
 
 export class SharpPptxPresentationRenderer implements PresentationRendererPort {
   async renderSlidePreviews(input: RenderInput) {
-    const classroomCourseware = isFiveCompositionCourseware(input.blueprint)
+    const classroomCourseware = input.blueprint.renderMode !== 'VISUAL_DECK_V4'
+      && isFiveCompositionCourseware(input.blueprint)
     const rendered = await Promise.all(slideByPage(input).map(({ blueprint, source }) => {
       if (classroomCourseware) return renderFiveCompositionSlide(blueprint)
       if (input.blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
@@ -246,7 +247,8 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
     pptx.title = input.blueprint.title
     pptx.theme = { headFontFace: FONT_FACE, bodyFontFace: FONT_FACE }
 
-    const classroomCourseware = isFiveCompositionCourseware(input.blueprint)
+    const classroomCourseware = input.blueprint.renderMode !== 'VISUAL_DECK_V4'
+      && isFiveCompositionCourseware(input.blueprint)
     for (const { blueprint, source } of slideByPage(input)) {
       if (classroomCourseware) {
         addFiveCompositionSlide(pptx, blueprint)
