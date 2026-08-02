@@ -321,6 +321,17 @@ export class RunService {
         : action.repairDomain === 'ASSET' ? 'REGENERATE_IMAGE' as const : 'RELAYOUT' as const
       const createdAt = this.dependencies.clock.now().toISOString()
       const issueId = `manual-${hashInput({ runId: transaction.run.id, action }).slice(0, 24)}`
+      const openIssueIds = new Set<string>()
+      for (const event of transaction.listEvents()) {
+        if (event.type === 'issue.detected') openIssueIds.add(event.payload.id)
+        if (event.type === 'issue.resolved') openIssueIds.delete(event.payload.issueId)
+      }
+      const replacedMediaIssueIds = transaction.listSteps()
+        .filter((step) => step.tool === 'generate_slide_image'
+          && step.idempotencyKey.startsWith(`${action.slideId}:image:`)
+          && ['FAILED', 'FAILED_CHARGED', 'FAILED_NOT_CHARGED'].includes(step.status))
+        .flatMap((step) => [`${step.id}:provider-result`, `${step.id}:submission-unknown`])
+        .filter((candidate) => openIssueIds.has(candidate))
       const plan = revisionPlanSchema.parse({
         id: `${transaction.run.id}:manual-revision:r${targetRound}`,
         reviewId: `${transaction.run.id}:manual-review:r${transaction.run.revisionRound}`,
@@ -331,7 +342,7 @@ export class RunService {
           id: `${transaction.run.id}:manual-operation:r${targetRound}`,
           slideId: action.slideId,
           kind: operationKind,
-          issueIds: [issueId],
+          issueIds: replacedMediaIssueIds.length > 0 ? replacedMediaIssueIds : [issueId],
           instruction: action.instruction,
           sourceChunkIds: action.repairDomain === 'KNOWLEDGE' ? slide.sourceChunkIds : [],
           ...(action.targetElementId ? { targetElementId: action.targetElementId } : {}),

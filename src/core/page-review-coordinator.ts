@@ -280,7 +280,7 @@ export class PageReviewCoordinator {
   private async resolveSupersededPageIssues(run: RunRecord, reviews: readonly ReviewSlideResult[]) {
     if (run.revisionRound === 0) return
     const planSteps = (await this.dependencies.repository.listSteps(run.id))
-      .filter((step) => step.tool === 'plan_page_revision' && step.status === 'COMPLETED')
+      .filter((step) => ['plan_revision', 'plan_page_revision'].includes(step.tool) && step.status === 'COMPLETED')
     const planStep = planSteps
       .find((step) => step.idempotencyKey === revisionPlanStepKey(run.id, run.revisionRound)
       )

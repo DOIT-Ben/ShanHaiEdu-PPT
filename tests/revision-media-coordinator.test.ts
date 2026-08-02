@@ -221,6 +221,15 @@ describe('revision media coordinator', () => {
     images.complete(key, 'artifact-r1-2')
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
 
+    await repository.transact('run-1', (transaction) => transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'issue.detected',
+      payload: {
+        id: 'issue-1', category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+        summary: '第2页原始产物缺失。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+      },
+    }))
+
     const reviewerPort = new MockVisualReviewPort({
       approved: true, textDetected: false, visualScore: 91, reasons: [], retryInstruction: null,
     })
@@ -228,6 +237,33 @@ describe('revision media coordinator', () => {
     const pages = new PageReviewCoordinator({ repository, reviewer, artifacts, renderer, clock })
     expect(await pages.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', approved: 4, total: 4 })
     expect(reviewerPort.reviews.size).toBe(4)
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'issue.resolved' && event.payload.issueId === 'issue-1')).toBe(true)
+  })
+
+  test('keeps a V4 run recoverable when another page still has no usable artifact', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+    })
+    await repository.transact('run-1', (transaction) => {
+      const missing = transaction.getStep('run-1:slide:1:image:r0:v1')!
+      transaction.putStep({ ...missing, status: 'FAILED_CHARGED', errorCode: 'IMAGE_TASK_FAILED', output: null })
+    })
+
+    await coordinator.submit('run-1', 5)
+    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 1, total: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', revisionRound: 1 })
+    const events = await repository.listEvents('run-1')
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'phase.changed',
+        payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: 'PAGE_ARTIFACTS_INCOMPLETE' },
+      }),
+      expect.objectContaining({ type: 'approval.required', payload: expect.objectContaining({ kind: 'HUMAN_REVIEW' }) }),
+    ]))
+    expect(events.some((event) => event.type === 'page_review.started')).toBe(false)
   })
 
   test('recovers a revision image left in submitting without double-reserving budget', async () => {

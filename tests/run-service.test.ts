@@ -459,6 +459,22 @@ describe('run service', () => {
         budgetReservationId: null, externalOperationId: null, errorCode: null, output: blueprint(),
         createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
       })
+      transaction.putStep({
+        id: 'step-failed-page-2', runId: created.run.id,
+        idempotencyKey: `${created.run.id}:slide:2:image:r0:v1`, inputHash: 'failed-page-2-hash',
+        tool: 'generate_slide_image', status: 'FAILED_CHARGED', budgetUnits: 1,
+        budgetReservationId: 'reservation-page-2', externalOperationId: 'operation-page-2',
+        errorCode: 'IMAGE_TASK_FAILED', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'step-failed-page-2:provider-result', category: 'PROVIDER_RESULT_FAILED', severity: 'CRITICAL',
+          summary: '第2页 Provider 已收费但未返回产物。', slideIds: [], sourceChunkIds: [], status: 'OPEN',
+        },
+      })
     })
 
     const revised = await service.act(created.run.id, host, {
@@ -475,7 +491,13 @@ describe('run service', () => {
       .find((candidate) => candidate.idempotencyKey === revisionPlanStepKey(created.run.id, 1))!
     expect(step).toMatchObject({
       tool: 'plan_revision', status: 'COMPLETED',
-      output: { revisionRound: 1, operations: [{ slideId: `${created.run.id}:slide:2`, kind: 'RELAYOUT' }] },
+      output: {
+        revisionRound: 1,
+        operations: [{
+          slideId: `${created.run.id}:slide:2`, kind: 'RELAYOUT',
+          issueIds: ['step-failed-page-2:provider-result'],
+        }],
+      },
     })
   })
 
