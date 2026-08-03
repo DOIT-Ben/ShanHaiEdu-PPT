@@ -1,9 +1,117 @@
 import { describe, expect, test } from 'bun:test'
 import { readFile } from 'node:fs/promises'
+import { KNOWN_AGENT_EVENT_TYPES } from '../src/contracts'
 
 const filename = new URL('../docs/openapi-v1.json', import.meta.url)
 
 describe('OpenAPI v1 contract', () => {
+  test('keeps the OpenAPI known event enum in parity with the Zod discriminated union', async () => {
+    const document = JSON.parse(await readFile(filename, 'utf8')) as {
+      components: {
+        schemas: Record<string, {
+          enum?: string[]
+          oneOf?: Array<{ $ref?: string }>
+          allOf?: Array<{
+            oneOf?: Array<{
+              properties?: {
+                type?: { const?: string }
+                payload?: {
+                  $ref?: string
+                  additionalProperties?: boolean
+                  required?: string[]
+                  properties?: Record<string, Record<string, unknown>>
+                }
+              }
+            }>
+          }>
+        }>
+      }
+    }
+    const zodKnownTypes = [...KNOWN_AGENT_EVENT_TYPES].sort()
+
+    const openApiKnownTypes = document.components.schemas.KnownAgentEventType?.enum
+    expect(openApiKnownTypes ? [...openApiKnownTypes].sort() : undefined).toEqual(zodKnownTypes)
+    const runtimeVariantContracts = document.components.schemas.RuntimeAgentEvent?.allOf
+      ?.flatMap((item) => item.oneOf ?? [])
+      ?? []
+    const runtimeVariants = runtimeVariantContracts
+      .map((variant) => variant.properties?.type?.const)
+      .filter((type): type is string => type !== undefined)
+      .sort()
+    expect(runtimeVariants).toEqual([
+      'approval.required',
+      'approval.resolved',
+      'budget.updated',
+      'issue.detected',
+      'issue.resolved',
+      'phase.changed',
+      'run.resumed',
+      'run.started',
+      'tool.completed',
+      'tool.failed',
+      'tool.progress',
+      'tool.started',
+    ])
+    const expectedRequiredFields: Record<string, string[]> = {
+      'run.started': ['status'],
+      'phase.changed': ['from', 'to'],
+      'approval.required': ['kind', 'summary'],
+      'approval.resolved': ['kind', 'actionType'],
+      'tool.started': ['stepId', 'tool', 'label'],
+      'tool.progress': ['stepId', 'completed', 'total'],
+      'tool.completed': ['stepId', 'summary'],
+      'tool.failed': ['stepId', 'errorCode', 'retryable'],
+      'issue.resolved': ['issueId', 'resolution'],
+      'budget.updated': ['budgetUnits', 'committedBudgetUnits'],
+      'run.resumed': ['status'],
+    }
+    for (const [type, required] of Object.entries(expectedRequiredFields)) {
+      const payload = runtimeVariantContracts.find((variant) => variant.properties?.type?.const === type)
+        ?.properties?.payload
+      expect(payload?.additionalProperties).toBe(false)
+      expect(payload?.required).toEqual(required)
+    }
+    const payloadFor = (type: string) => runtimeVariantContracts
+      .find((variant) => variant.properties?.type?.const === type)?.properties?.payload
+    expect(payloadFor('issue.detected')?.$ref).toBe('#/components/schemas/IssueSummary')
+    expect(payloadFor('phase.changed')?.properties?.from?.$ref).toBe('#/components/schemas/RunStatus')
+    expect(payloadFor('tool.progress')?.properties?.total?.minimum).toBe(1)
+    expect(payloadFor('approval.resolved')?.properties?.reason?.minLength).toBe(10)
+    expect(payloadFor('run.resumed')?.properties?.status?.$ref).toBe('#/components/schemas/RunStatus')
+    expect(document.components.schemas.AgentEvent?.oneOf?.map((item) => item.$ref)).toEqual([
+      '#/components/schemas/KnownAgentEvent',
+      '#/components/schemas/ForwardCompatibleAgentEvent',
+    ])
+    const explicitKnownTypes = new Set<string>()
+    const collectExplicitEventTypes = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        value.forEach(collectExplicitEventTypes)
+        return
+      }
+      if (!value || typeof value !== 'object') return
+      const record = value as Record<string, unknown>
+      const properties = record.properties as Record<string, unknown> | undefined
+      const typeContract = properties?.type as { const?: unknown; enum?: unknown } | undefined
+      if (typeof typeContract?.const === 'string') explicitKnownTypes.add(typeContract.const)
+      if (Array.isArray(typeContract?.enum)) {
+        typeContract.enum.forEach((type) => {
+          if (typeof type === 'string') explicitKnownTypes.add(type)
+        })
+      }
+      Object.values(record).forEach(collectExplicitEventTypes)
+    }
+    for (const component of [
+      'RuntimeAgentEvent',
+      'V4LifecycleEvent',
+      'GenerationBatchEvent',
+      'TechnicalRecoveryEvent',
+      'LegacyTerminalAgentEvent',
+    ]) collectExplicitEventTypes(document.components.schemas[component])
+    expect([...explicitKnownTypes].sort()).toEqual(zodKnownTypes)
+    expect(JSON.stringify(document.components.schemas.ForwardCompatibleAgentEvent))
+      .toContain('#/components/schemas/KnownAgentEventType')
+  })
+
   test('publishes the implemented versioned resources and security boundary', async () => {
     const document = JSON.parse(await readFile(filename, 'utf8')) as {
       openapi: string
@@ -132,12 +240,12 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.AgentEventEnvelope?.required).toEqual(expect.arrayContaining([
       'schemaVersion', 'id', 'eventId', 'runId', 'sequence', 'type', 'payload',
     ]))
-    expect(document.components.schemas.AgentEvent?.oneOf?.map((item) => item.$ref)).toEqual([
+    expect(document.components.schemas.KnownAgentEvent?.oneOf?.map((item) => item.$ref)).toEqual([
+      '#/components/schemas/RuntimeAgentEvent',
       '#/components/schemas/V4LifecycleEvent',
       '#/components/schemas/GenerationBatchEvent',
       '#/components/schemas/TechnicalRecoveryEvent',
       '#/components/schemas/LegacyTerminalAgentEvent',
-      '#/components/schemas/ForwardCompatibleAgentEvent',
     ])
     expect(JSON.stringify(document.components.schemas.GenerationBatchEvent))
       .toContain('generation.batch.updated')
@@ -180,10 +288,16 @@ describe('OpenAPI v1 contract', () => {
     expect(deliveryIdentity).not.toContain('LEGACY_UNVERIFIED')
     expect(deliveryIdentity).toContain('blueprintHash')
     expect(deliveryIdentity).toContain('proposalHash')
-    expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
+    expect(JSON.stringify(document.components.schemas.RunDetail))
       .toContain('#/components/schemas/DeliveryRecord')
+    const runDetailContract = JSON.stringify(document.components.schemas.RunDetail)
+    expect(runDetailContract).toContain('#/components/schemas/AvailableDeliveryAvailability')
+    expect(runDetailContract).toContain('#/components/schemas/UnavailableDeliveryAvailability')
+    expect(runDetailContract).toContain('"status":{"const":"COMPLETED"}')
+    expect(runDetailContract).toContain('"minItems":1,"maxItems":1')
+    expect(runDetailContract).toContain('"maxItems":0')
     expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
-      .toContain('#/components/schemas/DeliveryAvailability')
+      .toContain('#/components/schemas/RunDetail')
     expect(document.components.schemas.DeliveryAvailability).toBeDefined()
     expect(JSON.stringify(document.paths['/v1/runs/{runId}']?.get))
       .toContain('#/components/schemas/RunDetailEnvelope')

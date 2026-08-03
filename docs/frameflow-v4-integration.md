@@ -348,6 +348,10 @@ GET /v1/runs/{runId}/events/history?after=12
 响应为 `{ data: AgentEvent[], pagination: { nextAfter, hasMore } }`。单页最多 100 条且受大小限制；
 `hasMore=true` 时先继续读取历史，再打开 SSE。
 
+`KnownAgentEventType` 是运行时已知事件的完整集合。`run.started`、`phase.changed`、`approval.*`、
+`tool.*`、`issue.*`、`budget.updated`、`run.resumed` 以及下列 V4 生命周期事件都有各自的严格
+payload variant；只有不在该枚举中的未来类型才按 forward-compatible 事件忽略未知业务语义。
+
 ### V4 生命周期事件
 
 V4 关键事件包括：
@@ -464,7 +468,8 @@ Usage V2 事件被宿主以确定性 4xx 硬拒绝时也遵循该技术终态流
 ```
 
 `deliveryAvailability.deliveryId` 必须等于唯一公开 Delivery 的 `id`，且 Delivery `runId` 必须等于 Run
-`data.id`。不要根据 `actorId`、原因文本、`run.completed` 的显示文案或本地缓存猜测可用性。
+`data.id`。`AVAILABLE` 必须对应恰好一条 Delivery；`UNAVAILABLE` 时 `deliveries` 必须为空。不要根据
+`actorId`、原因文本、`run.completed` 的显示文案或本地缓存猜测可用性。
 `UNAVAILABLE` 的稳定原因包括 `RUN_NOT_COMPLETED`、`RUN_FAILED`、`RUN_CANCELLED`、
 `QUALITY_RECOVERY`、`ACCOUNTING_PENDING`、`VERIFIED_FINAL_DELIVERY_MISSING`、
 `DELIVERY_CONTRACT_INVALID` 和 `DELIVERY_CONTENT_INVALID`。特别是 Usage V2 已进入 `COMPLETED` 但终态

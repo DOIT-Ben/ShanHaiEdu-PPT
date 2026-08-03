@@ -589,7 +589,7 @@ const legacyRunCancelledPayloadSchema = z.object({
 const legacyRunCompletedPayloadSchema = z.object({ deliveryId: identifierSchema, qualityOverride: z.boolean() }).strict()
 const legacyRunFailedPayloadSchema = z.object({ errorCode: z.string().min(1).max(100) }).strict()
 
-const knownAgentEventSchema = z.discriminatedUnion('type', [
+export const knownAgentEventSchema = z.discriminatedUnion('type', [
   z.object({ ...eventBase, type: z.literal('run.started'), payload: z.object({ status: z.literal('PLANNING') }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('phase.changed'), payload: z.object({ from: runStatusSchema, to: runStatusSchema, reason: z.string().max(500).optional() }).strict() }).strict(),
   z.object({ ...eventBase, type: z.literal('approval.required'), payload: z.object({ kind: z.enum(['BLUEPRINT', 'REVISION', 'BUDGET', 'HUMAN_REVIEW']), summary: z.string().min(1).max(1_000) }).strict() }).strict(),
@@ -651,7 +651,10 @@ const knownAgentEventSchema = z.discriminatedUnion('type', [
   }) }).strict(),
 ])
 
-const knownAgentEventTypes = new Set<string>(knownAgentEventSchema.options.map((option) => option.shape.type.value))
+export const KNOWN_AGENT_EVENT_TYPES = Object.freeze(
+  knownAgentEventSchema.options.map((option) => option.shape.type.value),
+)
+const knownAgentEventTypes = new Set<string>(KNOWN_AGENT_EVENT_TYPES)
 const unknownAgentEventSchema = z.object({
   ...eventBase,
   type: nonEmptyTextSchema.max(100),

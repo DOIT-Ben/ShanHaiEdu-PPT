@@ -1,4 +1,5 @@
 export * from './contracts'
+export * from './run-detail-contracts'
 export * from './presentation-contracts'
 export * from './visual-deck-v4-contracts'
 export * from './visual-deck-v4-generation-plan'

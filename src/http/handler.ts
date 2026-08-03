@@ -29,6 +29,7 @@ import {
 } from '../core/usage-v2-coordinator'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
 import { publicDeliveryRecordSchema, type DeliveryRecord } from '../presentation-contracts'
+import { runDetailSchema } from '../run-detail-contracts'
 import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
@@ -323,7 +324,7 @@ async function runDetail(repository: AgentRepository, artifacts: ArtifactPort, r
   const generationPlan = blueprint?.visualDeckV4Proposal
     ? visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal)
     : null
-  return runSnapshotSchema.parse({
+  return runDetailSchema.parse({
     ...publicRun(run),
     blueprint,
     generationPlan,

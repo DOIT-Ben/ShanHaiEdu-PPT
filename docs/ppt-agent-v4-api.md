@@ -48,6 +48,8 @@ X-PPT-Agent-Project: <externalProjectId>  # 可选
 Run 快照、每条 `AgentEvent`、公开 Delivery 和 JSON 错误体都携带同一个
 `schemaVersion: "1"`。Run 的身份字段固定为 `data.id`；事件和 Delivery 分别使用 `runId` 指回该值。
 宿主不得从 `actorId`、原因文本、工具摘要或未列入 OpenAPI 的字段推断生命周期或交付状态。
+OpenAPI 的 `KnownAgentEventType` 与运行时 Zod 已知事件集合一一对应；枚举内类型必须使用各自的严格
+payload variant，只有枚举外的新类型才进入 forward-compatible 分支。
 
 ## 自动执行的规划
 
@@ -304,7 +306,9 @@ Run 详情始终返回机器可判定的 `deliveryAvailability`。只有以下�
 Usage V2 的 Run 即使已经进入 `COMPLETED`，在宿主终态 finalize 得到确认前仍返回
 `ACCOUNTING_PENDING`；宿主应继续读取 Run 详情，不能提前暴露下载。
 
-`deliveries` 只包含与 `deliveryAvailability.deliveryId` 一致的一个公开交付，其消费者身份为：
+`deliveryAvailability.state` 为 `AVAILABLE` 时，`deliveries` 必须且只能包含一个公开交付；为
+`UNAVAILABLE` 时必须为空。可用交付的 `runId` 必须等于 Run `data.id`、`id` 必须等于
+`deliveryAvailability.deliveryId`，其消费者身份为：
 
 ```json
 {

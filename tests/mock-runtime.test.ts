@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import { CONTRACT_VERSION, agentEventSchema, runSnapshotSchema } from '../src/contracts'
+import { runDetailSchema } from '../src/run-detail-contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import type { FrameFlowBackendClient } from '../src/adapters/frameflow-host'
 import {
@@ -764,7 +765,7 @@ describe('mock runtime', () => {
       deliveryAvailability?: unknown
     } }
     expect(planned.data.status).toBe('EXECUTING')
-    expect(runSnapshotSchema.parse(planned.data)).toMatchObject({
+    expect(runDetailSchema.parse(planned.data)).toMatchObject({
       schemaVersion: CONTRACT_VERSION,
       id: runId,
       status: 'EXECUTING',
@@ -876,7 +877,7 @@ describe('mock runtime', () => {
       deliveries: unknown[]
       deliveryAvailability: unknown
     } }
-    expect(runSnapshotSchema.parse(finalDetail.data)).toMatchObject({
+    expect(runDetailSchema.parse(finalDetail.data)).toMatchObject({
       schemaVersion: CONTRACT_VERSION,
       id: runId,
       status: 'COMPLETED',

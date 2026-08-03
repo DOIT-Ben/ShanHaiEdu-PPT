@@ -445,6 +445,234 @@
           "payload": { "type": "object", "additionalProperties": true }
         }
       },
+      "KnownAgentEventType": {
+        "type": "string",
+        "enum": [
+          "run.started",
+          "phase.changed",
+          "approval.required",
+          "approval.resolved",
+          "tool.started",
+          "tool.progress",
+          "tool.completed",
+          "tool.failed",
+          "issue.detected",
+          "issue.resolved",
+          "budget.updated",
+          "planning.started",
+          "planning.completed",
+          "generation.started",
+          "generation.progress",
+          "generation.completed",
+          "generation.batch.created",
+          "generation.batch.updated",
+          "technical.recovery.started",
+          "technical.recovery.completed",
+          "page_review.started",
+          "page_review.completed",
+          "revision.started",
+          "revision.progress",
+          "revision.completed",
+          "deck_review.started",
+          "deck_review.completed",
+          "delivery.started",
+          "delivery.completed",
+          "run.paused",
+          "run.resumed",
+          "run.cancelled",
+          "run.completed",
+          "run.failed",
+          "run.accounting.finalized"
+        ]
+      },
+      "RunStatus": {
+        "type": "string",
+        "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "RECOVERING", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"]
+      },
+      "RuntimeAgentEvent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/AgentEventEnvelope" },
+          {
+            "oneOf": [
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "run.started" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["status"],
+                    "properties": { "status": { "const": "PLANNING" } }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "phase.changed" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["from", "to"],
+                    "properties": {
+                      "from": { "$ref": "#/components/schemas/RunStatus" },
+                      "to": { "$ref": "#/components/schemas/RunStatus" },
+                      "reason": { "type": "string", "maxLength": 500 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "approval.required" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "summary"],
+                    "properties": {
+                      "kind": { "enum": ["BLUEPRINT", "REVISION", "BUDGET", "HUMAN_REVIEW"] },
+                      "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "approval.resolved" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "actionType"],
+                    "properties": {
+                      "kind": { "enum": ["BLUEPRINT", "REVISION", "BUDGET", "HUMAN_REVIEW"] },
+                      "actionType": { "type": "string", "minLength": 1, "maxLength": 80 },
+                      "actorId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                      "actorRole": { "enum": ["USER", "ADMIN"] },
+                      "issueIds": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+                      "reason": { "type": "string", "minLength": 10, "maxLength": 2000 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "tool.started" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["stepId", "tool", "label"],
+                    "properties": {
+                      "stepId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                      "tool": { "type": "string", "minLength": 1, "maxLength": 100 },
+                      "label": { "type": "string", "minLength": 1, "maxLength": 240 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "tool.progress" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["stepId", "completed", "total"],
+                    "properties": {
+                      "stepId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                      "completed": { "type": "integer", "minimum": 0 },
+                      "total": { "type": "integer", "minimum": 1 },
+                      "summary": { "type": "string", "maxLength": 500 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "tool.completed" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["stepId", "summary"],
+                    "properties": {
+                      "stepId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                      "summary": { "type": "string", "minLength": 1, "maxLength": 1000 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "tool.failed" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["stepId", "errorCode", "retryable"],
+                    "properties": {
+                      "stepId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                      "errorCode": { "type": "string", "minLength": 1, "maxLength": 100 },
+                      "retryable": { "type": "boolean" }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "issue.detected" },
+                  "payload": { "$ref": "#/components/schemas/IssueSummary" }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "issue.resolved" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["issueId", "resolution"],
+                    "properties": {
+                      "issueId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                      "resolution": { "enum": ["FIXED", "ACCEPTED"] }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "budget.updated" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["budgetUnits", "committedBudgetUnits"],
+                    "properties": {
+                      "budgetUnits": { "type": "integer", "minimum": 0 },
+                      "committedBudgetUnits": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                }
+              },
+              {
+                "required": ["type", "payload"],
+                "properties": {
+                  "type": { "const": "run.resumed" },
+                  "payload": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["status"],
+                    "properties": { "status": { "$ref": "#/components/schemas/RunStatus" } }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
       "V4LifecyclePayload": {
         "type": "object",
         "required": ["presentationMode", "stage", "completed", "total", "pageNumbers", "revisionKind", "revisionRound", "maxRevisionRounds", "budgetUnits", "committedBudgetUnits", "reason", "retryable", "requiresUserAction", "nextAction"],
@@ -521,7 +749,7 @@
                 "properties": {
                   "type": { "const": "run.paused" },
                   "payload": {
-                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["resumeState"], "properties": { "stage": { "const": "RUN" }, "resumeState": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] } } }],
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["resumeState"], "properties": { "stage": { "const": "RUN" }, "resumeState": { "$ref": "#/components/schemas/RunStatus" } } }],
                     "unevaluatedProperties": false
                   }
                 }
@@ -598,9 +826,7 @@
           {
             "properties": {
               "type": {
-                "not": {
-                  "enum": ["planning.started", "planning.completed", "generation.started", "generation.progress", "generation.completed", "generation.batch.created", "generation.batch.updated", "technical.recovery.started", "technical.recovery.completed", "page_review.started", "page_review.completed", "revision.started", "revision.progress", "revision.completed", "deck_review.started", "deck_review.completed", "delivery.started", "delivery.completed", "run.paused", "run.completed", "run.failed", "run.accounting.finalized", "run.cancelled"]
-                }
+                "not": { "$ref": "#/components/schemas/KnownAgentEventType" }
               }
             }
           }
@@ -614,7 +840,7 @@
               {
                 "properties": {
                   "type": { "const": "run.paused" },
-                  "payload": { "type": "object", "additionalProperties": false, "required": ["reason", "resumeState"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 500 }, "resumeState": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] } } }
+                  "payload": { "type": "object", "additionalProperties": false, "required": ["reason", "resumeState"], "properties": { "reason": { "type": "string", "minLength": 1, "maxLength": 500 }, "resumeState": { "$ref": "#/components/schemas/RunStatus" } } }
                 }
               },
               {
@@ -639,13 +865,19 @@
           }
         ]
       },
-      "AgentEvent": {
-        "description": "Forward-compatible durable event contract. Known V4 lifecycle events use the typed variant; consumers must ignore unhandled future type values and use sequence for ordering and deduplication.",
+      "KnownAgentEvent": {
         "oneOf": [
+          { "$ref": "#/components/schemas/RuntimeAgentEvent" },
           { "$ref": "#/components/schemas/V4LifecycleEvent" },
           { "$ref": "#/components/schemas/GenerationBatchEvent" },
           { "$ref": "#/components/schemas/TechnicalRecoveryEvent" },
-          { "$ref": "#/components/schemas/LegacyTerminalAgentEvent" },
+          { "$ref": "#/components/schemas/LegacyTerminalAgentEvent" }
+        ]
+      },
+      "AgentEvent": {
+        "description": "Forward-compatible durable event contract. Every runtime-known type uses an explicit typed variant; consumers must ignore unhandled future type values and use sequence for ordering and deduplication.",
+        "oneOf": [
+          { "$ref": "#/components/schemas/KnownAgentEvent" },
           { "$ref": "#/components/schemas/ForwardCompatibleAgentEvent" }
         ]
       },
@@ -960,7 +1192,7 @@
           "schemaVersion": { "const": "1" },
           "id": { "type": "string" },
           "host": { "$ref": "#/components/schemas/HostContext" },
-          "status": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "RECOVERING", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] },
+          "status": { "$ref": "#/components/schemas/RunStatus" },
           "resumeState": { "type": ["string", "null"] },
           "technicalRecovery": { "$ref": "#/components/schemas/TechnicalRecovery" },
           "pendingTerminalFailure": { "$ref": "#/components/schemas/PendingTerminalFailure" },
@@ -1145,29 +1377,36 @@
           "DELIVERY_CONTENT_INVALID"
         ]
       },
+      "UnavailableDeliveryAvailability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "reason"],
+        "properties": {
+          "state": { "const": "UNAVAILABLE" },
+          "reason": { "$ref": "#/components/schemas/DeliveryUnavailableReason" }
+        }
+      },
+      "AvailableDeliveryAvailability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "deliveryId", "disposition", "identityStatus"],
+        "properties": {
+          "state": { "const": "AVAILABLE" },
+          "deliveryId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Must equal the id of the single DeliveryRecord in RunDetail.deliveries."
+          },
+          "disposition": { "const": "FINAL" },
+          "identityStatus": { "const": "VERIFIED" }
+        }
+      },
       "DeliveryAvailability": {
         "description": "The only authoritative signal for exposing generated output. AVAILABLE is emitted only for the current integrity-checked VERIFIED FINAL Delivery of a COMPLETED Run whose accounting is closed.",
         "oneOf": [
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["state", "reason"],
-            "properties": {
-              "state": { "const": "UNAVAILABLE" },
-              "reason": { "$ref": "#/components/schemas/DeliveryUnavailableReason" }
-            }
-          },
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["state", "deliveryId", "disposition", "identityStatus"],
-            "properties": {
-              "state": { "const": "AVAILABLE" },
-              "deliveryId": { "type": "string", "minLength": 1, "maxLength": 160 },
-              "disposition": { "const": "FINAL" },
-              "identityStatus": { "const": "VERIFIED" }
-            }
-          }
+          { "$ref": "#/components/schemas/UnavailableDeliveryAvailability" },
+          { "$ref": "#/components/schemas/AvailableDeliveryAvailability" }
         ]
       },
       "DeliveryArtifact": {
@@ -1346,11 +1585,11 @@
         "required": ["id", "category", "severity", "summary", "slideIds", "sourceChunkIds", "status"],
         "properties": {
           "id": { "type": "string", "minLength": 1, "maxLength": 160 },
-          "category": { "type": "string" },
+          "category": { "enum": ["CURRICULUM_GAP", "FACTUAL_RISK", "SEQUENCE_BREAK", "DUPLICATION", "COVER_IMPACT", "VISUAL_CONSISTENCY", "COMPOSITION_CONFLICT", "IMAGE_QUALITY", "ASSET_RELEVANCE", "LAYERING_CONFLICT", "CHILD_READABILITY", "SOURCE_INCOMPLETE", "PLANNING_FAILED", "BUDGET_RESERVATION_UNKNOWN", "PROVIDER_SUBMISSION_UNKNOWN", "PROVIDER_RESULT_FAILED"] },
           "severity": { "enum": ["INFO", "WARNING", "CRITICAL"] },
           "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "slideIds": { "type": "array", "maxItems": 50, "items": { "type": "string" } },
-          "sourceChunkIds": { "type": "array", "maxItems": 200, "items": { "type": "string" } },
+          "slideIds": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "sourceChunkIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
           "status": { "enum": ["OPEN", "RESOLVED", "ACCEPTED"] },
           "repairDomain": { "enum": ["KNOWLEDGE", "ASSET", "LAYOUT"] },
           "planningFailure": { "$ref": "#/components/schemas/PlanningFailure" }
@@ -1443,12 +1682,36 @@
           }
         }
       },
-      "RunDetailEnvelope": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["data"],
-        "properties": {
-          "data": {
+      "RunDetail": {
+        "description": "Strict public Run detail. AVAILABLE requires status COMPLETED and exactly one readable public DeliveryRecord; that record's runId must equal RunDetail.id, its id must equal deliveryAvailability.deliveryId, and its revisionRound must equal RunDetail.revisionRound. UNAVAILABLE exposes no DeliveryRecord.",
+        "oneOf": [
+          {
+            "allOf": [
+              { "$ref": "#/components/schemas/PublicRun" },
+              {
+                "type": "object",
+                "required": ["blueprint", "generationPlan", "deliveries", "deliveryAvailability", "issues", "progress"],
+                "properties": {
+                  "status": { "const": "COMPLETED" },
+                  "blueprint": { "type": ["object", "null"] },
+                  "generationPlan": {
+                    "oneOf": [
+                      { "$ref": "#/components/schemas/VisualDeckV4GenerationPlan" },
+                      { "type": "null" }
+                    ]
+                  },
+                  "deliveries": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 1,
+                    "items": { "$ref": "#/components/schemas/DeliveryRecord" }
+                  },
+                  "deliveryAvailability": { "$ref": "#/components/schemas/AvailableDeliveryAvailability" }
+                }
+              }
+            ]
+          },
+          {
             "allOf": [
               { "$ref": "#/components/schemas/PublicRun" },
               {
@@ -1462,12 +1725,24 @@
                       { "type": "null" }
                     ]
                   },
-                  "deliveries": { "type": "array", "maxItems": 1, "items": { "$ref": "#/components/schemas/DeliveryRecord" } },
-                  "deliveryAvailability": { "$ref": "#/components/schemas/DeliveryAvailability" }
+                  "deliveries": {
+                    "type": "array",
+                    "maxItems": 0,
+                    "items": { "$ref": "#/components/schemas/DeliveryRecord" }
+                  },
+                  "deliveryAvailability": { "$ref": "#/components/schemas/UnavailableDeliveryAvailability" }
                 }
               }
             ]
           }
+        ]
+      },
+      "RunDetailEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data"],
+        "properties": {
+          "data": { "$ref": "#/components/schemas/RunDetail" }
         }
       },
       "ErrorEnvelope": {
