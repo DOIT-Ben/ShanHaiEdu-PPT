@@ -235,8 +235,31 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
 
   expect(delivery.preview.mimeType).toBe('image/png')
   expect(delivery.sources?.mimeType).toBe('application/json')
+  expect(delivery).toMatchObject({
+    disposition: 'FINAL',
+    qualityStatus: 'APPROVED',
+    openIssueIds: [],
+    identity: { status: 'LEGACY_UNVERIFIED' },
+  })
   expect(deliveryRecordSchema.safeParse({
     ...delivery,
     pptx: { ...delivery.pptx, mimeType: 'application/zip' },
+  }).success).toBe(false)
+
+  expect(deliveryRecordSchema.parse({
+    ...delivery,
+    identity: {
+      status: 'VERIFIED',
+      slideCount: 2,
+      pageNumbers: [1, 2],
+      blueprintHash: 'd'.repeat(64),
+      proposalHash: 'e'.repeat(64),
+    },
+  }).identity).toMatchObject({ status: 'VERIFIED', pageNumbers: [1, 2] })
+  expect(deliveryRecordSchema.safeParse({
+    ...delivery,
+    identity: {
+      status: 'VERIFIED', slideCount: 2, pageNumbers: [1, 3], blueprintHash: 'd'.repeat(64),
+    },
   }).success).toBe(false)
 })

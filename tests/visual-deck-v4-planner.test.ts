@@ -3,6 +3,7 @@ import {
   compileVisualDeckV4Proposal,
   createVisualDeckV4Blueprint,
   createVisualDeckV4BlueprintFromProposal,
+  normalizeVisualDeckV4SourceSpecRequestBinding,
 } from '../src/core/visual-deck-v4-planner'
 
 describe('visual deck v4 chain planner', () => {
@@ -113,5 +114,49 @@ describe('visual deck v4 chain planner', () => {
       { sourceId: 'design', role: 'DESIGN_REFERENCE' },
     ])
     expect(proposal.presentationSpec.goal).toBe('为六年级学生制作一套理解百分数的视觉演示')
+  })
+
+  test('binds omitted audience goal and focus to deterministic request defaults', () => {
+    const source = {
+      kind: 'TEXT' as const,
+      name: '百分数教材.md',
+      text: '百分数表示一个数是另一个数的百分之几。'.repeat(4),
+    }
+    const input = {
+      runId: 'run-v4-default-binding', inputHash: 'input-v4-default-binding', source,
+      document: {
+        name: source.name,
+        chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+        isComplete: true,
+        missingRanges: [],
+      },
+      config: {
+        instruction: '制作一套介绍百分数的课堂演示',
+        sourceMode: 'SOURCE_GROUNDED' as const,
+        deckOptions: {
+          deckType: 'DETAILED_DECK' as const, language: 'zh-CN', length: { slideCount: 2 },
+          aspectRatio: '16:9' as const,
+        },
+      },
+      slideCount: 2,
+      visualDirection: '清晰课堂信息图',
+      createdAt: '2026-08-03T00:00:00.000Z',
+    }
+    const compiled = compileVisualDeckV4Proposal(input)
+    const normalized = normalizeVisualDeckV4SourceSpecRequestBinding(input, {
+      sourceUnderstanding: compiled.sourceUnderstanding,
+      presentationSpec: {
+        ...compiled.presentationSpec,
+        audience: '模型擅自指定的受众',
+        goal: '模型擅自改变的目标',
+        focus: ['模型擅自改变的重点'],
+      },
+    })
+
+    expect(normalized.presentationSpec).toMatchObject({
+      audience: '需要理解本主题的学习者',
+      goal: input.config.instruction,
+      focus: ['围绕《百分数教材》建立清晰理解'],
+    })
   })
 })

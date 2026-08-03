@@ -10,6 +10,7 @@ import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
 import { StructuredModelError } from '../src/core/ports'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { appendV4LifecycleEvent } from '../src/core/v4-lifecycle'
+import { generationBatchStepKeyFor } from '../src/core/generation-batch'
 
 function run(): RunRecord {
   return {
@@ -289,6 +290,7 @@ describe('deck review runner', () => {
         ...transaction.run,
         presentationMode: 'VISUAL_DECK_V4',
         revisionRound: 2,
+        committedBudgetUnits: 40,
         version: transaction.run.version + 1,
       })
       for (const round of [1, 2]) {
@@ -345,6 +347,46 @@ describe('deck review runner', () => {
           },
         })
       }
+      transaction.putStep({
+        id: 'step-generation-batch-r0', runId: 'run-1',
+        idempotencyKey: generationBatchStepKeyFor('run-1', { revisionRound: 0, scope: 'INITIAL' }),
+        inputHash: 'generation-batch-r0-hash', tool: 'generate_image_batch', status: 'COMPLETED',
+        budgetUnits: 20, budgetReservationId: 'batch-reservation-r0', externalOperationId: null, errorCode: null,
+        output: {
+          batchId: `genbatch_${'a'.repeat(32)}`, proposalHash: 'a'.repeat(64), revisionRound: 0,
+          submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', pageCount: 2,
+          pages: [1, 2].map((pageNumber) => ({
+            pageNumber, idempotencyKey: `run-1:slide:${pageNumber}:image:r0:v1`, promptHash: String(pageNumber).repeat(64),
+          })),
+          accounting: {
+            estimatedUnits: 20, committedUnits: 20, settledUnits: 20, releasedUnits: 0,
+            reconciliationUnits: 0, authorization: 'RESERVED', settlement: 'SETTLED',
+          },
+          progress: { submitted: 2, completed: 2, failed: 0 }, status: 'COMPLETED',
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: 'step-revision-generation-batch-r2', runId: 'run-1',
+        idempotencyKey: generationBatchStepKeyFor('run-1', { revisionRound: 2, scope: 'REVISION' }),
+        inputHash: 'revision-generation-batch-r2-hash', tool: 'generate_image_batch', status: 'COMPLETED',
+        budgetUnits: 20, budgetReservationId: 'batch-reservation-r2', externalOperationId: null, errorCode: null,
+        output: {
+          batchId: `genbatch_${'b'.repeat(32)}`, proposalHash: 'b'.repeat(64), revisionRound: 2,
+          submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', pageCount: 2,
+          pages: [1, 2].map((pageNumber) => ({
+            pageNumber, idempotencyKey: `run-1:slide:${pageNumber}:image:r2:v1`, promptHash: String(pageNumber + 2).repeat(64),
+          })),
+          accounting: {
+            estimatedUnits: 20, committedUnits: 20, settledUnits: 20, releasedUnits: 0,
+            reconciliationUnits: 0, authorization: 'RESERVED', settlement: 'SETTLED',
+          },
+          progress: { submitted: 2, completed: 2, failed: 0 }, status: 'COMPLETED',
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
       appendV4LifecycleEvent(transaction, 'revision.started', {
         completed: 0, total: 1, pageNumbers: [2], revisionKind: 'DECK_CONTENT', revisionRound: 1,
       })
@@ -371,7 +413,8 @@ describe('deck review runner', () => {
     })
 
     expect(await runner.review('run-1')).toMatchObject({ passed: false, review: { qualityScore: 88 } })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED' })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) =>
       event.type === 'issue.resolved' && event.payload.issueId === 'failed-media-factual-risk')).toBe(false)
   })
@@ -379,7 +422,33 @@ describe('deck review runner', () => {
   test('does not deliver while an untargeted historical blocking issue remains open', async () => {
     const { repository, reviewer, runner } = await fixture()
     await repository.transact('run-1', (transaction) => {
-      transaction.putRun({ ...transaction.run, revisionRound: 1, version: transaction.run.version + 1 })
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        revisionRound: 1,
+        version: transaction.run.version + 1,
+      })
+      transaction.putStep({
+        id: 'step-generation-batch-r0', runId: 'run-1',
+        idempotencyKey: generationBatchStepKeyFor('run-1', { revisionRound: 0, scope: 'INITIAL' }),
+        inputHash: 'generation-batch-r0-hash', tool: 'generate_image_batch', status: 'COMPLETED',
+        budgetUnits: 20, budgetReservationId: 'batch-reservation-r0', externalOperationId: null,
+        errorCode: null,
+        output: {
+          batchId: `genbatch_${'a'.repeat(32)}`, proposalHash: 'a'.repeat(64), revisionRound: 0,
+          submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', pageCount: 2,
+          pages: [1, 2].map((pageNumber) => ({
+            pageNumber, idempotencyKey: `run-1:slide:${pageNumber}:image:r0:v1`, promptHash: String(pageNumber).repeat(64),
+          })),
+          accounting: {
+            estimatedUnits: 20, committedUnits: 20, settledUnits: 20, releasedUnits: 0,
+            reconciliationUnits: 0, authorization: 'RESERVED', settlement: 'SETTLED',
+          },
+          progress: { submitted: 2, completed: 2, failed: 0 }, status: 'COMPLETED',
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
       transaction.putStep({
         id: 'unapplied-revision-plan-r1', runId: 'run-1', idempotencyKey: revisionPlanStepKey('run-1', 1),
         inputHash: 'unapplied-revision-plan-r1-hash', tool: 'plan_revision', status: 'COMPLETED', budgetUnits: 0,
@@ -407,9 +476,11 @@ describe('deck review runner', () => {
     })
 
     expect(await runner.review('run-1')).toMatchObject({ passed: false, replayed: false, review: { qualityScore: 88 } })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', qualityScore: 88 })
-    expect((await repository.listEvents('run-1')).find((event) => event.type === 'approval.required')).toMatchObject({
-      payload: { kind: 'HUMAN_REVIEW' },
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED', qualityScore: 88 })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
     })
     expect(await runner.review('run-1')).toMatchObject({ passed: false, replayed: true, review: { qualityScore: 88 } })
     expect(reviewer.evaluations.size).toBe(1)

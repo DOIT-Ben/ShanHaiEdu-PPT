@@ -305,8 +305,10 @@ describe('revision planning runner', () => {
     })
   })
 
-  test('requires human review when only informational issues remain', async () => {
-    const { repository, planner, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, plan(), visualDeckV4Blueprint())
+  test('fails a v4 run when a rejected review has only informational issues', async () => {
+    const { repository, planner, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', budgetUnits: 0, committedBudgetUnits: 0,
+    }, plan(), visualDeckV4Blueprint())
     await repository.transact('run-1', (transaction) => {
       const key = deckReviewStepKey(transaction.run)
       const step = transaction.getStep(key)!
@@ -323,13 +325,16 @@ describe('revision planning runner', () => {
     })
 
     expect(await runner.plan('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN',
+      status: 'FAILED',
       step: null,
       plan: null,
     })
     expect(planner.requests.size).toBe(0)
-    expect((await repository.listEvents('run-1')).find((event) => event.type === 'approval.required'))
-      .toMatchObject({ payload: { summary: '自动修订无法继续，请人工确认当前结果或后续处理。' } })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+    })
   })
 
   test('falls back to a complete deterministic v4 plan after model contract repair is exhausted', async () => {
@@ -418,15 +423,24 @@ describe('revision planning runner', () => {
       revisionRound: 2,
       maxRevisionRounds: 2,
       presentationMode: 'VISUAL_DECK_V4',
+      budgetUnits: 0,
+      committedBudgetUnits: 0,
     })
     const result = await runner.plan('run-1')
 
-    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', step: null, plan: null })
+    expect(result).toMatchObject({ status: 'FAILED', step: null, plan: null })
     expect(planner.requests.size).toBe(0)
-    expect(await repository.getRun('run-1')).toMatchObject({ revisionRound: 2 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED', revisionRound: 2 })
     const events = await repository.listEvents('run-1')
     expect(events.some((event) => event.type.startsWith('revision.'))).toBe(false)
-    expect(events.find((event) => event.type === 'approval.required')).toBeDefined()
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        terminalAccounting: { accountingStatus: 'FINAL', authorizedUnits: 0, settledUnits: 0, releasedUnits: 0 },
+      },
+    })
   })
 
   test('counts completed page redraws against the public total revision limit', async () => {
@@ -600,7 +614,7 @@ describe('revision planning runner', () => {
     const current = plan()
     current.operations[0]!.instruction = '保留历史视觉要求并修复当前页面问题。'.repeat(12)
     const { repository, planner, runner } = await fixture({
-      revisionRound: 1, maxRevisionRounds: 4, presentationMode: 'VISUAL_DECK_V4',
+      revisionRound: 1, maxRevisionRounds: 4, presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 0,
     }, current, visualDeckV4Blueprint())
     await repository.transact('run-1', (transaction) => {
       transaction.putStep({
@@ -619,11 +633,17 @@ describe('revision planning runner', () => {
       })
     })
 
-    expect(await runner.plan('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', plan: null })
+    expect(await runner.plan('run-1')).toMatchObject({
+      status: 'FAILED', plan: null,
+    })
     expect([...planner.requests.values()][1]?.contractRepairIssues).toContainEqual({
       path: '$', message: 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
     })
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
+    })
   })
 
   test('rejects missing, unknown and non-image v3 revision targets during planning', async () => {

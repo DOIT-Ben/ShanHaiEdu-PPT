@@ -8,8 +8,9 @@ import type {
   RunRecord,
   StepRecord,
   TenantRevisionRoundsSettings,
+  TerminalAgentEvent,
 } from '../core/ports'
-import type { DeliveryRecord } from '../presentation-contracts'
+import { deliveryRecordSchema, type DeliveryRecord } from '../presentation-contracts'
 import { isPendingRunReconciliationStep } from '../core/media-reconciliation'
 import { buildOperationsReport } from '../core/operations'
 
@@ -128,8 +129,14 @@ export class InMemoryAgentRepository implements AgentRepository {
 
   async getTerminalEvent(runId: string) {
     const stored = this.#runs.get(runId)
-    const event = stored?.events.find((candidate) =>
-      candidate.type === 'run.completed' || candidate.type === 'run.failed' || candidate.type === 'run.cancelled')
+    const event = stored?.events.find((candidate): candidate is TerminalAgentEvent => {
+      if (candidate.type === 'run.accounting.finalized') return true
+      if (candidate.type === 'run.failed') {
+        return !('terminalAccounting' in candidate.payload)
+          || candidate.payload.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
+      }
+      return candidate.type === 'run.completed' || candidate.type === 'run.cancelled'
+    })
     return event ? clone(event) : null
   }
 
@@ -237,7 +244,10 @@ export class InMemoryAgentRepository implements AgentRepository {
         getDelivery(deliveryId) { return clone(nextDeliveries.get(deliveryId) ?? null) },
         putRun(run) { nextRun = clone(run) },
         putStep(step) { nextSteps.set(step.idempotencyKey, clone(step)) },
-        putDelivery(delivery) { nextDeliveries.set(delivery.id, clone(delivery)) },
+        putDelivery(delivery) {
+          const parsed = deliveryRecordSchema.parse(delivery)
+          nextDeliveries.set(parsed.id, clone(parsed))
+        },
         appendEvent(event: NewAgentEvent) {
           const sequence = (nextEvents.at(-1)?.sequence ?? 0) + 1
           const eventId = `${runId}:event:${sequence}`

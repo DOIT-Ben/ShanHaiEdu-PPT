@@ -7,8 +7,10 @@ import {
   MAX_GATEWAY_TOOL_ARGUMENT_BYTES,
 } from '../src/adapters/gateway-courseware-model'
 import { MockArtifactPort } from '../src/adapters/mock-ports'
+import { hashInput } from '../src/core/hash'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
 import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
+import { LEGACY_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
 
 function blueprintDraft() {
   return blueprintDraftSchema.parse({
@@ -112,7 +114,10 @@ function responsesCompletion(name: string, argumentsValue: unknown) {
   })
 }
 
-function streamedResponsesTextCompletion(value: string) {
+function streamedResponsesTextCompletion(
+  value: string,
+  usage?: Readonly<{ input_tokens: number; output_tokens: number; total_tokens: number }>,
+) {
   return new Response([
     `data: ${JSON.stringify({ type: 'response.created', response: { status: 'in_progress' } })}`,
     `data: ${JSON.stringify({
@@ -124,7 +129,7 @@ function streamedResponsesTextCompletion(value: string) {
     `data: ${JSON.stringify({
       type: 'response.output_text.done', text: value,
     })}`,
-    `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}`,
+    `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', ...(usage ? { usage } : {}) } })}`,
     '',
   ].join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
 }
@@ -201,7 +206,16 @@ describe('gateway courseware model', () => {
         if (requests.length === 1) {
           return Response.json({ error: { code: 'json_schema_unsupported', type: 'invalid_request_error' } }, { status: 400 })
         }
-        return responsesCompletion('confirm_structured_generation_ready', { ready: true })
+        return responsesCompletion('confirm_structured_generation_ready', {
+          ready: true,
+          contract: {
+            decision: 'UNCHANGED',
+            checks: [
+              { dimension: 'REQUEST_BINDING', passed: true, evidence: 'request contract accepted' },
+              { dimension: 'SOURCE_GROUNDING', passed: true, evidence: 'nested array contract accepted' },
+            ],
+          },
+        })
       },
     })
     const original = console.error
@@ -215,6 +229,24 @@ describe('gateway courseware model', () => {
     expect(requests).toHaveLength(2)
     expect((requests[0]!.body.text as { format: { type: string; strict: boolean } }).format)
       .toMatchObject({ type: 'json_schema', strict: true })
+    const preflightSchema = (requests[0]!.body.text as {
+      format: { schema: Record<string, any> }
+    }).format.schema
+    expect(preflightSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        ready: { const: true },
+        contract: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            decision: expect.objectContaining({ enum: ['UNCHANGED', 'REVISED'] }),
+            checks: expect.objectContaining({ type: 'array' }),
+          },
+        },
+      },
+    })
     expect(requests[0]!.body.tools).toBeUndefined()
     expect((requests[1]!.body.tools as { strict: boolean }[])[0]).toMatchObject({ strict: true })
     expect(requests.map((request) => request.key)).toEqual([
@@ -231,11 +263,57 @@ describe('gateway courseware model', () => {
         const body = JSON.parse(String(init?.body)) as { text?: unknown }
         return body.text
           ? Response.json({ object: 'response', status: 'completed', output: [{ type: 'function_call', name: 'unexpected', arguments: '{}' }] })
-          : responsesCompletion('confirm_structured_generation_ready', { ready: true })
+          : responsesCompletion('confirm_structured_generation_ready', {
+              ready: true,
+              contract: {
+                decision: 'UNCHANGED',
+                checks: [
+                  { dimension: 'REQUEST_BINDING', passed: true, evidence: 'request contract accepted' },
+                  { dimension: 'SOURCE_GROUNDING', passed: true, evidence: 'nested array contract accepted' },
+                ],
+              },
+            })
       },
     })
     expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-missing-text-0001' }))
       .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+  })
+
+  test('does not hide an exact wrapped model 404 behind the Function compatibility fallback', async () => {
+    let calls = 0
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        calls += 1
+        if (calls === 1) {
+          return Response.json({ error: { code: '404', type: 'upstream_error' } }, {
+            status: 404, headers: { 'x-request-id': 'request-preflight-model-not-found' },
+          })
+        }
+        return responsesCompletion('confirm_structured_generation_ready', {
+          ready: true,
+          contract: {
+            decision: 'UNCHANGED',
+            checks: [
+              { dimension: 'REQUEST_BINDING', passed: true, evidence: 'request contract accepted' },
+              { dimension: 'SOURCE_GROUNDING', passed: true, evidence: 'nested array contract accepted' },
+            ],
+          },
+        })
+      },
+    })
+    const original = console.error
+    console.error = () => undefined
+    try {
+      await expect(model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-model-not-found-0001' }))
+        .rejects.toMatchObject({
+          code: 'MODEL_NOT_FOUND', retryable: false, requestId: 'request-preflight-model-not-found',
+        })
+    } finally {
+      console.error = original
+    }
+    expect(calls).toBe(1)
   })
 
   test('requests the first V4 planning stage through streamed Structured Outputs', async () => {
@@ -321,8 +399,263 @@ describe('gateway courseware model', () => {
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
   })
 
-  test('uses Responses for V4 revision planning and revision execution', async () => {
+  test('keeps the chain-1 final coherence operation on its original strict structured contract', async () => {
+    const review = {
+      decision: 'APPROVED' as const,
+      summary: '请求、来源、叙事、页面覆盖和视觉系统保持一致。',
+      checks: [
+        'REQUEST_BINDING',
+        'SOURCE_GROUNDING',
+        'NARRATIVE_COHERENCE',
+        'SLIDE_COVERAGE',
+        'VISUAL_COHERENCE',
+      ].map((dimension) => ({ dimension, passed: true as const, evidence: `${dimension} 已通过。` })),
+    }
+    let requestBody: Record<string, any> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return streamedResponsesTextCompletion(JSON.stringify(review))
+      },
+    })
+
+    expect(await model.execute({
+      operation: 'review_visual_deck_v4_coherence',
+      schemaName: 'ppt_agent_v4_final_coherence_v1',
+      idempotencyKey: 'run-chain-1:v4:final-coherence:planning:0',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        sourceUnderstanding: { sources: [{ sourceChunkIds: ['chunk-1'] }] },
+        presentationSpec: { slideCount: 2 },
+        slideBriefs: [
+          { pageNumber: 1, sourceChunkIds: ['chunk-1'] },
+          { pageNumber: 2, sourceChunkIds: ['chunk-1'] },
+        ],
+      },
+    })).toEqual(review)
+    expect(requestBody!.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_final_coherence_v1', strict: true,
+    })
+    expect(requestBody!.input[0].content[0].text).toContain('最终连贯性审查')
+  })
+
+  test('delegates the four chain-3 reflection contracts to strict staged Structured Outputs', async () => {
+    const sourceText = '把五个圆片分成两个非空组，可以分成一和四，也可以分成二和三。'
+    const source = { kind: 'TEXT' as const, name: '分与合教材.txt', text: sourceText }
+    const document = {
+      name: source.name,
+      chunks: [{ id: 'chunk-1', sourceId: 'inline-source', text: sourceText, sha256: 'a'.repeat(64) }],
+      isComplete: true,
+      missingRanges: [] as string[],
+    }
+    const config = {
+      instruction: '为一年级学生制作五以内数的分与合课堂演示',
+      sourceMode: 'SOURCE_GROUNDED' as const,
+      deckOptions: {
+        deckType: 'DETAILED_DECK' as const, language: 'zh-CN', length: { slideCount: 2 },
+        aspectRatio: '16:9' as const, audience: '小学一年级学生', focus: '两个非空组',
+        styleHint: '清晰活泼的儿童课堂信息图',
+      },
+    }
+    const proposal = compileVisualDeckV4Proposal({
+      runId: 'run-v4-reflection-gateway', inputHash: 'input-v4-reflection-gateway', source, document, config,
+      slideCount: 2, visualDirection: '清晰活泼的儿童课堂信息图', createdAt: '2026-08-03T00:00:00.000Z',
+    })
+    const deckCandidate = { deckPlan: proposal.deckPlan, visualContract: proposal.visualContract }
+    const slideCandidate = { slideBriefs: proposal.slideBriefs }
+    const outputs: Record<string, unknown> = {
+      ppt_agent_v4_deck_consistency_critic_v1: { issues: [] },
+      ppt_agent_v4_deck_consistency_optimizer_v1: {
+        titleChanges: [], narrativeArcChanges: [], artDirectionChanges: [], paletteChanges: [],
+        typographyChanges: [], mediumChanges: [], visualDensityChanges: [], compositionRuleChanges: [],
+        continuityRuleChanges: [], forbiddenChanges: [],
+      },
+      ppt_agent_v4_slide_brief_critic_v1: { issues: [] },
+      ppt_agent_v4_slide_brief_optimizer_v1: {
+        roleChanges: [], visualMetaphorChanges: [], compositionChanges: [], informationHierarchyChanges: [],
+        previousSlideRelationChanges: [], nextSlideRelationChanges: [],
+      },
+    }
+    const requests: { url: string; body: Record<string, any>; key: string | null }[] = []
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (url, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, any>
+        requests.push({ url: String(url), body, key: new Headers(init?.headers).get('Idempotency-Key') })
+        return streamedResponsesTextCompletion(
+          JSON.stringify(outputs[body.text.format.name]),
+          { input_tokens: 321, output_tokens: 123, total_tokens: 444 },
+        )
+      },
+    })
+
+    await model.execute({
+      operation: 'critique_v4_deck_consistency', schemaName: 'ppt_agent_v4_deck_consistency_critic_v1',
+      idempotencyKey: 'run-v4:deck-reflection:critic', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        presentationSpec: proposal.presentationSpec,
+        candidate: deckCandidate,
+        sourceSummary: sourceText,
+      },
+    })
+    await model.execute({
+      operation: 'optimize_v4_deck_consistency', schemaName: 'ppt_agent_v4_deck_consistency_optimizer_v1',
+      idempotencyKey: 'run-v4:deck-reflection:optimizer', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        candidate: deckCandidate,
+        issues: [{
+          issueId: 'reflection-issue-deck-1', pageNumbers: [1, 2], category: 'NARRATIVE_BREAK',
+          field: 'deckPlan.narrativeArc', problem: '叙事没有收束', desiredChange: '补充结论收束',
+        }],
+      },
+    })
+    await model.execute({
+      operation: 'critique_v4_slide_briefs', schemaName: 'ppt_agent_v4_slide_brief_critic_v1',
+      idempotencyKey: 'run-v4:slide-reflection:critic', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        presentationSpec: proposal.presentationSpec,
+        deckVisual: deckCandidate,
+        candidate: slideCandidate,
+        sourceSummary: sourceText,
+      },
+    })
+    await model.execute({
+      operation: 'optimize_v4_slide_briefs', schemaName: 'ppt_agent_v4_slide_brief_optimizer_v1',
+      idempotencyKey: 'run-v4:slide-reflection:optimizer', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        candidate: slideCandidate,
+        issues: [{
+          issueId: 'reflection-issue-slide-1', pageNumber: 2, category: 'COUNTABILITY_RISK',
+          field: 'composition', problem: '可能重复圆片', desiredChange: '只保留一个权威集合',
+        }],
+      },
+    })
+
+    expect(requests.map((request) => request.url)).toEqual(Array(4).fill('https://newapi.doitbenai.cloud/v1/responses'))
+    expect(requests.map((request) => request.key)).toEqual([
+      'run-v4:deck-reflection:critic', 'run-v4:deck-reflection:optimizer',
+      'run-v4:slide-reflection:critic', 'run-v4:slide-reflection:optimizer',
+    ])
+    for (const request of requests) {
+      expect(request.body.text.format).toMatchObject({ type: 'json_schema', strict: true })
+      expect(request.body.text.format.schema).toMatchObject({ type: 'object', additionalProperties: false })
+      expect(request.body.text.format.schema.oneOf).toBeUndefined()
+      expect(request.body.text.format.schema.anyOf).toBeUndefined()
+      expect(request.body.tools).toBeUndefined()
+      expect(request.body.tool_choice).toBeUndefined()
+      expect(request.body.stream).toBe(true)
+      const userText = request.body.input[1].content[0].text as string
+      expect(userText).toContain('candidate')
+      expect(userText).not.toContain('candidateArtifactHash')
+      expect(userText).not.toContain('reviewContextHash')
+      expect(userText).not.toContain('rubricVersion')
+      const system = request.body.input[0].content[0].text as string
+      expect(system).toContain('不输出思维过程')
+      expect(system).toContain('不要返回哈希')
+      expect(system).toContain('不要返回完整候选')
+    }
+    expect(requests[0]!.body.text.format.schema.properties).toEqual({ issues: expect.any(Object) })
+    expect(requests[2]!.body.text.format.schema.properties).toEqual({ issues: expect.any(Object) })
+    expect(requests[1]!.body.text.format.schema.properties).not.toHaveProperty('chapterChanges')
+    expect(Object.keys(requests[3]!.body.text.format.schema.properties).sort()).toEqual([
+      'compositionChanges', 'informationHierarchyChanges', 'nextSlideRelationChanges',
+      'previousSlideRelationChanges', 'roleChanges', 'visualMetaphorChanges',
+    ])
+    expect(requests[2]!.body.input[0].content[0].text).toContain('重复绘制可数对象')
+    expect(requests[3]!.body.input[0].content[0].text).toContain('冻结教学字段')
+    expect(model.takeExecutionMetrics('run-v4:deck-reflection:critic')).toMatchObject({
+      inputTokens: 321, outputTokens: 123, totalTokens: 444,
+    })
+    expect(model.takeExecutionMetrics('run-v4:slide-reflection:optimizer')).toMatchObject({
+      inputTokens: 321, outputTokens: 123, totalTokens: 444,
+    })
+    expect(model.takeExecutionMetrics('run-v4:deck-reflection:critic')).toBeNull()
+  })
+
+  test('keeps strict Responses Function as the explicit reflection compatibility encoding', async () => {
+    const candidate = {
+      deckPlan: {
+        title: '分与合', slideCount: 2, narrativeArc: ['观察五个圆片', '总结两种分法'],
+        chapters: [{ chapterId: 'story', title: '完整叙事', purpose: '建立分与合', slideNumbers: [1, 2] }],
+      },
+      visualContract: {
+        artDirection: '儿童课堂信息图', palette: ['#FFFFFF', '#227755'], typography: '清晰中文字体',
+        medium: '编辑插画', visualDensity: 'LOW' as const, compositionRules: ['每页一个焦点', '数量对象唯一'],
+        continuityRules: ['统一圆片造型', '统一配色'], forbidden: ['额外编号'],
+      },
+    }
+    const result = {
+      decision: 'UNCHANGED' as const,
+      checks: [
+        'REQUEST_BINDING', 'SOURCE_GROUNDING', 'NARRATIVE_COHERENCE', 'SLIDE_COVERAGE',
+        'VISUAL_COHERENCE', 'IMAGE_MODEL_EXECUTABILITY', 'COUNTABILITY_RISK',
+        'UNAUTHORIZED_TEXT_RISK', 'VISUAL_DENSITY_RISK', 'CROSS_SLIDE_REPETITION',
+        'SOURCE_ROLE_INTEGRITY', 'PEDAGOGICAL_SEQUENCE',
+      ].map((dimension) => ({ dimension, passed: true, evidence: `${dimension} 已通过。` })),
+      findings: [],
+      baseArtifactHash: hashInput(candidate),
+      reviewContextHash: 'f'.repeat(64),
+      appliedFindingIds: [],
+      revisedArtifact: candidate,
+    }
+    let body: Record<string, any> = {}
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        body = JSON.parse(String(init?.body))
+        return responsesCompletion('submit_visual_deck_v4_deck_visual_reflection', result)
+      },
+    })
+
+    await model.execute({
+      operation: 'reflect_and_revise_deck_visual', schemaName: 'ppt_agent_v4_deck_visual_reflection_v1',
+      idempotencyKey: 'run-v4:reflect:deck-visual:0', structuredGenerationProtocol: 'RESPONSES_FUNCTION',
+      payload: {
+        originalRequest: { instruction: '制作分与合演示', targetAudience: null, presentationGoal: null, visualDirection: '儿童课堂信息图' },
+        trustedEvidence: {
+          sourceManifest: [{ sourceId: 'source-1', name: '教材', role: 'CONTENT_SOURCE', status: 'READY', sourceChunkIds: ['chunk-1'] }],
+          sourceChunks: [{ id: 'chunk-1', sourceId: 'source-1', sha256: 'a'.repeat(64), text: '五可以分成一和四。', pageStart: null, pageEnd: null, region: null }],
+        },
+        frozenConstraints: {
+          slideCount: 2, language: 'zh-CN', sourceMode: 'SOURCE_GROUNDED', presentationMode: 'VISUAL_DECK_V4',
+          deckType: 'DETAILED_DECK', audience: '小学一年级学生', goal: '理解分与合', aspectRatio: '16:9', forbidden: [],
+        },
+        governanceContext: { presentationSpec: compileVisualDeckV4Proposal({
+          runId: 'run-v4-reflection-compatibility', inputHash: 'input-v4-reflection-compatibility',
+          source: { kind: 'TEXT', name: '教材.txt', text: '五可以分成一和四。' },
+          document: {
+            name: '教材.txt', chunks: [{ id: 'chunk-1', text: '五可以分成一和四。', sha256: 'a'.repeat(64) }],
+            isComplete: true, missingRanges: [],
+          },
+          config: {
+            instruction: '制作分与合演示', sourceMode: 'SOURCE_GROUNDED',
+            deckOptions: {
+              deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 },
+              aspectRatio: '16:9', audience: '小学一年级学生',
+            },
+          },
+          slideCount: 2, visualDirection: '儿童课堂信息图',
+          presentationGoal: '理解分与合', createdAt: '2026-08-03T00:00:00.000Z',
+        }).presentationSpec },
+        candidateArtifact: candidate, candidateArtifactHash: hashInput(candidate),
+        reviewContextHash: 'f'.repeat(64), rubricVersion: 'v4-reflection-1',
+        providerCapabilities: { deliveryModel: 'RASTER_SLIDES_IN_PPTX' },
+      },
+    })
+
+    expect(body.text).toBeUndefined()
+    expect(body.tools[0]).toMatchObject({
+      name: 'submit_visual_deck_v4_deck_visual_reflection', strict: true,
+    })
+  })
+
+  test('uses patch-only Responses for chain-2 revision application and preserves chain-1', async () => {
     const requestUrls: string[] = []
+    const requests: Array<{ key: string | null; body: any }> = []
     const revisionPlan = {
       summary: '只修订第一页的数量条件。',
       operations: [{
@@ -347,31 +680,66 @@ describe('gateway courseware model', () => {
       slideCount: 2, visualDirection: '温暖儿童绘本风格', createdAt: '2026-08-01T00:00:00.000Z',
     })
     const { compilerVersion: _compilerVersion, ...revisedDraft } = v4Draft
+    const patchResult = {
+      contentPatches: [],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [1],
+    }
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (url, init) => {
         requestUrls.push(String(url))
         const request = JSON.parse(String(init?.body)) as { text?: { format?: { name?: string } } }
+        const key = new Headers(init?.headers).get('Idempotency-Key')
+        requests.push({ key, body: request })
         return request.text?.format?.name === 'ppt_agent_v4_revision_plan_v1'
           ? streamedResponsesTextCompletion(JSON.stringify(revisionPlan))
-          : streamedResponsesTextCompletion(JSON.stringify(revisedDraft))
+          : key === 'v4-revision-apply-chain-2'
+            ? streamedResponsesTextCompletion(JSON.stringify(patchResult))
+            : streamedResponsesTextCompletion(JSON.stringify(revisedDraft))
       },
     })
-    const blueprint = { renderMode: 'VISUAL_DECK_V4' } as never
+    const blueprint = { renderMode: 'VISUAL_DECK_V4', visualDeckV4Proposal: v4Draft } as never
+    const legacyProposal = {
+      ...structuredClone(v4Draft),
+      compilerVersion: LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+    }
+    const legacyBlueprint = { renderMode: 'VISUAL_DECK_V4', visualDeckV4Proposal: legacyProposal } as never
 
     await model.plan({
       tenantId: 'frameflow', blueprint, review: {} as never, sourceChunks: [],
       targetRevisionRound: 1, idempotencyKey: 'v4-revision-plan',
     })
     await model.apply({
-      tenantId: 'frameflow', blueprint, plan: {} as never, sourceChunks: [], idempotencyKey: 'v4-revision-apply',
+      tenantId: 'frameflow', blueprint, plan: {} as never, sourceChunks: [],
+      idempotencyKey: 'v4-revision-apply-chain-2',
+    })
+    await model.apply({
+      tenantId: 'frameflow', blueprint: legacyBlueprint, plan: {} as never, sourceChunks: [],
+      idempotencyKey: 'v4-revision-apply-chain-1',
     })
 
     expect(requestUrls).toEqual([
       'https://newapi.doitbenai.cloud/v1/responses',
       'https://newapi.doitbenai.cloud/v1/responses',
+      'https://newapi.doitbenai.cloud/v1/responses',
     ])
+    const chain2 = requests.find((request) => request.key === 'v4-revision-apply-chain-2')!.body
+    const chain1 = requests.find((request) => request.key === 'v4-revision-apply-chain-1')!.body
+    expect(chain2.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_revision_application_patch_v1', strict: true,
+    })
+    expect(Object.keys(chain2.text.format.schema.properties).sort()).toEqual([
+      'contentPatches', 'layoutPatches', 'redrawOnlyPageNumbers',
+    ])
+    expect(JSON.stringify(chain2.input)).toContain('只返回局部补丁')
+    expect(chain2.text.format.schema.properties).not.toHaveProperty('sourceUnderstanding')
+    expect(chain1.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_revision_application_v1', strict: true,
+    })
+    expect(chain1.text.format.schema.properties).toHaveProperty('sourceUnderstanding')
+    expect(chain1.text.format.schema.properties).toHaveProperty('slideBriefs')
   })
 
   test('rejects an incomplete V4 staged response before using its structured text', async () => {
@@ -800,6 +1168,8 @@ describe('gateway courseware model', () => {
     })
     await expect(invalidJson.execute(request)).rejects.toMatchObject({
       code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-2',
+      submissionState: 'ACCEPTED',
+      contractFailure: { layer: 'JSON_PARSE', responseHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
     })
 
     const invalidContract = new GatewayCoursewareModel({
@@ -811,6 +1181,8 @@ describe('gateway courseware model', () => {
     })
     await expect(invalidContract.execute(request)).rejects.toMatchObject({
       code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-3',
+      submissionState: 'ACCEPTED',
+      contractFailure: { layer: 'JSON_SCHEMA', responseHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
     })
   })
 
@@ -900,22 +1272,56 @@ describe('gateway courseware model', () => {
     }
   })
 
-  test('treats a gateway upstream error as retryable even when wrapped in HTTP 404', async () => {
+  test.each([
+    [401, '401', 'MODEL_AUTH_FAILED'],
+    [401, 401, 'MODEL_AUTH_FAILED'],
+    [403, '403', 'MODEL_FORBIDDEN'],
+    [403, 403, 'MODEL_FORBIDDEN'],
+    [404, '404', 'MODEL_NOT_FOUND'],
+    [404, 404, 'MODEL_NOT_FOUND'],
+  ] as const)('classifies explicit matching wrapped HTTP %i / %s as %s', async (status, providerCode, expectedCode) => {
     const original = console.error
     console.error = () => undefined
     try {
       const model = new GatewayCoursewareModel({
         baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
         artifacts: new MockArtifactPort(),
-        fetchImpl: async () => Response.json({ error: { code: '404', type: 'upstream_error' } }, {
-          status: 404,
-          headers: { 'x-request-id': 'request-upstream-404' },
+        fetchImpl: async () => Response.json({ error: { code: providerCode, type: 'upstream_error' } }, {
+          status,
+          headers: { 'x-request-id': `request-upstream-${status}` },
         }),
       })
       await expect(model.execute({
-        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-upstream',
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
+        idempotencyKey: `plan-upstream-${status}-${typeof providerCode}`,
       })).rejects.toMatchObject({
-        code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-upstream-404', model: 'gpt-5.6',
+        code: expectedCode, retryable: false, requestId: `request-upstream-${status}`, model: 'gpt-5.6',
+      })
+    } finally {
+      console.error = original
+    }
+  })
+
+  test.each([
+    ['missing inner code', undefined, true],
+    ['conflicting inner code', '404', false],
+  ] as const)('does not mistake wrapped 403 with %s for a matching permission error', async (_label, providerCode, retryable) => {
+    const original = console.error
+    console.error = () => undefined
+    try {
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        artifacts: new MockArtifactPort(),
+        fetchImpl: async () => Response.json({ error: { type: 'upstream_error', ...(providerCode ? { code: providerCode } : {}) } }, {
+          status: 403,
+          headers: { 'x-request-id': 'request-upstream-ambiguous-403' },
+        }),
+      })
+      await expect(model.execute({
+        operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
+        idempotencyKey: `plan-upstream-ambiguous-${providerCode ?? 'missing'}`,
+      })).rejects.toMatchObject({
+        code: 'PROVIDER_UNAVAILABLE', retryable, requestId: 'request-upstream-ambiguous-403', model: 'gpt-5.6',
       })
     } finally {
       console.error = original
@@ -975,8 +1381,17 @@ describe('gateway courseware model', () => {
       artifacts: new MockArtifactPort(), fetchImpl: async () => { throw new DOMException('private timeout detail', 'TimeoutError') },
     })
     await expect(model.execute({
-      operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-timeout',
-    })).rejects.toMatchObject({ code: 'PROVIDER_TIMEOUT', retryable: true, model: 'gpt-5.6' })
+      operation: 'create_visual_deck_v4_source_spec', schemaName: 'ppt_agent_v4_source_spec_v1',
+      payload: { document: { chunks: [{ id: 'chunk-1' }] } }, idempotencyKey: 'plan-timeout',
+    })).rejects.toMatchObject({
+      code: 'PROVIDER_TIMEOUT', retryable: true, model: 'gpt-5.6', submissionState: 'UNKNOWN',
+    })
+    expect(model.takeExecutionMetrics('plan-timeout')).toMatchObject({
+      outcome: 'FAILED', errorCode: 'PROVIDER_TIMEOUT', status: null,
+      requestId: null, responseAccepted: false, sseEventCount: 0,
+      submissionState: 'UNKNOWN',
+      durationMs: expect.any(Number),
+    })
   })
 
   test('classifies an interrupted response stream as provider unavailable instead of invalid JSON', async () => {
@@ -991,6 +1406,7 @@ describe('gateway courseware model', () => {
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream',
     })).rejects.toMatchObject({
       code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-stream-1', model: 'gpt-5.6',
+      submissionState: 'ACCEPTED',
     })
   })
 
@@ -1006,6 +1422,7 @@ describe('gateway courseware model', () => {
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream-timeout',
     })).rejects.toMatchObject({
       code: 'PROVIDER_TIMEOUT', retryable: true, requestId: 'request-stream-timeout-1', model: 'gpt-5.6',
+      submissionState: 'ACCEPTED',
     })
   })
 

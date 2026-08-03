@@ -1,9 +1,14 @@
 import type { CreateRunRequest } from '../contracts'
-import { VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
+import {
+  isSupportedVisualDeckV4CompilerVersion,
+  LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+} from '../release-identity'
 import { presentationBlueprintSchema, type PresentationBlueprint } from '../presentation-contracts'
 import {
   visualDeckV4ProposalSchema,
   type VisualDeckV4Config,
+  type VisualDeckV4SourceSpecStage,
   type VisualDeckV4Proposal,
   type VisualDeckV4ProposalDraft,
   type VisualDeckV4SourceRole,
@@ -20,11 +25,40 @@ export type VisualDeckV4PlanningArtifact =
   | 'slide-briefs'
   | 'visual-contract'
 
-export type VisualDeckV4PlanningStage =
-  | 'source-spec'
-  | 'deck-visual'
-  | 'slide-briefs'
-  | 'final-coherence'
+export const LEGACY_V4_PLANNING_STAGES = [
+  'source-spec',
+  'deck-visual',
+  'slide-briefs',
+  'final-coherence',
+] as const
+
+export const V4_PLANNING_STAGES = [
+  'source-spec',
+  'deck-visual',
+  'reflect-deck-visual',
+  'slide-briefs',
+  'reflect-slide-briefs',
+] as const
+
+export const V4_ALL_PLANNING_STAGES = [
+  'source-spec',
+  'deck-visual',
+  'reflect-deck-visual',
+  'slide-briefs',
+  'reflect-slide-briefs',
+  'final-coherence',
+] as const
+
+export type VisualDeckV4PlanningStage = (typeof V4_ALL_PLANNING_STAGES)[number]
+export const V4_PLANNING_STAGE_COUNT = V4_PLANNING_STAGES.length
+
+export function visualDeckV4PlanningStagesForCompiler(
+  compilerVersion: string,
+): readonly VisualDeckV4PlanningStage[] {
+  return compilerVersion === LEGACY_VISUAL_DECK_V4_COMPILER_VERSION
+    ? LEGACY_V4_PLANNING_STAGES
+    : V4_PLANNING_STAGES
+}
 
 export function visualDeckV4PlanningStageStepKey(
   runId: string,
@@ -32,7 +66,11 @@ export function visualDeckV4PlanningStageStepKey(
   attempt = 0,
   repairAttempt = 0,
 ) {
-  const key = `${runId}:v4:${stage}:planning:${attempt}`
+  const key = stage === 'reflect-deck-visual'
+    ? `${runId}:v4:reflect:deck-visual:${attempt}`
+    : stage === 'reflect-slide-briefs'
+      ? `${runId}:v4:reflect:slide-briefs:${attempt}`
+      : `${runId}:v4:${stage}:planning:${attempt}`
   return repairAttempt === 0 ? key : `${key}:repair:${repairAttempt}`
 }
 
@@ -73,7 +111,7 @@ function clipped(value: string, maximum: number) {
 
 function compilerVersion(input: CompileVisualDeckV4Input) {
   const version = input.compilerVersion ?? VISUAL_DECK_V4_COMPILER_VERSION
-  if (version !== VISUAL_DECK_V4_COMPILER_VERSION) {
+  if (!isSupportedVisualDeckV4CompilerVersion(version)) {
     throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
   }
   return version
@@ -126,6 +164,57 @@ function compileSourceUnderstanding(input: CompileVisualDeckV4Input) {
       ...(source.failureCode ? { failureCode: source.failureCode } : {}),
     })),
     missingRanges: [...input.document.missingRanges],
+  }
+}
+
+export function normalizeVisualDeckV4SourceSpecRequestBinding(
+  input: CompileVisualDeckV4Input,
+  candidate: VisualDeckV4SourceSpecStage,
+): VisualDeckV4SourceSpecStage {
+  const expected = compileSourceUnderstanding(input)
+  const candidatesById = new Map(candidate.sourceUnderstanding.sources.map((source) => [source.sourceId, source]))
+  if (candidatesById.size !== expected.sources.length
+    || expected.sources.some((source) => !candidatesById.has(source.sourceId))) {
+    throw new Error('VISUAL_DECK_V4_SOURCE_REFERENCE_INVALID')
+  }
+  const sources = expected.sources.map((source) => ({
+    ...candidatesById.get(source.sourceId)!,
+    sourceId: source.sourceId,
+    name: source.name,
+    role: source.role,
+    status: source.status,
+    sourceChunkIds: source.sourceChunkIds,
+    ...(source.failureCode ? { failureCode: source.failureCode } : {}),
+  }))
+  const explicitAudience = input.config.deckOptions.audience ?? input.targetAudience
+  const title = clipped(input.document.name.replace(/\.[^.]+$/, ''), 120) || '视觉演示'
+  const audience = explicitAudience ?? '需要理解本主题的学习者'
+  const goal = input.presentationGoal ?? input.config.instruction
+  const focus = input.config.deckOptions.focus
+    ? [
+        input.config.deckOptions.focus,
+        ...candidate.presentationSpec.focus.filter((item) => item !== input.config.deckOptions.focus),
+      ].slice(0, 12)
+    : [`围绕《${title}》建立清晰理解`]
+  return {
+    sourceUnderstanding: {
+      ...candidate.sourceUnderstanding,
+      sourceMode: expected.sourceMode,
+      instruction: input.config.instruction,
+      sources,
+      missingRanges: expected.missingRanges,
+    },
+    presentationSpec: {
+      ...candidate.presentationSpec,
+      sourceMode: expected.sourceMode,
+      deckType: input.config.deckOptions.deckType,
+      language: input.config.deckOptions.language,
+      slideCount: input.slideCount,
+      audience,
+      goal,
+      focus,
+      style: input.config.deckOptions.styleHint ?? input.visualDirection,
+    },
   }
 }
 
@@ -242,8 +331,21 @@ export function createVisualDeckV4BlueprintFromProposal(
     || proposal.presentationSpec.deckType !== input.config.deckOptions.deckType
     || proposal.presentationSpec.language !== input.config.deckOptions.language
     || (expectedAudience !== undefined && proposal.presentationSpec.audience !== expectedAudience)
+    || (input.presentationGoal !== undefined && proposal.presentationSpec.goal !== input.presentationGoal)
+    || (input.config.deckOptions.styleHint !== undefined
+      && proposal.presentationSpec.style !== input.config.deckOptions.styleHint)
     || (input.config.deckOptions.focus !== undefined
       && !proposal.presentationSpec.focus.includes(input.config.deckOptions.focus))) {
+    throw new Error('VISUAL_DECK_V4_REQUEST_MISMATCH')
+  }
+  const normalizedSourceSpec = normalizeVisualDeckV4SourceSpecRequestBinding(input, {
+    sourceUnderstanding: proposal.sourceUnderstanding,
+    presentationSpec: proposal.presentationSpec,
+  })
+  if (hashInput(normalizedSourceSpec) !== hashInput({
+    sourceUnderstanding: proposal.sourceUnderstanding,
+    presentationSpec: proposal.presentationSpec,
+  })) {
     throw new Error('VISUAL_DECK_V4_REQUEST_MISMATCH')
   }
   const availableChunkIds = new Set(input.document.chunks.map((chunk) => chunk.id))

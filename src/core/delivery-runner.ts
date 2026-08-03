@@ -122,6 +122,18 @@ export class DeliveryRunner {
         revisionRound: run.revisionRound,
         qualityScore: run.qualityScore,
         qualityOverride: run.qualityOverride,
+        disposition: 'FINAL',
+        qualityStatus: run.qualityOverride ? 'OVERRIDDEN_INTERNAL' : 'APPROVED',
+        openIssueIds: run.qualityOverrideIssueIds ?? [],
+        identity: {
+          status: 'VERIFIED',
+          slideCount: blueprint.slides.length,
+          pageNumbers: blueprint.slides.map((slide) => slide.pageNumber),
+          blueprintHash: hashInput(blueprint),
+          ...(blueprint.visualDeckV4Proposal
+            ? { proposalHash: hashInput(blueprint.visualDeckV4Proposal) }
+            : {}),
+        },
         qualityOverrideAudit: run.qualityOverride
           && run.qualityOverrideBy
           && run.qualityOverrideRole
@@ -160,7 +172,7 @@ export class DeliveryRunner {
         ...(run.release ? { release: run.release } : {}),
         createdAt: this.dependencies.clock.now().toISOString(),
       })
-      return this.complete(run, idempotencyKey, delivery)
+      return this.complete(run, idempotencyKey, delivery, blueprint)
     } catch {
       return this.fail(run, idempotencyKey, 'DELIVERY_FAILED')
     }
@@ -228,10 +240,16 @@ export class DeliveryRunner {
     })
   }
 
-  private async complete(run: RunRecord, idempotencyKey: string, delivery: DeliveryRecord): Promise<DeliveryResult> {
+  private async complete(
+    run: RunRecord,
+    idempotencyKey: string,
+    delivery: DeliveryRecord,
+    blueprint: Awaited<ReturnType<typeof getActiveBlueprint>>,
+  ): Promise<DeliveryResult> {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
+      assertFinalDeliveryForCompletion(transaction.run, blueprint, delivery)
       const now = this.dependencies.clock.now().toISOString()
       const policy = transitionRun(transaction.run, 'COMPLETED')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
@@ -342,4 +360,35 @@ export class DeliveryRunner {
 
 export function deliveryStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) {
   return `${run.id}:delivery:r${run.revisionRound}`
+}
+
+export function assertFinalDeliveryForCompletion(
+  run: RunRecord,
+  blueprint: Awaited<ReturnType<typeof getActiveBlueprint>>,
+  delivery: DeliveryRecord,
+) {
+  if (delivery.disposition !== 'FINAL' || delivery.identity.status !== 'VERIFIED') {
+    throw new Error('FINAL_DELIVERY_IDENTITY_REQUIRED')
+  }
+  if (delivery.runId !== run.id || delivery.revisionRound !== run.revisionRound) {
+    throw new Error('FINAL_DELIVERY_REVISION_MISMATCH')
+  }
+  const expectedPages = blueprint.slides.map((slide) => slide.pageNumber)
+  if (delivery.identity.slideCount !== expectedPages.length
+    || delivery.identity.pageNumbers.some((pageNumber, index) => pageNumber !== expectedPages[index])
+    || delivery.identity.blueprintHash !== hashInput(blueprint)) {
+    throw new Error('FINAL_DELIVERY_BLUEPRINT_MISMATCH')
+  }
+  const proposalHash = blueprint.visualDeckV4Proposal ? hashInput(blueprint.visualDeckV4Proposal) : undefined
+  if (proposalHash !== delivery.identity.proposalHash) throw new Error('FINAL_DELIVERY_PROPOSAL_MISMATCH')
+  if (delivery.qualityOverride) {
+    if (delivery.qualityStatus !== 'OVERRIDDEN_INTERNAL' || !delivery.qualityOverrideAudit) {
+      throw new Error('FINAL_DELIVERY_OVERRIDE_AUDIT_REQUIRED')
+    }
+    if (run.presentationMode === 'VISUAL_DECK_V4' && delivery.qualityOverrideAudit.actorRole !== 'ADMIN') {
+      throw new Error('FINAL_DELIVERY_V4_ADMIN_OVERRIDE_REQUIRED')
+    }
+  } else if (delivery.qualityStatus !== 'APPROVED' || delivery.openIssueIds.length > 0) {
+    throw new Error('FINAL_DELIVERY_QUALITY_STATUS_INVALID')
+  }
 }

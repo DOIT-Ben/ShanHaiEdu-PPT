@@ -1,17 +1,17 @@
 # PPT Agent V4 宿主接口合同
 
 PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资料、预算端口和最终交付展示；资料理解、
-四阶段规划、整页视觉生成、审查、修订、批次恢复和 PPTX 封装均由 Agent 负责。本文不假定任何特定
+五阶段规划、整页视觉生成、审查、修订、批次恢复和 PPTX 封装均由 Agent 负责。本文不假定任何特定
 宿主项目或前端框架。
 
 ## 发布身份
 
 | 字段 | 固定值 | 用途 |
 | --- | --- | --- |
-| 软件版本 | `4.0.0` | 部署与故障定位 |
+| 软件版本 | `4.1.1` | 部署与故障定位 |
 | 演示模式 | `VISUAL_DECK_V4` | NotebookLM 风格整页视觉链路 |
 | HTTP/SSE 合同 | `"1"` | 公共 API 数据格式 |
-| V4 编译器 | `visual-deck-v4-chain-1` | 链式规划实现身份 |
+| V4 编译器 | `visual-deck-v4-chain-3` | 一轮 Critic/Optimizer 规划身份；旧 `chain-1/chain-2` Run 仍按持久化身份恢复 |
 
 `GET /health/live` 与每个 Run 详情的 `release` 都必须返回这些身份字段。模式名不是软件发布版本。
 
@@ -40,6 +40,29 @@ X-PPT-Agent-Project: <externalProjectId>  # 可选
 身份由认证层绑定，请求体的 `host` 只能与该上下文一致。浏览器不得直接持有任一服务 Token。
 
 ## 自动执行的规划
+
+正常 V4 规划使用三次生成调用和两个质量 Critic：
+
+```text
+Source Understanding + Presentation Spec
+-> Deck Plan + Visual Contract 初稿
+-> Deck/Visual Critic
+-> 仅发现问题时：Deck/Visual Optimizer
+-> Slide Briefs 初稿
+-> Slide Briefs Critic
+-> 仅发现问题时：Slide Briefs Optimizer
+-> 确定性 Proposal 校验和图片提示词编译
+```
+
+无质量问题时共 5 次文本调用；两个 Critic 都发现问题时最多 7 次。每个节点最多执行 1 次 Critic 和
+1 次可选 Optimizer，不存在 Critic repair、Optimizer repair 或第三轮业务调用。Critic 只返回问题，
+Optimizer 只返回被授权字段的局部新值；候选哈希、冻结字段、Patch 合并和确定性复验由 Agent 后端负责。
+
+页数、连续页码、公式、来源、冻结文案和 Proposal 合法性属于程序硬校验，失败会阻断规划。审美、表达、
+构图和叙事属于可降级质量反射：Critic 合同/Provider 失败或 Optimizer Patch 无效时记录
+`REFLECTION_SKIPPED`，沿用反射前已验证方案继续出图，不进入五轮技术恢复，也不伪造“已通过”。
+请求结果未知时，同一业务调用最多用同一输入、协议和 Idempotency-Key 恢复 1 次。内部问题、候选哈希、
+Slide Brief 和模型原始输出不属于宿主公共 UI 合同。
 
 V4 规划完成后自动进入 `EXECUTING`。详情中的 `generationPlan` 是生成进度页的唯一内容源，宿主应
 展示标题、受众、页数、叙事流程、每页标题/内容/视觉说明、整体风格与“整页图片型 PPTX，不可编辑”的
@@ -88,5 +111,69 @@ finalizeBatch({
 技术处置，不会伪装成终端用户确认。用户取消会停止新的图片提交，但已经提交的 Provider 任务和批次账务
 仍会在后台对账，Run 不会被重新激活。
 
-完成后交付 PNG 总览和图片型 PPTX。质量审查或技术错误尚未完成时，宿主应按 Run 状态显示可恢复进度；
+标准 V4 Run 的消费者终态只有三类：
+
+| Run 状态 | 宿主可依赖的结果 |
+| --- | --- |
+| `COMPLETED` | 存在完整性校验通过的 `FINAL` PNG 总览和图片型 PPTX |
+| `FAILED` | `run.failed` 提供稳定错误码、是否可重试和终态账务投影 |
+| `CANCELLED` | 停止新提交；已提交任务和批次账务继续以原幂等键对账 |
+
+达到自动返修轮次、页审无法继续返修或历史质量 Issue 状态不一致时，V4 不再创建普通用户
+`HUMAN_REVIEW` 待办。对应稳定失败码为：
+
+- `QUALITY_REMEDIATION_EXHAUSTED`
+- `QUALITY_ISSUE_STATE_INCONSISTENT`
+- `TECHNICAL_RECOVERY_EXHAUSTED`
+- `TECHNICAL_CONFIGURATION_REQUIRED`
+- `WORKER_FATAL`
+
+新 V4 `run.failed` 事件可携带 `terminalAccounting`：
+
+```json
+{
+  "authorizedUnits": 36,
+  "submittedUnits": 15,
+  "settledUnits": 15,
+  "releasedUnits": 21,
+  "reconciliationUnits": 0,
+  "accountingStatus": "FINAL"
+}
+```
+
+`accountingStatus: "FINAL"` 表示授权已由 `settledUnits + releasedUnits` 完整分配；
+`RECONCILIATION_REQUIRED` 表示仍有提交或计费事实待确认，宿主不得自行猜测收费结果，也不得换幂等键重建任务。
+该字段对历史事件保持可选兼容。
+
+质量返修已耗尽但账务尚未确定时，Run 会进入内部 `RECOVERING`，详情同时返回
+`pendingTerminalFailure` 与最新 `terminalAccounting`；它不会回到页审/套审，也不会产生普通用户审批。
+若技术失败已经先进入 `FAILED`，且其 `run.failed.terminalAccounting.accountingStatus` 为
+`RECONCILIATION_REQUIRED`，SSE 必须继续监听。账务最终确定后 Agent 追加一次
+`run.accounting.finalized`，Run 详情中的 `terminalAccounting` 同步变为 `FINAL`，此时消费者才关闭流。
+
+Run 详情中的每个新交付都具有以下消费者身份：
+
+```json
+{
+  "disposition": "FINAL",
+  "qualityStatus": "APPROVED",
+  "openIssueIds": [],
+  "identity": {
+    "status": "VERIFIED",
+    "slideCount": 12,
+    "pageNumbers": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "blueprintHash": "<sha256>",
+    "proposalHash": "<sha256>"
+  },
+  "preview": {},
+  "pptx": {}
+}
+```
+
+`COMPLETED` 只允许引用页集、修订轮次、活动 Blueprint/Proposal 哈希均匹配的 `VERIFIED FINAL` 交付。
+历史交付在读取时归一化为 `identity.status: "LEGACY_UNVERIFIED"`，不会伪造旧记录中不存在的页集或哈希证据。
+当前合同不产出 DRAFT；未审核页面不得冒充 FINAL。
+
+V4 的 `ACCEPT_WITH_OVERRIDE` 仅供已认证的 `ADMIN` 内部治理使用，必须保存操作者、原因、Issue 列表和时间；
+普通用户不能借此取得 FINAL 交付。质量审查或技术错误尚未完成时，宿主应按 Run 状态显示可恢复进度，
 不能通过重建任务、替换幂等键或直接调用 Provider 来绕过 Agent 状态机。

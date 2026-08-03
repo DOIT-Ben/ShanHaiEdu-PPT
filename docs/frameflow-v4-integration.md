@@ -14,7 +14,7 @@
 
 | 字段 | 语义 |
 | --- | --- |
-| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.0.0` |
+| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.1.1` |
 | `presentationMode` | 本次 Run 的能力模式，V4 固定为 `VISUAL_DECK_V4` |
 | `compilerVersion` | V4 链式规划与整页图片编译器版本 |
 | `contractVersion` | HTTP/SSE 数据合同版本，当前为 `"1"` |
@@ -68,7 +68,7 @@ FrameFlow 服务端统一生成 `host`，不要让客户端直接提交租户和
 ```text
 POST /v1/runs
         |
-        |  PLANNING（V4 四个持久化阶段）
+        |  PLANNING（V4 五个持久化阶段）
         v
 GET  /v1/runs/{runId}
 GET  /v1/runs/{runId}/events/history 或 GET /v1/runs/{runId}/events（SSE）
@@ -235,20 +235,23 @@ GET /v1/runs/{runId}
 }
 ```
 
-`pages` 实际会包含 `slideCount` 个页面；上例只展示一个页面以节省篇幅。规划对应的内部四个
+`pages` 实际会包含 `slideCount` 个页面；上例只展示一个页面以节省篇幅。规划对应的内部五个
 持久化阶段是：
 
 1. `Source Understanding + Presentation Spec`；
-2. `Deck Plan + Visual Contract`；
-3. `Slide Briefs`；
-4. `Final Coherence Review`。
+2. `Deck Plan + Visual Contract` 初稿；
+3. `Reflect-and-Revise Deck/Visual`；
+4. `Slide Briefs` 初稿；
+5. `Reflect-and-Revise Slide Briefs`。
 
-FrameFlow 不需要也不应该重建这四个内部工件。可在生成进度中展示 `generationPlan` 的摘要、流程、
+旧 Final Coherence 调用已由第五阶段替换。每个质量节点只执行一次 Critic；只有发现问题时才执行一次
+Optimizer，模型不会拥有 Hash、冻结字段或完整候选的写权限，也不会逐页请求文本模型。
+FrameFlow 不需要也不应该重建或解释这五个内部工件。可在生成进度中展示 `generationPlan` 的摘要、流程、
 逐页标题/内容/视觉说明、风格和不可编辑提示。
 
 ## 6. 自动开始付费出图
 
-V4 的四个规划阶段完成后，Agent 自动冻结规划并进入 `EXECUTING`，随后在图片 Provider 允许的
+V4 的五个规划阶段完成后，Agent 自动冻结规划并进入 `EXECUTING`，随后在图片 Provider 允许的
 并发范围内提交独立页面任务。
 FrameFlow 不需要也不能自行调用 Nano Banana；图片任务的幂等、计费、轮询和断点恢复由 Agent 负责。
 
@@ -368,8 +371,8 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
   "payload": {
     "presentationMode": "VISUAL_DECK_V4",
     "stage": "PLANNING",
-    "completed": 4,
-    "total": 4,
+    "completed": 5,
+    "total": 5,
     "pageNumbers": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     "revisionKind": null,
     "revisionRound": 0,
@@ -398,15 +401,21 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | `DELIVERING` | 等待 Agent 组装预览和 PPTX |
 | `COMPLETED` | 展示交付下载入口 |
 | `PAUSED` | 按 `resumeState` 显示可恢复状态，用户确认后发送 `RESUME` |
-| `NEEDS_HUMAN` | 读取 `issues` 和最新事件的 `nextAction`；按要求重试、修订、接受或联系管理员 |
-| `FAILED` / `CANCELLED` | 终止进度监听，保留错误/取消原因和已有审计记录 |
+| `NEEDS_HUMAN` | 仅处理合同明确保留的人工业务动作；标准 V4 质量耗尽或技术故障不得依赖普通用户放行 |
+| `FAILED` / `CANCELLED` | 保留稳定错误/取消原因、终态账务和已有审计记录；`FAILED` 的账务仍为 `RECONCILIATION_REQUIRED` 时继续监听 |
 
 超时、限流、网关波动、已知任务的查询失败和审查服务暂时不可用，会进入 `RECOVERING`，由 Agent 在
-有界退避后恢复原阶段；同一恢复阶段累计第五次失败会转入可审计的技术处置状态 `NEEDS_HUMAN`，不会无限重试或
-停留在不可推进的恢复状态。`MODEL_AUTH_FAILED`、`MODEL_FORBIDDEN` 与 `MODEL_NOT_FOUND` 等模型鉴权、权限和配置
-故障直接进入该技术处置状态，**不产生** `approval.required`，只能由管理员修复上游配置。来源、合同和内容质量等真正
-需要选择的情形，才使用用户审批。
+有界退避后恢复原阶段；同一恢复阶段累计第五次失败会明确进入
+`FAILED(TECHNICAL_RECOVERY_EXHAUSTED)`，不会无限重试或转成普通用户待办。`MODEL_AUTH_FAILED`、
+`MODEL_FORBIDDEN` 与 `MODEL_NOT_FOUND` 等模型鉴权、权限和配置故障进入
+`FAILED(TECHNICAL_CONFIGURATION_REQUIRED)`，**不产生** `approval.required`，只能由管理员修复上游配置。
+质量反射的非法 JSON、Schema 不匹配或局部 Patch 无效不会阻断主链，而是记录跳过并沿用已经通过硬合同
+校验的候选。只有提交结果未知时才允许用原反射键恢复一次，不从 Source 阶段重新提交，也不创建新 Run。
 未知计费或提交状态时，Agent 会保留原幂等键等待恢复；FrameFlow 不得通过换键强制重新扣费。
+质量返修耗尽但账务未确定时，Run 以 `pendingTerminalFailure` 留在内部 `RECOVERING`，不会重新进入页审、
+套审或用户审批。若 `run.failed` 已发出但其中 `terminalAccounting.accountingStatus` 为
+`RECONCILIATION_REQUIRED`，该事件不是 SSE 关闭点；FrameFlow 必须继续监听，直到收到
+`run.accounting.finalized`，并以该事件和最新 Run 详情中的 `terminalAccounting` 为最终费用事实。
 
 ## 9. 交付下载
 
@@ -478,6 +487,6 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 - [ ] 不在 FrameFlow 生成 Deck Plan、Slide Brief、Visual Contract 或图片 Prompt。
 - [ ] 不自行调用 Nano Banana、不轮询未知的 Provider 任务、不重复扣费。
 - [ ] 展示 `release` 作为唯一版本身份，记录 `gitSha` 和 `releaseId` 以便问题追溯。
-- [ ] 对 `RECOVERING` 显示自动恢复状态；只对 `NEEDS_HUMAN` 显示人工决策入口。
+- [ ] 对 `RECOVERING` 显示自动恢复状态；标准 V4 的质量/技术失败按 `FAILED` 展示，不提供普通用户质量放行入口。
 - [ ] 将 `generationBatch` 作为整单进度和账务汇总展示，不将内部页级 reservation 映射为多次用户扣费。
 - [ ] 只从 `deliveries` 的受保护内容接口下载 PNG/PPTX/来源清单。

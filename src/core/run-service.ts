@@ -12,6 +12,7 @@ import { deliveryStepKey } from './delivery-runner'
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
+import { V4_PLANNING_STAGE_COUNT } from './visual-deck-v4-planner'
 import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRecord } from './ports'
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
@@ -127,7 +128,7 @@ export class RunService {
       })
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: run.presentationMode === 'VISUAL_DECK_V4' ? 4 : 1,
+        total: run.presentationMode === 'VISUAL_DECK_V4' ? V4_PLANNING_STAGE_COUNT : 1,
         pageNumbers: allPageNumbers(transaction.run),
       })
     })
@@ -173,7 +174,7 @@ export class RunService {
         const approvedRevisionRound = this.assertActionPrerequisites(transaction, parsed.data, host)
         const nextPlanningAttempt = this.planningRetryAttempt(transaction, parsed.data)
         const previous = transaction.run
-        const policy = applyRunAction(previous, parsed.data)
+        const policy = applyRunAction(previous, parsed.data, { actorRole: host.role ?? 'USER' })
         const now = this.dependencies.clock.now().toISOString()
         const updated: RunRecord = {
           ...previous,
@@ -239,6 +240,9 @@ export class RunService {
     host: HostContext,
   ) {
     if (action.type === 'ACCEPT_WITH_OVERRIDE') {
+      if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && (host.role ?? 'USER') !== 'ADMIN') {
+        throw new RunServiceError(403, 'QUALITY_OVERRIDE_ADMIN_REQUIRED', 'v4 quality override requires administrator approval')
+      }
       const blueprintStep = transaction.getStep(transaction.run.revisionRound === 0
         ? planningStepKey(transaction.run.id, transaction.run.planningAttempt ?? 0)
         : revisionBlueprintStepKey(transaction.run.id, transaction.run.revisionRound))
@@ -516,7 +520,7 @@ export class RunService {
       || action.type === 'REQUEST_BLUEPRINT_REVISION') {
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: 4,
+        total: V4_PLANNING_STAGE_COUNT,
         pageNumbers: allPageNumbers(updated),
       })
     } else if (action.type === 'RETRY_DELIVERY' || action.type === 'ACCEPT_WITH_OVERRIDE') {

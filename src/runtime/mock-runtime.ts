@@ -16,7 +16,9 @@ import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
 import { PlanningRunner, planningStepKey } from '../core/planning-runner'
+import { hashInput } from '../core/hash'
 import { compileVisualDeckV4Proposal } from '../core/visual-deck-v4-planner'
+import { VISUAL_DECK_V4_REFLECTION_DIMENSIONS } from '../visual-deck-v4-contracts'
 import {
   acquireMediaReconciliationLease,
   acquireRunLease,
@@ -42,6 +44,7 @@ import type {
   RevisionPlanningPort,
   RunRecord,
   StructuredModelPort,
+  StructuredModelMetricsPort,
   StructuredGenerationPreflightPort,
   VisualReviewPort,
 } from '../core/ports'
@@ -68,7 +71,11 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
   async preflightBatchFinalization() {}
 }
 
+type MockReflectionFailureMode = 'NONE' | 'INVALID_SLIDE_CRITIC'
+
 class DeterministicPlanningModel implements StructuredModelPort, StructuredGenerationPreflightPort {
+  constructor(private readonly reflectionFailureMode: MockReflectionFailureMode = 'NONE') {}
+
   async preflightStructuredGeneration() {
     return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
   }
@@ -77,17 +84,76 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
     const visualDeckV4Stage = [
       'create_visual_deck_v4_source_spec',
       'create_visual_deck_v4_deck_visual',
+      'reflect_and_revise_deck_visual',
       'create_visual_deck_v4_slide_briefs',
+      'reflect_and_revise_slide_briefs',
       'review_visual_deck_v4_coherence',
+      'critique_v4_deck_consistency',
+      'optimize_v4_deck_consistency',
+      'critique_v4_slide_briefs',
+      'optimize_v4_slide_briefs',
     ].includes(input.operation)
     if (visualDeckV4Stage) {
+      if (input.operation === 'critique_v4_deck_consistency') return { issues: [] }
+      if (input.operation === 'critique_v4_slide_briefs') {
+        return this.reflectionFailureMode === 'INVALID_SLIDE_CRITIC'
+          ? { decision: 'APPROVED' }
+          : { issues: [] }
+      }
+      if (input.operation === 'optimize_v4_deck_consistency') {
+        return {
+          titleChanges: [], narrativeArcChanges: [], artDirectionChanges: [], paletteChanges: [],
+          typographyChanges: [], mediumChanges: [], visualDensityChanges: [], compositionRuleChanges: [],
+          continuityRuleChanges: [], forbiddenChanges: [],
+        }
+      }
+      if (input.operation === 'optimize_v4_slide_briefs') {
+        return {
+          roleChanges: [], visualMetaphorChanges: [], compositionChanges: [], informationHierarchyChanges: [],
+          previousSlideRelationChanges: [], nextSlideRelationChanges: [],
+        }
+      }
       if (input.operation === 'review_visual_deck_v4_coherence') {
         return {
           decision: 'APPROVED',
-          summary: '资料绑定、叙事、页面覆盖和统一视觉规则均已通过连贯性审查。',
+          summary: '请求、来源、叙事、页面覆盖和视觉系统保持一致。',
           checks: [
-            'REQUEST_BINDING', 'SOURCE_GROUNDING', 'NARRATIVE_COHERENCE', 'SLIDE_COVERAGE', 'VISUAL_COHERENCE',
+            'REQUEST_BINDING',
+            'SOURCE_GROUNDING',
+            'NARRATIVE_COHERENCE',
+            'SLIDE_COVERAGE',
+            'VISUAL_COHERENCE',
           ].map((dimension) => ({ dimension, passed: true, evidence: `${dimension} 已通过。` })),
+        }
+      }
+      if (input.operation === 'reflect_and_revise_deck_visual') {
+        const payload = input.payload as { candidateArtifact: unknown; reviewContextHash: string }
+        const candidate = payload.candidateArtifact
+        return {
+          decision: 'UNCHANGED',
+          checks: VISUAL_DECK_V4_REFLECTION_DIMENSIONS.map((dimension) => ({
+            dimension, passed: true, evidence: `${dimension} 已通过。`,
+          })),
+          findings: [],
+          baseArtifactHash: hashInput(candidate),
+          reviewContextHash: payload.reviewContextHash,
+          appliedFindingIds: [],
+          revisedArtifact: candidate,
+        }
+      }
+      if (input.operation === 'reflect_and_revise_slide_briefs') {
+        const payload = input.payload as { candidateArtifact: unknown; reviewContextHash: string }
+        const candidate = payload.candidateArtifact
+        return {
+          decision: 'UNCHANGED',
+          checks: VISUAL_DECK_V4_REFLECTION_DIMENSIONS.map((dimension) => ({
+            dimension, passed: true, evidence: `${dimension} 已通过。`,
+          })),
+          findings: [],
+          baseArtifactHash: hashInput(candidate),
+          reviewContextHash: payload.reviewContextHash,
+          appliedFindingIds: [],
+          revisedSlides: [],
         }
       }
       const payload = input.payload as {
@@ -415,7 +481,7 @@ type RuntimeInput = Readonly<{
   candidateReviewer?: AssetCandidateReviewPort
   apiToken: string
   authentication?: HostAuthenticationPort
-  model: StructuredModelPort
+  model: StructuredModelPort & Partial<StructuredGenerationPreflightPort> & Partial<StructuredModelMetricsPort>
   visualReviewer: VisualReviewPort
   deckReviewer: DeckReviewPort
   revisionPlanner: RevisionPlanningPort
@@ -474,12 +540,18 @@ export function createAgentRuntime(input: RuntimeInput) {
       health.tickActivity()
     }
   }
-  const model: StructuredModelPort & Partial<StructuredGenerationPreflightPort> = {
+  const model: StructuredModelPort
+    & Partial<StructuredGenerationPreflightPort>
+    & Partial<StructuredModelMetricsPort> = {
     ...(input.model.modelName === undefined ? {} : { modelName: input.model.modelName }),
     execute: trackedCall(input.model.execute.bind(input.model)),
     ...('preflightStructuredGeneration' in input.model
       && typeof input.model.preflightStructuredGeneration === 'function'
       ? { preflightStructuredGeneration: trackedCall(input.model.preflightStructuredGeneration.bind(input.model)) }
+      : {}),
+    ...('takeExecutionMetrics' in input.model
+      && typeof input.model.takeExecutionMetrics === 'function'
+      ? { takeExecutionMetrics: input.model.takeExecutionMetrics.bind(input.model) }
       : {}),
   }
   const visualReviewer: VisualReviewPort = {
@@ -588,6 +660,11 @@ export function createAgentRuntime(input: RuntimeInput) {
       let run = await input.repository.getRun(candidate.id)
       if (!run) return
       if (run.status === 'RECOVERING') {
+        if (run.pendingTerminalFailure) {
+          await generation.reconcileTerminalGenerationBatch(run.id)
+          run = await input.repository.getRun(run.id)
+          if (!run || run.status !== 'RECOVERING') return
+        }
         const resumed = await input.repository.transact(run.id, (transaction) =>
           resumeTechnicalRecovery(transaction, clock))
         if (!resumed) return
@@ -738,10 +815,13 @@ export function createAgentRuntime(input: RuntimeInput) {
 }
 
 export function createMockRuntime(input: Omit<RuntimeInput,
-  'model' | 'visualReviewer' | 'deckReviewer' | 'revisionPlanner' | 'revisionApplication'>) {
+  'model' | 'visualReviewer' | 'deckReviewer' | 'revisionPlanner' | 'revisionApplication'> & Readonly<{
+    reflectionFailureMode?: MockReflectionFailureMode
+  }>) {
+  const { reflectionFailureMode = 'NONE', ...runtimeInput } = input
   return createAgentRuntime({
-    ...input,
-    model: new DeterministicPlanningModel(),
+    ...runtimeInput,
+    model: new DeterministicPlanningModel(reflectionFailureMode),
     visualReviewer: new PassingVisualReview(),
     deckReviewer: new PassingDeckReview(),
     revisionPlanner: new UnsupportedRevisionPlanning(),

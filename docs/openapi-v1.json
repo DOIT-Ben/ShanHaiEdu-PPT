@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "PPT Agent API",
-    "version": "4.0.0",
+    "version": "4.1.1",
     "description": "Host-independent API for durable PPT Agent runs. Bearer credentials are tenant-bound; user and administrator credentials are distinct, and host identity headers are canonicalized by the service."
   },
   "servers": [{ "url": "/" }],
@@ -235,7 +235,7 @@
       ],
       "get": {
         "operationId": "streamRunEvents",
-        "description": "Replays durable AgentEvent objects after the supplied cursor in batches of at most 100 events and 256 KiB, then shares one live poller per Run. Each SSE data field is the same AgentEvent structure returned by event history. The stream closes after a terminal run.completed, run.failed, or run.cancelled event. Clients reconnect with Last-Event-ID or after and must ignore sequences they have already applied.",
+        "description": "Replays durable AgentEvent objects after the supplied cursor in batches of at most 100 events and 256 KiB, then shares one live poller per Run. Each SSE data field is the same AgentEvent structure returned by event history. The stream closes after run.completed, run.cancelled, a run.failed event with FINAL or absent terminal accounting, or the later run.accounting.finalized event. A run.failed event with RECONCILIATION_REQUIRED does not close the stream. Clients reconnect with Last-Event-ID or after and must ignore sequences they have already applied.",
         "parameters": [
           { "$ref": "#/components/parameters/RunId" },
           { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
@@ -481,7 +481,16 @@
                 "properties": {
                   "type": { "const": "run.failed" },
                   "payload": {
-                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "const": "WORKER_FATAL" } } }],
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED"] }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
+                    "unevaluatedProperties": false
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "type": { "const": "run.accounting.finalized" },
+                  "payload": {
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["terminalAccounting"], "properties": { "stage": { "const": "RUN" }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
                     "unevaluatedProperties": false
                   }
                 }
@@ -532,7 +541,7 @@
             "properties": {
               "type": {
                 "not": {
-                  "enum": ["planning.started", "planning.completed", "generation.started", "generation.progress", "generation.completed", "generation.batch.created", "generation.batch.updated", "technical.recovery.started", "technical.recovery.completed", "page_review.started", "page_review.completed", "revision.started", "revision.progress", "revision.completed", "deck_review.started", "deck_review.completed", "delivery.started", "delivery.completed", "run.paused", "run.completed", "run.failed", "run.cancelled"]
+                  "enum": ["planning.started", "planning.completed", "generation.started", "generation.progress", "generation.completed", "generation.batch.created", "generation.batch.updated", "technical.recovery.started", "technical.recovery.completed", "page_review.started", "page_review.completed", "revision.started", "revision.progress", "revision.completed", "deck_review.started", "deck_review.completed", "delivery.started", "delivery.completed", "run.paused", "run.completed", "run.failed", "run.accounting.finalized", "run.cancelled"]
                 }
               }
             }
@@ -880,6 +889,8 @@
           "status": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "RECOVERING", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] },
           "resumeState": { "type": ["string", "null"] },
           "technicalRecovery": { "$ref": "#/components/schemas/TechnicalRecovery" },
+          "pendingTerminalFailure": { "$ref": "#/components/schemas/PendingTerminalFailure" },
+          "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" },
           "release": { "$ref": "#/components/schemas/ReleaseIdentity" },
           "generationBatch": { "$ref": "#/components/schemas/GenerationBatch" },
           "version": { "type": "integer" },
@@ -929,6 +940,16 @@
           "active": { "type": "boolean" }
         }
       },
+      "PendingTerminalFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["errorCode", "reason", "requestedAt"],
+        "properties": {
+          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED"] },
+          "reason": { "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "REVISION_REJECTED_BY_USER", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER"] },
+          "requestedAt": { "type": "string", "format": "date-time" }
+        }
+      },
       "ReleaseIdentity": {
         "type": "object",
         "additionalProperties": false,
@@ -940,6 +961,73 @@
           "contractVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
           "gitSha": { "type": "string", "minLength": 1, "maxLength": 160 },
           "releaseId": { "type": "string", "minLength": 1, "maxLength": 160 }
+        }
+      },
+      "DeliveryArtifact": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifactId", "name", "mimeType", "sha256", "byteLength"],
+        "properties": {
+          "artifactId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "mimeType": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "byteLength": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "DeliveryIdentity": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "slideCount", "pageNumbers", "blueprintHash"],
+            "properties": {
+              "status": { "const": "VERIFIED" },
+              "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+              "pageNumbers": { "type": "array", "minItems": 2, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 50 } },
+              "blueprintHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "proposalHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status"],
+            "properties": { "status": { "const": "LEGACY_UNVERIFIED" } }
+          }
+        ]
+      },
+      "DeliveryRecord": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "runId", "revisionRound", "qualityScore", "qualityOverride", "disposition", "qualityStatus", "openIssueIds", "identity", "preview", "pptx", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "revisionRound": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "qualityScore": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
+          "qualityOverride": { "type": "boolean" },
+          "disposition": { "const": "FINAL" },
+          "qualityStatus": { "enum": ["APPROVED", "OVERRIDDEN_INTERNAL"] },
+          "openIssueIds": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "identity": { "$ref": "#/components/schemas/DeliveryIdentity" },
+          "qualityOverrideAudit": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["actorId", "actorRole", "reason", "issueIds", "acceptedAt"],
+            "properties": {
+              "actorId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "actorRole": { "enum": ["USER", "ADMIN"] },
+              "reason": { "type": "string", "minLength": 10, "maxLength": 2000 },
+              "issueIds": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+              "acceptedAt": { "type": "string", "format": "date-time" }
+            }
+          },
+          "preview": { "allOf": [{ "$ref": "#/components/schemas/DeliveryArtifact" }, { "properties": { "mimeType": { "const": "image/png" } } }] },
+          "pptx": { "allOf": [{ "$ref": "#/components/schemas/DeliveryArtifact" }, { "properties": { "mimeType": { "const": "application/vnd.openxmlformats-officedocument.presentationml.presentation" } } }] },
+          "sources": { "allOf": [{ "$ref": "#/components/schemas/DeliveryArtifact" }, { "properties": { "mimeType": { "const": "application/json" } } }] },
+          "release": { "$ref": "#/components/schemas/ReleaseIdentity" },
+          "createdAt": { "type": "string", "format": "date-time" }
         }
       },
       "GenerationBatch": {
@@ -958,6 +1046,19 @@
           "status": { "enum": ["PREPARED", "PROCESSING", "RECONCILIATION_REQUIRED", "COMPLETED"] },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TerminalAccounting": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["authorizedUnits", "submittedUnits", "settledUnits", "releasedUnits", "reconciliationUnits", "accountingStatus"],
+        "properties": {
+          "authorizedUnits": { "type": "integer", "minimum": 0 },
+          "submittedUnits": { "type": "integer", "minimum": 0 },
+          "settledUnits": { "type": "integer", "minimum": 0 },
+          "releasedUnits": { "type": "integer", "minimum": 0 },
+          "reconciliationUnits": { "type": "integer", "minimum": 0 },
+          "accountingStatus": { "enum": ["FINAL", "RECONCILIATION_REQUIRED"] }
         }
       },
       "PlanningFailure": {
@@ -1100,7 +1201,7 @@
                       { "type": "null" }
                     ]
                   },
-                  "deliveries": { "type": "array", "items": { "type": "object" } }
+                  "deliveries": { "type": "array", "items": { "$ref": "#/components/schemas/DeliveryRecord" } }
                 }
               }
             ]

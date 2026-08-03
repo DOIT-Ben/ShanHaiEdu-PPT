@@ -33,6 +33,7 @@ import {
   allPageNumbers,
   appendV4LifecycleEvent,
   isVisualDeckV4,
+  reconcileVisualDeckV4TerminalState,
   v4LifecyclePayload,
 } from './v4-lifecycle'
 
@@ -423,15 +424,16 @@ export class SlideGenerationCoordinator {
    */
   async reconcileTerminalGenerationBatch(runId: string) {
     const run = await this.dependencies.repository.getRun(runId)
-    if (!run || !isVisualDeckV4(run) || !['CANCELLED', 'FAILED'].includes(run.status)) return false
+    if (!run || !isVisualDeckV4(run)
+      || (!['CANCELLED', 'FAILED'].includes(run.status)
+        && !(run.status === 'RECOVERING' && run.pendingTerminalFailure))) return false
     const identities = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_image_batch')
       .flatMap((step) => {
         const identity = generationBatchIdentityFromStepKey(runId, step.idempotencyKey)
         return identity ? [identity] : []
       })
-    if (identities.length === 0) return false
-    let finalized = true
+    let finalized = identities.length > 0
     for (const identity of identities) {
       await refreshGenerationBatch({
         repository: this.dependencies.repository,
@@ -449,6 +451,9 @@ export class SlideGenerationCoordinator {
         scope: identity.scope,
       })) && finalized
     }
+    const terminalStateChanged = await this.dependencies.repository.transact(runId, (transaction) =>
+      reconcileVisualDeckV4TerminalState(transaction, this.dependencies.clock))
+    if (identities.length === 0) return terminalStateChanged
     return finalized
   }
 

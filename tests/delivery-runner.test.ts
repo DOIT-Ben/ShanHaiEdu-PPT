@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockArtifactPort, MockPresentationRendererPort } from '../src/adapters/mock-ports'
+import { getActiveBlueprint } from '../src/core/active-blueprint'
 import { DeliveryRunner } from '../src/core/delivery-runner'
 import { planningStepKey } from '../src/core/planning-runner'
+import { hashInput } from '../src/core/hash'
 import type { RunRecord } from '../src/core/ports'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
@@ -124,6 +126,7 @@ async function fixture(runOverrides: Partial<RunRecord> = {}) {
 describe('delivery runner', () => {
   test('stores PNG and PPTX artifacts before atomically completing the run', async () => {
     const { repository, artifacts, renderer, runner } = await fixture()
+    const activeBlueprint = await getActiveBlueprint(repository, 'run-1', 0)
     const result = await runner.deliver('run-1')
 
     expect(result).toMatchObject({ status: 'COMPLETED', replayed: false, delivery: { qualityScore: 88 } })
@@ -132,6 +135,14 @@ describe('delivery runner', () => {
     expect(result.delivery?.preview.mimeType).toBe('image/png')
     expect(result.delivery?.pptx.mimeType).toContain('presentationml.presentation')
     expect(result.delivery?.sources?.mimeType).toBe('application/json')
+    expect(result.delivery).toMatchObject({
+      disposition: 'FINAL',
+      qualityStatus: 'APPROVED',
+      openIssueIds: [],
+      identity: {
+        status: 'VERIFIED', slideCount: 2, pageNumbers: [1, 2], blueprintHash: hashInput(activeBlueprint),
+      },
+    })
     expect(artifacts.artifacts.has(result.delivery!.preview.artifactId)).toBe(true)
     const sources = await artifacts.get({ tenantId: 'frameflow', artifactId: result.delivery!.sources!.artifactId })
     expect(JSON.parse(new TextDecoder().decode(sources!.bytes))).toMatchObject({

@@ -464,10 +464,20 @@ describe('slide generation coordinator', () => {
     })
     budget.nextBatchFinalizationPreflightFailure = new Error('HOST_BATCH_FINALIZATION_UNSUPPORTED')
 
-    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 0 })
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'FAILED', submitted: 0 })
     expect(images.operations.size).toBe(0)
     expect(budget.batchReservations.size).toBe(0)
-    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED',
+      terminalAccounting: {
+        accountingStatus: 'FINAL', submittedUnits: 0, settledUnits: 0, reconciliationUnits: 0,
+      },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'run.failed')).toMatchObject({
+      payload: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
       .toMatchObject({ status: 'FAILED', errorCode: 'BATCH_BUDGET_FINALIZATION_UNSUPPORTED' })
   })

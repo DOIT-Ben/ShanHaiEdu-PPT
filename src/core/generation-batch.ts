@@ -408,11 +408,19 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
       }))
       const batch = generationBatchSchema.parse(step.output)
       const now = input.clock.now().toISOString()
-      const next = updatedBatch(batch, {
-        ...batch.accounting,
-        authorization: 'REJECTED',
-        settlement: 'NOT_READY',
-      }, now)
+      const definitiveRejection = errorCode !== 'BATCH_BUDGET_FINALIZATION_UNKNOWN'
+      const next = generationBatchSchema.parse({
+        ...updatedBatch(batch, {
+          ...batch.accounting,
+          authorization: 'REJECTED',
+          settlement: definitiveRejection ? 'RELEASED' : 'NOT_READY',
+          releasedUnits: definitiveRejection ? batch.accounting.estimatedUnits : 0,
+          reconciliationUnits: 0,
+        }, now, definitiveRejection ? 'COMPLETED' : batch.status),
+        progress: definitiveRejection
+          ? { submitted: 0, completed: 0, failed: batch.pageCount }
+          : batch.progress,
+      })
       transaction.putStep({ ...step, status: 'FAILED', errorCode, output: next, updatedAt: now })
       const recovery = beginTechnicalRecovery(transaction, input.clock, errorCode)
       transaction.appendEvent({

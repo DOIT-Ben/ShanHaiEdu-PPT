@@ -170,10 +170,14 @@ describe('media step runner', () => {
 
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'MODEL_FORBIDDEN' })
     expect(await repository.getRun('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN',
+      status: 'FAILED',
       technicalRecovery: { reason: 'MODEL_FORBIDDEN', retryable: false, active: false },
     })
-    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'run.failed')).toMatchObject({
+      payload: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
   })
 
   test('releases Agent budget without calling Provider when the host account is frozen', async () => {

@@ -485,12 +485,35 @@ export const webAssetProvenanceSchema = z.object({
   }).strict().optional(),
 }).strict()
 
-export const deliveryRecordSchema = z.object({
+export const verifiedDeliveryIdentitySchema = z.object({
+  status: z.literal('VERIFIED'),
+  slideCount: z.number().int().min(2).max(50),
+  pageNumbers: z.array(z.number().int().min(1).max(50)).min(2).max(50),
+  blueprintHash: z.string().regex(/^[a-f0-9]{64}$/),
+  proposalHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.pageNumbers.length !== value.slideCount
+    || value.pageNumbers.some((pageNumber, index) => pageNumber !== index + 1)) {
+    context.addIssue({ code: 'custom', path: ['pageNumbers'], message: 'verified delivery pages must be complete and continuous' })
+  }
+})
+
+export const deliveryIdentitySchema = z.discriminatedUnion('status', [
+  verifiedDeliveryIdentitySchema,
+  z.object({ status: z.literal('LEGACY_UNVERIFIED') }).strict(),
+])
+
+const deliveryRecordObjectSchema = z.object({
   id: identifierSchema,
   runId: identifierSchema,
   revisionRound: z.number().int().min(0).max(4),
   qualityScore: z.number().int().min(0).max(100).nullable(),
   qualityOverride: z.boolean(),
+  disposition: z.literal('FINAL').default('FINAL'),
+  qualityStatus: z.enum(['APPROVED', 'OVERRIDDEN_INTERNAL']).optional(),
+  openIssueIds: z.array(identifierSchema).max(50)
+    .refine((value) => new Set(value).size === value.length).default([]),
+  identity: deliveryIdentitySchema.default({ status: 'LEGACY_UNVERIFIED' }),
   qualityOverrideAudit: z.object({
     actorId: identifierSchema,
     actorRole: z.enum(['USER', 'ADMIN']),
@@ -505,7 +528,19 @@ export const deliveryRecordSchema = z.object({
   sources: deliveryArtifactSchema.extend({ mimeType: z.literal('application/json') }).strict().optional(),
   release: releaseIdentitySchema.optional(),
   createdAt: z.string().datetime(),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if (value.qualityStatus === 'OVERRIDDEN_INTERNAL' && !value.qualityOverride) {
+    context.addIssue({ code: 'custom', path: ['qualityStatus'], message: 'internal override status requires qualityOverride' })
+  }
+  if (value.qualityStatus === 'APPROVED' && value.qualityOverride) {
+    context.addIssue({ code: 'custom', path: ['qualityStatus'], message: 'quality override cannot be marked approved' })
+  }
+})
+
+export const deliveryRecordSchema = deliveryRecordObjectSchema.transform((value) => ({
+  ...value,
+  qualityStatus: value.qualityStatus ?? (value.qualityOverride ? 'OVERRIDDEN_INTERNAL' as const : 'APPROVED' as const),
+}))
 
 export type BlueprintDraft = z.infer<typeof blueprintDraftSchema>
 export type PresentationBlueprint = z.infer<typeof presentationBlueprintSchema>
@@ -516,7 +551,8 @@ export type DeckReviewDraft = z.infer<typeof deckReviewDraftSchema>
 export type DeckReview = z.infer<typeof deckReviewSchema>
 export type RevisionPlanDraft = z.infer<typeof revisionPlanDraftSchema>
 export type RevisionPlan = z.infer<typeof revisionPlanSchema>
-export type DeliveryRecord = z.infer<typeof deliveryRecordSchema>
+export type DeliveryRecordInput = z.input<typeof deliveryRecordSchema>
+export type DeliveryRecord = z.output<typeof deliveryRecordSchema>
 
 export function revisionRepairDomain(operation: z.infer<typeof revisionOperationSchema>) {
   if (operation.kind === 'UPDATE_CONTENT') return 'KNOWLEDGE' as const

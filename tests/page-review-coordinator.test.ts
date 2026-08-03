@@ -16,6 +16,7 @@ import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import type { PresentationBlueprint } from '../src/presentation-contracts'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
+import { generationBatchStepKeyFor } from '../src/core/generation-batch'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -151,6 +152,29 @@ async function fixture(options: Readonly<{
         updatedAt: transaction.run.updatedAt,
       })
     }
+    if (transaction.run.presentationMode === 'VISUAL_DECK_V4') {
+      transaction.putStep({
+        id: 'step-generation-batch-r0', runId: 'run-1',
+        idempotencyKey: generationBatchStepKeyFor('run-1', { revisionRound: 0, scope: 'INITIAL' }),
+        inputHash: 'generation-batch-r0-hash', tool: 'generate_image_batch', status: 'COMPLETED',
+        budgetUnits: 30, budgetReservationId: 'batch-reservation-r0', externalOperationId: null,
+        errorCode: null,
+        output: {
+          batchId: `genbatch_${'a'.repeat(32)}`, proposalHash: 'a'.repeat(64), revisionRound: 0,
+          submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', pageCount: 3,
+          pages: [1, 2, 3].map((pageNumber) => ({
+            pageNumber, idempotencyKey: `run-1:slide:${pageNumber}:image:r0:v1`, promptHash: String(pageNumber).repeat(64),
+          })),
+          accounting: {
+            estimatedUnits: 30, committedUnits: 30, settledUnits: 30, releasedUnits: 0,
+            reconciliationUnits: 0, authorization: 'RESERVED', settlement: 'SETTLED',
+          },
+          progress: { submitted: 3, completed: 3, failed: 0 }, status: 'COMPLETED',
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    }
   })
   const reviewer = new VisualReviewRunner({ repository, reviewer: reviewerPort, clock })
     return {
@@ -274,6 +298,31 @@ describe('page review coordinator', () => {
         revisionKind: 'PAGE_VISUAL', revisionRound: 1, maxRevisionRounds: 2,
         pageNumbers: [2], completed: 0, total: 1,
       },
+    })
+  })
+
+  test('fails explicitly when a rejected v4 page exhausts bounded remediation', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+        revisionRound: 2, maxRevisionRounds: 2,
+      },
+    })
+    const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact((imageStep.output as { artifactId: string }).artifactId, {
+      approved: false, textDetected: false, visualScore: 55,
+      reasons: ['第二页仍存在阻断课堂使用的视觉错误。'],
+      retryInstruction: 'Remove the duplicated countable objects on page two.',
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED', revisionRound: 2 })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
     })
   })
 
@@ -452,13 +501,13 @@ describe('page review coordinator', () => {
     expect(resolvedIds).not.toContain('independent-image-quality-issue')
   })
 
-  test('moves to human review before revising when cumulative v4 instructions exceed the lossless budget', async () => {
+  test('fails explicitly when cumulative v4 instructions cannot fit another bounded revision', async () => {
     const planned = visualDeckV4Blueprint()
     const { repository, reviewerPort, artifacts, coordinator } = await fixture({
       plannedBlueprint: planned,
       runOverrides: {
         presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
-        revisionRound: 1, maxRevisionRounds: 4,
+        revisionRound: 1, maxRevisionRounds: 4, committedBudgetUnits: 31,
       },
     })
     const revisedArtifact = await artifacts.put({
@@ -500,12 +549,32 @@ describe('page review coordinator', () => {
         },
         createdAt: now, updatedAt: now,
       })
+      transaction.putStep({
+        id: 'step-revision-generation-batch-r1', runId: 'run-1',
+        idempotencyKey: generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' }),
+        inputHash: 'revision-generation-batch-r1-hash', tool: 'generate_image_batch', status: 'COMPLETED',
+        budgetUnits: 1, budgetReservationId: 'batch-reservation-r1', externalOperationId: null,
+        errorCode: null,
+        output: {
+          batchId: `genbatch_${'b'.repeat(32)}`, proposalHash: 'b'.repeat(64), revisionRound: 1,
+          submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', pageCount: 1,
+          pages: [{ pageNumber: 1, idempotencyKey: 'run-1:slide:2:image:r1:v1', promptHash: '2'.repeat(64) }],
+          accounting: {
+            estimatedUnits: 1, committedUnits: 1, settledUnits: 1, releasedUnits: 0,
+            reconciliationUnits: 0, authorization: 'RESERVED', settlement: 'SETTLED',
+          },
+          progress: { submitted: 1, completed: 1, failed: 0 }, status: 'COMPLETED',
+          createdAt: now, updatedAt: now,
+        },
+        createdAt: now, updatedAt: now,
+      })
     })
 
-    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', rejected: 1 })
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
     expect((await repository.listSteps('run-1')).some((step) =>
       step.idempotencyKey === revisionPlanStepKey('run-1', 2))).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('replays a completed page-review phase without model calls', async () => {

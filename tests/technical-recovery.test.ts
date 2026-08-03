@@ -52,11 +52,16 @@ describe('technical recovery', () => {
     }
 
     expect(await repository.getRun('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN',
+      status: 'FAILED',
       technicalRecovery: { attempt: 5, reason: 'PROVIDER_TIMEOUT', retryable: false, active: false, nextAttemptAt: null },
     })
     const events = await repository.listEvents('run-1')
-    expect(events.at(-1)).toMatchObject({ type: 'technical.recovery.completed', payload: { attempt: 5, active: false } })
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'technical.recovery.completed', payload: expect.objectContaining({ attempt: 5, active: false }),
+    }))
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'TECHNICAL_RECOVERY_EXHAUSTED' },
+    })
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 
@@ -69,7 +74,7 @@ describe('technical recovery', () => {
 
     expect(isTechnicalFailureCode('MODEL_FORBIDDEN')).toBe(true)
     expect(await repository.getRun('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN',
+      status: 'FAILED',
       technicalRecovery: {
         reason: 'MODEL_FORBIDDEN', retryable: false, active: false, nextAttemptAt: null,
       },
@@ -77,8 +82,37 @@ describe('technical recovery', () => {
     const events = await repository.listEvents('run-1')
     expect(events).toContainEqual(expect.objectContaining({
       type: 'phase.changed',
-      payload: expect.objectContaining({ reason: 'TECHNICAL_CONFIGURATION_REQUIRED' }),
+      payload: expect.objectContaining({ to: 'FAILED', reason: 'TECHNICAL_CONFIGURATION_REQUIRED' }),
     }))
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('defers a non-retryable technical failure while provider accounting is unknown', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await repository.createRun({ ...run(), committedBudgetUnits: 1 })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-image-1', runId: 'run-1', idempotencyKey: 'run-1:slide:1:image:r0:v1',
+        inputHash: 'image-1', tool: 'generate_slide_image', status: 'WAITING', budgetUnits: 1,
+        budgetReservationId: 'reservation-1', externalOperationId: 'provider-operation-1',
+        errorCode: null, output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      beginTechnicalRecovery(transaction, clock, 'MODEL_FORBIDDEN')
+    })
+
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      terminalAccounting: { accountingStatus: 'RECONCILIATION_REQUIRED' },
+      technicalRecovery: { reason: 'TERMINAL_ACCOUNTING_PENDING', active: true },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 })

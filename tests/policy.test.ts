@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { CONTRACT_VERSION } from '../src/contracts'
+import { CONTRACT_VERSION, type RunAction } from '../src/contracts'
 import {
   PolicyError,
   applyRunAction,
@@ -53,6 +53,22 @@ describe('run transition policy', () => {
     expect(result).toMatchObject({ status: 'DELIVERING', qualityOverride: true, version: 4 })
     expect(canTransition('DELIVERING', 'COMPLETED')).toBe(true)
     expect(canTransition('DELIVERING', 'FAILED')).toBe(true)
+  })
+
+  test('allows a v4 quality override only in an administrator policy context', () => {
+    const action: RunAction = {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'ACCEPT_WITH_OVERRIDE',
+      expectedVersion: 3,
+      reason: '内部管理员已经复核所有问题并记录质量放行依据。',
+      issueIds: ['issue-visual-1'],
+    }
+    const v4 = state({ status: 'NEEDS_HUMAN', presentationMode: 'VISUAL_DECK_V4' })
+
+    expect(() => applyRunAction(v4, action, { actorRole: 'USER' }))
+      .toThrow('v4 quality override requires administrator context')
+    expect(applyRunAction(v4, action, { actorRole: 'ADMIN' }))
+      .toMatchObject({ status: 'DELIVERING', qualityOverride: true })
   })
 
   test('rejects stale actions and invalid terminal transitions', () => {
