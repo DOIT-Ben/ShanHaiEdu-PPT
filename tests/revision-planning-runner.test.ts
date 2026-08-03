@@ -307,7 +307,8 @@ describe('revision planning runner', () => {
 
   test('delivers a v4 run when a rejected review has only informational issues', async () => {
     const { repository, planner, runner } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', budgetUnits: 0, committedBudgetUnits: 0,
+      presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+      budgetUnits: 0, committedBudgetUnits: 0,
     }, plan(), visualDeckV4Blueprint())
     await repository.transact('run-1', (transaction) => {
       const key = deckReviewStepKey(transaction.run)
@@ -422,6 +423,7 @@ describe('revision planning runner', () => {
       revisionRound: 2,
       maxRevisionRounds: 2,
       presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
       budgetUnits: 0,
       committedBudgetUnits: 0,
     })
@@ -435,6 +437,27 @@ describe('revision planning runner', () => {
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
     expect(events.some((event) => event.type === 'run.failed')).toBe(false)
     expect(events.at(-1)).toMatchObject({ type: 'delivery.started' })
+  })
+
+  test('keeps a supervised v4 run behind internal review when revisions are disabled', async () => {
+    const { repository, planner, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'SUPERVISED',
+      revisionRound: 0,
+      maxRevisionRounds: 0,
+      budgetUnits: 0,
+      committedBudgetUnits: 0,
+    })
+
+    expect(await runner.plan('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', plan: null })
+    expect(planner.requests.size).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN', qualityOverride: false,
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(true)
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
   })
 
   test('counts completed page redraws against the public total revision limit', async () => {
@@ -608,7 +631,8 @@ describe('revision planning runner', () => {
     const current = plan()
     current.operations[0]!.instruction = '保留历史视觉要求并修复当前页面问题。'.repeat(12)
     const { repository, planner, runner } = await fixture({
-      revisionRound: 1, maxRevisionRounds: 4, presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 0,
+      revisionRound: 1, maxRevisionRounds: 4, presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO', committedBudgetUnits: 0,
     }, current, visualDeckV4Blueprint())
     await repository.transact('run-1', (transaction) => {
       transaction.putStep({

@@ -240,14 +240,23 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
     qualityStatus: 'APPROVED',
     openIssueIds: [],
     identity: { status: 'LEGACY_UNVERIFIED' },
+    qualityPolicyAudit: null,
+    qualityOverrideAudit: null,
   })
+  expect(Object.hasOwn(delivery, 'qualityPolicyAudit')).toBe(true)
+  expect(Object.hasOwn(delivery, 'qualityOverrideAudit')).toBe(true)
   expect(deliveryRecordSchema.safeParse({
     ...delivery,
     pptx: { ...delivery.pptx, mimeType: 'application/zip' },
   }).success).toBe(false)
 
+  const {
+    qualityPolicyAudit: _qualityPolicyAudit,
+    qualityOverrideAudit: _qualityOverrideAudit,
+    ...legacyDelivery
+  } = delivery
   expect(deliveryRecordSchema.parse({
-    ...delivery,
+    ...legacyDelivery,
     identity: {
       status: 'VERIFIED',
       slideCount: 2,
@@ -262,4 +271,83 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
       status: 'VERIFIED', slideCount: 2, pageNumbers: [1, 3], blueprintHash: 'd'.repeat(64),
     },
   }).success).toBe(false)
+
+  const policyAudit = {
+    provenance: 'SYSTEM_POLICY' as const,
+    policyId: 'v4-non-blocking-quality-v1',
+    reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+    issueIds: ['issue-visual-1'],
+    acceptedAt: '2026-07-21T00:00:00.000Z',
+  }
+  expect(deliveryRecordSchema.parse({
+    ...delivery,
+    qualityOverride: true,
+    qualityStatus: 'SYSTEM_POLICY_ACCEPTED',
+    openIssueIds: ['issue-visual-1'],
+    qualityPolicyAudit: policyAudit,
+  })).toMatchObject({
+    qualityStatus: 'SYSTEM_POLICY_ACCEPTED',
+    qualityPolicyAudit: policyAudit,
+  })
+  expect(deliveryRecordSchema.safeParse({
+    ...delivery,
+    qualityOverride: true,
+    qualityStatus: 'SYSTEM_POLICY_ACCEPTED',
+    openIssueIds: ['issue-visual-1'],
+  }).success).toBe(false)
+
+  expect(deliveryRecordSchema.safeParse({
+    ...delivery,
+    identity: {
+      status: 'VERIFIED', slideCount: 2, pageNumbers: [1, 2], blueprintHash: 'd'.repeat(64),
+    },
+    qualityOverride: true,
+    qualityStatus: 'OVERRIDDEN_INTERNAL',
+    openIssueIds: ['issue-visual-1'],
+  }).success).toBe(false)
+
+  const { qualityStatus: _qualityStatus, ...legacyUnclassifiedDelivery } = legacyDelivery
+  for (const legacyActorAudit of [{
+    actorId: 'ppt-agent-quality-policy',
+    actorRole: 'ADMIN' as const,
+    reason: policyAudit.reason,
+    issueIds: policyAudit.issueIds,
+    acceptedAt: policyAudit.acceptedAt,
+  }, {
+    actorId: 'ppt-agent-quality-policy',
+    actorRole: 'ADMIN' as const,
+    reason: '管理员已逐项复核并接受当前问题。',
+    issueIds: policyAudit.issueIds,
+    acceptedAt: policyAudit.acceptedAt,
+  }]) {
+    expect(deliveryRecordSchema.parse({
+      ...legacyUnclassifiedDelivery,
+      qualityOverride: true,
+      openIssueIds: ['issue-visual-1'],
+      qualityOverrideAudit: legacyActorAudit,
+    })).toMatchObject({
+      qualityStatus: 'OVERRIDDEN_INTERNAL',
+      qualityPolicyAudit: null,
+      qualityOverrideAudit: legacyActorAudit,
+    })
+  }
+
+  expect(deliveryRecordSchema.parse({
+    ...delivery,
+    qualityOverride: true,
+    qualityStatus: 'OVERRIDDEN_INTERNAL',
+    openIssueIds: ['issue-visual-1'],
+    qualityPolicyAudit: null,
+    qualityOverrideAudit: {
+      actorId: 'ppt-agent-quality-policy',
+      actorRole: 'ADMIN',
+      reason: policyAudit.reason,
+      issueIds: policyAudit.issueIds,
+      acceptedAt: policyAudit.acceptedAt,
+    },
+  })).toMatchObject({
+    qualityStatus: 'OVERRIDDEN_INTERNAL',
+    qualityPolicyAudit: null,
+    qualityOverrideAudit: { actorId: 'ppt-agent-quality-policy', actorRole: 'ADMIN' },
+  })
 })

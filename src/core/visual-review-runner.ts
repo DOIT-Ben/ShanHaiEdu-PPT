@@ -228,7 +228,7 @@ export class VisualReviewRunner {
           payload: {
             id: `${step.id}:visual-review`,
             category: 'IMAGE_QUALITY',
-            severity: review.textDetected ? 'CRITICAL' : 'WARNING',
+            severity: (review.qualityImpact ?? 'HARD_BLOCKER') === 'HARD_BLOCKER' ? 'CRITICAL' : 'WARNING',
             summary: review.reasons.join('；').slice(0, 500) || '页面视觉素材未通过质检。',
             slideIds: [input.slideId],
             sourceChunkIds: [],

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import JSZip from 'jszip'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockArtifactPort, MockPresentationRendererPort } from '../src/adapters/mock-ports'
 import { getActiveBlueprint } from '../src/core/active-blueprint'
-import { DeliveryRunner } from '../src/core/delivery-runner'
+import { assertFinalDeliveryForCompletion, DeliveryRunner } from '../src/core/delivery-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import { hashInput } from '../src/core/hash'
 import type { RunRecord } from '../src/core/ports'
@@ -123,6 +124,37 @@ async function fixture(runOverrides: Partial<RunRecord> = {}) {
   }
 }
 
+async function rewritePptxEntry(
+  archive: JSZip,
+  path: string,
+  search: string,
+  replacement: string,
+) {
+  const entry = archive.file(path)
+  if (!entry) throw new Error(`missing test PPTX entry: ${path}`)
+  const xml = await entry.async('string')
+  if (!xml.includes(search)) throw new Error(`missing test PPTX text in ${path}: ${search}`)
+  archive.file(path, xml.replace(search, replacement))
+}
+
+async function expectRejectedV4Pptx(mutate: (archive: JSZip) => void | Promise<void>) {
+  const { repository, renderer, runner } = await fixture({
+    presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+    qualityDisposition: 'REVIEW_PASSED',
+  })
+  const renderPptx = renderer.renderPptx.bind(renderer)
+  renderer.renderPptx = async (input) => {
+    const archive = await JSZip.loadAsync(await renderPptx(input))
+    await mutate(archive)
+    return archive.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })
+  }
+
+  expect(await runner.deliver('run-1')).toMatchObject({
+    status: 'RECOVERING', delivery: null, step: { status: 'FAILED', errorCode: 'DELIVERY_FAILED' },
+  })
+  expect(await repository.listDeliveries('run-1')).toEqual([])
+}
+
 describe('delivery runner', () => {
   test('persists a Usage V2 finalization outbox in the same completion transaction', async () => {
     const { repository, runner } = await fixture({ accountingProtocol: 'FRAMEFLOW_USAGE_V2' })
@@ -185,13 +217,110 @@ describe('delivery runner', () => {
       qualityOverrideAt: '2026-07-21T00:00:00.000Z',
     })
     const result = await runner.deliver('run-1')
-    expect(result.delivery?.qualityOverrideAudit).toEqual({
-      actorId: 'admin-1',
-      actorRole: 'ADMIN',
-      reason: '管理员已逐项复核并接受当前教学风险。',
-      issueIds: ['issue-factual-1'],
-      acceptedAt: '2026-07-21T00:00:00.000Z',
+    expect(result.delivery).toMatchObject({
+      qualityStatus: 'OVERRIDDEN_INTERNAL',
+      qualityPolicyAudit: null,
+      qualityOverrideAudit: {
+        actorId: 'admin-1',
+        actorRole: 'ADMIN',
+        reason: '管理员已逐项复核并接受当前教学风险。',
+        issueIds: ['issue-factual-1'],
+        acceptedAt: '2026-07-21T00:00:00.000Z',
+      },
     })
+  })
+
+  test('delivers an ambiguous legacy quality actor as an internal override without rewriting its audit', async () => {
+    const { runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      qualityOverride: true,
+      qualityOverrideBy: 'ppt-agent-quality-policy',
+      qualityOverrideRole: 'ADMIN',
+      qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      qualityOverrideIssueIds: ['legacy-quality-issue'],
+      qualityOverrideAt: '2026-07-21T00:00:00.000Z',
+    })
+
+    expect(await runner.deliver('run-1')).toMatchObject({
+      status: 'COMPLETED',
+      delivery: {
+        qualityStatus: 'OVERRIDDEN_INTERNAL',
+        qualityPolicyAudit: null,
+        qualityOverrideAudit: {
+          actorId: 'ppt-agent-quality-policy',
+          actorRole: 'ADMIN',
+          reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+          issueIds: ['legacy-quality-issue'],
+          acceptedAt: '2026-07-21T00:00:00.000Z',
+        },
+      },
+    })
+  })
+
+  test('records automatic quality acceptance as system policy provenance without an admin actor', async () => {
+    const policyAudit = {
+      provenance: 'SYSTEM_POLICY' as const,
+      policyId: 'v4-non-blocking-quality-v1',
+      reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      issueIds: ['issue-visual-1'],
+      acceptedAt: '2026-07-21T00:00:00.000Z',
+    }
+    const { runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      qualityOverride: true,
+      qualityOverrideReason: policyAudit.reason,
+      qualityOverrideBy: null,
+      qualityOverrideRole: null,
+      qualityOverrideIssueIds: policyAudit.issueIds,
+      qualityOverrideAt: policyAudit.acceptedAt,
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+      qualityPolicyAudit: policyAudit,
+    } as Partial<RunRecord> & {
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED'
+      qualityPolicyAudit: typeof policyAudit
+    })
+
+    const result = await runner.deliver('run-1')
+
+    expect(result.delivery).toMatchObject({
+      qualityOverride: true,
+      qualityStatus: 'SYSTEM_POLICY_ACCEPTED',
+      qualityPolicyAudit: policyAudit,
+      qualityOverrideAudit: null,
+    })
+  })
+
+  test('rejects system quality policy provenance outside bounded-auto v4 delivery', async () => {
+    const policyAudit = {
+      provenance: 'SYSTEM_POLICY' as const,
+      policyId: 'v4-non-blocking-quality-v1',
+      reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      issueIds: ['issue-visual-1'],
+      acceptedAt: '2026-07-21T00:00:00.000Z',
+    }
+    const { repository, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      qualityOverride: true,
+      qualityOverrideReason: policyAudit.reason,
+      qualityOverrideBy: null,
+      qualityOverrideRole: null,
+      qualityOverrideIssueIds: policyAudit.issueIds,
+      qualityOverrideAt: policyAudit.acceptedAt,
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+      qualityPolicyAudit: policyAudit,
+    })
+    const result = await runner.deliver('run-1')
+    const completedRun = (await repository.getRun('run-1'))!
+    const activeBlueprint = await getActiveBlueprint(repository, 'run-1', completedRun.revisionRound)
+
+    expect(() => assertFinalDeliveryForCompletion(
+      { ...completedRun, automationLevel: 'SUPERVISED' },
+      activeBlueprint,
+      result.delivery!,
+    )).toThrow('FINAL_DELIVERY_POLICY_MODE_INVALID')
   })
 
   test('moves to human review when a controlled source artifact is unavailable', async () => {
@@ -212,6 +341,152 @@ describe('delivery runner', () => {
     expect(result.status).toBe('NEEDS_HUMAN')
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
     expect(await repository.listDeliveries('run-1')).toEqual([])
+  })
+
+  test('does not complete v4 when non-empty rendered artifacts are unreadable', async () => {
+    const { repository, renderer, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+      qualityDisposition: 'REVIEW_PASSED',
+    })
+    renderer.renderPreviewFromSlidePreviews = async () => new TextEncoder().encode('not-a-readable-png')
+    renderer.renderPptx = async () => new TextEncoder().encode('not-a-readable-pptx')
+
+    expect(await runner.deliver('run-1')).toMatchObject({
+      status: 'RECOVERING', delivery: null, step: { status: 'FAILED', errorCode: 'DELIVERY_FAILED' },
+    })
+    expect(await repository.listDeliveries('run-1')).toEqual([])
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING', technicalRecovery: { resumeState: 'DELIVERING', reason: 'DELIVERY_FAILED' },
+    })
+  })
+
+  test('does not complete v4 when a readable pptx contains the wrong slide count', async () => {
+    const { repository, renderer, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+      qualityDisposition: 'REVIEW_PASSED',
+    })
+    const renderPptx = renderer.renderPptx.bind(renderer)
+    renderer.renderPptx = async (input) => renderPptx({ ...input, slides: input.slides.slice(0, 1) })
+
+    expect(await runner.deliver('run-1')).toMatchObject({ status: 'RECOVERING', delivery: null })
+    expect(await repository.listDeliveries('run-1')).toEqual([])
+  })
+
+  test('does not complete v4 when a PPTX XML part is malformed despite valid ZIP CRCs', async () => {
+    await expectRejectedV4Pptx((archive) => {
+      archive.file('ppt/presentation.xml', '<p:presentation><p:sldIdLst></p:presentation>')
+    })
+  })
+
+  test('does not complete v4 when the presentation relationship part is missing', async () => {
+    await expectRejectedV4Pptx((archive) => {
+      archive.remove('ppt/_rels/presentation.xml.rels')
+    })
+  })
+
+  test('does not complete v4 when the package root relationship misses the presentation', async () => {
+    await expectRejectedV4Pptx((archive) => rewritePptxEntry(
+      archive,
+      '_rels/.rels',
+      'Target="ppt/presentation.xml"',
+      'Target="ppt/missing-presentation.xml"',
+    ))
+  })
+
+  test('does not complete v4 without a package officeDocument relationship', async () => {
+    await expectRejectedV4Pptx((archive) => rewritePptxEntry(
+      archive,
+      '_rels/.rels',
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"',
+      'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties"',
+    ))
+  })
+
+  test('does not complete v4 with multiple package officeDocument relationships', async () => {
+    await expectRejectedV4Pptx(async (archive) => {
+      const entry = archive.file('_rels/.rels')
+      if (!entry) throw new Error('missing test PPTX root relationships')
+      const xml = await entry.async('string')
+      archive.file('_rels/.rels', xml.replace(
+        '</Relationships>',
+        '<Relationship Id="rId-extra" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>',
+      ))
+    })
+  })
+
+  test('does not complete v4 when the package officeDocument relationship is external', async () => {
+    await expectRejectedV4Pptx((archive) => rewritePptxEntry(
+      archive,
+      '_rels/.rels',
+      'Target="ppt/presentation.xml"',
+      'Target="ppt/presentation.xml" TargetMode="External"',
+    ))
+  })
+
+  test('does not complete v4 when a slide relationship targets a missing part', async () => {
+    await expectRejectedV4Pptx((archive) => rewritePptxEntry(
+      archive,
+      'ppt/_rels/presentation.xml.rels',
+      'Target="slides/slide1.xml"',
+      'Target="slides/missing.xml"',
+    ))
+  })
+
+  test('does not complete v4 when a packaged slide is not referenced by the presentation', async () => {
+    await expectRejectedV4Pptx((archive) => rewritePptxEntry(
+      archive,
+      'ppt/_rels/presentation.xml.rels',
+      'Target="slides/slide2.xml"',
+      'Target="slides/slide1.xml"',
+    ))
+  })
+
+  test('reuses stored final artifacts after a transient readback failure', async () => {
+    const { repository, artifacts, renderer, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+      qualityDisposition: 'REVIEW_PASSED',
+    })
+    const renderPptx = renderer.renderPptx.bind(renderer)
+    let renderAttempt = 0
+    renderer.renderPptx = async (input) => {
+      renderAttempt += 1
+      return renderPptx({
+        ...input,
+        slides: input.slides.map((slide) => ({
+          ...slide,
+          pageNumber: slide.pageNumber + renderAttempt * 100,
+        })),
+      })
+    }
+    const get = artifacts.get.bind(artifacts)
+    let failReadback = true
+    artifacts.get = async (input) => {
+      if (failReadback && input.artifactId.endsWith(':run-1:delivery:r0:preview')) {
+        failReadback = false
+        return null
+      }
+      return get(input)
+    }
+
+    expect(await runner.deliver('run-1')).toMatchObject({
+      status: 'RECOVERING', delivery: null, step: { status: 'FAILED' },
+    })
+    const artifactCount = artifacts.artifacts.size
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'DELIVERING',
+        resumeState: null,
+        version: transaction.run.version + 1,
+      })
+    })
+
+    expect(await runner.deliver('run-1')).toMatchObject({
+      status: 'COMPLETED', delivery: { disposition: 'FINAL' }, step: { status: 'COMPLETED' },
+    })
+    expect(await repository.listDeliveries('run-1')).toHaveLength(1)
+    expect(artifacts.artifacts.size).toBe(artifactCount)
+    expect(renderer).toMatchObject({ previewCalls: 1, pptxCalls: 1 })
   })
 
   test('retries the same failed delivery step after the run re-enters delivery', async () => {

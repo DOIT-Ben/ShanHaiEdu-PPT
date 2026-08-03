@@ -17,7 +17,14 @@ describe('OpenAPI v1 contract', () => {
         schemas: Record<string, {
           required?: string[]
           oneOf?: Array<{ $ref?: string; properties?: Record<string, { const?: string }> }>
-          properties?: Record<string, { enum?: Array<string | null> }>
+          properties?: Record<string, { enum?: Array<string | null>; description?: string }>
+          allOf?: Array<{
+            if?: { properties?: Record<string, { const?: string }> }
+            then?: {
+              required?: string[]
+              properties?: Record<string, { const?: string; type?: string }>
+            }
+          }>
         }>
       }
     }
@@ -132,6 +139,9 @@ describe('OpenAPI v1 contract', () => {
     const deliveryRecord = JSON.stringify(document.components.schemas.DeliveryRecord)
     expect(deliveryRecord).toContain('"disposition":{"const":"FINAL"}')
     expect(deliveryRecord).toContain('OVERRIDDEN_INTERNAL')
+    expect(deliveryRecord).toContain('SYSTEM_POLICY_ACCEPTED')
+    expect(deliveryRecord).toContain('qualityPolicyAudit')
+    expect(deliveryRecord).toContain('SYSTEM_POLICY')
     expect(deliveryRecord).toContain('#/components/schemas/DeliveryIdentity')
     const deliveryIdentity = JSON.stringify(document.components.schemas.DeliveryIdentity)
     expect(deliveryIdentity).toContain('LEGACY_UNVERIFIED')
@@ -145,6 +155,30 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.CreateRunRequest?.properties?.presentationGoal).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.assetAcquisitionPolicy?.enum)
       .toEqual(['AI_FIRST', 'SEARCH_FIRST'])
+    expect(document.components.schemas.PublicRun?.properties?.qualityDisposition?.enum).toEqual([
+      'PENDING', 'REVIEW_PASSED', 'SYSTEM_POLICY_ACCEPTED', 'ADMIN_OVERRIDE', 'HARD_FAILURE',
+    ])
+    expect(document.components.schemas.PublicRun?.properties?.qualityDisposition?.description)
+      .toContain('qualityOverride false')
+    const publicRunContract = JSON.stringify(document.components.schemas.PublicRun)
+    expect(publicRunContract).toContain('"qualityDisposition":{"enum":["PENDING","REVIEW_PASSED"]}')
+    expect(publicRunContract).toContain('"if":{"properties":{"qualityDisposition":{"const":"SYSTEM_POLICY_ACCEPTED"}}')
+    expect(publicRunContract).toContain('"if":{"properties":{"qualityDisposition":{"const":"ADMIN_OVERRIDE"}}')
+    expect(publicRunContract).toContain('"if":{"properties":{"status":{"const":"FAILED"}}')
+    expect(publicRunContract).toContain('"if":{"properties":{"qualityDisposition":{"const":"HARD_FAILURE"}}')
+    const hardFailureRule = document.components.schemas.PublicRun?.allOf?.find((rule) =>
+      rule.if?.properties?.qualityDisposition?.const === 'HARD_FAILURE')
+    expect(hardFailureRule?.then).toMatchObject({
+      required: ['qualityPolicyAudit', 'qualityOverrideAudit'],
+      properties: {
+        status: { const: 'FAILED' },
+        qualityPolicyAudit: { type: 'null' },
+        qualityOverrideAudit: { type: 'null' },
+      },
+    })
+    expect(deliveryRecord).toContain('"if":{"properties":{"qualityStatus":{"const":"SYSTEM_POLICY_ACCEPTED"}}')
+    expect(deliveryRecord).toContain('"if":{"properties":{"qualityStatus":{"const":"OVERRIDDEN_INTERNAL"}}')
+    expect(deliveryRecord).toContain('"if":{"properties":{"qualityStatus":{"const":"APPROVED"}}')
     expect(document.components.schemas.RunAction?.properties?.type?.enum).toEqual(expect.arrayContaining([
       'RETRY_PLANNING', 'RETRY_DELIVERY', 'REPLAN', 'ACCEPT_WITH_OVERRIDE', 'CANCEL',
     ]))

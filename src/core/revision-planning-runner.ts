@@ -39,8 +39,10 @@ import {
   activeRevisionLifecycle,
   appendAcceptedQualityIssueResolutions,
   appendV4LifecycleEvent,
+  classifyAutomatedQualityAcceptanceIssues,
   ensureAutomatedQualityAcceptanceIssue,
   failVisualDeckV4Transaction,
+  isHardQualityIssue,
   markAutomatedQualityAcceptance,
   revisionDetails,
 } from './v4-lifecycle'
@@ -499,6 +501,7 @@ export class RevisionPlanningRunner {
 
   private async requireHuman(run: RunRecord, reason: string): Promise<RevisionPlanningResult> {
     if (run.presentationMode === 'VISUAL_DECK_V4'
+      && run.automationLevel === 'BOUNDED_AUTO'
       && ['MAX_REVISION_ROUNDS_REACHED', 'REVISION_PLAN_HAS_NO_ISSUES', 'REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES'].includes(reason)) {
       const delivered = await this.dependencies.repository.transact(run.id, (transaction) => {
         if (this.acceptQualityAndStartDelivery(transaction)) return true
@@ -514,6 +517,7 @@ export class RevisionPlanningRunner {
       return { status: latest.status, step: null, plan: null, replayed: !delivered }
     }
     const terminalErrorCode = run.presentationMode === 'VISUAL_DECK_V4'
+      && run.automationLevel === 'BOUNDED_AUTO'
       ? reason === 'MAX_REVISION_ROUNDS_REACHED'
         ? 'QUALITY_REMEDIATION_EXHAUSTED' as const
         : ['REVISION_PLAN_HAS_NO_ISSUES', 'REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES'].includes(reason)
@@ -571,9 +575,14 @@ export class RevisionPlanningRunner {
   }
 
   private acceptQualityAndStartDelivery(transaction: AgentTransaction) {
-    if (transaction.run.status !== 'DECK_REVIEW') return false
+    if (transaction.run.status !== 'DECK_REVIEW'
+      || transaction.run.automationLevel !== 'BOUNDED_AUTO') return false
     const disposition = appendAcceptedQualityIssueResolutions(transaction)
     if (disposition.blockingIssueIds.length > 0) return false
+    if (classifyAutomatedQualityAcceptanceIssues(
+      transaction,
+      disposition.acceptedIssueIds,
+    ).invalidIssueIds.length > 0) return false
     const now = this.dependencies.clock.now().toISOString()
     const policy = transitionRun(transaction.run, 'DELIVERING')
     const acceptedIssueIds = ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
@@ -721,8 +730,7 @@ function expectedRevisionKind(issue: DeckReview['issues'][number]): RevisionPlan
 
 function revisionScope(review: DeckReview): DeckReview {
   if (review.qualityScore < DECK_QUALITY_THRESHOLD) return review
-  const issues = review.issues.filter((issue) =>
-    issue.severity === 'CRITICAL' || issue.category === 'FACTUAL_RISK')
+  const issues = review.issues.filter(isHardQualityIssue)
   return issues.length === review.issues.length ? review : { ...review, issues }
 }
 

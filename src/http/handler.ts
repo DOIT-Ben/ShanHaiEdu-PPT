@@ -9,6 +9,7 @@ import {
 } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
 import { getGenerationBatch } from '../core/generation-batch'
+import { qualityPolicyAuditForRun } from '../core/v4-lifecycle'
 import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-operations'
 import {
   AdminRevisionRoundsSettingsError,
@@ -40,6 +41,38 @@ type HandlerDependencies = Readonly<{
 }>
 
 function publicRun(run: RunRecord) {
+  const normalizedQualityPolicyAudit = qualityPolicyAuditForRun(run)
+  const auditPendingOrFailed = ['PENDING', 'REVIEW_PASSED'].includes(run.qualityDisposition ?? '')
+    || run.status === 'FAILED'
+  const qualityPolicyAudit = auditPendingOrFailed ? null : normalizedQualityPolicyAudit
+  const qualityOverrideAudit = !auditPendingOrFailed
+    && !normalizedQualityPolicyAudit
+    && run.qualityOverrideBy
+    && run.qualityOverrideRole
+    && run.qualityOverrideReason
+    && run.qualityOverrideIssueIds?.length
+    && run.qualityOverrideAt
+    ? {
+        actorId: run.qualityOverrideBy,
+        actorRole: run.qualityOverrideRole,
+        reason: run.qualityOverrideReason,
+        issueIds: run.qualityOverrideIssueIds,
+        acceptedAt: run.qualityOverrideAt,
+      }
+    : null
+  const qualityDisposition = run.status === 'FAILED'
+    ? 'HARD_FAILURE' as const
+    : run.qualityDisposition === 'PENDING'
+      ? 'PENDING' as const
+      : qualityPolicyAudit
+        ? 'SYSTEM_POLICY_ACCEPTED' as const
+        : run.qualityDisposition
+          ? run.qualityDisposition
+          : run.qualityOverride
+            ? 'ADMIN_OVERRIDE' as const
+            : ['DELIVERING', 'COMPLETED'].includes(run.status)
+              ? 'REVIEW_PASSED' as const
+              : 'PENDING' as const
   return {
     id: run.id,
     host: run.host,
@@ -68,8 +101,11 @@ function publicRun(run: RunRecord) {
     budgetUnits: run.budgetUnits,
     committedBudgetUnits: run.committedBudgetUnits,
     qualityScore: run.qualityScore,
-    qualityOverride: run.qualityOverride,
+    qualityOverride: ['PENDING', 'REVIEW_PASSED'].includes(qualityDisposition) ? false : run.qualityOverride,
     qualityOverrideReason: run.qualityOverrideReason,
+    qualityDisposition,
+    qualityPolicyAudit,
+    qualityOverrideAudit,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
   }

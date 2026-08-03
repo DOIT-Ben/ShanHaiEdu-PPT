@@ -794,11 +794,11 @@ ${assetStrategyInstruction}
 	visualIntent中的“非展示事实核对项”只用于核对对象数量、知识关系和结论准确性，不属于允许文字；画面抄录、改写或展示其中句子必须作为额外文字拒绝。
 	严格检查允许内容是否准确、清楚可读，是否出现乱码、错字、错误数字、错误公式、未列入允许文字的标签、Logo或水印；同时检查知识相关性、主体残缺、裁切、遮挡、层级、对比度、构图和整体完成度。空格、换行以及不改变含义的普通标点差异可以接受；替换字词、改变数字或公式、增添标签、遗漏关键信息必须拒绝。
 	视觉元素独立性要求：检查主要元素是否分别具有完整轮廓、清晰边界和可见间隔，是否被绑定、粘合、嵌套或合成为不可分割的组合主体。明显绑定、重度遮挡或轮廓融合导致元素无法分别辨认时必须approved=false；边界完整的轻微接近只能记录为非阻断建议。
-	只有阻断课堂使用的问题才可approved=false：错误或额外文字、数字、公式，错误对象数量，方向或知识关系矛盾，核心教学对象缺失，明显遮挡裁切、不可读或严重失衡。不得仅因装饰图标、卡片形状、放大镜/手势/虚线的精确位置、轻微间距、颜色或构图没有逐项复刻visualIntent而拒绝；核心含义正确且visualScore达到80时应approved=true，可在reasons中记录非阻断建议。
-textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true。拒绝时给出当前页可直接执行的修复指令。若输入包含contractRepairIssues，保持图片和审查范围不变，逐项修正输出合同。`
+		必须显式返回qualityImpact：完全通过为PASS；仅有不影响事实、来源、安全和课堂使用的视觉优化建议为NON_BLOCKING_RECOMMENDATION；错误或额外文字、数字、公式，错误对象数量，方向或知识关系矛盾，核心教学对象缺失，明显遮挡裁切、不可读或严重失衡为HARD_BLOCKER。不得把硬阻断降级为非阻断建议。不得仅因装饰图标、卡片形状、放大镜/手势/虚线的精确位置、轻微间距、颜色或构图没有逐项复刻visualIntent而标记HARD_BLOCKER。
+	approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLOCKING_RECOMMENDATION或HARD_BLOCKER。textDetected只表示检测到错误、无关、乱码或无法确认准确性的文字，不得因为图片包含正确的锁定文案而设为true；textDetected=true必须标记HARD_BLOCKER。拒绝时给出当前页可直接执行的修复指令。若输入包含contractRepairIssues，保持图片和审查范围不变，逐项修正输出合同。`
         : `你是儿童课件视觉质检员。严格检查图片内错误文字、数字、公式、Logo、水印、知识不相关、年龄不适宜、主体残缺和低质量问题。
 当 layout 以 COMPOSITE: 开头时，还必须检查最终页面中的文字可读性、遮挡、越界、层级、留白和元素冲突；合成页中的原生课件文字允许存在，不得因此判 textDetected=true。
-只有所有检查通过才可 approved=true。拒绝时给出可直接用于重新生成或重新布局的明确指令。`,
+	只有所有检查通过才可 approved=true 并返回 qualityImpact=PASS；拒绝时返回 qualityImpact=HARD_BLOCKER，并给出可直接用于重新生成或重新布局的明确指令。`,
       user: [
         { type: 'text', text: boundedJson({
           visualIntent: input.visualIntent,

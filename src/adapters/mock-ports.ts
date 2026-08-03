@@ -14,6 +14,8 @@ import type {
 } from '../core/ports'
 import { BudgetReservationError, MediaSubmissionError } from '../core/ports'
 import { createHash } from 'node:crypto'
+import PptxGenJS from 'pptxgenjs'
+import sharp from 'sharp'
 
 export class FixedClock implements ClockPort {
   constructor(private current = new Date('2026-07-21T00:00:00.000Z')) {}
@@ -363,16 +365,31 @@ export class MockPresentationRendererPort implements PresentationRendererPort {
     })
   }
 
-  async renderPreviewFromSlidePreviews(input: Parameters<PresentationRendererPort['renderPreviewFromSlidePreviews']>[0]) {
+  async renderPreviewFromSlidePreviews(
+    input: Parameters<PresentationRendererPort['renderPreviewFromSlidePreviews']>[0],
+  ): Promise<Uint8Array> {
     this.previewCalls += 1
     this.throwIfNeeded()
-    return new TextEncoder().encode(`PNG:${input.slides.length}`)
+    return new Uint8Array(await sharp({
+      create: {
+        width: Math.max(1, input.slides.length) * 16,
+        height: 9,
+        channels: 3,
+        background: '#e8edf0',
+      },
+    }).png().toBuffer())
   }
 
-  async renderPptx(input: Parameters<PresentationRendererPort['renderPptx']>[0]) {
+  async renderPptx(input: Parameters<PresentationRendererPort['renderPptx']>[0]): Promise<Uint8Array> {
     this.pptxCalls += 1
     this.throwIfNeeded()
-    return new TextEncoder().encode(`PPTX:${input.blueprint.id}:${input.slides.length}`)
+    const pptx = new PptxGenJS()
+    for (const slide of input.slides) {
+      pptx.addSlide().addText(`Mock slide ${slide.pageNumber}`, { x: 1, y: 1, w: 4, h: 1 })
+    }
+    const output = await pptx.write({ outputType: 'uint8array', compression: true })
+    if (!(output instanceof Uint8Array)) throw new Error('MOCK_PPTX_OUTPUT_INVALID')
+    return new Uint8Array(output)
   }
 
   private throwIfNeeded() {

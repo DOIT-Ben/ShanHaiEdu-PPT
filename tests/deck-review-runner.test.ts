@@ -189,6 +189,64 @@ describe('deck review runner', () => {
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toContain('issue.detected')
   })
 
+  test('does not mark a high-scoring v4 deck with an open recommendation as review-passed', async () => {
+    const { repository, runner } = await fixture({
+      ...passingReview(),
+      issues: [{
+        id: 'high-score-recommendation', category: 'IMAGE_QUALITY', severity: 'WARNING',
+        summary: '第二页视觉间距仍有非阻断优化空间。', slideIds: ['run-1:slide:2'],
+        sourceChunkIds: [], status: 'OPEN',
+      }],
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO', maxRevisionRounds: 2,
+      })
+    })
+
+    expect(await runner.review('run-1')).toMatchObject({ passed: false })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'DECK_REVIEW', qualityDisposition: 'PENDING', qualityOverride: false,
+    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'delivery.started')).toBe(false)
+  })
+
+  test('does not repackage a historically accepted hard blocker as system policy', async () => {
+    const { repository, runner } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO', maxRevisionRounds: 0,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'legacy-accepted-factual-risk', category: 'FACTUAL_RISK', severity: 'WARNING',
+          summary: '旧版本曾接受一项事实风险，但没有可验证的系统策略来源。',
+          slideIds: ['run-1:slide:2'], sourceChunkIds: ['chunk-2'], status: 'OPEN',
+          repairDomain: 'KNOWLEDGE',
+        },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.resolved',
+        payload: { issueId: 'legacy-accepted-factual-risk', resolution: 'ACCEPTED' },
+      })
+    })
+
+    expect(await runner.review('run-1')).toMatchObject({ passed: false })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', qualityDisposition: 'HARD_FAILURE', qualityOverride: false,
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+    })
+  })
+
   test('accepts review findings and enters delivery when v4 has no revision round available', async () => {
     const { repository, runner } = await fixture({
       ...passingReview(),
@@ -196,7 +254,7 @@ describe('deck review runner', () => {
       issues: [{
         id: 'issue-deck-limit',
         category: 'IMAGE_QUALITY',
-        severity: 'CRITICAL',
+        severity: 'WARNING',
         summary: '第二页存在模型审查识别出的视觉数量歧义。',
         slideIds: ['run-1:slide:2'],
         sourceChunkIds: ['chunk-2'],
@@ -255,9 +313,10 @@ describe('deck review runner', () => {
       repository, artifacts, renderer, clock: new FixedClock(),
     }).deliver('run-1')
 
-    expect(delivery).toMatchObject({ status: 'COMPLETED', delivery: { qualityStatus: 'OVERRIDDEN_INTERNAL' } })
+    expect(delivery).toMatchObject({ status: 'COMPLETED', delivery: { qualityStatus: 'SYSTEM_POLICY_ACCEPTED' } })
     expect(delivery.delivery?.openIssueIds.length).toBeLessThanOrEqual(50)
-    expect(delivery.delivery?.qualityOverrideAudit?.issueIds.length).toBeLessThanOrEqual(50)
+    expect(delivery.delivery?.qualityPolicyAudit?.issueIds.length).toBeLessThanOrEqual(50)
+    expect(delivery.delivery?.qualityOverrideAudit).toBeNull()
     const acceptedIssueIds = (await repository.listEvents('run-1')).flatMap((event) =>
       event.type === 'issue.resolved' && event.payload.resolution === 'ACCEPTED'
         ? [event.payload.issueId]
@@ -296,6 +355,36 @@ describe('deck review runner', () => {
     expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
     expect(events.some((event) => event.type === 'issue.resolved'
       && event.payload.issueId === 'hard-source-blocker')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+    })
+  })
+
+  test('fails an exhausted v4 deck review when a warning identifies a curriculum hard blocker', async () => {
+    const { repository, runner } = await fixture({
+      ...passingReview(),
+      issues: [{
+        id: 'curriculum-hard-blocker', category: 'CURRICULUM_GAP', severity: 'WARNING',
+        summary: '第二页遗漏教材要求掌握的关键知识。', slideIds: ['run-1:slide:2'],
+        sourceChunkIds: ['chunk-2'], status: 'OPEN', repairDomain: 'KNOWLEDGE',
+      }],
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO', maxRevisionRounds: 0,
+      })
+    })
+
+    expect(await runner.review('run-1')).toMatchObject({ passed: false })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', qualityDisposition: 'HARD_FAILURE',
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved')).toBe(false)
     expect(events.at(-1)).toMatchObject({
       type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
     })
@@ -357,7 +446,7 @@ describe('deck review runner', () => {
         schemaVersion: CONTRACT_VERSION,
         type: 'issue.detected',
         payload: {
-          id: 'historical-quality-issue', category: 'IMAGE_QUALITY', severity: 'CRITICAL',
+          id: 'historical-quality-issue', category: 'IMAGE_QUALITY', severity: 'WARNING',
           summary: '历史页审留下的视觉问题尚未返修。', slideIds: ['run-1:slide:2'],
           sourceChunkIds: [], status: 'OPEN',
         },
@@ -371,8 +460,34 @@ describe('deck review runner', () => {
       && event.payload.issueId === 'historical-quality-issue'
       && event.payload.resolution === 'ACCEPTED')).toBe(true)
     expect(events.find((event) => event.type === 'deck_review.completed')).toMatchObject({
-      payload: { reason: 'DECK_REVIEW_REJECTED' },
+      payload: { reason: null },
     })
+  })
+
+  test('does not review-pass a deck while a prior page recommendation remains open below the round limit', async () => {
+    const { repository, runner } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+        revisionRound: 1, maxRevisionRounds: 4,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'page-recommendation-awaiting-policy', category: 'IMAGE_QUALITY', severity: 'WARNING',
+          summary: '页审留下的非阻断构图建议尚未形成最终策略结论。', slideIds: ['run-1:slide:2'],
+          sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+    })
+
+    expect(await runner.review('run-1')).toMatchObject({ passed: false })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'DECK_REVIEW', qualityDisposition: 'PENDING', qualityOverride: false,
+    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'delivery.started')).toBe(false)
   })
 
   test('resolves deck issues across an intervening page-only revision round', async () => {

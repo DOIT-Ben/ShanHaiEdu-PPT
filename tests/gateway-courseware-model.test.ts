@@ -1074,7 +1074,10 @@ describe('gateway courseware model', () => {
     })
     let requestBody: Record<string, unknown> | null = null
     let requestUrl = ''
-    const review = { approved: true, textDetected: false, visualScore: 91, reasons: [], retryInstruction: null }
+    const review = {
+      approved: true, textDetected: false, visualScore: 91, reasons: [], retryInstruction: null,
+      qualityImpact: 'PASS' as const,
+    }
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
       visionModel: 'gpt-5.6', artifacts,
@@ -1098,6 +1101,7 @@ describe('gateway courseware model', () => {
     expect(input[0]?.content[0]?.text).toContain('非展示事实核对项')
     expect(input[0]?.content[0]?.text).toContain('视觉元素独立性要求')
     expect(input[0]?.content[0]?.text).toContain('绑定、粘合、嵌套或合成')
+    expect(input[0]?.content[0]?.text).toContain('NON_BLOCKING_RECOMMENDATION')
     const userContent = input[1]!.content
     const imageUrl = userContent.find((part) => part.type === 'input_image')?.image_url
     expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)
@@ -1111,7 +1115,10 @@ describe('gateway courseware model', () => {
       create: { width: 120, height: 80, channels: 3, background: '#F4F7FA' },
     }).png().toBuffer()
     let requestBody: Record<string, unknown> | null = null
-    const review = { approved: true, textDetected: false, visualScore: 88, reasons: [], retryInstruction: null }
+    const review = {
+      approved: true, textDetected: false, visualScore: 88, reasons: [], retryInstruction: null,
+      qualityImpact: 'PASS' as const,
+    }
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts,
       fetchImpl: async (_url, init) => {

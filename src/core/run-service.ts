@@ -182,6 +182,8 @@ export class RunService {
       qualityOverride: false,
       qualityOverrideReason: null,
       qualityOverrideBy: null,
+      qualityDisposition: 'PENDING',
+      qualityPolicyAudit: null,
       leaseToken: null,
       leaseUntil: null,
       leaseVersion: 0,
@@ -267,12 +269,19 @@ export class RunService {
         const updated: RunRecord = {
           ...previous,
           ...policy,
+          ...(qualityFailureRecovery ? {
+            qualityOverride: false,
+            qualityDisposition: 'PENDING' as const,
+            qualityPolicyAudit: null,
+          } : {}),
           ...(parsed.data.type === 'ACCEPT_WITH_OVERRIDE' ? {
             qualityOverrideReason: parsed.data.reason,
             qualityOverrideBy: host.externalUserId,
             qualityOverrideRole: host.role ?? 'USER',
             qualityOverrideIssueIds: parsed.data.issueIds,
             qualityOverrideAt: now,
+            qualityDisposition: 'ADMIN_OVERRIDE' as const,
+            qualityPolicyAudit: null,
           } : {}),
           ...(approvedRevisionRound === null ? {} : { revisionRound: approvedRevisionRound }),
           ...(nextPlanningAttempt === null ? {} : {

@@ -163,6 +163,82 @@ describe('HTTP v1 handler', () => {
     expect((await replay.json() as { replayed: boolean }).replayed).toBe(true)
   })
 
+  test('normalizes pending quality provenance until review finishes', async () => {
+    const { handle, repository } = fixture()
+    const created = await createRun(handle, 'http-create-pending-quality-policy')
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'DECK_REVIEW',
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+        qualityOverride: true,
+        qualityDisposition: 'PENDING',
+        qualityPolicyAudit: {
+          provenance: 'SYSTEM_POLICY',
+          policyId: 'v4-non-blocking-quality-v1',
+          reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+          issueIds: ['legacy-quality-issue'],
+          acceptedAt: '2026-07-21T00:00:00.000Z',
+        },
+      })
+    })
+
+    const response = await handle(request(`/v1/runs/${runId}`))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      data: {
+        qualityOverride: false,
+        qualityDisposition: 'PENDING',
+        qualityPolicyAudit: null,
+        qualityOverrideAudit: null,
+      },
+    })
+  })
+
+  test('projects an ambiguous legacy quality actor as an internal override without rewriting its audit', async () => {
+    const { handle, repository } = fixture()
+    const created = await createRun(handle, 'http-create-legacy-quality-actor')
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    await repository.transact(runId, (transaction) => {
+      const {
+        qualityDisposition: _qualityDisposition,
+        qualityPolicyAudit: _qualityPolicyAudit,
+        ...legacyRun
+      } = transaction.run
+      transaction.putRun({
+        ...legacyRun,
+        status: 'DELIVERING',
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+        qualityOverride: true,
+        qualityOverrideBy: 'ppt-agent-quality-policy',
+        qualityOverrideRole: 'ADMIN',
+        qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+        qualityOverrideIssueIds: ['legacy-quality-issue'],
+        qualityOverrideAt: '2026-07-21T00:00:00.000Z',
+      })
+    })
+
+    const response = await handle(request(`/v1/runs/${runId}`))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      data: {
+        qualityOverride: true,
+        qualityDisposition: 'ADMIN_OVERRIDE',
+        qualityPolicyAudit: null,
+        qualityOverrideAudit: {
+          actorId: 'ppt-agent-quality-policy',
+          actorRole: 'ADMIN',
+          reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+          issueIds: ['legacy-quality-issue'],
+          acceptedAt: '2026-07-21T00:00:00.000Z',
+        },
+      },
+    })
+  })
+
   test('rejects body host spoofing and unauthenticated access', async () => {
     const { handle } = fixture()
     const spoofed = await handle(request('/v1/runs', {

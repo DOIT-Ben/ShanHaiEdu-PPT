@@ -194,13 +194,34 @@ V2 Run，就不得回退到不包含 V2 恢复器的 `4.2.x` 或更早版本。
 | `FAILED` | `run.failed` 提供稳定错误码、是否可重试和终态账务投影 |
 | `CANCELLED` | 停止新提交；已提交任务和批次账务继续以原幂等键对账 |
 
-`maxRevisionRounds` 表示最多允许执行的图片返修轮次。`0` 的准确语义是“不返修”：页审或套审发现模型质量问题时，
-Agent 记录原始 `*_REJECTED` 结果，将质量 Issue 以 `issue.resolved(resolution: "ACCEPTED")` 审计，并继续合成
-当前图片版本。该路径不会创建新图片 Step、不会增加 `committedBudgetUnits`，最终 Delivery 标记为
-`qualityStatus: "OVERRIDDEN_INTERNAL"`，不会伪造成审查通过。
+Run 详情的 `qualityDisposition` 明确区分质量结果：
 
-只有来源、蓝图、页面素材完整性、Provider 执行、账务、安全或文件合法性等确定性硬合同仍可阻断交付。
-对应稳定失败码包括：
+| `qualityDisposition` | 含义 |
+| --- | --- |
+| `PENDING` | 页面审查或整稿审查尚未形成最终质量结论 |
+| `REVIEW_PASSED` | 页面审查和整稿审查均通过，Delivery 的 `qualityStatus` 为 `APPROVED` |
+| `SYSTEM_POLICY_ACCEPTED` | 两级审查已经完成，系统仅接受了明确列入策略的非阻断建议 |
+| `ADMIN_OVERRIDE` | 真实管理员通过 `ACCEPT_WITH_OVERRIDE` 接受全部开放问题 |
+| `HARD_FAILURE` | Run 因硬合同、硬阻断或不可恢复技术错误失败；以 `run.failed` 为准 |
+
+`maxRevisionRounds` 表示最多允许执行的图片返修轮次。对 `BOUNDED_AUTO`，`0` 的准确语义是“不返修”。页审结果
+使用 `qualityImpact: PASS | NON_BLOCKING_RECOMMENDATION | HARD_BLOCKER` 显式分类；旧结果缺失该字段时，拒绝
+默认按 `HARD_BLOCKER` 处理。页审发现明确的非阻断建议时，Run 进入 `DECK_REVIEW` 后仍保持
+`qualityDisposition: PENDING`，不会提前生成系统策略审计。只有整稿审查也完成且没有硬阻断，Agent 才按固定的
+`v4-non-blocking-quality-v1` 策略追加 `issue.resolved(resolution: "ACCEPTED")` 并交付当前图片版本。该路径不会
+创建新图片 Step、不会增加 `committedBudgetUnits`，也不会伪造成审查通过。
+
+整稿审查达到分数阈值但仍返回任何开放 finding 时，也不能标记为 `REVIEW_PASSED`。非阻断 finding 必须通过上述
+显式系统策略形成 `SYSTEM_POLICY_ACCEPTED`；硬 finding 只能先修复或进入硬失败。
+
+`SUPERVISED` 不适用自动质量策略。页面被拒绝且未启动自动修订时进入 `NEEDS_HUMAN` 内部审查门；普通用户不能
+接受缺陷，V4 最终放行只能由已认证管理员执行 `ACCEPT_WITH_OVERRIDE`。系统策略也不得通过伪造管理员身份绕过该门。
+
+系统策略只允许接受 `DUPLICATION`、`COVER_IMPACT`、`VISUAL_CONSISTENCY`、`COMPOSITION_CONFLICT`、
+`IMAGE_QUALITY`、`ASSET_RELEVANCE`、`LAYERING_CONFLICT` 和 `CHILD_READABILITY` 的非 `CRITICAL` 建议。
+任意 `CRITICAL`、任意 `repairDomain: KNOWLEDGE`，以及事实、课程覆盖、来源边界、规划、Provider、账务、安全、
+媒体或文件完整性问题都是硬阻断，
+不得追加 `ACCEPTED`，不得进入系统策略交付路径。对应稳定失败码包括：
 
 - `QUALITY_REMEDIATION_EXHAUSTED`
 - `QUALITY_ISSUE_STATE_INCONSISTENT`
@@ -266,15 +287,22 @@ Run 详情中的每个新交付都具有以下消费者身份：
 }
 ```
 
-`COMPLETED` 只允许引用页集、修订轮次、活动 Blueprint/Proposal 哈希均匹配的 `VERIFIED FINAL` 交付。
+`COMPLETED` 只允许引用页集、修订轮次、活动 Blueprint/Proposal 哈希均匹配的 `VERIFIED FINAL` 交付。V4 在写入
+终态前会读回持久化 Artifact，复核 MIME、长度和 SHA-256；PNG 必须可完整解码，PPTX 必须通过 ZIP CRC、必需条目
+和实际 `ppt/slides/slideN.xml` 数量校验。非空但损坏或页数不符的文件进入技术恢复，不会成为 FINAL。若 Artifact 已写入
+但首次读回暂时失败，恢复会按原交付幂等键读取并复用已验证字节，只补写缺失 Artifact，不用重新渲染出的变化字节覆盖
+同一身份。
 历史交付在读取时归一化为 `identity.status: "LEGACY_UNVERIFIED"`，不会伪造旧记录中不存在的页集或哈希证据。
 当前合同不产出 DRAFT；未审核页面不得冒充 FINAL。
 
-当质量模型未通过但返修被禁用或已达到上限时，`qualityStatus` 为 `OVERRIDDEN_INTERNAL`，
-`qualityOverrideAudit` 保存系统质量策略主体、原因、被接受的 Issue 和时间。该状态表示“按非阻断策略交付当前版本”，
-不表示模型审查通过。完整接受清单保留在 `issue.resolved(ACCEPTED)` 事件中；超过交付合同 50 项枚举上限时，
-Delivery 只保留有界代表项和一个汇总 Issue，不丢失事件级审计事实。
+当质量模型未通过但 `BOUNDED_AUTO` 返修被禁用或已耗尽，且没有硬阻断时，Delivery 的 `qualityStatus` 为
+`SYSTEM_POLICY_ACCEPTED`。`qualityPolicyAudit` 保存 `provenance: "SYSTEM_POLICY"`、策略 ID、原因、被接受的
+Issue 和时间；它不包含 `actorId` 或 `actorRole`。该状态表示“按非阻断策略交付当前版本”，不表示模型审查通过。
+完整接受清单保留在 `issue.resolved(ACCEPTED)` 事件中；超过交付合同 50 项枚举上限时，Delivery 只保留有界
+代表项和一个汇总 Issue，不丢失事件级审计事实。
 
 V4 的 `ACCEPT_WITH_OVERRIDE` 仅供已认证的 `ADMIN` 内部治理使用，必须保存操作者、原因、Issue 列表和时间；
-普通用户不能借此取得 FINAL 交付。质量审查或技术错误尚未完成时，宿主应按 Run 状态显示可恢复进度，
+对应 `qualityDisposition: "ADMIN_OVERRIDE"`、Delivery `qualityStatus: "OVERRIDDEN_INTERNAL"` 和
+`qualityOverrideAudit`，其中 `actorRole` 必须是真实的 `ADMIN`。普通用户不能借此取得 FINAL 交付。质量审查或
+技术错误尚未完成时，宿主应按 Run 状态显示可恢复进度，
 不能通过重建任务、替换幂等键或直接调用 Provider 来绕过 Agent 状态机。

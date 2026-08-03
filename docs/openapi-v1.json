@@ -882,7 +882,7 @@
       },
       "PublicRun": {
         "type": "object",
-        "required": ["id", "host", "status", "version", "slideCount", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityOverride", "createdAt", "updatedAt"],
+        "required": ["id", "host", "status", "version", "slideCount", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityOverride", "qualityDisposition", "qualityPolicyAudit", "qualityOverrideAudit", "createdAt", "updatedAt"],
         "properties": {
           "id": { "type": "string" },
           "host": { "$ref": "#/components/schemas/HostContext" },
@@ -907,6 +907,24 @@
           "budgetUnits": { "type": "integer" },
           "committedBudgetUnits": { "type": "integer" },
           "qualityOverride": { "type": "boolean" },
+          "qualityDisposition": {
+            "description": "Final quality provenance. PENDING and REVIEW_PASSED require qualityOverride false and null quality audits. PENDING remains in force until both page and deck review finish; REVIEW_PASSED means no open findings; SYSTEM_POLICY_ACCEPTED means only explicit non-blocking findings were accepted by system policy; ADMIN_OVERRIDE identifies a real administrator action; HARD_FAILURE identifies a blocking failure and is required whenever status is FAILED.",
+            "enum": ["PENDING", "REVIEW_PASSED", "SYSTEM_POLICY_ACCEPTED", "ADMIN_OVERRIDE", "HARD_FAILURE"]
+          },
+          "qualityPolicyAudit": {
+            "description": "System-policy provenance for a completed two-level review. Never contains an administrator actor.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/QualityPolicyAudit" },
+              { "type": "null" }
+            ]
+          },
+          "qualityOverrideAudit": {
+            "description": "Real human override provenance. V4 FINAL delivery requires actorRole ADMIN.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/QualityOverrideAudit" },
+              { "type": "null" }
+            ]
+          },
           "issues": { "type": "array", "items": { "$ref": "#/components/schemas/IssueSummary" } },
           "progress": {
             "type": "array",
@@ -924,7 +942,79 @@
           },
           "createdAt": { "type": "string", "format": "date-time" },
           "updatedAt": { "type": "string", "format": "date-time" }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "qualityDisposition": { "enum": ["PENDING", "REVIEW_PASSED"] } },
+              "required": ["qualityDisposition"]
+            },
+            "then": {
+              "required": ["qualityPolicyAudit", "qualityOverrideAudit"],
+              "properties": {
+                "qualityOverride": { "const": false },
+                "qualityPolicyAudit": { "type": "null" },
+                "qualityOverrideAudit": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "qualityDisposition": { "const": "SYSTEM_POLICY_ACCEPTED" } }, "required": ["qualityDisposition"] },
+            "then": {
+              "required": ["qualityPolicyAudit", "qualityOverrideAudit"],
+              "properties": {
+                "qualityOverride": { "const": true },
+                "presentationMode": { "const": "VISUAL_DECK_V4" },
+                "qualityPolicyAudit": { "$ref": "#/components/schemas/QualityPolicyAudit" },
+                "qualityOverrideAudit": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "qualityDisposition": { "const": "ADMIN_OVERRIDE" } }, "required": ["qualityDisposition"] },
+            "then": {
+              "required": ["qualityPolicyAudit", "qualityOverrideAudit"],
+              "properties": {
+                "qualityOverride": { "const": true },
+                "qualityPolicyAudit": { "type": "null" },
+                "qualityOverrideAudit": { "$ref": "#/components/schemas/QualityOverrideAudit" }
+              }
+            }
+          },
+          {
+            "if": {
+              "allOf": [
+                { "properties": { "qualityDisposition": { "const": "ADMIN_OVERRIDE" } }, "required": ["qualityDisposition"] },
+                { "properties": { "presentationMode": { "const": "VISUAL_DECK_V4" } }, "required": ["presentationMode"] }
+              ]
+            },
+            "then": {
+              "properties": {
+                "qualityOverrideAudit": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/QualityOverrideAudit" },
+                    { "properties": { "actorRole": { "const": "ADMIN" } }, "required": ["actorRole"] }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "status": { "const": "FAILED" } }, "required": ["status"] },
+            "then": { "properties": { "qualityDisposition": { "const": "HARD_FAILURE" } } }
+          },
+          {
+            "if": { "properties": { "qualityDisposition": { "const": "HARD_FAILURE" } }, "required": ["qualityDisposition"] },
+            "then": {
+              "required": ["qualityPolicyAudit", "qualityOverrideAudit"],
+              "properties": {
+                "status": { "const": "FAILED" },
+                "qualityPolicyAudit": { "type": "null" },
+                "qualityOverrideAudit": { "type": "null" }
+              }
+            }
+          }
+        ]
       },
       "TechnicalRecovery": {
         "type": "object",
@@ -997,6 +1087,30 @@
           }
         ]
       },
+      "QualityPolicyAudit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provenance", "policyId", "reason", "issueIds", "acceptedAt"],
+        "properties": {
+          "provenance": { "const": "SYSTEM_POLICY" },
+          "policyId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "reason": { "type": "string", "minLength": 10, "maxLength": 2000 },
+          "issueIds": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "acceptedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "QualityOverrideAudit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actorId", "actorRole", "reason", "issueIds", "acceptedAt"],
+        "properties": {
+          "actorId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "actorRole": { "enum": ["USER", "ADMIN"] },
+          "reason": { "type": "string", "minLength": 10, "maxLength": 2000 },
+          "issueIds": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          "acceptedAt": { "type": "string", "format": "date-time" }
+        }
+      },
       "DeliveryRecord": {
         "type": "object",
         "additionalProperties": false,
@@ -1008,27 +1122,81 @@
           "qualityScore": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
           "qualityOverride": { "type": "boolean" },
           "disposition": { "const": "FINAL" },
-          "qualityStatus": { "enum": ["APPROVED", "OVERRIDDEN_INTERNAL"] },
+          "qualityStatus": { "enum": ["APPROVED", "SYSTEM_POLICY_ACCEPTED", "OVERRIDDEN_INTERNAL"] },
           "openIssueIds": { "type": "array", "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
           "identity": { "$ref": "#/components/schemas/DeliveryIdentity" },
+          "qualityPolicyAudit": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/QualityPolicyAudit" },
+              { "type": "null" }
+            ]
+          },
           "qualityOverrideAudit": {
-            "type": ["object", "null"],
-            "additionalProperties": false,
-            "required": ["actorId", "actorRole", "reason", "issueIds", "acceptedAt"],
-            "properties": {
-              "actorId": { "type": "string", "minLength": 1, "maxLength": 160 },
-              "actorRole": { "enum": ["USER", "ADMIN"] },
-              "reason": { "type": "string", "minLength": 10, "maxLength": 2000 },
-              "issueIds": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
-              "acceptedAt": { "type": "string", "format": "date-time" }
-            }
+            "oneOf": [
+              { "$ref": "#/components/schemas/QualityOverrideAudit" },
+              { "type": "null" }
+            ]
           },
           "preview": { "allOf": [{ "$ref": "#/components/schemas/DeliveryArtifact" }, { "properties": { "mimeType": { "const": "image/png" } } }] },
           "pptx": { "allOf": [{ "$ref": "#/components/schemas/DeliveryArtifact" }, { "properties": { "mimeType": { "const": "application/vnd.openxmlformats-officedocument.presentationml.presentation" } } }] },
           "sources": { "allOf": [{ "$ref": "#/components/schemas/DeliveryArtifact" }, { "properties": { "mimeType": { "const": "application/json" } } }] },
           "release": { "$ref": "#/components/schemas/ReleaseIdentity" },
           "createdAt": { "type": "string", "format": "date-time" }
-        }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "qualityStatus": { "const": "SYSTEM_POLICY_ACCEPTED" } }, "required": ["qualityStatus"] },
+            "then": {
+              "required": ["qualityPolicyAudit", "qualityOverrideAudit"],
+              "properties": {
+                "qualityOverride": { "const": true },
+                "openIssueIds": { "minItems": 1 },
+                "qualityPolicyAudit": { "$ref": "#/components/schemas/QualityPolicyAudit" },
+                "qualityOverrideAudit": { "type": "null" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "qualityStatus": { "const": "OVERRIDDEN_INTERNAL" } }, "required": ["qualityStatus"] },
+            "then": {
+              "properties": {
+                "qualityOverride": { "const": true },
+                "qualityPolicyAudit": { "type": "null" }
+              },
+              "oneOf": [
+                {
+                  "required": ["qualityOverrideAudit"],
+                  "properties": {
+                    "openIssueIds": { "minItems": 1 },
+                    "qualityOverrideAudit": { "$ref": "#/components/schemas/QualityOverrideAudit" }
+                  }
+                },
+                {
+                  "properties": {
+                    "identity": {
+                      "type": "object",
+                      "required": ["status"],
+                      "properties": { "status": { "const": "LEGACY_UNVERIFIED" } }
+                    },
+                    "qualityOverrideAudit": { "type": "null" }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "if": { "properties": { "qualityStatus": { "const": "APPROVED" } }, "required": ["qualityStatus"] },
+            "then": {
+              "required": ["qualityPolicyAudit", "qualityOverrideAudit"],
+              "properties": {
+                "qualityOverride": { "const": false },
+                "openIssueIds": { "maxItems": 0 },
+                "qualityPolicyAudit": { "type": "null" },
+                "qualityOverrideAudit": { "type": "null" }
+              }
+            }
+          }
+        ]
       },
       "GenerationBatch": {
         "type": "object",
