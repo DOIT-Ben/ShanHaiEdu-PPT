@@ -15,7 +15,7 @@ import {
 import { hashInput } from './hash'
 import { isPendingMediaReconciliationStep } from './media-reconciliation'
 import { releaseBudget, reserveBudget, transitionRun } from './policy'
-import { appendFixedIssueResolutions } from './v4-lifecycle'
+import { allPageNumbers, appendFixedIssueResolutions, isVisualDeckV4, v4LifecyclePayload } from './v4-lifecycle'
 import { recoverV4AfterMediaRecovery } from './v4-media-recovery'
 import {
   beginTechnicalRecovery,
@@ -38,12 +38,53 @@ const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
   'BILLING_UNKNOWN',
 ])
 
+const POST_PROVIDER_USAGE_V2_CONSISTENCY_CODES = new Set([
+  'USAGE_V2_RUN_REQUIRED',
+  'USAGE_V2_MEDIA_METADATA_MISSING',
+  'USAGE_V2_MEDIA_METADATA_INVALID',
+  'USAGE_V2_PERMIT_REQUIRED',
+  'USAGE_V2_PROVIDER_OPERATION_CONFLICT',
+  'MEDIA_OPERATION_ID_MISSING',
+  'USAGE_V2_OBSERVED_REQUIRED',
+  'USAGE_V2_EVENT_IDENTITY_CONFLICT',
+  'USAGE_V2_EVENT_CONTRACT_INVALID',
+  'USAGE_V2_OUTBOX_INVALID',
+  'USAGE_V2_OUTBOX_NOT_FOUND',
+])
+
+type UsageV2RecoveryCheckpoint = Readonly<
+  | {
+      stage: 'PROVIDER_SUBMISSION'
+      providerOperationId: string
+      submissionState: 'QUEUED' | 'PROCESSING' | 'COMPLETED'
+    }
+  | {
+      stage: 'PROVIDER_RESULT'
+      providerOperationId: string
+      providerStatus: 'COMPLETED' | 'FAILED' | 'CANCELLED'
+      billingState: 'CHARGED' | 'NOT_CHARGED' | 'UNKNOWN'
+    }
+>
+
+function postProviderUsageV2TechnicalFailure(error: unknown) {
+  if (!(error instanceof Error) || !POST_PROVIDER_USAGE_V2_CONSISTENCY_CODES.has(error.message)) return null
+  return usageV2TechnicalFailure(error.message, 'REJECTED')
+}
+
 function submissionLookupRetryDelayMs(attempt: number) {
   return [2_000, 10_000, 30_000, 60_000, 60_000][Math.max(0, Math.min(4, attempt - 1))]!
 }
 
 export function isMediaFailureStepStatus(status: StepStatus) {
   return MEDIA_FAILURE_STEP_STATUSES.has(status)
+}
+
+export function isUsageAuthorizationCapFailureStep(
+  step: Pick<StepRecord, 'status' | 'errorCode' | 'externalOperationId'>,
+) {
+  return step.status === 'FAILED'
+    && step.errorCode === 'AUTHORIZATION_CAP_REACHED'
+    && step.externalOperationId === null
 }
 
 export type SubmitSlideImageInput = Readonly<{
@@ -166,6 +207,10 @@ export class MediaStepRunner {
           aspectRatio: input.aspectRatio ?? '16:9',
         })
         if (!permit.allowed) {
+          if (permit.stopReason === 'AUTHORIZATION_CAP_REACHED' && isVisualDeckV4(prepared.run)) {
+            const step = await this.pauseForUsageAuthorizationCap(input)
+            return { step, replayed: false }
+          }
           const step = await this.markDefiniteFailure(input, reservationId, permit.stopReason)
           return { step, replayed: false }
         }
@@ -250,12 +295,13 @@ export class MediaStepRunner {
     }
     const step = await this.markWaiting(input, reservationId, submitted.operationId)
     if (usesUsageV2) {
-      await this.dependencies.usageV2!.recordProviderSubmission({
-        runId: input.runId,
-        mediaStepKey: input.idempotencyKey,
-        operationId: submitted.operationId,
-        state: submitted.state,
-      })
+      const failed = await this.recordUsageV2ProviderSubmission(
+        input.runId,
+        input.idempotencyKey,
+        submitted.operationId,
+        submitted.state,
+      )
+      if (failed) return { step: failed, replayed: false }
     }
     return { step, replayed: false }
   }
@@ -294,12 +340,13 @@ export class MediaStepRunner {
     const usesUsageV2 = accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2'
     if (usesUsageV2) {
       if (!this.dependencies.usageV2) throw new Error('USAGE_V2_COORDINATOR_REQUIRED')
-      await this.dependencies.usageV2.recordProviderSubmission({
+      const failed = await this.recordUsageV2ProviderSubmission(
         runId,
-        mediaStepKey: idempotencyKey,
-        operationId: step.externalOperationId,
-        state: 'PROCESSING',
-      })
+        idempotencyKey,
+        step.externalOperationId,
+        'PROCESSING',
+      )
+      if (failed) return { step: failed, changed: true }
     }
     const status = await this.dependencies.images.inspect({
       tenantId: run.host.tenantId,
@@ -314,12 +361,14 @@ export class MediaStepRunner {
     if (status.state === 'COMPLETED') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
       if (usesUsageV2) {
-        await this.dependencies.usageV2!.recordProviderResult({
+        const failed = await this.recordUsageV2ProviderResult(
           runId,
-          mediaStepKey: idempotencyKey,
-          status: 'COMPLETED',
-          billingState: 'CHARGED',
-        })
+          idempotencyKey,
+          step.externalOperationId,
+          'COMPLETED',
+          'CHARGED',
+        )
+        if (failed) return { step: failed, changed: true }
       }
       if (!isBatchReserved(mediaInput)) {
         await this.dependencies.budget.settle({
@@ -332,12 +381,14 @@ export class MediaStepRunner {
     }
     if (status.state !== 'FAILED') return { step, changed: false }
     if (usesUsageV2) {
-      await this.dependencies.usageV2!.recordProviderResult({
+      const failed = await this.recordUsageV2ProviderResult(
         runId,
-        mediaStepKey: idempotencyKey,
-        status: 'FAILED',
-        billingState: status.billingState,
-      })
+        idempotencyKey,
+        step.externalOperationId,
+        'FAILED',
+        status.billingState,
+      )
+      if (failed) return { step: failed, changed: true }
     }
     if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId && !isBatchReserved(mediaInput)) {
       const input = this.reconstructInput(step, run.imageModel)
@@ -416,12 +467,15 @@ export class MediaStepRunner {
         if (existing.id !== input.stepId || existing.inputHash !== inputHash || existing.tool !== 'generate_slide_image') {
           throw new Error('STEP_IDEMPOTENCY_CONFLICT')
         }
+        const retryingAuthorizationCap = isBatchReserved(input)
+          && isUsageAuthorizationCapFailureStep(existing)
+        const retryingTechnicalFailure = transaction.run.technicalRecovery?.active === false
+          && technicalFailureFromStep(existing) !== null
+          && typeof input.budgetReservationKey === 'string'
         const canRetryReleasedV4Submission = existing.status === 'FAILED'
           && transaction.run.presentationMode === 'VISUAL_DECK_V4'
           && ['EXECUTING', 'REVISING'].includes(transaction.run.status)
-          && transaction.run.technicalRecovery?.active === false
-          && technicalFailureFromStep(existing) !== null
-          && typeof input.budgetReservationKey === 'string'
+          && (retryingAuthorizationCap || retryingTechnicalFailure)
         if (canRetryReleasedV4Submission) {
           const output = existing.output && typeof existing.output === 'object'
             ? existing.output as Record<string, unknown>
@@ -748,6 +802,158 @@ export class MediaStepRunner {
         },
       })
       recoverV4AfterMediaRecovery(transaction, this.dependencies.clock)
+      return updated
+    })
+  }
+
+  private async recordUsageV2ProviderSubmission(
+    runId: string,
+    idempotencyKey: string,
+    providerOperationId: string,
+    submissionState: 'QUEUED' | 'PROCESSING' | 'COMPLETED',
+  ) {
+    try {
+      await this.dependencies.usageV2!.recordProviderSubmission({
+        runId,
+        mediaStepKey: idempotencyKey,
+        operationId: providerOperationId,
+        state: submissionState,
+      })
+      return null
+    } catch (error) {
+      const technicalFailure = postProviderUsageV2TechnicalFailure(error)
+      if (!technicalFailure) throw error
+      return this.markPostProviderUsageV2Failure(runId, idempotencyKey, technicalFailure, {
+        stage: 'PROVIDER_SUBMISSION',
+        providerOperationId,
+        submissionState,
+      })
+    }
+  }
+
+  private async recordUsageV2ProviderResult(
+    runId: string,
+    idempotencyKey: string,
+    providerOperationId: string,
+    providerStatus: 'COMPLETED' | 'FAILED' | 'CANCELLED',
+    billingState: 'CHARGED' | 'NOT_CHARGED' | 'UNKNOWN',
+  ) {
+    try {
+      await this.dependencies.usageV2!.recordProviderResult({
+        runId,
+        mediaStepKey: idempotencyKey,
+        status: providerStatus,
+        billingState,
+      })
+      return null
+    } catch (error) {
+      const technicalFailure = postProviderUsageV2TechnicalFailure(error)
+      if (!technicalFailure) throw error
+      return this.markPostProviderUsageV2Failure(runId, idempotencyKey, technicalFailure, {
+        stage: 'PROVIDER_RESULT',
+        providerOperationId,
+        providerStatus,
+        billingState,
+      })
+    }
+  }
+
+  private async pauseForUsageAuthorizationCap(input: SubmitSlideImageInput) {
+    return this.dependencies.repository.transact(input.runId, (transaction) => {
+      const step = transaction.getStep(input.idempotencyKey)
+      if (!step) throw new Error('STEP_NOT_FOUND')
+      const now = this.dependencies.clock.now().toISOString()
+      const cancelled = transaction.run.status === 'CANCELLED'
+      const updatedStep: StepRecord = {
+        ...step,
+        status: cancelled ? 'FAILED_NOT_CHARGED' : 'FAILED',
+        errorCode: 'AUTHORIZATION_CAP_REACHED',
+        updatedAt: now,
+      }
+      transaction.putStep(updatedStep)
+      if (cancelled || transaction.run.status === 'PAUSED'
+        || !['EXECUTING', 'REVISING'].includes(transaction.run.status)) {
+        return updatedStep
+      }
+
+      const policy = transitionRun(transaction.run, 'PAUSED')
+      const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
+      transaction.putRun(updatedRun)
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.paused',
+        payload: {
+          ...v4LifecyclePayload(updatedRun, 'RUN', {
+            completed: 0,
+            total: updatedRun.slideCount,
+            pageNumbers: allPageNumbers(updatedRun),
+            reason: 'BUDGET_INSUFFICIENT',
+            retryable: true,
+            requiresUserAction: true,
+            nextAction: 'ADD_BUDGET',
+          }),
+          resumeState: updatedRun.resumeState!,
+        },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'approval.required',
+        payload: { kind: 'BUDGET', summary: '当前授权额度已用完，请追加预算后继续。' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.failed',
+        payload: { stepId: step.id, errorCode: 'AUTHORIZATION_CAP_REACHED', retryable: true },
+      })
+      return updatedStep
+    })
+  }
+
+  private async markPostProviderUsageV2Failure(
+    runId: string,
+    idempotencyKey: string,
+    technicalFailure: TechnicalFailure,
+    checkpoint: UsageV2RecoveryCheckpoint,
+  ) {
+    return this.dependencies.repository.transact(runId, (transaction) => {
+      const step = transaction.getStep(idempotencyKey)
+      if (!step) throw new Error('STEP_NOT_FOUND')
+      const output = step.output && typeof step.output === 'object'
+        ? step.output as Record<string, unknown>
+        : {}
+      const previousCheckpoint = output.usageV2Recovery
+      const repeated = step.errorCode === technicalFailure.diagnosticCode
+        && previousCheckpoint !== null
+        && typeof previousCheckpoint === 'object'
+        && (previousCheckpoint as Record<string, unknown>).stage === checkpoint.stage
+        && (previousCheckpoint as Record<string, unknown>).diagnosticCode === technicalFailure.diagnosticCode
+      const updated: StepRecord = {
+        ...step,
+        externalOperationId: checkpoint.providerOperationId,
+        errorCode: technicalFailure.diagnosticCode,
+        output: outputWithTechnicalFailure({
+          ...output,
+          usageV2Recovery: {
+            ...checkpoint,
+            operationIdempotencyKey: idempotencyKey,
+            diagnosticCode: technicalFailure.diagnosticCode,
+          },
+        }, technicalFailure),
+        updatedAt: this.dependencies.clock.now().toISOString(),
+      }
+      transaction.putStep(updated)
+      beginTechnicalRecovery(transaction, this.dependencies.clock, technicalFailure)
+      if (!repeated) {
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'tool.failed',
+          payload: {
+            stepId: step.id,
+            errorCode: technicalFailure.diagnosticCode,
+            retryable: technicalFailure.disposition === 'RETRYABLE',
+          },
+        })
+      }
       return updated
     })
   }

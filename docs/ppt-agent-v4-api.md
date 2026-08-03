@@ -134,8 +134,10 @@ Content-Type: application/json
 }
 ```
 
-permit 未明确返回 `allowed: true` 时，Agent 不调用 Provider。响应未知时保留同一个操作 Key 恢复；明确
-拒绝时终止该操作，不新建 Run、换 Key 或重复提交。
+permit 未明确返回 `allowed: true` 时，Agent 不调用 Provider。响应未知时保留同一个操作 Key 恢复；
+`AUTHORIZATION_CAP_REACHED` 作为额度决策将 V4 Run 暂停为 `BUDGET_INSUFFICIENT`，宿主展示
+`ADD_BUDGET`，补充额度并恢复后仍只用原操作 Key 重新取 permit。`PROVIDER_SAFETY_CAP_REACHED` 保持为
+独立的 Provider 安全帽处理，不得映射成用户预算不足；两类拒绝都不得换 Key 或提交未获 permit 的任务。
 
 ### Usage 事件
 
@@ -168,6 +170,11 @@ Idempotency-Key: <event.idempotencyKey>
 `REINSPECT` 动作；宿主冲突修复后，该动作只重投原 `eventId/sequence/body/Idempotency-Key`。重投成功只
 归并原账务事实并继续技术终态收敛，不恢复旧执行阶段，也不会重新提交 Provider 图片任务。非 V4 Run 保留
 历史的管理员处理与恢复行为。
+
+Provider 已接受操作后，如果本地 Usage V2 的合同、媒体身份、元数据或事件一致性检查失败，媒体 Step 会
+保留原 Provider operation ID、操作 Key、失败阶段、已知结果和原始诊断码，并进入同一类型化技术终态。
+该路径不产生普通 `approval.required`，也不得由 worker 包装成 `WORKER_FATAL`；恢复只能查询原操作并修复
+原账务身份，不能重新提交 Provider。
 
 ### Run 终态 finalize
 

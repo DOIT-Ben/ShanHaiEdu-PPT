@@ -34,6 +34,10 @@ const RETRYABLE_PROVIDER_FAILURE_CODES = new Set([
 const PROVIDER_CONTRACT_FAILURE_CODES = new Set([
   'INVALID_IMAGE_PROMPT',
 ])
+const NON_RETRYABLE_AUTHENTICATION_FAILURE_CODES = new Set([
+  'MODEL_AUTH_FAILED',
+  'BATCH_BUDGET_FINALIZATION_AUTH_FAILED',
+])
 
 export type TechnicalFailureDisposition = FailureDisposition
 
@@ -67,7 +71,8 @@ function terminalLifecycleReason(resumeState: TechnicalRecovery['resumeState']) 
 export function technicalFailureDisposition(errorCode: string): TechnicalFailureDisposition | null {
   const normalized = errorCode.toUpperCase()
   if (isTechnicalContractFailure(normalized)) return 'NON_RETRYABLE'
-  if (/(^|_)(401|403|404)(_|$)|AUTH|PERMISSION|MODEL_(FORBIDDEN|NOT_FOUND)|CONTENT_POLICY|UNSUPPORTED/.test(normalized)) {
+  if (NON_RETRYABLE_AUTHENTICATION_FAILURE_CODES.has(normalized)
+    || /(^|_)(401|403|404)(_|$)|PERMISSION|MODEL_(FORBIDDEN|NOT_FOUND)|CONTENT_POLICY|UNSUPPORTED/.test(normalized)) {
     return 'NON_RETRYABLE'
   }
   if (/^(PROVIDER_REJECTED|IMAGE_TASK_FAILED)$/.test(normalized)) return 'NON_RETRYABLE'

@@ -5,7 +5,7 @@ import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adap
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import type { RunRecord } from '../src/core/ports'
 import { hashInput } from '../src/core/hash'
-import { reserveBudget } from '../src/core/policy'
+import { applyRunAction, reserveBudget } from '../src/core/policy'
 import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
 import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
@@ -81,6 +81,7 @@ class MediaUsagePort implements UsageAccountingPort {
   readonly permitKeys: string[] = []
   readonly events: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
   permitResult: 'ALLOW' | 'DENY' | 'UNKNOWN' = 'ALLOW'
+  permitStopReason: 'AUTHORIZATION_CAP_REACHED' | 'PROVIDER_SAFETY_CAP_REACHED' = 'AUTHORIZATION_CAP_REACHED'
 
   async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
     this.order.push('permit')
@@ -90,7 +91,7 @@ class MediaUsagePort implements UsageAccountingPort {
     }
     if (this.permitResult === 'DENY') {
       return {
-        allowed: false as const, stopReason: 'AUTHORIZATION_CAP_REACHED' as const,
+        allowed: false as const, stopReason: this.permitStopReason,
         authorizedOperations: 30, authorizationCapOperations: 30, providerSpendSafetyCapOperations: 30,
       }
     }
@@ -107,7 +108,7 @@ class MediaUsagePort implements UsageAccountingPort {
   async finalizeRun() { return { ...usageBill(), status: 'SETTLED' as const } }
 }
 
-async function usageFixture() {
+async function usageFixture(overrides: Partial<RunRecord> = {}) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
@@ -116,6 +117,7 @@ async function usageFixture() {
   await repository.createRun(run({
     presentationMode: 'VISUAL_DECK_V4', accountingProtocol: 'FRAMEFLOW_USAGE_V2',
     imageModel: 'image-2', committedBudgetUnits: 10,
+    ...overrides,
   }))
   const billingCatalog = parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
     model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
@@ -194,7 +196,7 @@ describe('media step runner', () => {
     expect(images.submitCalls).toBe(1)
   })
 
-  test('keeps an accepted Provider operation durable when Usage event reconciliation has a hard conflict', async () => {
+  test('routes a post-submit Usage V2 operation conflict into technical recovery without resubmitting Provider work', async () => {
     const { repository, images, runner } = await usageFixture()
     const eventId = `pptu_obs_${createHash('sha256')
       .update(['run-1', usageRequest.idempotencyKey].join('\0')).digest('hex').slice(0, 32)}`
@@ -221,11 +223,82 @@ describe('media step runner', () => {
       })
     })
 
-    await expect(runner.submitSlideImage(usageRequest)).rejects.toThrow('USAGE_V2_PROVIDER_OPERATION_CONFLICT')
+    const result = await runner.submitSlideImage(usageRequest)
+    const providerOperationId = images.operations.get(usageRequest.idempotencyKey)!
 
     expect(images.submitCalls).toBe(1)
-    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === usageRequest.idempotencyKey))
-      .toMatchObject({ status: 'WAITING', externalOperationId: expect.any(String), errorCode: null })
+    expect(result.step).toMatchObject({
+      status: 'WAITING',
+      externalOperationId: providerOperationId,
+      errorCode: 'USAGE_V2_PROVIDER_OPERATION_CONFLICT',
+      output: {
+        technicalFailure: {
+          category: 'USAGE_V2', disposition: 'NON_RETRYABLE',
+          diagnosticCode: 'USAGE_V2_PROVIDER_OPERATION_CONFLICT',
+        },
+        usageV2Recovery: {
+          stage: 'PROVIDER_SUBMISSION',
+          providerOperationId,
+          operationIdempotencyKey: usageRequest.idempotencyKey,
+          submissionState: 'QUEUED',
+          diagnosticCode: 'USAGE_V2_PROVIDER_OPERATION_CONFLICT',
+        },
+      },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      technicalRecovery: { reason: 'TERMINAL_ACCOUNTING_PENDING', active: true },
+      terminalAccounting: { accountingStatus: 'RECONCILIATION_REQUIRED' },
+    })
+    await expect(runner.refreshSlideImage('run-1', usageRequest.idempotencyKey))
+      .resolves.toMatchObject({ step: { externalOperationId: providerOperationId } })
+    expect(images.submitCalls).toBe(1)
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.some((event) => event.type === 'run.failed'
+      && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
+  })
+
+  test('types invalid post-submit Usage V2 metadata without losing the accepted operation', async () => {
+    const { repository, images, runner } = await usageFixture()
+    const submit = images.submit.bind(images)
+    images.submit = async (input) => {
+      const accepted = await submit(input)
+      await repository.transact('run-1', (transaction) => {
+        const step = transaction.getStep(usageRequest.idempotencyKey)!
+        const output = step.output as Record<string, unknown>
+        transaction.putStep({
+          ...step,
+          output: { ...output, usageV2: { protocol: 'FRAMEFLOW_USAGE_V2' } },
+        })
+      })
+      return accepted
+    }
+
+    const result = await runner.submitSlideImage(usageRequest)
+    const providerOperationId = images.operations.get(usageRequest.idempotencyKey)!
+
+    expect(result.step).toMatchObject({
+      status: 'WAITING', externalOperationId: providerOperationId,
+      errorCode: 'USAGE_V2_MEDIA_METADATA_INVALID',
+      output: {
+        technicalFailure: {
+          category: 'USAGE_V2', disposition: 'NON_RETRYABLE',
+          diagnosticCode: 'USAGE_V2_MEDIA_METADATA_INVALID',
+        },
+        usageV2Recovery: {
+          stage: 'PROVIDER_SUBMISSION', providerOperationId,
+          operationIdempotencyKey: usageRequest.idempotencyKey,
+          diagnosticCode: 'USAGE_V2_MEDIA_METADATA_INVALID',
+        },
+      },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
+    expect(images.submitCalls).toBe(1)
   })
 
   test('requires a persisted Usage V2 permit before Provider submission without a legacy reservation', async () => {
@@ -244,15 +317,149 @@ describe('media step runner', () => {
       .toMatchObject({ output: { usageV2: { billingSnapshot: { costAmountMicros: 40_000 }, permit: { allowed: true } } } })
   })
 
-  test('stops before Provider when the Usage V2 permit is denied', async () => {
-    const { budget, images, usage, runner } = await usageFixture()
+  test('pauses a V4 Run for more budget when the Usage V2 authorization cap is reached', async () => {
+    const { repository, budget, images, usage, runner } = await usageFixture()
     usage.permitResult = 'DENY'
 
     const result = await runner.submitSlideImage(usageRequest)
 
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'AUTHORIZATION_CAP_REACHED' })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'PAUSED', resumeState: 'EXECUTING',
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.find((event) => event.type === 'run.paused')).toMatchObject({
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', reason: 'BUDGET_INSUFFICIENT',
+        retryable: true, requiresUserAction: true, nextAction: 'ADD_BUDGET', resumeState: 'EXECUTING',
+      },
+    })
+    expect(events.find((event) => event.type === 'approval.required')).toMatchObject({
+      payload: { kind: 'BUDGET' },
+    })
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.some((event) => event.type === 'technical.recovery.started')).toBe(false)
     expect(images.submitCalls).toBe(0)
     expect(budget.reservationRequests).toHaveLength(0)
+  })
+
+  test('rechecks the original permit key after an authorization-cap budget resume', async () => {
+    const { repository, images, usage, runner } = await usageFixture()
+    usage.permitResult = 'DENY'
+    await runner.submitSlideImage(usageRequest)
+    expect(images.submitCalls).toBe(0)
+
+    await repository.transact('run-1', (transaction) => {
+      const funded = applyRunAction(transaction.run, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'ADD_BUDGET',
+        expectedVersion: transaction.run.version,
+        additionalBudgetUnits: 10,
+      })
+      const resumed = applyRunAction(funded, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'RESUME',
+        expectedVersion: funded.version,
+      })
+      transaction.putRun({ ...transaction.run, ...resumed, updatedAt: transaction.run.updatedAt })
+    })
+    usage.permitResult = 'ALLOW'
+
+    await expect(runner.submitSlideImage(usageRequest))
+      .resolves.toMatchObject({ step: { status: 'WAITING' } })
+    expect(usage.permitKeys).toEqual([usageRequest.idempotencyKey, usageRequest.idempotencyKey])
+    expect(images.submitCalls).toBe(1)
+  })
+
+  test('keeps a definite Usage V2 permit denial on the existing non-V4 failure path', async () => {
+    const { repository, images, usage, runner } = await usageFixture({ presentationMode: 'SLIDE_IMAGE_V2' })
+    usage.permitResult = 'DENY'
+
+    const result = await runner.submitSlideImage(usageRequest)
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'AUTHORIZATION_CAP_REACHED' })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING' })
+    expect(images.submitCalls).toBe(0)
+  })
+
+  test('keeps the Provider safety cap distinct from a user budget pause', async () => {
+    const { repository, images, usage, runner } = await usageFixture()
+    usage.permitResult = 'DENY'
+    usage.permitStopReason = 'PROVIDER_SAFETY_CAP_REACHED'
+
+    const result = await runner.submitSlideImage(usageRequest)
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'PROVIDER_SAFETY_CAP_REACHED' })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING' })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'run.paused')).toBe(false)
+    expect(images.submitCalls).toBe(0)
+  })
+
+  test('routes a post-result Usage V2 identity conflict into technical recovery with the original operation', async () => {
+    const { repository, images, runner } = await usageFixture()
+    const submitted = await runner.submitSlideImage(usageRequest)
+    const providerOperationId = submitted.step.externalOperationId!
+    const eventId = `pptu_res_${createHash('sha256')
+      .update(['run-1', usageRequest.idempotencyKey, providerOperationId].join('\0')).digest('hex').slice(0, 32)}`
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'conflicting-resolved', runId: 'run-1',
+        idempotencyKey: `run-1:usage-v2:event:${eventId}`, inputHash: 'conflicting-resolved-hash',
+        tool: 'report_usage_v2', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: 'different-provider-operation', errorCode: null,
+        output: {
+          deliveryState: 'ACKNOWLEDGED', nextAttemptAt: null, billStatus: 'ACTIVE', blockedRunStatus: null,
+          event: {
+            schemaVersion: '2', eventId, sequence: 2, eventType: 'BILLING_RESOLVED', pptRunId: 'run-1',
+            batchId: usageRequest.batchReservation.batchId, pageNumber: 1, revisionRound: 0,
+            idempotencyKey: `${usageRequest.idempotencyKey}:billing-resolved`,
+            providerOperationId: 'different-provider-operation', model: 'image-2', status: 'COMPLETED',
+            providerBilling: {
+              result: 'CHARGED', actualCostAmountMicros: 40_000, currency: 'USD',
+              pricingVersion: 'image-2-2026-08',
+            },
+            operationCreatedAt: '2026-07-21T00:00:00.000Z',
+            operationCompletedAt: '2026-07-21T00:00:00.000Z', eventAt: '2026-07-21T00:00:00.000Z',
+          },
+        },
+        createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+      })
+    })
+    images.complete(usageRequest.idempotencyKey, 'artifact-slide-1-v1')
+
+    const result = await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
+
+    expect(result).toMatchObject({
+      changed: true,
+      step: {
+        status: 'WAITING', externalOperationId: providerOperationId,
+        errorCode: 'USAGE_V2_EVENT_IDENTITY_CONFLICT',
+        output: {
+          technicalFailure: {
+            category: 'USAGE_V2', disposition: 'NON_RETRYABLE',
+            diagnosticCode: 'USAGE_V2_EVENT_IDENTITY_CONFLICT',
+          },
+          usageV2Recovery: {
+            stage: 'PROVIDER_RESULT', providerOperationId,
+            operationIdempotencyKey: usageRequest.idempotencyKey,
+            providerStatus: 'COMPLETED', billingState: 'CHARGED',
+            diagnosticCode: 'USAGE_V2_EVENT_IDENTITY_CONFLICT',
+          },
+        },
+      },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      technicalRecovery: { reason: 'TERMINAL_ACCOUNTING_PENDING', active: true },
+    })
+    await expect(runner.refreshSlideImage('run-1', usageRequest.idempotencyKey))
+      .resolves.toMatchObject({ step: { externalOperationId: providerOperationId } })
+    expect(images.submitCalls).toBe(1)
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.some((event) => event.type === 'run.failed'
+      && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
   })
 
   test('keeps an unknown permit recoverable and retries the same key before one Provider submission', async () => {

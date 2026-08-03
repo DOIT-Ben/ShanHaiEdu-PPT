@@ -23,7 +23,11 @@ import {
   type GenerationBatchReservation,
 } from './generation-batch'
 import { hashInput } from './hash'
-import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
+import {
+  isMediaFailureStepStatus,
+  isUsageAuthorizationCapFailureStep,
+  MediaStepRunner,
+} from './media-step-runner'
 import type { AgentRepository, ArtifactPort, BatchBudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
@@ -80,6 +84,12 @@ type RevisionTarget = Readonly<{
   }>
 }>
 
+function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefined) {
+  return isVisualDeckV4(run)
+    && step?.status === 'FAILED'
+    && (technicalFailureFromStep(step) !== null || isUsageAuthorizationCapFailureStep(step))
+}
+
 export class RevisionMediaCoordinator {
   private readonly imageConcurrency: number
 
@@ -110,15 +120,14 @@ export class RevisionMediaCoordinator {
     if (targets.length === 0) throw new Error('REVISION_MEDIA_NOT_REQUIRED')
     const steps = await this.currentSteps(run, targets)
     const stepsByKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
-    const canRetryReleasedSubmission = (step: StepRecord | undefined) => isVisualDeckV4(run)
-      && step?.status === 'FAILED'
-      && technicalFailureFromStep(step) !== null
     const pending = targets.filter((target) => {
       const existing = stepsByKey.get(target.idempotencyKey)
-      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status) || canRetryReleasedSubmission(existing)
+      return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status)
+        || canRetryReleasedV4Submission(run, existing)
     })
     const newTargetCount = pending.filter((target) =>
-      !stepsByKey.has(target.idempotencyKey) || canRetryReleasedSubmission(stepsByKey.get(target.idempotencyKey))).length
+      !stepsByKey.has(target.idempotencyKey)
+        || canRetryReleasedV4Submission(run, stepsByKey.get(target.idempotencyKey))).length
     let batchReservation: GenerationBatchReservation | undefined
     if (isVisualDeckV4(run)) {
       const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
@@ -617,7 +626,7 @@ export class RevisionMediaCoordinator {
       idempotencyKey: key,
       ...(batchReservation ? { batchReservation } : {}),
       ...(batchReservation ? { pageNumber: target.pageNumber, revisionRound: run.revisionRound } : {}),
-      ...(isVisualDeckV4(run) && existing?.status === 'FAILED' && technicalFailureFromStep(existing) !== null ? {
+      ...(canRetryReleasedV4Submission(run, existing) ? {
         budgetReservationKey: `${key}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
       } : {}),
       slideId: target.slideId,

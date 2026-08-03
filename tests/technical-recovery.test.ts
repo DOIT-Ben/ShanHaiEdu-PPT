@@ -73,6 +73,8 @@ describe('technical recovery', () => {
     await repository.transact('run-1', (transaction) => beginTechnicalRecovery(transaction, clock, 'MODEL_FORBIDDEN'))
 
     expect(isTechnicalFailureCode('MODEL_FORBIDDEN')).toBe(true)
+    expect(isTechnicalFailureCode('AUTHORIZATION_CAP_REACHED')).toBe(false)
+    expect(isTechnicalFailureCode('PROVIDER_SAFETY_CAP_REACHED')).toBe(false)
     expect(await repository.getRun('run-1')).toMatchObject({
       status: 'FAILED',
       technicalRecovery: {

@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto'
+import { z } from 'zod'
 import { CONTRACT_VERSION } from '../contracts'
 import {
   UsageAccountingRequestError,
   usageOperationEventV2Schema,
+  usagePermitSchema,
   usageRunBillSchema,
   type ProviderBilling,
   type UsageOperationEventV2,
@@ -38,6 +40,33 @@ type UsageMediaMetadata = Readonly<{
     outcome: 'REJECTED' | 'UNKNOWN' | null
   }>
 }>
+
+const usageMediaMetadataSchema = z.object({
+  protocol: z.literal('FRAMEFLOW_USAGE_V2'),
+  batchId: z.string().trim().min(1).max(200),
+  pageNumber: z.number().int().min(1).max(50),
+  revisionRound: z.number().int().min(0).max(100),
+  operationIdempotencyKey: z.string().trim().min(1).max(200),
+  operationCreatedAt: z.string().datetime(),
+  billingSnapshot: z.object({
+    model: z.string().trim().min(1).max(200),
+    operationMode: z.enum(['TEXT_TO_IMAGE', 'IMAGE_EDIT']),
+    resolution: z.literal('1K'),
+    aspectRatio: z.enum(['16:9', '4:3', '1:1', '3:4']),
+    costBasis: z.literal('FIXED_PER_OPERATION'),
+    costAmountMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    currency: z.string().regex(/^[A-Z]{3}$/),
+    providerPricingVersion: z.string().trim().min(1).max(200),
+  }).strict(),
+  permit: z.union([
+    usagePermitSchema,
+    z.object({
+      allowed: z.null(),
+      errorCode: z.string().trim().min(1).max(200).nullable(),
+      outcome: z.enum(['REJECTED', 'UNKNOWN']).nullable(),
+    }).strict(),
+  ]),
+}).strict()
 
 type UsageOutboxOutput = Readonly<{
   event: UsageOperationEventV2
@@ -153,12 +182,16 @@ function outputRecord(step: StepRecord) {
 function usageMetadata(step: StepRecord): UsageMediaMetadata {
   const metadata = outputRecord(step).usageV2
   if (!metadata || typeof metadata !== 'object') throw new Error('USAGE_V2_MEDIA_METADATA_MISSING')
-  return metadata as UsageMediaMetadata
+  const parsed = usageMediaMetadataSchema.safeParse(metadata)
+  if (!parsed.success) throw new Error('USAGE_V2_MEDIA_METADATA_INVALID')
+  return parsed.data
 }
 
 function eventStepOutput(step: StepRecord): UsageOutboxOutput {
   const output = outputRecord(step) as Partial<UsageOutboxOutput>
-  const event = usageOperationEventV2Schema.parse(output.event)
+  const parsed = usageOperationEventV2Schema.safeParse(output.event)
+  if (!parsed.success) throw new Error('USAGE_V2_OUTBOX_INVALID')
+  const event = parsed.data
   if (!['PENDING', 'ACKNOWLEDGED', 'REJECTED'].includes(String(output.deliveryState))) {
     throw new Error('USAGE_V2_OUTBOX_INVALID')
   }
@@ -277,10 +310,14 @@ export class UsageV2Coordinator {
       transaction.putStep(updated)
       return { run: transaction.run, step: updated, metadata }
     })
-    if (prepared.metadata.permit.allowed !== null) return prepared.metadata.permit
-    if (prepared.metadata.permit.outcome === 'REJECTED') {
+    const persistedPermit = prepared.metadata.permit
+    if (persistedPermit.allowed === true) return persistedPermit
+    if (persistedPermit.allowed === false && persistedPermit.stopReason !== 'AUTHORIZATION_CAP_REACHED') {
+      return persistedPermit
+    }
+    if (persistedPermit.allowed === null && persistedPermit.outcome === 'REJECTED') {
       throw new UsageAccountingRequestError(
-        prepared.metadata.permit.errorCode ?? 'HOST_USAGE_V2_PERMIT_REJECTED',
+        persistedPermit.errorCode ?? 'HOST_USAGE_V2_PERMIT_REJECTED',
         'REJECTED',
       )
     }
@@ -566,7 +603,9 @@ export class UsageV2Coordinator {
       const sequence = transaction.listSteps()
         .filter((step) => step.tool === 'report_usage_v2')
         .reduce((maximum, step) => Math.max(maximum, eventStepOutput(step).event.sequence), 0) + 1
-      const event = usageOperationEventV2Schema.parse({ ...candidate, sequence })
+      const parsed = usageOperationEventV2Schema.safeParse({ ...candidate, sequence })
+      if (!parsed.success) throw new Error('USAGE_V2_EVENT_CONTRACT_INVALID')
+      const event = parsed.data
       const now = this.dependencies.clock.now().toISOString()
       const output: UsageOutboxOutput = {
         event, deliveryState: 'PENDING', nextAttemptAt: null, billStatus: null, blockedRunStatus: null,

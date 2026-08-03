@@ -17,7 +17,11 @@ import {
   technicalFailureFromStep,
 } from './technical-recovery'
 import { hashInput } from './hash'
-import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
+import {
+  isMediaFailureStepStatus,
+  isUsageAuthorizationCapFailureStep,
+  MediaStepRunner,
+} from './media-step-runner'
 import type {
   AcquiredWebAsset,
   AgentRepository,
@@ -57,7 +61,7 @@ export type RefreshBlueprintImagesResult = Readonly<{
 function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefined) {
   return isVisualDeckV4(run)
     && step?.status === 'FAILED'
-    && technicalFailureFromStep(step) !== null
+    && (technicalFailureFromStep(step) !== null || isUsageAuthorizationCapFailureStep(step))
 }
 
 export const ASSET_CANDIDATE_QUALITY_THRESHOLD = 80
@@ -266,10 +270,13 @@ export class SlideGenerationCoordinator {
         else steps[existingIndex] = step
       }
       const failed = submittedOutcomes.find((outcome) => isMediaFailureStepStatus(outcome.step.status))
-      if (failed) await this.requireHuman(runId, failed.step)
-      else {
-        for (const [index, outcome] of submittedOutcomes.entries()) {
-          await this.appendProgress(runId, outcome.step.id, index + 1, requirements.length)
+      const runAfterSubmissions = await this.dependencies.repository.getRun(runId)
+      if (!runAfterSubmissions || !['PAUSED', 'CANCELLED'].includes(runAfterSubmissions.status)) {
+        if (failed) await this.requireHuman(runId, failed.step)
+        else {
+          for (const [index, outcome] of submittedOutcomes.entries()) {
+            await this.appendProgress(runId, outcome.step.id, index + 1, requirements.length)
+          }
         }
       }
       const latest = await this.dependencies.repository.getRun(runId)

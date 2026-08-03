@@ -22,6 +22,7 @@ import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-ca
 import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
 import type { UsageAccountingPort } from '../src/core/ports'
 import type { UsageRunBill } from '../src/usage-accounting-contracts'
+import { applyRunAction } from '../src/core/policy'
 
 function run(budgetUnits = 100): RunRecord {
   return {
@@ -176,9 +177,19 @@ function usageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
 class InitialDeckUsagePort implements UsageAccountingPort {
   readonly permits: Parameters<UsageAccountingPort['authorizeOperation']>[0][] = []
   readonly events: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
+  denyAuthorizationCap = false
 
   async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
     this.permits.push(structuredClone(input))
+    if (this.denyAuthorizationCap) {
+      return {
+        allowed: false as const,
+        stopReason: 'AUTHORIZATION_CAP_REACHED' as const,
+        authorizedOperations: 30,
+        authorizationCapOperations: 30,
+        providerSpendSafetyCapOperations: 30,
+      }
+    }
     return { allowed: true as const, permitId: `permit-${input.pageNumber}`, pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
   }
 
@@ -347,6 +358,40 @@ describe('slide generation coordinator', () => {
     expect(budget.batchFinalizationAttempts).toHaveLength(0)
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
       .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'SETTLED', settledUnits: 30 } } })
+  })
+
+  test('releases a permit-denied Usage V2 batch when the paused Run is cancelled', async () => {
+    const { repository, images, usage, coordinator } = await usageV2Fixture()
+    usage.denyAuthorizationCap = true
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({
+      status: 'PAUSED', submitted: 0, total: 3,
+    })
+    expect(images.submitCalls).toBe(0)
+    expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image'))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: 'FAILED', errorCode: 'AUTHORIZATION_CAP_REACHED' }),
+      ]))
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'tool.progress' && event.payload.summary?.includes('已安全提交'))).toBe(false)
+
+    await repository.transact('run-1', (transaction) => {
+      const cancelled = applyRunAction(transaction.run, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'CANCEL',
+        expectedVersion: transaction.run.version,
+        reason: '用户取消额度不足的任务。',
+      })
+      transaction.putRun({ ...transaction.run, ...cancelled, updatedAt: transaction.run.updatedAt })
+    })
+
+    expect(await coordinator.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 0 })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({
+        status: 'COMPLETED',
+        output: { accounting: { settlement: 'RELEASED', settledUnits: 0, releasedUnits: 30 } },
+      })
   })
 
   test('compiles V2.1 visual prompts without changing legacy V2 prompts', () => {
