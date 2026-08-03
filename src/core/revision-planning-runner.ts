@@ -13,6 +13,7 @@ import { getActiveBlueprint } from './active-blueprint'
 import { hashInput } from './hash'
 import type {
   AgentRepository,
+  AgentTransaction,
   ClockPort,
   DocumentPort,
   RevisionPlanningPort,
@@ -36,8 +37,11 @@ import {
 } from './revision-plan-representability'
 import {
   activeRevisionLifecycle,
+  appendAcceptedQualityIssueResolutions,
   appendV4LifecycleEvent,
+  ensureAutomatedQualityAcceptanceIssue,
   failVisualDeckV4Transaction,
+  markAutomatedQualityAcceptance,
   revisionDetails,
 } from './v4-lifecycle'
 
@@ -50,6 +54,10 @@ export type RevisionPlanningResult = Readonly<{
 
 const MAX_REVISION_PROVIDER_ATTEMPTS = 5
 const REVISION_PROVIDER_RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 60_000] as const
+const DEGRADABLE_V4_REVISION_FAILURES = new Set([
+  'REVISION_PLAN_OPERATION_BUDGET_EXCEEDED',
+  'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
+])
 
 type RevisionPlanningFailure = Readonly<{
   errorCode: string
@@ -449,6 +457,10 @@ export class RevisionPlanningRunner {
         return { status: transaction.run.status, step: updatedStep, plan: null, replayed: false }
       }
       if (v4InternalFailure) {
+        if (DEGRADABLE_V4_REVISION_FAILURES.has(diagnostic.diagnosticCode)
+          && this.acceptQualityAndStartDelivery(transaction)) {
+          return { status: transaction.run.status, step: updatedStep, plan: null, replayed: false }
+        }
         failVisualDeckV4Transaction({
           transaction,
           clock: this.dependencies.clock,
@@ -486,6 +498,21 @@ export class RevisionPlanningRunner {
   }
 
   private async requireHuman(run: RunRecord, reason: string): Promise<RevisionPlanningResult> {
+    if (run.presentationMode === 'VISUAL_DECK_V4'
+      && ['MAX_REVISION_ROUNDS_REACHED', 'REVISION_PLAN_HAS_NO_ISSUES', 'REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES'].includes(reason)) {
+      const delivered = await this.dependencies.repository.transact(run.id, (transaction) => {
+        if (this.acceptQualityAndStartDelivery(transaction)) return true
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+          reason: 'DECK_REVIEW_REJECTED',
+        })
+        return false
+      })
+      const latest = await this.requireRun(run.id)
+      return { status: latest.status, step: null, plan: null, replayed: !delivered }
+    }
     const terminalErrorCode = run.presentationMode === 'VISUAL_DECK_V4'
       ? reason === 'MAX_REVISION_ROUNDS_REACHED'
         ? 'QUALITY_REMEDIATION_EXHAUSTED' as const
@@ -541,6 +568,30 @@ export class RevisionPlanningRunner {
       return next
     })
     return { status: updated.status, step: null, plan: null, replayed: false }
+  }
+
+  private acceptQualityAndStartDelivery(transaction: AgentTransaction) {
+    if (transaction.run.status !== 'DECK_REVIEW') return false
+    const disposition = appendAcceptedQualityIssueResolutions(transaction)
+    if (disposition.blockingIssueIds.length > 0) return false
+    const now = this.dependencies.clock.now().toISOString()
+    const policy = transitionRun(transaction.run, 'DELIVERING')
+    const acceptedIssueIds = ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
+    transaction.putRun({
+      ...markAutomatedQualityAcceptance({ ...transaction.run, ...policy }, acceptedIssueIds, now),
+      updatedAt: now,
+    })
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'phase.changed',
+      payload: { from: 'DECK_REVIEW', to: 'DELIVERING', reason: 'QUALITY_POLICY_ACCEPTED' },
+    })
+    appendV4LifecycleEvent(transaction, 'delivery.started', {
+      completed: 0,
+      total: 1,
+      pageNumbers: Array.from({ length: transaction.run.slideCount }, (_, index) => index + 1),
+    })
+    return true
   }
 
   private async recoverTechnicalInputFailure(run: RunRecord, errorCode: string): Promise<RevisionPlanningResult> {

@@ -26,6 +26,8 @@ export const V4_REVISION_PROMPT_MAX_LENGTH = 12_000
 export const V4_REVISION_INSTRUCTION_MAX_LENGTH = 4_100
 
 const VISUAL_DECK_V4_SAFETY_RULES = [
+  '视觉元素独立性要求：画面中的每一个主要视觉元素都必须作为完整、独立、边界清晰的对象呈现，不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体。元素之间可以通过位置、方向、箭头、间距和大小关系表达联系，但即使存在语义关系，也必须分别保持完整轮廓、清晰边界和可见间隔；除非用户明确要求物理接触，否则不得通过接触、遮挡、交叠、穿插、融合或共用轮廓来表达关系。',
+  '每个主要元素周围必须保留足够留白和清晰的背景对比；文字不得覆盖主要图形，装饰不得跨越或连接多个主体，使任意元素后续被单独识别、擦除、替换或分离时不需要重绘相邻元素，同时保持整页统一自然，避免零散贴纸或素材拼贴。',
   'COUNTABLE OBJECT SAFETY: render exactly one authoritative set of every countable teaching object, with the total cardinality stated in the page facts. Never duplicate solid objects to show motion, before/after states, zoom details, or whole/part relationships.',
   'Show motion only with arrows, paths, empty destinations, or non-countable outline symbols. Do not add solid motion copies, ghost objects, inset duplicates, or decorative instances of a counted object.',
   'When a whole and its parts share one page, distinguish them with containers or abstract notation instead of drawing the same physical set twice. The viewer must get one unambiguous count from the static slide.',
@@ -250,6 +252,7 @@ export function latestCompletedAssetStep(
   steps: readonly StepRecord[],
   requirement: BlueprintImageRequirement,
   maxRevisionRound: number,
+  minRevisionRound = 0,
 ) {
   const match = /^(.*):r\d+:v1(?:\:edit\:[a-f0-9]{24})?$/.exec(requirement.idempotencyKey)
   if (!match) return null
@@ -261,7 +264,7 @@ export function latestCompletedAssetStep(
       round: Number(new RegExp(`^${escapeRegExp(prefix)}(\\d+):v1(?:\\:edit\\:[a-f0-9]{24})?$`)
         .exec(step.idempotencyKey)?.[1] ?? -1),
     }))
-    .filter((candidate) => candidate.round >= 0 && candidate.round <= maxRevisionRound)
+    .filter((candidate) => candidate.round >= minRevisionRound && candidate.round <= maxRevisionRound)
     .sort((left, right) => right.round - left.round)[0]?.step ?? null
 }
 
@@ -273,6 +276,27 @@ export function visualDeckPageImageIdentity(idempotencyKey: string) {
   if (!Number.isSafeInteger(pageNumber) || pageNumber < 1
     || !Number.isSafeInteger(revisionRound) || revisionRound < 0) return null
   return { runId: match[1]!, pageNumber, revisionRound }
+}
+
+export function controlledVisualDeckPageArtifact(
+  step: StepRecord | null,
+  requirement: BlueprintImageRequirement,
+) {
+  if (!step || step.tool !== 'generate_slide_image' || step.status !== 'COMPLETED') return null
+  const identity = visualDeckPageImageIdentity(step.idempotencyKey)
+  const expectedIdentity = visualDeckPageImageIdentity(requirement.idempotencyKey)
+  if (!identity || !expectedIdentity || step.runId !== identity.runId
+    || identity.runId !== expectedIdentity.runId
+    || identity.pageNumber !== requirement.pageNumber
+    || identity.revisionRound > expectedIdentity.revisionRound) return null
+  const output = step.output as { slideId?: unknown; versionId?: unknown; artifactId?: unknown } | null
+  const expectedVersionId = `${requirement.slideId}:r${identity.revisionRound}:v1`
+  if (!output
+    || output.slideId !== requirement.slideId
+    || output.versionId !== expectedVersionId
+    || typeof output.artifactId !== 'string'
+    || output.artifactId.trim().length === 0) return null
+  return { artifactId: output.artifactId, revisionRound: identity.revisionRound }
 }
 
 function escapeRegExp(value: string) {

@@ -329,6 +329,17 @@ export class MockArtifactPort implements ArtifactPort {
     const value = this.artifacts.get(artifactId)
     return value ? { artifactId, ...structuredClone(value) } : null
   }
+
+  verifyIntegrity(input: Parameters<ArtifactPort['verifyIntegrity']>[0]) {
+    if (this.owners.get(input.artifactId) !== input.tenantId) return false
+    const value = this.artifacts.get(input.artifactId)
+    if (!value) return false
+    const sha256 = createHash('sha256').update(value.bytes).digest('hex')
+    return value.mimeType === input.mimeType
+      && value.bytes.length === input.byteLength
+      && value.sha256 === input.sha256
+      && sha256 === input.sha256
+  }
 }
 
 export class MockPresentationRendererPort implements PresentationRendererPort {

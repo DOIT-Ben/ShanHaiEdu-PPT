@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { ArtifactPort } from '../core/ports'
@@ -78,18 +79,42 @@ export class LocalArtifactPort implements ArtifactPort {
     return artifact ? { artifactId, ...artifact } : null
   }
 
+  verifyIntegrity(input: Parameters<ArtifactPort['verifyIntegrity']>[0]) {
+    if (!/^artifact-[a-f0-9]{40}$/.test(input.artifactId)) return false
+    const directory = path.join(this.rootDirectory, input.artifactId)
+    try {
+      const metadata = this.parseMetadata(JSON.parse(
+        readFileSync(path.join(directory, 'metadata.json'), 'utf8'),
+      ) as Partial<ArtifactMetadata>)
+      if (!metadata || metadata.tenantHash !== digest(input.tenantId)
+        || metadata.mimeType !== input.mimeType
+        || metadata.byteLength !== input.byteLength
+        || metadata.sha256 !== input.sha256) return false
+      const bytes = new Uint8Array(readFileSync(path.join(directory, 'content.bin')))
+      return bytes.length === input.byteLength && digest(bytes) === input.sha256
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw error
+    }
+  }
+
   private async readMetadata(directory: string) {
     try {
-      const raw = JSON.parse(await readFile(path.join(directory, 'metadata.json'), 'utf8')) as Partial<ArtifactMetadata>
-      if (
-        typeof raw.artifactId !== 'string' || typeof raw.tenantHash !== 'string' || typeof raw.runHash !== 'string'
-        || typeof raw.name !== 'string' || typeof raw.mimeType !== 'string' || typeof raw.sha256 !== 'string'
-        || typeof raw.byteLength !== 'number'
-      ) return null
-      return raw as ArtifactMetadata
+      return this.parseMetadata(
+        JSON.parse(await readFile(path.join(directory, 'metadata.json'), 'utf8')) as Partial<ArtifactMetadata>,
+      )
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
     }
+  }
+
+  private parseMetadata(raw: Partial<ArtifactMetadata>) {
+    if (
+      typeof raw.artifactId !== 'string' || typeof raw.tenantHash !== 'string' || typeof raw.runHash !== 'string'
+      || typeof raw.name !== 'string' || typeof raw.mimeType !== 'string' || typeof raw.sha256 !== 'string'
+      || typeof raw.byteLength !== 'number'
+    ) return null
+    return raw as ArtifactMetadata
   }
 }

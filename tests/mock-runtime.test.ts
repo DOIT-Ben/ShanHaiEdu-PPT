@@ -16,6 +16,7 @@ import {
 import {
   StructuredModelError,
   type DeckReviewPort,
+  type ImageGenerationPort,
   type RevisionApplicationPort,
   type RevisionPlanningPort,
 } from '../src/core/ports'
@@ -28,6 +29,8 @@ import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-ca
 import type { UsageAccountingPort } from '../src/core/ports'
 import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 import type { UsageRunBill } from '../src/usage-accounting-contracts'
+import { deriveV4TerminalAccounting } from '../src/core/v4-terminal-accounting'
+import { v4LifecyclePayload } from '../src/core/v4-lifecycle'
 
 const token = 'test-runtime-token-0001'
 
@@ -37,6 +40,44 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
   headers.set('X-PPT-Agent-Tenant', 'frameflow')
   headers.set('X-PPT-Agent-User', user)
   return new Request(`http://127.0.0.1:4310${path}`, { ...init, headers })
+}
+
+class CountingCompletedImageGeneration implements ImageGenerationPort {
+  readonly submissions: Parameters<ImageGenerationPort['submit']>[0][] = []
+  private readonly artifactsByOperation = new Map<string, string>()
+
+  constructor(private readonly artifacts: MockArtifactPort) {}
+
+  async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+    this.submissions.push(structuredClone(input))
+    const operationId = `counting-image-${hashInput(input.idempotencyKey).slice(0, 24)}`
+    if (!this.artifactsByOperation.has(operationId)) {
+      const artifact = await this.artifacts.put({
+        tenantId: input.tenantId,
+        runId: input.idempotencyKey.split(':slide:')[0]!,
+        name: `${operationId}.png`,
+        mimeType: 'image/png',
+        bytes: new TextEncoder().encode(`image:${input.idempotencyKey}`),
+        idempotencyKey: `${input.idempotencyKey}:artifact`,
+      })
+      this.artifactsByOperation.set(operationId, artifact.artifactId)
+    }
+    return { operationId, state: 'COMPLETED' as const }
+  }
+
+  async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+    const operationId = `counting-image-${hashInput(input.idempotencyKey).slice(0, 24)}`
+    return this.artifactsByOperation.has(operationId)
+      ? { state: 'SUBMITTED' as const, operationId }
+      : { state: 'NOT_SUBMITTED' as const }
+  }
+
+  async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
+    const artifactId = this.artifactsByOperation.get(input.operationId)
+    return artifactId
+      ? { state: 'COMPLETED' as const, artifactId }
+      : { state: 'FAILED' as const, errorCode: 'COUNTING_IMAGE_NOT_FOUND', billingState: 'NOT_CHARGED' as const }
+  }
 }
 
 describe('mock runtime', () => {
@@ -644,6 +685,106 @@ describe('mock runtime', () => {
     })
     expect(await repository.listDeliveries(runId)).toHaveLength(1)
     expect(renderer).toMatchObject({ previewCalls: 1, pptxCalls: 1 })
+  })
+
+  test('recovers an exhausted v4 quality failure through the worker without resubmitting or rebilling images', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const renderer = new MockPresentationRendererPort()
+    const images = new CountingCompletedImageGeneration(artifacts)
+    const runtime = createMockRuntime({ repository, artifacts, renderer, images, apiToken: token })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-v4-quality-recovery-create' },
+      body: JSON.stringify({
+        schemaVersion: '1',
+        host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: {
+          kind: 'TEXT', name: '五以内数的分与合.txt',
+          text: '把五只小鸟分成两个非空组，记录每一种分法，并检查两组合起来仍然是五只。'.repeat(6),
+        },
+        slideCount: 2,
+        visualDirection: '明亮清晰的儿童课堂信息图',
+        imageModel: 'mock-image',
+        automationLevel: 'BOUNDED_AUTO',
+        budgetUnits: 2,
+        maxRevisionRounds: 0,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '制作两页讲解五以内数的分与合的课堂视觉 PPT',
+          sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+            audience: '幼儿园大班学生', focus: '理解 5 的分与合',
+          },
+        },
+      }),
+    }))
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    expect(created.status).toBe(201)
+
+    await runtime.tick()
+    await runtime.tick()
+    const generated = (await repository.getRun(runId))!
+    expect(generated).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 2, maxRevisionRounds: 0 })
+    const beforeSteps = await repository.listSteps(runId)
+    const beforeImageSteps = beforeSteps.filter((step) => step.tool === 'generate_slide_image')
+    const beforeBatches = beforeSteps.filter((step) => step.tool === 'generate_image_batch')
+    expect(beforeImageSteps).toHaveLength(2)
+    expect(images.submissions).toHaveLength(2)
+    const terminalAccounting = deriveV4TerminalAccounting(generated, beforeSteps)
+    expect(terminalAccounting.accountingStatus).toBe('FINAL')
+    await repository.transact(runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'issue.detected',
+        payload: {
+          id: 'legacy-v4-quality-issue', category: 'IMAGE_QUALITY', severity: 'WARNING',
+          summary: '旧版本页审发现一项非确定性的构图问题。', slideIds: [`${runId}:slide:2`],
+          sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+      const failed = {
+        ...transaction.run,
+        status: 'FAILED' as const,
+        version: transaction.run.version + 1,
+        terminalAccounting,
+      }
+      transaction.putRun(failed)
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'run.failed',
+        payload: {
+          ...v4LifecyclePayload(failed, 'RUN', {
+            completed: 0, total: 1, pageNumbers: [1, 2], reason: 'REVISION_LIMIT_REACHED', retryable: false,
+          }),
+          errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+          terminalAccounting,
+        },
+      })
+    })
+    const failed = (await repository.getRun(runId))!
+
+    const resumed = await runtime.handler(request(`/v1/runs/${runId}/actions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-v4-quality-recovery-action' },
+      body: JSON.stringify({ schemaVersion: '1', type: 'RETRY_DELIVERY', expectedVersion: failed.version }),
+    }))
+    expect(resumed.status).toBe(200)
+    await runtime.tick()
+    await runtime.tick()
+
+    expect(await repository.getRun(runId)).toMatchObject({
+      status: 'COMPLETED', committedBudgetUnits: 2, qualityOverride: true,
+    })
+    expect(images.submissions).toHaveLength(2)
+    const afterSteps = await repository.listSteps(runId)
+    expect(afterSteps.filter((step) => step.tool === 'generate_slide_image')).toEqual(beforeImageSteps)
+    expect(afterSteps.filter((step) => step.tool === 'generate_image_batch')).toEqual(beforeBatches)
+    expect(await repository.listDeliveries(runId)).toEqual([
+      expect.objectContaining({ qualityStatus: 'OVERRIDDEN_INTERNAL', qualityOverride: true }),
+    ])
+    expect(await repository.getTerminalEvent(runId)).toMatchObject({ type: 'run.completed' })
   })
 
   test('rejects missing or mismatched service credentials', async () => {

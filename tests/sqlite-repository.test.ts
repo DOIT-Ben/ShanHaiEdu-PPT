@@ -222,6 +222,37 @@ describe('SQLite repository', () => {
     repository.close()
   })
 
+  test('ignores an old terminal event after a persisted run resume', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'DECK_REVIEW', version: 2 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.failed',
+        payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.resumed',
+        payload: { status: 'DECK_REVIEW' },
+      })
+    })
+
+    expect(await repository.getTerminalEvent('run-1')).toBeNull()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'COMPLETED', version: 3 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.completed',
+        payload: { deliveryId: 'delivery-1', qualityOverride: false },
+      })
+    })
+    expect(await repository.getTerminalEvent('run-1')).toMatchObject({ sequence: 3, type: 'run.completed' })
+    repository.close()
+  })
+
   test('enforces one Step per Run idempotency key', async () => {
     const filename = await databasePath()
     const repository = new SqliteAgentRepository(filename)

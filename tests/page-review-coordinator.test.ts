@@ -301,13 +301,13 @@ describe('page review coordinator', () => {
     })
   })
 
-  test('fails explicitly when a rejected v4 page exhausts bounded remediation', async () => {
+  test('accepts quality findings and continues to deck review when v4 remediation is disabled', async () => {
     const planned = visualDeckV4Blueprint()
     const { repository, reviewerPort, coordinator } = await fixture({
       plannedBlueprint: planned,
       runOverrides: {
         presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
-        revisionRound: 2, maxRevisionRounds: 2,
+        revisionRound: 0, maxRevisionRounds: 0,
       },
     })
     const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
@@ -317,13 +317,17 @@ describe('page review coordinator', () => {
       retryInstruction: 'Remove the duplicated countable objects on page two.',
     })
 
-    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED', revisionRound: 2 })
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', rejected: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'DECK_REVIEW', revisionRound: 0 })
     const events = await repository.listEvents('run-1')
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
-    expect(events.at(-1)).toMatchObject({
-      type: 'run.failed', payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(true)
+    expect(events.find((event) => event.type === 'page_review.completed')).toMatchObject({
+      payload: { reason: 'PAGE_REVIEW_REJECTED', retryable: false },
     })
+    expect(events.at(-1)).toMatchObject({ type: 'deck_review.started' })
   })
 
   test('keeps prior issues open while a redraw still fails and resolves them after the page passes', async () => {
@@ -501,7 +505,7 @@ describe('page review coordinator', () => {
     expect(resolvedIds).not.toContain('independent-image-quality-issue')
   })
 
-  test('fails explicitly when cumulative v4 instructions cannot fit another bounded revision', async () => {
+  test('accepts the current page when cumulative v4 instructions cannot fit another bounded revision', async () => {
     const planned = visualDeckV4Blueprint()
     const { repository, reviewerPort, artifacts, coordinator } = await fixture({
       plannedBlueprint: planned,
@@ -570,11 +574,13 @@ describe('page review coordinator', () => {
       })
     })
 
-    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', rejected: 1 })
     expect((await repository.listSteps('run-1')).some((step) =>
       step.idempotencyKey === revisionPlanStepKey('run-1', 2))).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'issue.resolved' && event.payload.resolution === 'ACCEPTED')).toBe(true)
   })
 
   test('replays a completed page-review phase without model calls', async () => {

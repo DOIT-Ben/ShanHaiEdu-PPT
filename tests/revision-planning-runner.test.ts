@@ -305,7 +305,7 @@ describe('revision planning runner', () => {
     })
   })
 
-  test('fails a v4 run when a rejected review has only informational issues', async () => {
+  test('delivers a v4 run when a rejected review has only informational issues', async () => {
     const { repository, planner, runner } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', budgetUnits: 0, committedBudgetUnits: 0,
     }, plan(), visualDeckV4Blueprint())
@@ -325,16 +325,15 @@ describe('revision planning runner', () => {
     })
 
     expect(await runner.plan('run-1')).toMatchObject({
-      status: 'FAILED',
+      status: 'DELIVERING',
       step: null,
       plan: null,
     })
     expect(planner.requests.size).toBe(0)
     const events = await repository.listEvents('run-1')
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
-    expect(events.at(-1)).toMatchObject({
-      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
-    })
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.at(-1)).toMatchObject({ type: 'delivery.started' })
   })
 
   test('falls back to a complete deterministic v4 plan after model contract repair is exhausted', async () => {
@@ -418,7 +417,7 @@ describe('revision planning runner', () => {
     expect(covered.has('issue-layout-50')).toBe(true)
   })
 
-  test('stops without a planner call at the configured revision limit', async () => {
+  test('continues to delivery without a planner call at the configured v4 revision limit', async () => {
     const { repository, planner, runner } = await fixture({
       revisionRound: 2,
       maxRevisionRounds: 2,
@@ -428,19 +427,14 @@ describe('revision planning runner', () => {
     })
     const result = await runner.plan('run-1')
 
-    expect(result).toMatchObject({ status: 'FAILED', step: null, plan: null })
+    expect(result).toMatchObject({ status: 'DELIVERING', step: null, plan: null })
     expect(planner.requests.size).toBe(0)
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED', revisionRound: 2 })
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'DELIVERING', revisionRound: 2 })
     const events = await repository.listEvents('run-1')
     expect(events.some((event) => event.type.startsWith('revision.'))).toBe(false)
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
-    expect(events.at(-1)).toMatchObject({
-      type: 'run.failed',
-      payload: {
-        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
-        terminalAccounting: { accountingStatus: 'FINAL', authorizedUnits: 0, settledUnits: 0, releasedUnits: 0 },
-      },
-    })
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.at(-1)).toMatchObject({ type: 'delivery.started' })
   })
 
   test('counts completed page redraws against the public total revision limit', async () => {
@@ -634,16 +628,15 @@ describe('revision planning runner', () => {
     })
 
     expect(await runner.plan('run-1')).toMatchObject({
-      status: 'FAILED', plan: null,
+      status: 'DELIVERING', plan: null,
     })
     expect([...planner.requests.values()][1]?.contractRepairIssues).toContainEqual({
       path: '$', message: 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
     })
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
-    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({
-      type: 'run.failed', payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
-    })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'run.failed')).toBe(false)
+    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({ type: 'delivery.started' })
   })
 
   test('rejects missing, unknown and non-image v3 revision targets during planning', async () => {

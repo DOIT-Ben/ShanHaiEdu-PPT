@@ -14,6 +14,77 @@ class CountingRepository extends InMemoryAgentRepository {
   }
 }
 
+class ResumeInsertedAfterTerminalLookupRepository extends CountingRepository {
+  private resumed = false
+
+  override async getTerminalEvent(runId: string) {
+    const terminal = await super.getTerminalEvent(runId)
+    if (!this.resumed && terminal) await this.resume(runId)
+    return terminal
+  }
+
+  override async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
+    if (!this.resumed) await this.resume(runId)
+    return super.readEvents(runId, input)
+  }
+
+  private async resume(runId: string) {
+    this.resumed = true
+    await this.transact(runId, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'DECK_REVIEW', version: transaction.run.version + 1 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.resumed',
+        payload: { status: 'DECK_REVIEW' },
+      })
+    })
+  }
+}
+
+class TerminalAndAuditInsertedBeforeReadRepository extends CountingRepository {
+  private inserted = false
+
+  override async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
+    if (!this.inserted) {
+      this.inserted = true
+      await this.transact(runId, (transaction) => {
+        transaction.putRun({ ...transaction.run, status: 'FAILED' })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'run.failed',
+          payload: { errorCode: 'TEST_FAILURE' },
+        })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'tool.completed',
+          payload: { stepId: 'step-late-audit', summary: 'late audit after terminal event' },
+        })
+      })
+    }
+    return super.readEvents(runId, input)
+  }
+}
+
+class TerminalInsertedAfterEmptyPageSnapshotRepository extends CountingRepository {
+  private inserted = false
+
+  override async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
+    const page = await super.readEvents(runId, input)
+    if (!this.inserted) {
+      this.inserted = true
+      await this.transact(runId, (transaction) => {
+        transaction.putRun({ ...transaction.run, status: 'FAILED' })
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'run.failed',
+          payload: { errorCode: 'TEST_FAILURE' },
+        })
+      })
+    }
+    return page
+  }
+}
+
 function run(status: RunRecord['status'] = 'EXECUTING'): RunRecord {
   return {
     id: 'run-1', creationKey: 'create-1', requestHash: 'hash',
@@ -130,7 +201,7 @@ describe('RunEventBroker', () => {
     await waitFor(() => closed)
 
     expect(events).toEqual([])
-    expect(repository.readCount).toBe(0)
+    expect(repository.readCount).toBe(1)
     expect(broker.activePollers()).toBe(0)
   })
 
@@ -194,7 +265,120 @@ describe('RunEventBroker', () => {
     await waitFor(() => closed)
 
     expect(events).toEqual([])
-    expect(repository.readCount).toBe(0)
+    expect(repository.readCount).toBe(1)
+    expect(broker.activePollers()).toBe(0)
+  })
+
+  test('does not close on a failed event that was superseded by run resume', async () => {
+    const repository = new CountingRepository()
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'DECK_REVIEW', version: 2 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.failed',
+        payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.resumed',
+        payload: { status: 'DECK_REVIEW' },
+      })
+    })
+    const broker = new RunEventBroker({ repository, pollMs: 5 })
+    const types: string[] = []
+    let closed = false
+
+    await broker.subscribe({
+      runId: 'run-1', after: 0,
+      onEvent: (event) => Boolean(types.push(event.type)),
+      onClose: () => { closed = true },
+    })
+    await waitFor(() => types.includes('run.resumed'))
+    expect(closed).toBe(false)
+
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'COMPLETED', version: 3 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.completed',
+        payload: { deliveryId: 'delivery-1', qualityOverride: false },
+      })
+    })
+    await waitFor(() => closed)
+    expect(types).toEqual(['run.failed', 'run.resumed', 'run.completed'])
+  })
+
+  test('does not close from a stale terminal lookup when recovery commits before event replay', async () => {
+    const repository = new ResumeInsertedAfterTerminalLookupRepository()
+    await repository.createRun(run('FAILED'))
+    await repository.transact('run-1', (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.failed',
+        payload: { errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' },
+      })
+    })
+    const broker = new RunEventBroker({ repository, pollMs: 2 })
+    const types: string[] = []
+    let closed = false
+
+    await broker.subscribe({
+      runId: 'run-1', after: 1,
+      onEvent: (event) => Boolean(types.push(event.type)),
+      onClose: () => { closed = true },
+    })
+    await waitFor(() => types.includes('run.resumed'))
+    expect(closed).toBe(false)
+
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'COMPLETED', version: transaction.run.version + 1 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.completed',
+        payload: { deliveryId: 'delivery-1', qualityOverride: false },
+      })
+    })
+    await waitFor(() => closed)
+    expect(types).toEqual(['run.resumed', 'run.completed'])
+  })
+
+  test('stops at a terminal event inserted with a later audit before the event-page read', async () => {
+    const repository = new TerminalAndAuditInsertedBeforeReadRepository()
+    await repository.createRun(run())
+    const broker = new RunEventBroker({ repository, pollMs: 2 })
+    const types: string[] = []
+    let closed = false
+
+    const unsubscribe = await broker.subscribe({
+      runId: 'run-1', after: 0,
+      onEvent: (event) => Boolean(types.push(event.type)),
+      onClose: () => { closed = true },
+    })
+    await Bun.sleep(40)
+
+    expect(types).toEqual(['run.failed'])
+    expect(closed).toBe(true)
+    expect(broker.activePollers()).toBe(0)
+    unsubscribe()
+  })
+
+  test('delivers a terminal event committed after an empty event-page snapshot before closing', async () => {
+    const repository = new TerminalInsertedAfterEmptyPageSnapshotRepository()
+    await repository.createRun(run())
+    const broker = new RunEventBroker({ repository, pollMs: 2 })
+    const types: string[] = []
+    let closed = false
+
+    await broker.subscribe({
+      runId: 'run-1', after: 0,
+      onEvent: (event) => Boolean(types.push(event.type)),
+      onClose: () => { closed = true },
+    })
+    await waitFor(() => closed)
+
+    expect(types).toEqual(['run.failed'])
+    expect(repository.readCount).toBe(2)
     expect(broker.activePollers()).toBe(0)
   })
 

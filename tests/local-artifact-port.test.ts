@@ -42,6 +42,14 @@ describe('local artifact port', () => {
     expect(stored?.sha256).toBe(first.sha256)
     expect(resolved).toMatchObject({ artifactId: first.artifactId, mimeType: 'image/png', sha256: first.sha256 })
     expect(resolved?.bytes).toEqual(bytes)
+    expect(artifacts.verifyIntegrity({
+      tenantId: 'frameflow', artifactId: first.artifactId, mimeType: 'image/png',
+      byteLength: bytes.length, sha256: first.sha256,
+    })).toBe(true)
+    expect(artifacts.verifyIntegrity({
+      tenantId: 'frameflow', artifactId: first.artifactId, mimeType: 'text/plain',
+      byteLength: bytes.length, sha256: first.sha256,
+    })).toBe(false)
   })
 
   test('isolates tenant reads and rejects changed bytes under one idempotency key', async () => {

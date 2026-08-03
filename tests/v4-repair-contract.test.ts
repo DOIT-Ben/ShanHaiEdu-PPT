@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import type { PresentationBlueprint } from '../src/presentation-contracts'
-import { latestCompletedAssetStep, type BlueprintImageRequirement } from '../src/core/blueprint-assets'
+import {
+  controlledVisualDeckPageArtifact,
+  latestCompletedAssetStep,
+  type BlueprintImageRequirement,
+} from '../src/core/blueprint-assets'
 import type { StepRecord } from '../src/core/ports'
 import { visualDeckV4RevisionInstructions } from '../src/core/revision-instruction-memory'
 import {
@@ -102,6 +106,8 @@ describe('V4 repair contract', () => {
     expect(prompt).toContain('恰好五个圆片')
     expect(prompt).toContain('2 + 3 = 5')
     expect(prompt).toContain('Do not redesign or regenerate the entire slide')
+    expect(prompt).toContain('视觉元素独立性要求')
+    expect(prompt).toContain('不得绑定、粘合、嵌套或合成为不可分割的组合主体')
   })
 
   test('keeps the persisted contract strict', () => {
@@ -159,6 +165,27 @@ describe('V4 edit key compatibility', () => {
 
     expect(latestCompletedAssetStep([legacy, edited, future], requirement, 2)?.idempotencyKey).toBe(edited.idempotencyKey)
     expect(latestCompletedAssetStep([legacy, edited], requirement, 0)?.idempotencyKey).toBe(legacy.idempotencyKey)
+  })
+
+  test('accepts an unchanged prior-round page but rejects an artifact from a future round', () => {
+    const completeRequirement = {
+      ...requirement,
+      slideId: 'run-1:slide:2',
+      pageNumber: 2,
+    } as BlueprintImageRequirement
+    const prior = {
+      ...step('run-1:slide:2:image:r1:v1', '2026-08-03T00:01:00.000Z'),
+      output: { slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r1:v1', artifactId: 'artifact-prior' },
+    }
+    const future = {
+      ...step('run-1:slide:2:image:r3:v1', '2026-08-03T00:03:00.000Z'),
+      output: { slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r3:v1', artifactId: 'artifact-future' },
+    }
+
+    expect(controlledVisualDeckPageArtifact(prior, completeRequirement)).toMatchObject({
+      artifactId: 'artifact-prior', revisionRound: 1,
+    })
+    expect(controlledVisualDeckPageArtifact(future, completeRequirement)).toBeNull()
   })
 
   test('carries a review derived from an edit key into the next revision round', () => {

@@ -399,6 +399,72 @@ describe('gateway courseware model', () => {
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
   })
 
+  test('requires visual element independence throughout V4 visual planning', async () => {
+    const source = {
+      kind: 'TEXT' as const,
+      name: '分数教材.txt',
+      text: '把一个蛋糕平均分成两份，其中一份就是这个蛋糕的二分之一。'.repeat(4),
+    }
+    const document = {
+      name: source.name,
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+      isComplete: true,
+      missingRanges: [] as string[],
+    }
+    const proposal = compileVisualDeckV4Proposal({
+      runId: 'run-v4-separable-elements', inputHash: 'input-v4-separable-elements', source, document,
+      config: {
+        instruction: '为三年级学生制作一套认识二分之一的视觉演示', sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: {
+          deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+          audience: '小学三年级学生', focus: '平均分和二分之一', styleHint: '温暖儿童绘本风格',
+        },
+      },
+      slideCount: 2, visualDirection: '温暖儿童绘本风格', createdAt: '2026-08-04T00:00:00.000Z',
+    })
+    const requestBodies: Record<string, any>[] = []
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body))
+        requestBodies.push(body)
+        return streamedResponsesTextCompletion(JSON.stringify(
+          body.text.format.name === 'ppt_agent_v4_deck_visual_v1'
+            ? { deckPlan: proposal.deckPlan, visualContract: proposal.visualContract }
+            : { slideBriefs: proposal.slideBriefs },
+        ))
+      },
+    })
+
+    await model.execute({
+      operation: 'create_visual_deck_v4_deck_visual', schemaName: 'ppt_agent_v4_deck_visual_v1',
+      idempotencyKey: 'run-v4-separable-elements:deck-visual', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        sourceUnderstanding: proposal.sourceUnderstanding,
+        presentationSpec: proposal.presentationSpec,
+      },
+    })
+    await model.execute({
+      operation: 'create_visual_deck_v4_slide_briefs', schemaName: 'ppt_agent_v4_slide_briefs_v1',
+      idempotencyKey: 'run-v4-separable-elements:slide-briefs', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        sourceUnderstanding: proposal.sourceUnderstanding,
+        presentationSpec: proposal.presentationSpec,
+        deckPlan: proposal.deckPlan,
+        visualContract: proposal.visualContract,
+      },
+    })
+
+    const deckSystemPrompt = requestBodies[0]!.input[0].content[0].text as string
+    const slideSystemPrompt = requestBodies[1]!.input[0].content[0].text as string
+    expect(deckSystemPrompt).toContain('视觉元素独立性要求')
+    expect(deckSystemPrompt).toContain('不可分割的组合主体')
+    expect(slideSystemPrompt).toContain('视觉元素独立性要求')
+    expect(slideSystemPrompt).toContain('不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体')
+    expect(slideSystemPrompt).toContain('除非用户明确要求物理接触')
+  })
+
   test('keeps the chain-1 final coherence operation on its original strict structured contract', async () => {
     const review = {
       decision: 'APPROVED' as const,
@@ -439,6 +505,7 @@ describe('gateway courseware model', () => {
       type: 'json_schema', name: 'ppt_agent_v4_final_coherence_v1', strict: true,
     })
     expect(requestBody!.input[0].content[0].text).toContain('最终连贯性审查')
+    expect(requestBody!.input[0].content[0].text).toContain('视觉元素独立性要求')
   })
 
   test('delegates the four chain-3 reflection contracts to strict staged Structured Outputs', async () => {
@@ -565,7 +632,9 @@ describe('gateway courseware model', () => {
       'previousSlideRelationChanges', 'roleChanges', 'visualMetaphorChanges',
     ])
     expect(requests[2]!.body.input[0].content[0].text).toContain('重复绘制可数对象')
+    expect(requests[2]!.body.input[0].content[0].text).toContain('不可分割的组合主体')
     expect(requests[3]!.body.input[0].content[0].text).toContain('冻结教学字段')
+    expect(requests[3]!.body.input[0].content[0].text).toContain('视觉元素独立性要求')
     expect(model.takeExecutionMetrics('run-v4:deck-reflection:critic')).toMatchObject({
       inputTokens: 321, outputTokens: 123, totalTokens: 444,
     })
@@ -734,12 +803,14 @@ describe('gateway courseware model', () => {
       'contentPatches', 'layoutPatches', 'redrawOnlyPageNumbers',
     ])
     expect(JSON.stringify(chain2.input)).toContain('只返回局部补丁')
+    expect(JSON.stringify(chain2.input)).toContain('视觉元素独立性要求')
     expect(chain2.text.format.schema.properties).not.toHaveProperty('sourceUnderstanding')
     expect(chain1.text.format).toMatchObject({
       type: 'json_schema', name: 'ppt_agent_v4_revision_application_v1', strict: true,
     })
     expect(chain1.text.format.schema.properties).toHaveProperty('sourceUnderstanding')
     expect(chain1.text.format.schema.properties).toHaveProperty('slideBriefs')
+    expect(JSON.stringify(chain1.input)).toContain('视觉元素独立性要求')
   })
 
   test('rejects an incomplete V4 staged response before using its structured text', async () => {
@@ -1025,6 +1096,8 @@ describe('gateway courseware model', () => {
       input: { content: { type: string; text?: string; image_url?: string }[] }[]
     }).input
     expect(input[0]?.content[0]?.text).toContain('非展示事实核对项')
+    expect(input[0]?.content[0]?.text).toContain('视觉元素独立性要求')
+    expect(input[0]?.content[0]?.text).toContain('绑定、粘合、嵌套或合成')
     const userContent = input[1]!.content
     const imageUrl = userContent.find((part) => part.type === 'input_image')?.image_url
     expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)

@@ -1,6 +1,5 @@
 import type { KnownAgentEvent as AgentEvent } from '../contracts'
 import type { AgentRepository } from '../core/ports'
-import { isTerminalStatus } from '../core/policy'
 
 type Subscriber = {
   cursor: number
@@ -11,7 +10,6 @@ type Subscriber = {
 type RunChannel = {
   cursor: number
   terminalSequence: number | null
-  terminalReady: Promise<void>
   subscribers: Set<Subscriber>
   timer: ReturnType<typeof setTimeout> | null
   polling: boolean
@@ -41,32 +39,20 @@ export class RunEventBroker {
       channel = {
         cursor: input.after,
         terminalSequence: null,
-        terminalReady: Promise.resolve(),
         subscribers: new Set(),
         timer: null,
         polling: false,
       }
       this.channels.set(input.runId, channel)
-      const initializingChannel = channel
-      channel.terminalReady = this.input.repository.getTerminalEvent(input.runId).then((terminal) => {
-        initializingChannel.terminalSequence = terminal?.sequence ?? null
-      })
-    }
-    try {
-      await channel.terminalReady
-    } catch {
-      input.onClose()
-      if (channel.subscribers.size === 0) this.stop(input.runId, channel)
-      return () => {}
-    }
-    if (channel.terminalSequence !== null && input.after >= channel.terminalSequence) {
-      input.onClose()
-      if (channel.subscribers.size === 0) this.stop(input.runId, channel)
-      return () => {}
     }
     let cursor = input.after
     while (cursor < channel.cursor) {
       const page = await this.read(input.runId, cursor)
+      channel.terminalSequence = page.terminalSequence
+      if (channel.terminalSequence !== null && channel.terminalSequence <= cursor) {
+        input.onClose()
+        return () => {}
+      }
       for (const event of page.events) {
         if (channel.terminalSequence !== null && event.sequence > channel.terminalSequence) {
           input.onClose()
@@ -77,7 +63,7 @@ export class RunEventBroker {
           return () => {}
         }
         cursor = event.sequence
-        if (this.isTerminalEvent(event)) {
+        if (channel.terminalSequence !== null && event.sequence === channel.terminalSequence) {
           input.onClose()
           return () => {}
         }
@@ -105,6 +91,12 @@ export class RunEventBroker {
     channel.polling = true
     try {
       const page = await this.read(runId, channel.cursor)
+      channel.terminalSequence = page.terminalSequence
+      if (channel.terminalSequence !== null && channel.terminalSequence <= channel.cursor) {
+        for (const subscriber of [...channel.subscribers]) subscriber.onClose()
+        this.stop(runId, channel)
+        return
+      }
       let terminal = false
       for (const event of page.events) {
         if (channel.terminalSequence !== null && event.sequence > channel.terminalSequence) break
@@ -117,17 +109,10 @@ export class RunEventBroker {
           }
           else subscriber.cursor = event.sequence
         }
-        if (this.isTerminalEvent(event)) {
-          channel.terminalSequence = event.sequence
+        if (channel.terminalSequence !== null && event.sequence === channel.terminalSequence) {
           terminal = true
           break
         }
-      }
-      if (!terminal && page.events.length === 0) {
-        const run = await this.input.repository.getRun(runId)
-        terminal = Boolean(run && isTerminalStatus(run.status)
-          && !(run.status === 'FAILED'
-            && run.terminalAccounting?.accountingStatus === 'RECONCILIATION_REQUIRED'))
       }
       if (terminal) {
         for (const subscriber of [...channel.subscribers]) subscriber.onClose()
@@ -152,15 +137,6 @@ export class RunEventBroker {
       limit: this.input.eventLimit ?? DEFAULT_EVENT_BATCH_LIMIT,
       maxBytes: this.input.maxBytes ?? DEFAULT_EVENT_BATCH_BYTES,
     })
-  }
-
-  private isTerminalEvent(event: AgentEvent) {
-    if (event.type === 'run.accounting.finalized') return true
-    if (event.type === 'run.failed') {
-      return !('terminalAccounting' in event.payload)
-        || event.payload.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
-    }
-    return event.type === 'run.completed' || event.type === 'run.cancelled'
   }
 
   private remove(runId: string, channel: RunChannel, subscriber: Subscriber) {

@@ -117,6 +117,8 @@ export function compileV4RepairPrompt(contract: V4RepairContract) {
     section('Formulas that must remain exact', value.exactConstraints.formulas),
     section('Visual continuity rules', value.preserve.continuityRules),
     section('Forbidden changes', value.forbiddenChanges),
+    '视觉元素独立性要求：编辑后仍须让每个主要视觉元素保持完整轮廓、清晰边界和可见间隔，不得绑定、粘合、嵌套或合成为不可分割的组合主体。',
+    '即使元素存在语义关系，也只能通过位置、方向、箭头、间距和大小关系表达；除非用户明确要求物理接触，否则不得新增接触、遮挡、交叠、穿插、融合或共用轮廓。',
     'COUNTABLE OBJECT SAFETY: keep exactly one authoritative set of every countable teaching object and preserve the required total cardinality.',
     'Do not invent any additional labels, captions, page numbers, decorative words, watermarks, logos, or content from another slide.',
     'Return one finished full-bleed 16:9 slide image. Do not add explanations, borders, watermarks, or content from another slide.',
