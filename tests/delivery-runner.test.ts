@@ -360,6 +360,30 @@ describe('delivery runner', () => {
     })
   })
 
+  test('fails closed when v4 delivery receives an unknown provider error code', async () => {
+    const { repository, renderer, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+      qualityDisposition: 'REVIEW_PASSED',
+    })
+    renderer.nextFailure = Object.assign(new Error('provider request rejected'), { code: 'INVALID_REQUEST' })
+
+    expect(await runner.deliver('run-1')).toMatchObject({
+      status: 'FAILED', delivery: null, step: { status: 'FAILED', errorCode: 'INVALID_REQUEST' },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED',
+      technicalRecovery: { reason: 'INVALID_REQUEST', retryable: false, active: false },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'run.failed',
+      payload: expect.objectContaining({
+        errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED', requiresUserAction: false, nextAction: null,
+      }),
+    }))
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
   test('does not complete v4 when a readable pptx contains the wrong slide count', async () => {
     const { repository, renderer, runner } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',

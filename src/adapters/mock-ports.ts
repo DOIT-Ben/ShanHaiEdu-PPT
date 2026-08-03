@@ -13,6 +13,7 @@ import type {
   VisualReviewPort,
 } from '../core/ports'
 import { BudgetReservationError, MediaSubmissionError } from '../core/ports'
+import { providerTechnicalFailure } from '../core/technical-recovery'
 import { createHash } from 'node:crypto'
 import PptxGenJS from 'pptxgenjs'
 import sharp from 'sharp'
@@ -174,6 +175,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
         state: 'FAILED' as const,
         errorCode: 'OPERATION_NOT_FOUND',
         billingState: 'UNKNOWN' as const,
+        technicalFailure: providerTechnicalFailure('OPERATION_NOT_FOUND'),
       })
     } finally {
       this.activeInspections -= 1
@@ -189,11 +191,23 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   fail(idempotencyKey: string, errorCode: string, billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN') {
     const operationId = this.operations.get(idempotencyKey)
     if (!operationId) throw new Error('mock operation not found')
-    this.statuses.set(operationId, { state: 'FAILED', errorCode, billingState })
+    this.statuses.set(operationId, {
+      state: 'FAILED',
+      errorCode,
+      billingState,
+      technicalFailure: providerTechnicalFailure(errorCode),
+    })
   }
 
   failNext(code: string, submissionState: 'NOT_SUBMITTED' | 'UNKNOWN') {
-    this.nextFailure = new MediaSubmissionError(code, submissionState, code)
+    this.nextFailure = new MediaSubmissionError(
+      code,
+      submissionState,
+      code,
+      providerTechnicalFailure(code, {
+        ...(submissionState === 'UNKNOWN' ? { disposition: 'RETRYABLE' as const } : {}),
+      }),
+    )
   }
 }
 

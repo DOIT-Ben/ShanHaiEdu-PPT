@@ -19,7 +19,7 @@ import {
   type StepRecord,
 } from './ports'
 import { releaseBudget, reserveBudget } from './policy'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import { beginTechnicalRecovery, hostTechnicalFailure, isTechnicalFailureCode } from './technical-recovery'
 import { accountingProtocolFor } from './usage-v2-coordinator'
 
 type Requirement = Readonly<{
@@ -479,7 +479,11 @@ export async function reserveGenerationBatch(input: Readonly<{
         reconciliationUnits: batch.accounting.estimatedUnits,
       }, now, 'RECONCILIATION_REQUIRED')
       transaction.putStep({ ...step, status: 'RESERVATION_UNKNOWN', errorCode, output: next, updatedAt: now })
-      const recovery = beginTechnicalRecovery(transaction, input.clock, errorCode)
+      const recovery = beginTechnicalRecovery(
+        transaction,
+        input.clock,
+        hostTechnicalFailure(errorCode, 'RETRYABLE'),
+      )
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',

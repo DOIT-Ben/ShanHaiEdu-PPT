@@ -157,11 +157,20 @@ export type ContractRepairIssue = Readonly<{
 
 export type MediaSubmissionState = 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
 
+export type TechnicalFailureDisposition = 'RETRYABLE' | 'NON_RETRYABLE'
+
+export type TechnicalFailure = Readonly<{
+  category: 'PROVIDER' | 'CONTRACT' | 'USAGE_V2' | 'HOST' | 'INTERNAL'
+  disposition: TechnicalFailureDisposition
+  diagnosticCode: string
+}>
+
 export class MediaSubmissionError extends Error {
   constructor(
     readonly code: string,
     readonly submissionState: Exclude<MediaSubmissionState, 'SUBMITTED'>,
     message: string,
+    readonly technicalFailure: TechnicalFailure,
   ) {
     super(message)
     this.name = 'MediaSubmissionError'
@@ -209,7 +218,12 @@ export interface ImageGenerationPort {
   }>): Promise<
     | Readonly<{ state: 'QUEUED' | 'PROCESSING'; retryAfterMs?: number }>
     | Readonly<{ state: 'COMPLETED'; artifactId: string }>
-    | Readonly<{ state: 'FAILED'; errorCode: string; billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN' }>
+    | Readonly<{
+        state: 'FAILED'
+        errorCode: string
+        billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN'
+        technicalFailure: TechnicalFailure
+      }>
   >
 }
 

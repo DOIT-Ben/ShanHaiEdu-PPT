@@ -14,8 +14,7 @@ import {
 } from './generation-batch'
 import {
   beginTechnicalRecovery,
-  isTechnicalFailureCode,
-  technicalFailureDisposition,
+  technicalFailureFromStep,
 } from './technical-recovery'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
@@ -58,7 +57,7 @@ export type RefreshBlueprintImagesResult = Readonly<{
 function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefined) {
   return isVisualDeckV4(run)
     && step?.status === 'FAILED'
-    && isTechnicalFailureCode(step.errorCode ?? '')
+    && technicalFailureFromStep(step) !== null
 }
 
 export const ASSET_CANDIDATE_QUALITY_THRESHOLD = 80
@@ -783,11 +782,14 @@ export class SlideGenerationCoordinator {
     await this.dependencies.repository.transact(runId, (transaction) => {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
-      const technical = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+      const technicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
         && step.errorCode !== 'SOURCE_ASSET_NOT_FOUND'
-        ? beginTechnicalRecovery(transaction, this.dependencies.clock, step.errorCode ?? 'IMAGE_SUBMISSION_FAILED')
+        ? technicalFailureFromStep(step)
         : null
-      if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && (technical || fromStatus === 'RECOVERING')) {
+      const technical = technicalFailure && !['RECOVERING', 'FAILED'].includes(fromStatus)
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, technicalFailure)
+        : null
+      if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && technicalFailure) {
         const events = transaction.listEvents()
         const started = [...events].reverse().find((event) => event.type === 'generation.started')
         const completedEvent = [...events].reverse().find((event) => event.type === 'generation.completed')
@@ -800,7 +802,7 @@ export class SlideGenerationCoordinator {
             total: transaction.run.slideCount,
             pageNumbers: allPageNumbers(transaction.run),
             reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
-            retryable: technicalFailureDisposition(step.errorCode ?? 'IMAGE_SUBMISSION_FAILED') === 'RETRYABLE'
+            retryable: technicalFailure.disposition === 'RETRYABLE'
               && !transaction.run.pendingTerminalFailure
               && (technical?.technicalRecovery?.retryable
                 ?? transaction.run.technicalRecovery?.retryable

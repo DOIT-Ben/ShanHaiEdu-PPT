@@ -2,6 +2,7 @@ import { z } from 'zod'
 import sharp from 'sharp'
 import type { ArtifactPort, ImageGenerationPort } from '../core/ports'
 import { MediaSubmissionError } from '../core/ports'
+import { providerTechnicalFailure } from '../core/technical-recovery'
 
 const gatewayResponseSchema = z.object({
   data: z.array(z.object({ b64_json: z.string().min(1) }).passthrough()).min(1),
@@ -171,20 +172,39 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 600_000),
       })
     } catch {
-      throw new MediaSubmissionError('GATEWAY_SUBMISSION_UNKNOWN', 'UNKNOWN', 'gateway submission status is unknown')
+      throw new MediaSubmissionError(
+        'GATEWAY_SUBMISSION_UNKNOWN',
+        'UNKNOWN',
+        'gateway submission status is unknown',
+        providerTechnicalFailure('GATEWAY_SUBMISSION_UNKNOWN', { disposition: 'RETRYABLE' }),
+      )
     }
 
     const payload = await response.json().catch(() => null)
     if (!response.ok) {
       const state = [400, 401, 403, 404, 422].includes(response.status) ? 'NOT_SUBMITTED' as const : 'UNKNOWN' as const
-      throw new MediaSubmissionError(gatewayErrorCode(payload, response.status), state, 'gateway rejected image request')
+      const code = gatewayErrorCode(payload, response.status)
+      throw new MediaSubmissionError(
+        code,
+        state,
+        'gateway rejected image request',
+        providerTechnicalFailure(code, {
+          httpStatus: response.status,
+          ...(state === 'UNKNOWN' ? { disposition: 'RETRYABLE' as const } : {}),
+        }),
+      )
     }
 
     try {
       const artifact = await this.storeOutput(input, gatewayResponseSchema.parse(payload))
       return { operationId: `gateway-image:${artifact.artifactId}`, state: 'COMPLETED' as const }
     } catch {
-      throw new MediaSubmissionError('GATEWAY_OUTPUT_INVALID', 'UNKNOWN', 'gateway returned an invalid image result')
+      throw new MediaSubmissionError(
+        'GATEWAY_OUTPUT_INVALID',
+        'UNKNOWN',
+        'gateway returned an invalid image result',
+        providerTechnicalFailure('GATEWAY_OUTPUT_INVALID'),
+      )
     }
   }
 
@@ -201,7 +221,12 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       const artifact = await this.dependencies.artifacts.get({ tenantId: input.tenantId, artifactId })
       return artifact
         ? { state: 'COMPLETED' as const, artifactId }
-        : { state: 'FAILED' as const, errorCode: 'GATEWAY_ARTIFACT_MISSING', billingState: 'CHARGED' as const }
+        : {
+            state: 'FAILED' as const,
+            errorCode: 'GATEWAY_ARTIFACT_MISSING',
+            billingState: 'CHARGED' as const,
+            technicalFailure: providerTechnicalFailure('GATEWAY_ARTIFACT_MISSING'),
+          }
     }
 
     let response: Response
@@ -218,12 +243,23 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       if (isTransientInspectionStatus(response.status)) {
         return { state: 'PROCESSING' as const, retryAfterMs: transientInspectionRetryAfterMs(response) }
       }
-      return { state: 'FAILED' as const, errorCode: gatewayErrorCode(payload, response.status), billingState: 'UNKNOWN' as const }
+      const errorCode = gatewayErrorCode(payload, response.status)
+      return {
+        state: 'FAILED' as const,
+        errorCode,
+        billingState: 'UNKNOWN' as const,
+        technicalFailure: providerTechnicalFailure(errorCode, { httpStatus: response.status }),
+      }
     }
 
     const parsed = imageOperationSchema.safeParse(payload)
     if (!parsed.success) {
-      return { state: 'FAILED' as const, errorCode: 'GATEWAY_OPERATION_INVALID', billingState: 'UNKNOWN' as const }
+      return {
+        state: 'FAILED' as const,
+        errorCode: 'GATEWAY_OPERATION_INVALID',
+        billingState: 'UNKNOWN' as const,
+        technicalFailure: providerTechnicalFailure('GATEWAY_OPERATION_INVALID'),
+      }
     }
     const operation = parsed.data
     if (operation.status === 'CREATED' || operation.status === 'SUBMITTING'
@@ -232,7 +268,12 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     }
     if (operation.status === 'COMPLETED') {
       if (!operation.result) {
-        return { state: 'FAILED' as const, errorCode: 'GATEWAY_OUTPUT_MISSING', billingState: 'CHARGED' as const }
+        return {
+          state: 'FAILED' as const,
+          errorCode: 'GATEWAY_OUTPUT_MISSING',
+          billingState: 'CHARGED' as const,
+          technicalFailure: providerTechnicalFailure('GATEWAY_OUTPUT_MISSING'),
+        }
       }
       try {
         const artifact = await this.storeOutput({
@@ -242,13 +283,20 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         }, operation.result)
         return { state: 'COMPLETED' as const, artifactId: artifact.artifactId }
       } catch {
-        return { state: 'FAILED' as const, errorCode: 'GATEWAY_OUTPUT_INVALID', billingState: 'CHARGED' as const }
+        return {
+          state: 'FAILED' as const,
+          errorCode: 'GATEWAY_OUTPUT_INVALID',
+          billingState: 'CHARGED' as const,
+          technicalFailure: providerTechnicalFailure('GATEWAY_OUTPUT_INVALID'),
+        }
       }
     }
+    const errorCode = operation.error?.code ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED')
     return {
       state: 'FAILED' as const,
-      errorCode: operation.error?.code ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED'),
+      errorCode,
       billingState: billingState(operation),
+      technicalFailure: providerTechnicalFailure(errorCode),
     }
   }
 
@@ -274,18 +322,36 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         const state = code === 'IDEMPOTENCY_SUBMISSION_UNKNOWN'
           ? 'UNKNOWN' as const
           : [400, 401, 403, 404, 409, 422].includes(response.status) ? 'NOT_SUBMITTED' as const : 'UNKNOWN' as const
-        throw new MediaSubmissionError(code, state, 'gateway rejected image task')
+        throw new MediaSubmissionError(
+          code,
+          state,
+          'gateway rejected image task',
+          providerTechnicalFailure(code, {
+            httpStatus: response.status,
+            ...(state === 'UNKNOWN' ? { disposition: 'RETRYABLE' as const } : {}),
+          }),
+        )
       }
       const operation = imageOperationSchema.safeParse(payload)
       if (!operation.success) {
-        throw new MediaSubmissionError('GATEWAY_OPERATION_INVALID', 'UNKNOWN', 'gateway returned an invalid image operation')
+        throw new MediaSubmissionError(
+          'GATEWAY_OPERATION_INVALID',
+          'UNKNOWN',
+          'gateway returned an invalid image operation',
+          providerTechnicalFailure('GATEWAY_OPERATION_INVALID', { disposition: 'RETRYABLE' }),
+        )
       }
       return { operationId: operation.data.id, state: operationState(operation.data.status) }
     } catch (error) {
       if (error instanceof MediaSubmissionError) throw error
       const recovered = await this.lookupImageTask(input.idempotencyKey, 'TEXT_TO_IMAGE')
       if (recovered) return { operationId: recovered.id, state: operationState(recovered.status) }
-      throw new MediaSubmissionError('GATEWAY_SUBMISSION_UNKNOWN', 'UNKNOWN', 'gateway submission status is unknown')
+      throw new MediaSubmissionError(
+        'GATEWAY_SUBMISSION_UNKNOWN',
+        'UNKNOWN',
+        'gateway submission status is unknown',
+        providerTechnicalFailure('GATEWAY_SUBMISSION_UNKNOWN', { disposition: 'RETRYABLE' }),
+      )
     }
   }
 

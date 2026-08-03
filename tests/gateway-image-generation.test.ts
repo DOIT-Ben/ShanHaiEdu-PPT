@@ -73,7 +73,13 @@ describe('gateway image generation adapter', () => {
     await expect(rejected.submit({
       tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
-    })).rejects.toMatchObject({ submissionState: 'NOT_SUBMITTED', code: 'INVALID_IMAGE_REQUEST' })
+    })).rejects.toMatchObject({
+      submissionState: 'NOT_SUBMITTED',
+      code: 'INVALID_IMAGE_REQUEST',
+      technicalFailure: {
+        category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'INVALID_IMAGE_REQUEST',
+      },
+    })
 
     const unknown = new GatewayImageGenerationPort({
       ...config,
@@ -164,7 +170,39 @@ describe('gateway image generation adapter', () => {
     await expect(adapter.inspect({
       tenantId: 'frameflow',
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
-    })).resolves.toEqual({ state: 'FAILED', errorCode: 'MODEL_FORBIDDEN', billingState: 'UNKNOWN' })
+    })).resolves.toEqual({
+      state: 'FAILED',
+      errorCode: 'MODEL_FORBIDDEN',
+      billingState: 'UNKNOWN',
+      technicalFailure: {
+        category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'MODEL_FORBIDDEN',
+      },
+    })
+  })
+
+  test('fails closed for an unrecognized provider operation code while retaining its diagnostic', async () => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        id: 'imgop_0123456789abcdef0123456789abcdef',
+        status: 'FAILED',
+        submission_state: 'SUBMITTED',
+        error: { code: 'INVALID_REQUEST' },
+      }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+    })).resolves.toEqual({
+      state: 'FAILED',
+      errorCode: 'INVALID_REQUEST',
+      billingState: 'CHARGED',
+      technicalFailure: {
+        category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'INVALID_REQUEST',
+      },
+    })
   })
 
   test('uses a multipart image edit request for a selected source reference', async () => {

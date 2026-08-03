@@ -996,6 +996,25 @@ describe('slide generation coordinator', () => {
     })
   })
 
+  test('fails closed when initial generation receives an unknown provider error code', async () => {
+    const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    const keys = [...images.operations.keys()]
+    images.complete(keys[0]!, 'artifact-r1-1')
+    images.fail(keys[1]!, 'INVALID_REQUEST', 'CHARGED')
+
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'RECOVERING' })
+    const events = await repository.listEvents('run-1')
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'technical.recovery.completed',
+      payload: expect.objectContaining({ reason: 'INVALID_REQUEST', retryable: false, active: false }),
+    }))
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
   test('continues a recovered V4 image batch into page review without resubmitting images', async () => {
     const { repository, images, media, coordinator } = await fixture()
     await repository.transact('run-1', (transaction) => {

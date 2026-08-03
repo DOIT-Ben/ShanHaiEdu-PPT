@@ -4,7 +4,14 @@ import {
   type TechnicalRecovery,
   type V4RunFailureCode,
 } from '../contracts'
-import type { AgentTransaction, ClockPort, RunRecord } from './ports'
+import type {
+  AgentTransaction,
+  ClockPort,
+  RunRecord,
+  StepRecord,
+  TechnicalFailure,
+  TechnicalFailureDisposition as FailureDisposition,
+} from './ports'
 import { transitionRun } from './policy'
 import { failVisualDeckV4Transaction, reconcileVisualDeckV4TerminalState } from './v4-lifecycle'
 
@@ -12,17 +19,32 @@ const MAX_TECHNICAL_RECOVERY_ATTEMPTS = 5
 const RECOVERABLE_STATES = new Set<RunStatus>([
   'PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING',
 ])
+const RETRYABLE_PROVIDER_FAILURE_CODES = new Set([
+  'PROVIDER_TIMEOUT',
+  'PROVIDER_RATE_LIMIT',
+  'PROVIDER_UNAVAILABLE',
+  'RATE_LIMITED',
+  'NO_HEALTHY_ROUTE',
+  'NO_HEALTHY_ROUTE_BEFORE_SUBMIT',
+  'IDEMPOTENCY_SUBMISSION_UNKNOWN',
+  'PROVIDER_SUBMISSION_UNKNOWN',
+  'PROVIDER_SUBMISSION_NOT_FOUND',
+  'MEDIA_SUBMISSION_UNKNOWN',
+])
+const PROVIDER_CONTRACT_FAILURE_CODES = new Set([
+  'INVALID_IMAGE_PROMPT',
+])
 
-export type TechnicalFailureDisposition = 'RETRYABLE' | 'NON_RETRYABLE'
+export type TechnicalFailureDisposition = FailureDisposition
 
 function isTechnicalContractFailure(errorCode: string) {
   return /(^|_)(CONTRACT_INVALID|INVALID_IMAGE_PROMPT)(_|$)/.test(errorCode)
     || /^(DECK_REVIEW_(SOURCE_COVERAGE_INCOMPLETE|SOURCE_REFERENCE_INVALID|SLIDE_REFERENCE_INVALID)|REVISION_SOURCE_REFERENCE_INVALID|PAGE_ARTIFACTS?_INCOMPLETE|PAGE_ARTIFACT_NOT_FOUND|BLUEPRINT_SLIDE_NOT_FOUND|DELIVERY_INPUT_FAILED)$/.test(errorCode)
 }
 
-function terminalFailureCode(reason: string, attempt: number): V4RunFailureCode {
+function terminalFailureCode(failure: TechnicalFailure, attempt: number): V4RunFailureCode {
   if (attempt >= MAX_TECHNICAL_RECOVERY_ATTEMPTS) return 'TECHNICAL_RECOVERY_EXHAUSTED'
-  return isTechnicalContractFailure(reason)
+  return failure.category === 'CONTRACT'
     ? 'TECHNICAL_CONTRACT_INVALID'
     : 'TECHNICAL_CONFIGURATION_REQUIRED'
 }
@@ -58,18 +80,124 @@ export function isTechnicalFailureCode(errorCode: string) {
   return technicalFailureDisposition(errorCode) !== null
 }
 
+function boundedDiagnosticCode(errorCode: string, fallback: string) {
+  const normalized = errorCode.trim()
+  return (normalized || fallback).slice(0, 100)
+}
+
+function categoryForKnownCode(errorCode: string): TechnicalFailure['category'] {
+  if (isTechnicalContractFailure(errorCode.toUpperCase())) return 'CONTRACT'
+  if (/^(HOST_|PPT_)USAGE_V2_/.test(errorCode.toUpperCase())) return 'USAGE_V2'
+  if (/PROVIDER|MODEL_|GATEWAY|RATE_LIMIT|NO_HEALTHY_ROUTE/.test(errorCode.toUpperCase())) return 'PROVIDER'
+  return 'INTERNAL'
+}
+
+export function technicalFailureForCode(errorCode: string): TechnicalFailure | null {
+  const diagnosticCode = boundedDiagnosticCode(errorCode, 'TECHNICAL_FAILURE')
+  const disposition = technicalFailureDisposition(diagnosticCode)
+  return disposition
+    ? { category: categoryForKnownCode(diagnosticCode), disposition, diagnosticCode }
+    : null
+}
+
+export function providerTechnicalFailure(
+  errorCode: string,
+  options: Readonly<{
+    httpStatus?: number
+    disposition?: TechnicalFailureDisposition
+    category?: Extract<TechnicalFailure['category'], 'PROVIDER' | 'CONTRACT'>
+  }> = {},
+): TechnicalFailure {
+  const diagnosticCode = boundedDiagnosticCode(errorCode, 'PROVIDER_FAILURE')
+  const transientStatus = options.httpStatus === 408
+    || options.httpStatus === 425
+    || options.httpStatus === 429
+    || (options.httpStatus !== undefined && options.httpStatus >= 500)
+  const disposition = options.disposition
+    ?? (transientStatus
+      ? 'RETRYABLE'
+      : options.httpStatus !== undefined
+        ? 'NON_RETRYABLE'
+        : RETRYABLE_PROVIDER_FAILURE_CODES.has(diagnosticCode.toUpperCase()) ? 'RETRYABLE' : null)
+    ?? 'NON_RETRYABLE'
+  return {
+    category: options.category
+      ?? (PROVIDER_CONTRACT_FAILURE_CODES.has(diagnosticCode.toUpperCase()) ? 'CONTRACT' : 'PROVIDER'),
+    disposition,
+    diagnosticCode,
+  }
+}
+
+export function usageV2TechnicalFailure(
+  errorCode: string,
+  outcome: 'REJECTED' | 'UNKNOWN',
+): TechnicalFailure {
+  return {
+    category: 'USAGE_V2',
+    disposition: outcome === 'UNKNOWN' ? 'RETRYABLE' : 'NON_RETRYABLE',
+    diagnosticCode: boundedDiagnosticCode(errorCode, 'HOST_USAGE_V2_FAILURE'),
+  }
+}
+
+export function hostTechnicalFailure(
+  errorCode: string,
+  disposition: TechnicalFailureDisposition,
+): TechnicalFailure {
+  return {
+    category: 'HOST',
+    disposition,
+    diagnosticCode: boundedDiagnosticCode(errorCode, 'HOST_FAILURE'),
+  }
+}
+
+export function contractTechnicalFailure(errorCode: string): TechnicalFailure {
+  return {
+    category: 'CONTRACT',
+    disposition: 'NON_RETRYABLE',
+    diagnosticCode: boundedDiagnosticCode(errorCode, 'TECHNICAL_CONTRACT_INVALID'),
+  }
+}
+
+export function technicalFailureFromStep(step: Pick<StepRecord, 'errorCode' | 'output'>): TechnicalFailure | null {
+  const output = step.output && typeof step.output === 'object' ? step.output as Record<string, unknown> : null
+  const persisted = output?.technicalFailure
+  if (persisted && typeof persisted === 'object') {
+    const value = persisted as Record<string, unknown>
+    const category = value.category
+    const disposition = value.disposition
+    const diagnosticCode = value.diagnosticCode
+    if (['PROVIDER', 'CONTRACT', 'USAGE_V2', 'HOST', 'INTERNAL'].includes(String(category))
+      && ['RETRYABLE', 'NON_RETRYABLE'].includes(String(disposition))
+      && typeof diagnosticCode === 'string'
+      && diagnosticCode.length > 0
+      && diagnosticCode.length <= 100) {
+      return {
+        category: category as TechnicalFailure['category'],
+        disposition: disposition as TechnicalFailureDisposition,
+        diagnosticCode,
+      }
+    }
+  }
+  return step.errorCode ? technicalFailureForCode(step.errorCode) : null
+}
+
 function retryDelayMs(attempt: number) {
   return [2_000, 10_000, 30_000, 60_000, 60_000][Math.max(0, Math.min(4, attempt - 1))]!
 }
 
-function recoveryState(run: RunRecord, resumeState: TechnicalRecovery['resumeState'], reason: string, now: Date): TechnicalRecovery {
+function recoveryState(
+  run: RunRecord,
+  resumeState: TechnicalRecovery['resumeState'],
+  failure: TechnicalFailure,
+  now: Date,
+): TechnicalRecovery {
   const previous = run.technicalRecovery
   const repeated = previous?.resumeState === resumeState
   const attempt = repeated ? previous.attempt + 1 : 1
-  const retryable = technicalFailureDisposition(reason) === 'RETRYABLE' && attempt < MAX_TECHNICAL_RECOVERY_ATTEMPTS
+  const retryable = failure.disposition === 'RETRYABLE' && attempt < MAX_TECHNICAL_RECOVERY_ATTEMPTS
   return {
     resumeState,
-    reason,
+    reason: failure.diagnosticCode,
     retryable,
     attempt: Math.min(attempt, MAX_TECHNICAL_RECOVERY_ATTEMPTS),
     maxAttempts: MAX_TECHNICAL_RECOVERY_ATTEMPTS,
@@ -79,12 +207,17 @@ function recoveryState(run: RunRecord, resumeState: TechnicalRecovery['resumeSta
 }
 
 /** Moves V4 technical failures out of the user-approval workflow. */
-export function beginTechnicalRecovery(transaction: AgentTransaction, clock: ClockPort, reason: string) {
+export function beginTechnicalRecovery(
+  transaction: AgentTransaction,
+  clock: ClockPort,
+  input: string | TechnicalFailure,
+) {
   const run = transaction.run
-  if (run.presentationMode !== 'VISUAL_DECK_V4' || !RECOVERABLE_STATES.has(run.status) || !technicalFailureDisposition(reason)) return null
+  const failure = typeof input === 'string' ? technicalFailureForCode(input) : input
+  if (run.presentationMode !== 'VISUAL_DECK_V4' || !RECOVERABLE_STATES.has(run.status) || !failure) return null
   const now = clock.now()
   const resumeState = run.status as TechnicalRecovery['resumeState']
-  const recovery = recoveryState(run, resumeState, reason, now)
+  const recovery = recoveryState(run, resumeState, failure, now)
   if (!recovery.retryable) {
     const exhausted: TechnicalRecovery = { ...recovery, active: false, nextAttemptAt: null }
     if (run.presentationMode === 'VISUAL_DECK_V4') {
@@ -93,7 +226,7 @@ export function beginTechnicalRecovery(transaction: AgentTransaction, clock: Clo
       failVisualDeckV4Transaction({
         transaction,
         clock,
-        errorCode: terminalFailureCode(reason, recovery.attempt),
+        errorCode: terminalFailureCode(failure, recovery.attempt),
         reason: terminalLifecycleReason(resumeState),
       })
       return transaction.run
@@ -112,7 +245,7 @@ export function beginTechnicalRecovery(transaction: AgentTransaction, clock: Clo
       payload: {
         from: run.status,
         to: 'NEEDS_HUMAN',
-        reason: terminalFailureCode(reason, recovery.attempt),
+        reason: terminalFailureCode(failure, recovery.attempt),
       },
     })
     transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'technical.recovery.completed', payload: exhausted })
@@ -129,7 +262,7 @@ export function beginTechnicalRecovery(transaction: AgentTransaction, clock: Clo
   transaction.appendEvent({
     schemaVersion: CONTRACT_VERSION,
     type: 'phase.changed',
-    payload: { from: run.status, to: 'RECOVERING', reason },
+    payload: { from: run.status, to: 'RECOVERING', reason: failure.diagnosticCode },
   })
   transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'technical.recovery.started', payload: recovery })
   return updated

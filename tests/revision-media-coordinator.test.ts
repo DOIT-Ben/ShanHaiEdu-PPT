@@ -1005,4 +1005,21 @@ describe('revision media coordinator', () => {
     })
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
+
+  test('fails closed when a v4 redraw receives an unknown provider error code', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    await coordinator.submit('run-1', 5)
+    images.fail(await revisionImageKey(repository, 2), 'INVALID_REQUEST', 'UNKNOWN')
+
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'RECOVERING', completed: 0 })
+    const events = await repository.listEvents('run-1')
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'technical.recovery.completed',
+      payload: expect.objectContaining({ reason: 'INVALID_REQUEST', retryable: false, active: false }),
+    }))
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
 })

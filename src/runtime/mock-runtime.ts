@@ -15,6 +15,7 @@ import { AdminOperationsService } from '../core/admin-operations'
 import { AdminRevisionRoundsSettingsService } from '../core/admin-revision-rounds-settings'
 import { DeliveryRunner } from '../core/delivery-runner'
 import { MediaStepRunner } from '../core/media-step-runner'
+import { providerTechnicalFailure } from '../core/technical-recovery'
 import { PageReviewCoordinator } from '../core/page-review-coordinator'
 import { PlanningRunner, planningStepKey } from '../core/planning-runner'
 import { hashInput } from '../core/hash'
@@ -445,7 +446,12 @@ class LocalMockImageGeneration implements ImageGenerationPort {
     const artifactId = this.results.get(input.operationId)
     return artifactId
       ? { state: 'COMPLETED' as const, artifactId }
-      : { state: 'FAILED' as const, errorCode: 'MOCK_IMAGE_NOT_FOUND', billingState: 'NOT_CHARGED' as const }
+      : {
+          state: 'FAILED' as const,
+          errorCode: 'MOCK_IMAGE_NOT_FOUND',
+          billingState: 'NOT_CHARGED' as const,
+          technicalFailure: providerTechnicalFailure('MOCK_IMAGE_NOT_FOUND'),
+        }
   }
 }
 

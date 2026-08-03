@@ -23,9 +23,14 @@ import type {
   PresentationRendererPort,
   RunRecord,
   StepRecord,
+  TechnicalFailure,
 } from './ports'
 import { transitionRun } from './policy'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import {
+  beginTechnicalRecovery,
+  contractTechnicalFailure,
+  providerTechnicalFailure,
+} from './technical-recovery'
 import { enqueueUsageV2RunFinalization } from './usage-v2-coordinator'
 import {
   allPageNumbers,
@@ -76,6 +81,27 @@ type StoredFinalArtifacts = Readonly<{
   pptx: StoredFinalArtifact | null
   sources: StoredFinalArtifact | null
 }>
+
+function rendererTechnicalFailure(error: unknown): TechnicalFailure {
+  const value = error && typeof error === 'object' ? error as Record<string, unknown> : null
+  const hasExternalCode = typeof value?.code === 'string'
+  const errorCode = hasExternalCode ? value.code as string : 'DELIVERY_FAILED'
+  const httpStatus = typeof value?.status === 'number' && Number.isSafeInteger(value.status)
+    ? value.status
+    : undefined
+  const disposition = typeof value?.retryable === 'boolean'
+    ? value.retryable ? 'RETRYABLE' as const : 'NON_RETRYABLE' as const
+    : hasExternalCode ? undefined : 'RETRYABLE' as const
+  return providerTechnicalFailure(errorCode, {
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    ...(disposition === undefined ? {} : { disposition }),
+  })
+}
+
+function outputWithTechnicalFailure(output: unknown, technicalFailure: TechnicalFailure) {
+  const persisted = output && typeof output === 'object' ? output as Record<string, unknown> : {}
+  return { ...persisted, technicalFailure }
+}
 
 export type DeliveryResult = Readonly<{
   status: RunRecord['status']
@@ -176,8 +202,8 @@ export class DeliveryRunner {
       }
       const delivery = await this.buildVerifiedDelivery(run, blueprint, finalArtifacts)
       return this.complete(run, idempotencyKey, delivery, blueprint)
-    } catch {
-      return this.fail(run, idempotencyKey, 'DELIVERY_FAILED')
+    } catch (error) {
+      return this.fail(run, idempotencyKey, rendererTechnicalFailure(error))
     }
   }
 
@@ -434,22 +460,33 @@ export class DeliveryRunner {
     const inputHash = hashInput({ tool: 'deliver_presentation', revisionRound: run.revisionRound, errorCode })
     const prepared = await this.prepare(run, idempotencyKey, inputHash)
     if (prepared) return prepared
-    return this.fail(run, idempotencyKey, errorCode)
+    return this.fail(run, idempotencyKey, contractTechnicalFailure(errorCode))
   }
 
-  private async fail(run: RunRecord, idempotencyKey: string, errorCode: string): Promise<DeliveryResult> {
+  private async fail(
+    run: RunRecord,
+    idempotencyKey: string,
+    technicalFailure: TechnicalFailure,
+  ): Promise<DeliveryResult> {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       const now = this.dependencies.clock.now().toISOString()
-      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)
+      const errorCode = technicalFailure.diagnosticCode
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
       const policy = v4TechnicalFailure ? transaction.run : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
-      const updatedStep: StepRecord = { ...step, status: 'FAILED', errorCode, updatedAt: now }
+      const updatedStep: StepRecord = {
+        ...step,
+        status: 'FAILED',
+        errorCode,
+        output: outputWithTechnicalFailure(step.output, technicalFailure),
+        updatedAt: now,
+      }
       transaction.putStep(updatedStep)
       if (!v4TechnicalFailure) transaction.putRun(updatedRun)
       const technicalRecovery = v4TechnicalFailure
-        ? beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, technicalFailure)
         : null
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -457,13 +494,19 @@ export class DeliveryRunner {
         payload: { stepId: step.id, errorCode, retryable: technicalRecovery?.technicalRecovery?.retryable ?? true },
       })
       if (technicalRecovery) {
-        appendV4LifecycleEvent(transaction, 'delivery.completed', {
-          completed: 0,
-          total: 1,
-          pageNumbers: allPageNumbers(transaction.run),
-          reason: 'DELIVERY_FAILED',
-          retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
-        })
+        const events = transaction.listEvents()
+        const started = [...events].reverse().find((event) => event.type === 'delivery.started')
+        const completed = [...events].reverse().find((event) => event.type === 'delivery.completed')
+        const stageAlreadyClosed = completed && (!started || completed.sequence > started.sequence)
+        if (!stageAlreadyClosed && transaction.run.status !== 'FAILED') {
+          appendV4LifecycleEvent(transaction, 'delivery.completed', {
+            completed: 0,
+            total: 1,
+            pageNumbers: allPageNumbers(transaction.run),
+            reason: 'DELIVERY_FAILED',
+            retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+          })
+        }
         return { status: transaction.run.status, step: updatedStep, delivery: null, replayed: false }
       }
       transaction.appendEvent({

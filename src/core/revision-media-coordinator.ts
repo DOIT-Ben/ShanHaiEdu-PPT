@@ -29,8 +29,7 @@ import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
 import {
   beginTechnicalRecovery,
-  isTechnicalFailureCode,
-  technicalFailureDisposition,
+  technicalFailureFromStep,
 } from './technical-recovery'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import {
@@ -113,7 +112,7 @@ export class RevisionMediaCoordinator {
     const stepsByKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
     const canRetryReleasedSubmission = (step: StepRecord | undefined) => isVisualDeckV4(run)
       && step?.status === 'FAILED'
-      && isTechnicalFailureCode(step.errorCode ?? '')
+      && technicalFailureFromStep(step) !== null
     const pending = targets.filter((target) => {
       const existing = stepsByKey.get(target.idempotencyKey)
       return !existing || ['RESERVED', 'SUBMITTING'].includes(existing.status) || canRetryReleasedSubmission(existing)
@@ -618,7 +617,7 @@ export class RevisionMediaCoordinator {
       idempotencyKey: key,
       ...(batchReservation ? { batchReservation } : {}),
       ...(batchReservation ? { pageNumber: target.pageNumber, revisionRound: run.revisionRound } : {}),
-      ...(isVisualDeckV4(run) && existing?.status === 'FAILED' && isTechnicalFailureCode(existing.errorCode ?? '') ? {
+      ...(isVisualDeckV4(run) && existing?.status === 'FAILED' && technicalFailureFromStep(existing) !== null ? {
         budgetReservationKey: `${key}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
       } : {}),
       slideId: target.slideId,
@@ -653,9 +652,12 @@ export class RevisionMediaCoordinator {
       .filter((step) => step.status === 'COMPLETED' && this.artifactId(step)).length
     await this.dependencies.repository.transact(run.id, (transaction) => {
       const fromStatus = transaction.run.status
+      const technicalFailure = technicalFailureFromStep(failed)
       if (fromStatus === 'REVISING') {
         const now = this.dependencies.clock.now().toISOString()
-        const recovery = beginTechnicalRecovery(transaction, this.dependencies.clock, failed.errorCode ?? 'REVISION_MEDIA_FAILED')
+        const recovery = technicalFailure
+          ? beginTechnicalRecovery(transaction, this.dependencies.clock, technicalFailure)
+          : null
         if (!recovery) {
           const policy = transitionRun(transaction.run, 'NEEDS_HUMAN')
           transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
@@ -681,7 +683,7 @@ export class RevisionMediaCoordinator {
           total,
           ...details,
           reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
-          retryable: technicalFailureDisposition(failed.errorCode ?? 'REVISION_MEDIA_FAILED') === 'RETRYABLE'
+          retryable: technicalFailure?.disposition === 'RETRYABLE'
             && !transaction.run.pendingTerminalFailure
             && (transaction.run.technicalRecovery?.retryable ?? false),
         })

@@ -35,6 +35,7 @@ import type { UsageRunBill } from '../src/usage-accounting-contracts'
 import { deriveV4TerminalAccounting } from '../src/core/v4-terminal-accounting'
 import { v4LifecyclePayload } from '../src/core/v4-lifecycle'
 import { deliveryRecordSchema } from '../src/presentation-contracts'
+import { providerTechnicalFailure } from '../src/core/technical-recovery'
 
 const token = 'test-runtime-token-0001'
 
@@ -89,7 +90,12 @@ class CountingCompletedImageGeneration implements ImageGenerationPort {
     const artifactId = this.artifactsByOperation.get(input.operationId)
     return artifactId
       ? { state: 'COMPLETED' as const, artifactId }
-      : { state: 'FAILED' as const, errorCode: 'COUNTING_IMAGE_NOT_FOUND', billingState: 'NOT_CHARGED' as const }
+      : {
+          state: 'FAILED' as const,
+          errorCode: 'COUNTING_IMAGE_NOT_FOUND',
+          billingState: 'NOT_CHARGED' as const,
+          technicalFailure: providerTechnicalFailure('COUNTING_IMAGE_NOT_FOUND'),
+        }
   }
 }
 
