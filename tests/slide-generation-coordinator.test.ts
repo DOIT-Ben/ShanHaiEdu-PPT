@@ -18,6 +18,10 @@ import type { AssetCandidate, AssetCandidateReviewPort, AssetDiscoveryPort, Docu
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { presentationBlueprintSchema } from '../src/presentation-contracts'
+import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
+import type { UsageAccountingPort } from '../src/core/ports'
+import type { UsageRunBill } from '../src/usage-accounting-contracts'
 
 function run(budgetUnits = 100): RunRecord {
   return {
@@ -156,6 +160,68 @@ candidateReviewer?: AssetCandidateReviewPort) {
   return { repository, budget, images, artifacts, media, coordinator, candidateReviewer: webReviewer, clock }
 }
 
+function usageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
+  return {
+    pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
+    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
+    generatedOperations: 0, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 0,
+    chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
+    lastEventAt: null, settledAt: null, firstUnknownAt: null, reconciliationAttempts: 0,
+    nextReconcileAt: null, reconciliationDeadlineAt: null, reconciliationLastError: null,
+    ...overrides,
+  }
+}
+
+class InitialDeckUsagePort implements UsageAccountingPort {
+  readonly permits: Parameters<UsageAccountingPort['authorizeOperation']>[0][] = []
+  readonly events: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
+
+  async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
+    this.permits.push(structuredClone(input))
+    return { allowed: true as const, permitId: `permit-${input.pageNumber}`, pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
+  }
+
+  async ingestEvent(input: Parameters<UsageAccountingPort['ingestEvent']>[0]) {
+    this.events.push(structuredClone(input.event))
+    return { replayed: false, bill: usageBill({ lastEventSequence: input.event.sequence }) }
+  }
+
+  async getRunBill() { return usageBill() }
+  async finalizeRun() { return usageBill({ status: 'SETTLED' }) }
+}
+
+async function usageV2Fixture() {
+  const base = await fixture()
+  await base.repository.transact('run-1', (transaction) => {
+    transaction.putRun({
+      ...transaction.run,
+      presentationMode: 'VISUAL_DECK_V4',
+      accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+    })
+  })
+  const usage = new InitialDeckUsagePort()
+  const usageV2 = new UsageV2Coordinator({
+    repository: base.repository,
+    usage,
+    billingCatalog: parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
+      model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
+      costBasis: 'FIXED_PER_OPERATION', costAmountMicros: 40_000, currency: 'USD',
+      providerPricingVersion: 'image-2-2026-08',
+    }] })),
+    clock: base.clock,
+  })
+  const media = new MediaStepRunner({
+    repository: base.repository, budget: base.budget, images: base.images, clock: base.clock, usageV2,
+  })
+  const coordinator = new SlideGenerationCoordinator({
+    repository: base.repository, media, batchBudget: base.budget,
+    documents: { resolve: async () => ({ name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [] }) },
+    artifacts: base.artifacts, clock: base.clock,
+  })
+  return { ...base, usage, media, coordinator }
+}
+
 function webSearchBlueprint() {
   const value = layeredBlueprint('REUSE_ORIGINAL')
   for (const slide of value.slides) {
@@ -261,6 +327,28 @@ function sourceDocument() {
 }
 
 describe('slide generation coordinator', () => {
+  test('runs a Usage V2 initial deck through permits and local batch reduction without legacy credit calls', async () => {
+    const { repository, budget, images, usage, coordinator } = await usageV2Fixture()
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({
+      status: 'EXECUTING', submitted: 3, total: 3,
+    })
+    expect(usage.permits.map(({ pageNumber, revisionRound }) => ({ pageNumber, revisionRound })))
+      .toEqual([{ pageNumber: 1, revisionRound: 0 }, { pageNumber: 2, revisionRound: 0 }, { pageNumber: 3, revisionRound: 0 }])
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+
+    for (const [index, key] of [...images.operations.keys()].entries()) images.complete(key, `artifact-${index + 1}`)
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
+      status: 'PAGE_REVIEW', completed: 3, total: 3,
+    })
+    expect(usage.events.filter((event) => event.eventType === 'OPERATION_OBSERVED')).toHaveLength(3)
+    expect(usage.events.filter((event) => event.eventType === 'BILLING_RESOLVED')).toHaveLength(3)
+    expect(budget.batchFinalizationAttempts).toHaveLength(0)
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'SETTLED', settledUnits: 30 } } })
+  })
+
   test('compiles V2.1 visual prompts without changing legacy V2 prompts', () => {
     const legacy = presentationBlueprintSchema.parse({ ...blueprint(), renderMode: 'SLIDE_IMAGE_V2' })
     const reflected = presentationBlueprintSchema.parse({ ...blueprint(), renderMode: 'SLIDE_IMAGE_V2_1' })

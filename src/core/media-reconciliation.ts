@@ -14,4 +14,6 @@ export function isPendingRunReconciliationStep(
 ) {
   return isPendingMediaReconciliationStep(step)
     || (step.tool === 'generate_image_batch' && step.status === 'BILLING_UNKNOWN')
+    || (step.tool === 'report_usage_v2' && step.status === 'RUNNING')
+    || (step.tool === 'finalize_usage_v2' && step.status === 'RUNNING')
 }

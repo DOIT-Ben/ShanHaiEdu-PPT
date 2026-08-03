@@ -281,6 +281,9 @@ export class SqliteAgentRepository implements AgentRepository {
             AND json_extract(agent_steps.data, '$.externalOperationId') IS NOT NULL
             AND json_extract(agent_steps.data, '$.externalOperationId') <> '')
         )
+      ) OR (
+        agent_steps.tool IN ('report_usage_v2', 'finalize_usage_v2')
+        AND agent_steps.status = 'RUNNING'
       )
       ORDER BY agent_runs.updated_at ASC, agent_runs.id ASC
       LIMIT ?

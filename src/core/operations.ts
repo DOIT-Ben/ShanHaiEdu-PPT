@@ -33,7 +33,10 @@ function reconciliationItem(step: OperationalStep, now: number, filters: Operati
   const age = ageMs(now, step.updatedAt)
   let errorCode: string | null = null
   let allowedActions: OperationsReport['reconciliation'][number]['allowedActions'] = []
-  if (step.status === 'WAITING' && age >= filters.waitingSlaMs) {
+  if (step.tool === 'report_usage_v2' && step.status === 'FAILED') {
+    errorCode = step.errorCode ?? 'HOST_USAGE_V2_EVENT_REJECTED'
+    allowedActions = ['REINSPECT']
+  } else if (step.status === 'WAITING' && age >= filters.waitingSlaMs) {
     errorCode = 'WAITING_TOO_LONG'
     allowedActions = ['REINSPECT']
   } else if (['RUNNING', 'RESERVED', 'SUBMITTING', 'RELEASING'].includes(step.status) && age >= filters.stepSlaMs) {

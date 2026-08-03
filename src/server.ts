@@ -10,12 +10,14 @@ import {
 } from './adapters/gateway-courseware-model'
 import { FallbackCoursewareModel } from './adapters/fallback-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
+import { FrameFlowUsageAccountingAdapter } from './adapters/frameflow-usage-accounting'
 import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
+import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
 const hostname = process.env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
 if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1') {
@@ -46,8 +48,32 @@ await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
+const usageV2Runtime = resolveUsageV2RuntimeConfig(process.env, await repository.listRuns())
+if (usageV2Runtime.requiresUsageV2Runtime && tenantId !== 'frameflow') {
+  throw new Error('USAGE_V2_FRAMEFLOW_TENANT_REQUIRED')
+}
+if (usageV2Runtime.requiresUsageV2Runtime && runtimeMode !== 'gateway') {
+  throw new Error('USAGE_V2_GATEWAY_RUNTIME_REQUIRED')
+}
 const revisionImageModel = process.env.PPT_AGENT_V4_REVISION_IMAGE_MODEL?.trim()
 if (runtimeMode === 'gateway' && !revisionImageModel) throw new Error('PPT_AGENT_V4_REVISION_IMAGE_MODEL_REQUIRED')
+if (usageV2Runtime.providerBillingCatalog && revisionImageModel) {
+  usageV2Runtime.providerBillingCatalog.snapshot({
+    model: revisionImageModel,
+    operationMode: 'IMAGE_EDIT',
+    resolution: '1K',
+    aspectRatio: '16:9',
+  })
+  for (const run of await repository.listRuns()) {
+    if (run.accountingProtocol !== 'FRAMEFLOW_USAGE_V2') continue
+    usageV2Runtime.providerBillingCatalog.snapshot({
+      model: run.imageModel,
+      operationMode: 'TEXT_TO_IMAGE',
+      resolution: '1K',
+      aspectRatio: run.visualDeckV4?.deckOptions.aspectRatio ?? '16:9',
+    })
+  }
+}
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const fallbackModelValue = process.env.PPT_AGENT_FALLBACK_MODEL_ENABLED?.trim()
 if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !== 'false') {
@@ -99,6 +125,12 @@ const runtime = runtimeMode === 'gateway'
         ? process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
         : undefined
       if (budgetMode === 'frameflow' && !frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
+      const frameFlowBackend = budgetMode === 'frameflow'
+        ? new HttpFrameFlowBackend({
+            baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
+            token: frameFlowInternalToken!,
+          })
+        : undefined
       const textModel = process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6'
       const visionModel = process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6'
       const primaryModel = new GatewayCoursewareModel({
@@ -137,14 +169,16 @@ const runtime = runtimeMode === 'gateway'
         deckReviewer: model,
         revisionPlanner: model,
         revisionApplication: model,
-        ...(budgetMode === 'frameflow' ? {
-          frameFlowBackend: new HttpFrameFlowBackend({
-            baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',
-            token: frameFlowInternalToken!,
-          }),
+        ...(frameFlowBackend ? {
+          frameFlowBackend,
         } : {
           budget: new ExternallyAuthorizedBudgetPort(tenantId),
         }),
+        defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
+        ...(usageV2Runtime.requiresUsageV2Runtime ? {
+          usageAccounting: new FrameFlowUsageAccountingAdapter(frameFlowBackend!),
+          providerBillingCatalog: usageV2Runtime.providerBillingCatalog!,
+        } : {}),
         appVersion,
         buildIdentity: releaseIdentity,
         heartbeatStaleMs,
@@ -164,6 +198,7 @@ const runtime = runtimeMode === 'gateway'
       repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
       revisionImageModel: revisionImageModel || 'image-2',
+      defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
     })
 let ticking = false
 const timer = setInterval(async () => {

@@ -2,6 +2,14 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { FrameFlowBackendClient } from './frameflow-host'
 import { BudgetReservationError } from '../core/ports'
+import {
+  UsageAccountingRequestError,
+  usageBillEnvelopeSchema,
+  usageEventEnvelopeSchema,
+  usageOperationEventV2Schema,
+  usagePermitEnvelopeSchema,
+  usagePermitRequestSchema,
+} from '../usage-accounting-contracts'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -263,6 +271,132 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
     }
   }
 
+  async authorizeUsageOperation(input: Readonly<{
+    externalUserId: string
+    runId: string
+    operationIdempotencyKey: string
+    pageNumber: number
+    revisionRound: number
+    model: string
+  }>) {
+    const request = usagePermitRequestSchema.parse({
+      operationIdempotencyKey: input.operationIdempotencyKey,
+      pageNumber: input.pageNumber,
+      revisionRound: input.revisionRound,
+      model: input.model,
+    })
+    const response = await this.usageRequest(
+      `/api/internal/ppt-agent/usage/v2/runs/${encodeURIComponent(input.runId)}/permits`,
+      {
+        method: 'POST',
+        headers: this.creditHeaders(input.externalUserId, input.operationIdempotencyKey, true),
+        body: JSON.stringify(request),
+      },
+      'PERMIT',
+    )
+    const parsed = usagePermitEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_PERMIT_RESPONSE_INVALID',
+        'UNKNOWN',
+        'FrameFlow Usage V2 permit response is invalid',
+      )
+    }
+    return parsed.data.data.permit
+  }
+
+  async ingestUsageEvent(input: Readonly<{
+    externalUserId: string
+    event: unknown
+  }>) {
+    const event = usageOperationEventV2Schema.parse(input.event)
+    const response = await this.usageRequest('/api/internal/ppt-agent/usage/v2/events', {
+      method: 'POST',
+      headers: this.creditHeaders(input.externalUserId, event.idempotencyKey, true),
+      body: JSON.stringify(event),
+    }, 'EVENT')
+    const parsed = usageEventEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_EVENT_RESPONSE_INVALID',
+        'UNKNOWN',
+        'FrameFlow Usage V2 event response is invalid',
+      )
+    }
+    if (parsed.data.data.bill.pptRunId !== event.pptRunId) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_EVENT_BILL_RUN_MISMATCH',
+        'UNKNOWN',
+        'FrameFlow Usage V2 event acknowledgement belongs to another Run',
+      )
+    }
+    return parsed.data.data
+  }
+
+  async getUsageRunBill(input: Readonly<{ externalUserId: string; runId: string }>) {
+    const response = await this.usageRequest(
+      `/api/internal/ppt-agent/usage/v2/runs/${encodeURIComponent(input.runId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${this.dependencies.token}`,
+          'X-PPT-Agent-User': input.externalUserId,
+          Accept: 'application/json',
+        },
+      },
+      'BILL',
+    )
+    const parsed = usageBillEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_BILL_RESPONSE_INVALID',
+        'UNKNOWN',
+        'FrameFlow Usage V2 bill response is invalid',
+      )
+    }
+    if (parsed.data.data.bill.pptRunId !== input.runId) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_BILL_RUN_MISMATCH',
+        'UNKNOWN',
+        'FrameFlow Usage V2 bill belongs to another Run',
+      )
+    }
+    return parsed.data.data.bill
+  }
+
+  async finalizeUsageRun(input: Readonly<{
+    externalUserId: string
+    runId: string
+    idempotencyKey: string
+  }>) {
+    if (input.idempotencyKey !== `finalize:${input.runId}`) {
+      throw new UsageAccountingRequestError('HOST_USAGE_V2_FINALIZATION_KEY_INVALID', 'REJECTED')
+    }
+    const response = await this.usageRequest(
+      `/api/internal/ppt-agent/usage/v2/runs/${encodeURIComponent(input.runId)}/finalize`,
+      {
+        method: 'POST',
+        headers: this.creditHeaders(input.externalUserId, input.idempotencyKey, true),
+      },
+      'FINALIZE',
+    )
+    const parsed = usageBillEnvelopeSchema.safeParse(await response.json().catch(() => null))
+    if (!parsed.success) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_FINALIZE_RESPONSE_INVALID',
+        'UNKNOWN',
+        'FrameFlow Usage V2 finalization response is invalid',
+      )
+    }
+    if (parsed.data.data.bill.pptRunId !== input.runId) {
+      throw new UsageAccountingRequestError(
+        'HOST_USAGE_V2_FINALIZE_BILL_RUN_MISMATCH',
+        'UNKNOWN',
+        'FrameFlow Usage V2 finalization belongs to another Run',
+      )
+    }
+    return parsed.data.data.bill
+  }
+
   private creditHeaders(userId: string, idempotencyKey: string, json = false) {
     return {
       Authorization: `Bearer ${this.dependencies.token}`,
@@ -271,6 +405,32 @@ export class HttpFrameFlowBackend implements FrameFlowBackendClient {
       Accept: 'application/json',
       ...(json ? { 'Content-Type': 'application/json' } : {}),
     }
+  }
+
+  private async usageRequest(
+    path: string,
+    init: RequestInit,
+    operation: 'PERMIT' | 'EVENT' | 'BILL' | 'FINALIZE',
+  ) {
+    let response: Response
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        signal: AbortSignal.timeout(15_000),
+      })
+    } catch {
+      throw new UsageAccountingRequestError(
+        `HOST_USAGE_V2_${operation}_UNKNOWN`,
+        'UNKNOWN',
+        `FrameFlow Usage V2 ${operation.toLowerCase()} result is unknown`,
+      )
+    }
+    if (response.ok) return response
+    const code = await this.errorCode(response, `HOST_USAGE_V2_${operation}_HTTP_${response.status}`)
+    const outcome = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500
+      ? 'UNKNOWN' as const
+      : 'REJECTED' as const
+    throw new UsageAccountingRequestError(code, outcome)
   }
 
   private async completeCreditOperation(

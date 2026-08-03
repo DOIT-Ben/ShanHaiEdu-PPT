@@ -608,6 +608,7 @@ export class RevisionMediaCoordinator {
       stepId: target.stepId,
       idempotencyKey: key,
       ...(batchReservation ? { batchReservation } : {}),
+      ...(batchReservation ? { pageNumber: target.pageNumber, revisionRound: run.revisionRound } : {}),
       ...(isVisualDeckV4(run) && existing?.status === 'FAILED' && isTechnicalFailureCode(existing.errorCode ?? '') ? {
         budgetReservationKey: `${key}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
       } : {}),

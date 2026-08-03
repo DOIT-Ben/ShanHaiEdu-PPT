@@ -18,6 +18,8 @@ import { appendFixedIssueResolutions } from './v4-lifecycle'
 import { recoverV4AfterMediaRecovery } from './v4-media-recovery'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import type { V4RepairContract } from './v4-repair-contract'
+import { UsageAccountingRequestError } from '../usage-accounting-contracts'
+import { accountingProtocolFor, UsageV2Coordinator } from './usage-v2-coordinator'
 
 const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
   'FAILED',
@@ -44,6 +46,9 @@ export type SubmitSlideImageInput = Readonly<{
   budgetReservationKey?: string
   /** V4 initial generation uses one reservation owned by GenerationBatch. */
   batchReservation?: Readonly<{ batchId: string; reservationId: string }>
+  /** Usage V2 operation identity. Required for a V2 Run. */
+  pageNumber?: number
+  revisionRound?: number
   slideId: string
   versionId: string
   prompt: string
@@ -94,6 +99,7 @@ export class MediaStepRunner {
     budget: BudgetPort
     images: ImageGenerationPort
     clock: ClockPort
+    usageV2?: UsageV2Coordinator
     inspectionConcurrency?: number
   }>) {
     this.inspectionConcurrency = dependencies.inspectionConcurrency ?? 1
@@ -127,6 +133,38 @@ export class MediaStepRunner {
     }
 
     let reservationId = prepared.step.budgetReservationId
+    const usesUsageV2 = accountingProtocolFor(prepared.run) === 'FRAMEFLOW_USAGE_V2'
+    if (usesUsageV2) {
+      if (!this.dependencies.usageV2) throw new Error('USAGE_V2_COORDINATOR_REQUIRED')
+      if (!input.batchReservation || input.pageNumber === undefined || input.revisionRound === undefined) {
+        throw new Error('USAGE_V2_MEDIA_IDENTITY_REQUIRED')
+      }
+      try {
+        const permit = await this.dependencies.usageV2.authorizeMediaOperation({
+          runId: input.runId,
+          mediaStepKey: input.idempotencyKey,
+          batchId: input.batchReservation.batchId,
+          pageNumber: input.pageNumber,
+          revisionRound: input.revisionRound,
+          model: input.model,
+          operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
+          resolution: '1K',
+          aspectRatio: input.aspectRatio ?? '16:9',
+        })
+        if (!permit.allowed) {
+          const step = await this.markDefiniteFailure(input, reservationId, permit.stopReason)
+          return { step, replayed: false }
+        }
+      } catch (error) {
+        const errorCode = error instanceof UsageAccountingRequestError ? error.code : 'HOST_USAGE_V2_PERMIT_UNKNOWN'
+        if (error instanceof UsageAccountingRequestError && error.outcome === 'REJECTED') {
+          const step = await this.markDefiniteFailure(input, reservationId, errorCode)
+          return { step, replayed: false }
+        }
+        const step = await this.markUnknown(input, reservationId, errorCode, 'BUDGET')
+        return { step, replayed: false }
+      }
+    }
     if (!reservationId && !isBatchReserved(input)) {
       try {
         const reservation = await this.dependencies.budget.reserve({
@@ -148,9 +186,10 @@ export class MediaStepRunner {
     }
     if (!reservationId) throw new Error('BATCH_BUDGET_RESERVATION_MISSING')
 
+    let submitted: Awaited<ReturnType<ImageGenerationPort['submit']>>
     try {
       await this.markSubmitting(input, reservationId)
-      const submitted = await this.dependencies.images.submit({
+      submitted = await this.dependencies.images.submit({
         tenantId: prepared.run.host.tenantId,
         prompt: input.prompt,
         ...(input.negativePrompt ? { negativePrompt: input.negativePrompt } : {}),
@@ -160,8 +199,6 @@ export class MediaStepRunner {
         ...(input.referenceImage ? { referenceImage: input.referenceImage } : {}),
         idempotencyKey: input.idempotencyKey,
       })
-      const step = await this.markWaiting(input, reservationId, submitted.operationId)
-      return { step, replayed: false }
     } catch (error) {
       const submissionState = error instanceof MediaSubmissionError ? error.submissionState : 'UNKNOWN'
       const errorCode = error instanceof MediaSubmissionError ? error.code : 'MEDIA_SUBMISSION_UNKNOWN'
@@ -184,6 +221,16 @@ export class MediaStepRunner {
       const step = await this.markUnknown(input, reservationId, errorCode, 'MEDIA')
       return { step, replayed: false }
     }
+    const step = await this.markWaiting(input, reservationId, submitted.operationId)
+    if (usesUsageV2) {
+      await this.dependencies.usageV2!.recordProviderSubmission({
+        runId: input.runId,
+        mediaStepKey: input.idempotencyKey,
+        operationId: submitted.operationId,
+        state: submitted.state,
+      })
+    }
+    return { step, replayed: false }
   }
 
   async refreshSlideImage(runId: string, idempotencyKey: string): Promise<RefreshSlideImageResult> {
@@ -216,6 +263,16 @@ export class MediaStepRunner {
     if (this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) return { step, changed: false }
 
     const mediaInput = this.reconstructInput(step, run.imageModel)
+    const usesUsageV2 = accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2'
+    if (usesUsageV2) {
+      if (!this.dependencies.usageV2) throw new Error('USAGE_V2_COORDINATOR_REQUIRED')
+      await this.dependencies.usageV2.recordProviderSubmission({
+        runId,
+        mediaStepKey: idempotencyKey,
+        operationId: step.externalOperationId,
+        state: 'PROCESSING',
+      })
+    }
     const status = await this.dependencies.images.inspect({
       tenantId: run.host.tenantId,
       operationId: step.externalOperationId,
@@ -228,6 +285,14 @@ export class MediaStepRunner {
     }
     if (status.state === 'COMPLETED') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
+      if (usesUsageV2) {
+        await this.dependencies.usageV2!.recordProviderResult({
+          runId,
+          mediaStepKey: idempotencyKey,
+          status: 'COMPLETED',
+          billingState: 'CHARGED',
+        })
+      }
       if (!isBatchReserved(mediaInput)) {
         await this.dependencies.budget.settle({
           host: run.host,
@@ -238,6 +303,14 @@ export class MediaStepRunner {
       return { step: await this.markCompleted(runId, idempotencyKey, status.artifactId), changed: true }
     }
     if (status.state !== 'FAILED') return { step, changed: false }
+    if (usesUsageV2) {
+      await this.dependencies.usageV2!.recordProviderResult({
+        runId,
+        mediaStepKey: idempotencyKey,
+        status: 'FAILED',
+        billingState: status.billingState,
+      })
+    }
     if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId && !isBatchReserved(mediaInput)) {
       const input = this.reconstructInput(step, run.imageModel)
       await this.markReleasing(input, step.budgetReservationId, status.errorCode)
@@ -383,6 +456,8 @@ export class MediaStepRunner {
           ...(input.repairContract ? { repairContract: input.repairContract } : {}),
           ...(input.budgetReservationKey ? { budgetReservationKey: input.budgetReservationKey } : {}),
           ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
+          ...(input.pageNumber === undefined ? {} : { pageNumber: input.pageNumber }),
+          ...(input.revisionRound === undefined ? {} : { revisionRound: input.revisionRound }),
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
         },
@@ -447,6 +522,8 @@ export class MediaStepRunner {
           ...(input.repairContract ? { repairContract: input.repairContract } : {}),
           ...(input.budgetReservationKey ? { budgetReservationKey: input.budgetReservationKey } : {}),
           ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
+          ...(input.pageNumber === undefined ? {} : { pageNumber: input.pageNumber }),
+          ...(input.revisionRound === undefined ? {} : { revisionRound: input.revisionRound }),
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
         },
@@ -531,6 +608,8 @@ export class MediaStepRunner {
       repairContractHash?: unknown
       budgetReservationKey?: unknown
       batchId?: unknown
+      pageNumber?: unknown
+      revisionRound?: unknown
     } | null
     if (!output || typeof output.slideId !== 'string' || typeof output.versionId !== 'string') {
       throw new Error('MEDIA_STEP_OUTPUT_INVALID')
@@ -547,6 +626,12 @@ export class MediaStepRunner {
       ...(typeof output.budgetReservationKey === 'string' ? { budgetReservationKey: output.budgetReservationKey } : {}),
       ...(typeof output.batchId === 'string' && typeof step.budgetReservationId === 'string'
         ? { batchReservation: { batchId: output.batchId, reservationId: step.budgetReservationId } }
+        : {}),
+      ...(typeof output.pageNumber === 'number' && Number.isSafeInteger(output.pageNumber)
+        ? { pageNumber: output.pageNumber }
+        : {}),
+      ...(typeof output.revisionRound === 'number' && Number.isSafeInteger(output.revisionRound)
+        ? { revisionRound: output.revisionRound }
         : {}),
       ...(output.backgroundMode === 'TRANSPARENT' || output.backgroundMode === 'OPAQUE'
         ? { backgroundMode: output.backgroundMode }

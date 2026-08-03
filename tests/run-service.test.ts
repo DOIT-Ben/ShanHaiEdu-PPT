@@ -9,6 +9,7 @@ import { planningStepKey } from '../src/core/planning-runner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { RunService, RunServiceError } from '../src/core/run-service'
 import { appendV4LifecycleEvent } from '../src/core/v4-lifecycle'
+import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 const request = {
@@ -21,6 +22,13 @@ const request = {
   automationLevel: 'SUPERVISED',
   budgetUnits: 100,
 } as const
+
+function usageV2Catalog(model = 'image-2') {
+  return parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
+    model, operationMode: 'TEXT_TO_IMAGE', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
+    costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: `${model}-2026-08`,
+  }] }))
+}
 
 function blueprint() {
   return {
@@ -65,6 +73,99 @@ describe('run service', () => {
     expect(replay).toMatchObject({ replayed: true, run: { id: first.run.id } })
     expect(await repository.listRuns()).toHaveLength(1)
     expect((await repository.listEvents(first.run.id)).map((event) => event.type)).toEqual(['run.started'])
+  })
+
+  test('freezes Usage V2 only onto new FrameFlow V4 Runs and never drifts on replay', async () => {
+    const repository = new InMemoryAgentRepository()
+    const v2Service = new RunService({
+      repository,
+      clock: new FixedClock(),
+      defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      providerBillingCatalog: usageV2Catalog(),
+    })
+    const v4Request = {
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      automationLevel: 'BOUNDED_AUTO' as const,
+      visualDeckV4: {
+        instruction: '根据教材自动制作完整课堂演示文稿',
+        sourceMode: 'SOURCE_GROUNDED' as const,
+        deckOptions: { length: { slideCount: 2 as const }, aspectRatio: '16:9' as const },
+      },
+    }
+
+    const v2 = await v2Service.create(v4Request, 'frameflow-v2-create-0001')
+    const legacyMode = await v2Service.create(request, 'frameflow-legacy-create-0001')
+    const otherHost = await v2Service.create({
+      ...v4Request,
+      host: { tenantId: 'shanhai', externalUserId: 'task-1' },
+    }, 'shanhai-v4-create-0001')
+    const restartedWithLegacyDefault = new RunService({
+      repository,
+      clock: new FixedClock(),
+      defaultAccountingProtocol: 'LEGACY_RESERVATION_V1',
+    })
+    const replay = await restartedWithLegacyDefault.create(v4Request, 'frameflow-v2-create-0001')
+
+    expect(v2.run.accountingProtocol).toBe('FRAMEFLOW_USAGE_V2')
+    expect(legacyMode.run.accountingProtocol).toBe('LEGACY_RESERVATION_V1')
+    expect(otherHost.run.accountingProtocol).toBe('LEGACY_RESERVATION_V1')
+    expect(replay).toMatchObject({ replayed: true, run: { accountingProtocol: 'FRAMEFLOW_USAGE_V2' } })
+  })
+
+  test('creates the Usage V2 finalization outbox atomically when a V4 Run is cancelled', async () => {
+    const repository = new InMemoryAgentRepository()
+    const service = new RunService({
+      repository, clock: new FixedClock(), defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      providerBillingCatalog: usageV2Catalog(),
+    })
+    const created = await service.create({
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      visualDeckV4: {
+        instruction: '根据教材自动制作完整课堂演示文稿',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+      },
+    }, 'frameflow-v2-cancel-create-0001')
+
+    await expect(service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION, type: 'CANCEL', expectedVersion: 0,
+      reason: '用户终止当前生成任务。',
+    }, 'frameflow-v2-cancel-action-0001')).resolves.toMatchObject({ status: 'CANCELLED' })
+
+    expect((await repository.listSteps(created.run.id)).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({
+        status: 'RUNNING', idempotencyKey: `${created.run.id}:usage-v2:finalize`,
+        output: { idempotencyKey: `finalize:${created.run.id}`, deliveryState: 'PENDING' },
+      })
+    expect(await repository.getTerminalEvent(created.run.id)).toMatchObject({ type: 'run.cancelled' })
+  })
+
+  test('rejects a new Usage V2 Run before planning when its initial image cost profile is missing', async () => {
+    const repository = new InMemoryAgentRepository()
+    const service = new RunService({
+      repository,
+      clock: new FixedClock(),
+      defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      providerBillingCatalog: usageV2Catalog('another-model'),
+    })
+
+    await expect(service.create({
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      visualDeckV4: {
+        instruction: '根据教材自动制作完整课堂演示文稿',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+      },
+    }, 'frameflow-v2-missing-cost-profile')).rejects.toMatchObject({
+      status: 503,
+      code: 'USAGE_V2_PROVIDER_BILLING_PROFILE_NOT_FOUND',
+    })
+    expect(await repository.listRuns()).toHaveLength(0)
   })
 
   test('uses the configured tenant revision-round setting over caller input', async () => {

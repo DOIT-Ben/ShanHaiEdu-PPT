@@ -4,6 +4,35 @@ import { HttpFrameFlowBackend } from '../src/adapters/frameflow-http-backend'
 
 const token = 'test-agent-token-0001'
 
+const usageBill = {
+  pptRunId: 'run-1',
+  authorizationReservationId: 'authorization-1',
+  accountingMode: 'USAGE_V2',
+  status: 'ACTIVE',
+  authorizationCapMilli: 300_000,
+  authorizedModel: 'nanobanana',
+  authorizedUnits: 30,
+  pricingVersion: 'ppt-image-v1',
+  unitPriceMilli: 10_000,
+  providerSpendSafetyCapOperations: 30,
+  generatedOperations: 1,
+  chargedOperations: 0,
+  notChargedOperations: 0,
+  unknownOperations: 1,
+  chargeableMilli: 0,
+  settledMilli: 0,
+  releasedMilli: 0,
+  providerCosts: [{ currency: 'USD', actualAmountMicros: 0, estimatedAmountMicros: 25_000 }],
+  lastEventSequence: 1,
+  lastEventAt: '2026-08-03T07:00:01.000Z',
+  settledAt: null,
+  firstUnknownAt: '2026-08-03T07:00:01.000Z',
+  reconciliationAttempts: 0,
+  nextReconcileAt: '2026-08-03T07:01:01.000Z',
+  reconciliationDeadlineAt: '2026-08-04T07:00:01.000Z',
+  reconciliationLastError: null,
+} as const
+
 describe('FrameFlow internal source backend', () => {
   test('loads a controlled source package with server authentication and verified bytes', async () => {
     const bytes = new Uint8Array([137, 80, 78, 71])
@@ -196,5 +225,177 @@ describe('FrameFlow internal source backend', () => {
     await backend.preflightBatchFinalization({ externalUserId: 'teacher-1' })
     expect(new URL(request.url).pathname).toBe('/api/internal/ppt-agent/credits/batch-finalization-capability')
     expect(request.headers.get('X-PPT-Agent-User')).toBe('teacher-1')
+  })
+
+  test('uses the Usage V2 permit, immutable event, bill and Run finalization contracts', async () => {
+    const requests: Request[] = []
+    const backend = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async (input, init) => {
+        const request = new Request(input, init)
+        requests.push(request)
+        const pathname = new URL(request.url).pathname
+        if (pathname.endsWith('/permits')) {
+          return Response.json({ data: { permit: {
+            allowed: true, permitId: 'permit-1', pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000,
+          } } }, { status: 201 })
+        }
+        if (pathname.endsWith('/events')) {
+          return Response.json({ data: { replayed: false, bill: usageBill } }, { status: 201 })
+        }
+        return Response.json({ data: { bill: {
+          ...usageBill,
+          status: pathname.endsWith('/finalize') ? 'SETTLED' : usageBill.status,
+          unknownOperations: pathname.endsWith('/finalize') ? 0 : usageBill.unknownOperations,
+          settledMilli: pathname.endsWith('/finalize') ? 10_000 : 0,
+          releasedMilli: pathname.endsWith('/finalize') ? 290_000 : 0,
+          settledAt: pathname.endsWith('/finalize') ? '2026-08-03T07:02:00.000Z' : null,
+        } } })
+      },
+    })
+    const observed = {
+      schemaVersion: '2' as const,
+      eventId: 'pptu_obs_0123456789abcdef0123456789abcdef',
+      sequence: 1,
+      eventType: 'OPERATION_OBSERVED' as const,
+      pptRunId: 'run-1',
+      batchId: 'genbatch_0123456789abcdef0123456789abcdef',
+      pageNumber: 1,
+      revisionRound: 0,
+      idempotencyKey: 'run-1:slide:1:image:r0:v1',
+      providerOperationId: 'imgop_0123456789abcdef0123456789abcdef',
+      model: 'nanobanana',
+      status: 'PROCESSING' as const,
+      providerBilling: {
+        result: 'UNKNOWN' as const,
+        estimatedCostAmountMicros: 25_000,
+        currency: 'USD',
+        pricingVersion: 'provider-image-2026-08',
+      },
+      operationCreatedAt: '2026-08-03T07:00:00.000Z',
+      operationCompletedAt: null,
+      eventAt: '2026-08-03T07:00:01.000Z',
+    }
+
+    await expect(backend.authorizeUsageOperation({
+      externalUserId: 'teacher-1',
+      runId: 'run-1',
+      operationIdempotencyKey: observed.idempotencyKey,
+      pageNumber: 1,
+      revisionRound: 0,
+      model: 'nanobanana',
+    })).resolves.toMatchObject({ allowed: true, permitId: 'permit-1' })
+    await expect(backend.ingestUsageEvent({ externalUserId: 'teacher-1', event: observed }))
+      .resolves.toMatchObject({ replayed: false, bill: { pptRunId: 'run-1', unknownOperations: 1 } })
+    await expect(backend.getUsageRunBill({ externalUserId: 'teacher-1', runId: 'run-1' }))
+      .resolves.toMatchObject({ pptRunId: 'run-1', status: 'ACTIVE' })
+    await expect(backend.finalizeUsageRun({
+      externalUserId: 'teacher-1', runId: 'run-1', idempotencyKey: 'finalize:run-1',
+    })).resolves.toMatchObject({ pptRunId: 'run-1', status: 'SETTLED' })
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      'POST /api/internal/ppt-agent/usage/v2/runs/run-1/permits',
+      'POST /api/internal/ppt-agent/usage/v2/events',
+      'GET /api/internal/ppt-agent/usage/v2/runs/run-1',
+      'POST /api/internal/ppt-agent/usage/v2/runs/run-1/finalize',
+    ])
+    expect(requests.map((request) => request.headers.get('X-PPT-Agent-User'))).toEqual([
+      'teacher-1', 'teacher-1', 'teacher-1', 'teacher-1',
+    ])
+    expect(requests.map((request) => request.headers.get('Idempotency-Key'))).toEqual([
+      observed.idempotencyKey, observed.idempotencyKey, null, 'finalize:run-1',
+    ])
+    expect(await requests[0]!.json()).toEqual({
+      operationIdempotencyKey: observed.idempotencyKey,
+      pageNumber: 1,
+      revisionRound: 0,
+      model: 'nanobanana',
+    })
+    expect(await requests[1]!.json()).toEqual(observed)
+  })
+
+  test('keeps a denied Usage V2 permit deterministic and a committed-or-unknown result recoverable', async () => {
+    const denied = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async () => Response.json({ data: { permit: {
+        allowed: false,
+        stopReason: 'AUTHORIZATION_CAP_REACHED',
+        authorizedOperations: 30,
+        authorizationCapOperations: 30,
+        providerSpendSafetyCapOperations: 30,
+      } } }),
+    })
+    const unavailable = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async () => Response.json({ error: { code: 'PPT_USAGE_TEMPORARILY_UNAVAILABLE' } }, { status: 503 }),
+    })
+    const malformedSuccess = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async () => Response.json({ data: { permit: { allowed: true } } }, { status: 201 }),
+    })
+    const input = {
+      externalUserId: 'teacher-1', runId: 'run-1', operationIdempotencyKey: 'operation-1',
+      pageNumber: 1, revisionRound: 0, model: 'nanobanana',
+    }
+
+    await expect(denied.authorizeUsageOperation(input)).resolves.toMatchObject({
+      allowed: false, stopReason: 'AUTHORIZATION_CAP_REACHED',
+    })
+    await expect(unavailable.authorizeUsageOperation(input)).rejects.toMatchObject({
+      code: 'PPT_USAGE_TEMPORARILY_UNAVAILABLE', outcome: 'UNKNOWN',
+    })
+    await expect(malformedSuccess.authorizeUsageOperation(input)).rejects.toMatchObject({
+      code: 'HOST_USAGE_V2_PERMIT_RESPONSE_INVALID', outcome: 'UNKNOWN',
+    })
+  })
+
+  test('classifies a Usage V2 contract rejection without hiding it as a retryable network result', async () => {
+    const backend = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async () => Response.json({ error: { code: 'PPT_USAGE_IDEMPOTENCY_CONFLICT' } }, { status: 409 }),
+    })
+    const event = {
+      schemaVersion: '2' as const, eventId: 'event-1', sequence: 1,
+      eventType: 'OPERATION_OBSERVED' as const, pptRunId: 'run-1', batchId: 'batch-1',
+      pageNumber: 1, revisionRound: 0, idempotencyKey: 'operation-1', providerOperationId: 'provider-1',
+      model: 'nanobanana', status: 'COMPLETED' as const,
+      providerBilling: {
+        result: 'CHARGED' as const, actualCostAmountMicros: 25_000,
+        currency: 'USD', pricingVersion: 'provider-v1',
+      },
+      operationCreatedAt: '2026-08-03T07:00:00.000Z',
+      operationCompletedAt: '2026-08-03T07:00:05.000Z',
+      eventAt: '2026-08-03T07:00:05.000Z',
+    }
+
+    await expect(backend.ingestUsageEvent({ externalUserId: 'teacher-1', event })).rejects.toMatchObject({
+      code: 'PPT_USAGE_IDEMPOTENCY_CONFLICT', outcome: 'REJECTED',
+    })
+  })
+
+  test('treats a valid bill for a different Run as an unknown event acknowledgement', async () => {
+    const backend = new HttpFrameFlowBackend({
+      baseUrl: 'http://127.0.0.1:3010', token,
+      fetchImpl: async () => Response.json({
+        data: { replayed: false, bill: { ...usageBill, pptRunId: 'run-other' } },
+      }, { status: 201 }),
+    })
+    const event = {
+      schemaVersion: '2' as const, eventId: 'event-run-binding', sequence: 1,
+      eventType: 'OPERATION_OBSERVED' as const, pptRunId: 'run-1', batchId: 'batch-1',
+      pageNumber: 1, revisionRound: 0, idempotencyKey: 'operation-1', providerOperationId: 'provider-1',
+      model: 'nanobanana', status: 'COMPLETED' as const,
+      providerBilling: {
+        result: 'CHARGED' as const, actualCostAmountMicros: 25_000,
+        currency: 'USD', pricingVersion: 'provider-v1',
+      },
+      operationCreatedAt: '2026-08-03T07:00:00.000Z',
+      operationCompletedAt: '2026-08-03T07:00:05.000Z',
+      eventAt: '2026-08-03T07:00:05.000Z',
+    }
+
+    await expect(backend.ingestUsageEvent({ externalUserId: 'teacher-1', event })).rejects.toMatchObject({
+      code: 'HOST_USAGE_V2_EVENT_BILL_RUN_MISMATCH', outcome: 'UNKNOWN',
+    })
   })
 })

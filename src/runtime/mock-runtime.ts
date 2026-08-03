@@ -8,6 +8,7 @@ import { InMemoryPrincipalRateLimiter, type PrincipalRateLimiterPort } from '../
 import { SharedTokenAuthentication } from '../http/service-token-authentication'
 export { ServiceTokenAuthentication, SharedTokenAuthentication } from '../http/service-token-authentication'
 import { FrameFlowHostAdapter, type FrameFlowBackendClient } from '../adapters/frameflow-host'
+import type { ProviderBillingCatalog } from '../adapters/provider-billing-catalog'
 import { SharpPptxPresentationRenderer } from '../adapters/presentation-renderer'
 import { DeckReviewRunner } from '../core/deck-review-runner'
 import { AdminOperationsService } from '../core/admin-operations'
@@ -46,6 +47,7 @@ import type {
   StructuredModelPort,
   StructuredModelMetricsPort,
   StructuredGenerationPreflightPort,
+  UsageAccountingPort,
   VisualReviewPort,
 } from '../core/ports'
 import { RunService } from '../core/run-service'
@@ -53,8 +55,10 @@ import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator
 import { VisualReviewRunner } from '../core/visual-review-runner'
 import { failVisualDeckV4Run } from '../core/v4-lifecycle'
 import { resumeTechnicalRecovery } from '../core/technical-recovery'
+import { UsageV2Coordinator } from '../core/usage-v2-coordinator'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 import { buildIdentity, type BuildIdentity } from '../release-identity'
+import type { UsageAccountingProtocol } from '../usage-accounting-contracts'
 
 export class SystemClock implements ClockPort {
   now() { return new Date() }
@@ -506,6 +510,9 @@ type RuntimeInput = Readonly<{
   runActionRateLimitPerMinute?: number
   rateLimiter?: PrincipalRateLimiterPort
   budget?: BudgetPort & BatchBudgetPort
+  defaultAccountingProtocol?: UsageAccountingProtocol
+  usageAccounting?: UsageAccountingPort
+  providerBillingCatalog?: ProviderBillingCatalog
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -575,7 +582,28 @@ export function createAgentRuntime(input: RuntimeInput) {
   const budget = input.budget ?? documents
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
-  const runs = new RunService({ repository: input.repository, clock, buildIdentity: runtimeBuildIdentity })
+  if (Boolean(input.usageAccounting) !== Boolean(input.providerBillingCatalog)) {
+    throw new Error('USAGE_V2_RUNTIME_DEPENDENCIES_INCOMPLETE')
+  }
+  if (input.defaultAccountingProtocol === 'FRAMEFLOW_USAGE_V2'
+    && (!input.usageAccounting || !input.providerBillingCatalog)) {
+    throw new Error('USAGE_V2_RUNTIME_DEPENDENCIES_REQUIRED')
+  }
+  const usageV2 = input.usageAccounting && input.providerBillingCatalog
+    ? new UsageV2Coordinator({
+        repository: input.repository,
+        usage: input.usageAccounting,
+        billingCatalog: input.providerBillingCatalog,
+        clock,
+      })
+    : undefined
+  const runs = new RunService({
+    repository: input.repository,
+    clock,
+    buildIdentity: runtimeBuildIdentity,
+    ...(input.defaultAccountingProtocol ? { defaultAccountingProtocol: input.defaultAccountingProtocol } : {}),
+    ...(input.providerBillingCatalog ? { providerBillingCatalog: input.providerBillingCatalog } : {}),
+  })
   const rateLimiter = input.rateLimiter ?? new InMemoryPrincipalRateLimiter({
     createRun: { limit: input.createRunRateLimitPerMinute ?? 10, windowMs: 60_000 },
     runAction: { limit: input.runActionRateLimitPerMinute ?? 60, windowMs: 60_000 },
@@ -592,9 +620,16 @@ export function createAgentRuntime(input: RuntimeInput) {
     budget,
     images,
     clock,
+    ...(usageV2 ? { usageV2 } : {}),
     inspectionConcurrency: imageConcurrency,
   })
-  const operations = new AdminOperationsService({ repository: input.repository, budget, media, clock })
+  const operations = new AdminOperationsService({
+    repository: input.repository,
+    budget,
+    media,
+    clock,
+    ...(usageV2 ? { usageV2 } : {}),
+  })
   const revisionRoundsSettings = new AdminRevisionRoundsSettingsService({ repository: input.repository, clock })
   const generation = new SlideGenerationCoordinator({
     repository: input.repository,
@@ -661,6 +696,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     let phase = candidate.status
     try {
       await media.reconcilePendingRun(candidate.id)
+      if (usageV2) await usageV2.flushEvents(candidate.id)
       let run = await input.repository.getRun(candidate.id)
       if (!run) return
       if (run.status === 'RECOVERING') {
@@ -788,6 +824,10 @@ export function createAgentRuntime(input: RuntimeInput) {
         withRenewedLease(runId, lease, async () => {
           await media.reconcilePendingRun(runId)
           await generation.reconcileTerminalGenerationBatch(runId)
+          if (usageV2) {
+            await usageV2.flushEvents(runId)
+            await usageV2.reconcileTerminalRun(runId)
+          }
         }))
       return true
     }))

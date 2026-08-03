@@ -124,6 +124,18 @@ async function fixture(runOverrides: Partial<RunRecord> = {}) {
 }
 
 describe('delivery runner', () => {
+  test('persists a Usage V2 finalization outbox in the same completion transaction', async () => {
+    const { repository, runner } = await fixture({ accountingProtocol: 'FRAMEFLOW_USAGE_V2' })
+
+    expect(await runner.deliver('run-1')).toMatchObject({ status: 'COMPLETED' })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({
+        status: 'RUNNING', idempotencyKey: 'run-1:usage-v2:finalize',
+        output: { idempotencyKey: 'finalize:run-1', deliveryState: 'PENDING' },
+      })
+    expect(await repository.getTerminalEvent('run-1')).toMatchObject({ type: 'run.completed' })
+  })
+
   test('stores PNG and PPTX artifacts before atomically completing the run', async () => {
     const { repository, artifacts, renderer, runner } = await fixture()
     const activeBlueprint = await getActiveBlueprint(repository, 'run-1', 0)

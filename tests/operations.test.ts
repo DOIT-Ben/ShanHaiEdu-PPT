@@ -106,4 +106,23 @@ describe('operations report', () => {
       expect.objectContaining({ status: 'RESERVATION_UNKNOWN', allowedActions: ['MARK_NOT_CHARGED'] }),
     ])
   })
+
+  test('surfaces a rejected Usage V2 outbox with one same-event retry action', () => {
+    const report = buildOperationsReport({
+      runs: [run('run-usage-review', 'NEEDS_HUMAN', 'teacher-1')],
+      steps: [step({
+        id: 'step-usage-event', runId: 'run-usage-review', tool: 'report_usage_v2', status: 'FAILED',
+        budgetUnits: 0, budgetReservationId: null, externalOperationId: 'provider-operation-1',
+        errorCode: 'PPT_USAGE_IDEMPOTENCY_CONFLICT',
+      })],
+      events: [],
+      filters,
+    })
+
+    expect(report.reconciliation).toEqual([
+      expect.objectContaining({
+        stepId: 'step-usage-event', errorCode: 'PPT_USAGE_IDEMPOTENCY_CONFLICT', allowedActions: ['REINSPECT'],
+      }),
+    ])
+  })
 })

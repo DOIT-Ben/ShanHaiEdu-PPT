@@ -24,6 +24,10 @@ import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
+import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
+import type { UsageAccountingPort } from '../src/core/ports'
+import type { UsageRunBill } from '../src/usage-accounting-contracts'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -230,7 +234,91 @@ async function fixture(
   }
 }
 
+function revisionUsageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
+  return {
+    pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
+    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
+    generatedOperations: 0, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 0,
+    chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
+    lastEventAt: null, settledAt: null, firstUnknownAt: null, reconciliationAttempts: 0,
+    nextReconcileAt: null, reconciliationDeadlineAt: null, reconciliationLastError: null,
+    ...overrides,
+  }
+}
+
+class RevisionUsagePort implements UsageAccountingPort {
+  readonly permits: Parameters<UsageAccountingPort['authorizeOperation']>[0][] = []
+  readonly events: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
+
+  async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
+    this.permits.push(structuredClone(input))
+    return { allowed: true as const, permitId: `permit-${input.pageNumber}`, pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
+  }
+
+  async ingestEvent(input: Parameters<UsageAccountingPort['ingestEvent']>[0]) {
+    this.events.push(structuredClone(input.event))
+    return { replayed: false, bill: revisionUsageBill({ lastEventSequence: input.event.sequence }) }
+  }
+
+  async getRunBill() { return revisionUsageBill() }
+  async finalizeRun() { return revisionUsageBill({ status: 'SETTLED' }) }
+}
+
+async function usageV2RevisionFixture() {
+  const basePlan = revisionPlan()
+  const plan = {
+    ...basePlan,
+    operations: [
+      { ...basePlan.operations[0]!, id: 'operation-page-1', slideId: 'run-1:slide:1', instruction: 'Correct page one.' },
+      { ...basePlan.operations[0]!, id: 'operation-page-2', slideId: 'run-1:slide:2', instruction: 'Correct page two.' },
+    ],
+  }
+  const base = await fixture({
+    presentationMode: 'VISUAL_DECK_V4', accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+  }, { blueprint: visualDeckV4Blueprint(), plan, imageConcurrency: 2 })
+  const usage = new RevisionUsagePort()
+  const usageV2 = new UsageV2Coordinator({
+    repository: base.repository,
+    usage,
+    billingCatalog: parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
+      model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K',
+      costBasis: 'FIXED_PER_OPERATION', costAmountMicros: 40_000, currency: 'USD',
+      providerPricingVersion: 'image-2-edit-2026-08',
+    }] })),
+    clock: base.clock,
+  })
+  const media = new MediaStepRunner({
+    repository: base.repository, budget: base.budget, images: base.images, clock: base.clock, usageV2,
+  })
+  const coordinator = new RevisionMediaCoordinator({
+    repository: base.repository, media, batchBudget: base.budget, artifacts: base.artifacts,
+    clock: base.clock, revisionImageModel: 'image-2', imageConcurrency: 2,
+  })
+  return { ...base, usage, media, coordinator }
+}
+
 describe('revision media coordinator', () => {
+  test('runs Usage V2 image edits through per-page permits and local batch reduction without legacy credit calls', async () => {
+    const { repository, budget, images, usage, coordinator } = await usageV2RevisionFixture()
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 2, total: 2 })
+    expect(usage.permits.map(({ pageNumber, revisionRound, model }) => ({ pageNumber, revisionRound, model })))
+      .toEqual([
+        { pageNumber: 1, revisionRound: 1, model: 'image-2' },
+        { pageNumber: 2, revisionRound: 1, model: 'image-2' },
+      ])
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+
+    images.complete(await revisionImageKey(repository, 1), 'artifact-r1-1')
+    images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 2, total: 2 })
+    expect(usage.events.filter((event) => event.eventType === 'OPERATION_OBSERVED')).toHaveLength(2)
+    expect(usage.events.filter((event) => event.eventType === 'BILLING_RESOLVED')).toHaveLength(2)
+    expect(budget.batchFinalizationAttempts).toHaveLength(0)
+  })
+
   test('edits the latest controlled V4 page with the configured GPT model before review', async () => {
     const { repository, budget, images, sourceBytes, sourceSha256, coordinator } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',

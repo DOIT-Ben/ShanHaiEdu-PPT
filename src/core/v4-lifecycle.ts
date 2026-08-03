@@ -12,6 +12,7 @@ import type { RevisionPlan } from '../presentation-contracts'
 import type { AgentRepository, AgentTransaction, ClockPort, NewAgentEvent, RunRecord } from './ports'
 import { isTerminalStatus, transitionRun } from './policy'
 import { deriveV4TerminalAccounting } from './v4-terminal-accounting'
+import { enqueueUsageV2RunFinalization } from './usage-v2-coordinator'
 
 export type V4LifecycleEventType =
   | 'planning.started' | 'planning.completed'
@@ -288,6 +289,7 @@ function completeVisualDeckV4Failure(input: Readonly<{
     updatedAt: now,
   }
   transaction.putRun(failedRun)
+  enqueueUsageV2RunFinalization(transaction, input.clock)
   if (completedRecovery) {
     transaction.appendEvent({
       schemaVersion: CONTRACT_VERSION,

@@ -24,6 +24,10 @@ import { PPT_AGENT_CONTRACT_VERSION, PPT_AGENT_SOFTWARE_VERSION } from '../src/r
 import { validateLifecycle } from '../scripts/run-v4-real-evaluation'
 import { getActiveBlueprint } from '../src/core/active-blueprint'
 import { hashInput } from '../src/core/hash'
+import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import type { UsageAccountingPort } from '../src/core/ports'
+import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
+import type { UsageRunBill } from '../src/usage-accounting-contracts'
 
 const token = 'test-runtime-token-0001'
 
@@ -36,6 +40,63 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
 }
 
 describe('mock runtime', () => {
+  test('recovers a terminal Usage V2 finalization through the worker after restart', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    const finalizeCalls: Parameters<UsageAccountingPort['finalizeRun']>[0][] = []
+    const bill: UsageRunBill = {
+      pptRunId: 'usage-v2-terminal-run', authorizationReservationId: 'authorization-1',
+      accountingMode: 'USAGE_V2', status: 'SETTLED', authorizationCapMilli: 300_000,
+      authorizedModel: 'image-2', authorizedUnits: 30, pricingVersion: 'ppt-image-v1',
+      unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30, generatedOperations: 1,
+      chargedOperations: 1, notChargedOperations: 0, unknownOperations: 0, chargeableMilli: 10_000,
+      settledMilli: 10_000, releasedMilli: 290_000, providerCosts: [], lastEventSequence: 1,
+      lastEventAt: '2026-07-21T00:00:00.000Z', settledAt: '2026-07-21T00:00:00.000Z',
+      firstUnknownAt: null, reconciliationAttempts: 0, nextReconcileAt: null,
+      reconciliationDeadlineAt: null, reconciliationLastError: null,
+    }
+    const usage: UsageAccountingPort = {
+      async authorizeOperation() {
+        return { allowed: true, permitId: 'permit-1', pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
+      },
+      async ingestEvent() { return { replayed: false, bill } },
+      async getRunBill() { return bill },
+      async finalizeRun(input) { finalizeCalls.push(structuredClone(input)); return bill },
+    }
+    await repository.createRun({
+      id: 'usage-v2-terminal-run', creationKey: 'usage-v2-terminal-create', requestHash: 'usage-v2-terminal-hash',
+      host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+      source: { kind: 'TEXT', text: '这是用于终态 Usage V2 worker 恢复的完整教材内容。' },
+      slideCount: 2, visualDirection: '课堂信息图', imageModel: 'image-2',
+      accountingProtocol: 'FRAMEFLOW_USAGE_V2', automationLevel: 'BOUNDED_AUTO', presentationMode: 'VISUAL_DECK_V4',
+      maxRevisionRounds: 2, revisionRound: 0, qualityScore: null, status: 'CANCELLED', resumeState: null,
+      version: 1, budgetUnits: 30, committedBudgetUnits: 0, qualityOverride: false,
+      qualityOverrideReason: null, qualityOverrideBy: null, leaseToken: null, leaseUntil: null, leaseVersion: 0,
+      createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+    })
+    await repository.transact('usage-v2-terminal-run', (transaction) => {
+      enqueueUsageV2RunFinalization(transaction, clock)
+    })
+    const runtime = createMockRuntime({
+      repository, artifacts, apiToken: token, clock,
+      defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      usageAccounting: usage,
+      providerBillingCatalog: parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
+        costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'image-2-2026-08',
+      }] })),
+    })
+
+    await runtime.tick()
+
+    expect(finalizeCalls).toEqual([expect.objectContaining({
+      runId: 'usage-v2-terminal-run', idempotencyKey: 'finalize:usage-v2-terminal-run',
+    })])
+    expect((await repository.listSteps('usage-v2-terminal-run')).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({ status: 'COMPLETED', output: { bill: { status: 'SETTLED' } } })
+  })
+
   test('forwards structured-model metrics into a failed V4 stage audit without raw content', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()

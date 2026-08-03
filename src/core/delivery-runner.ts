@@ -21,6 +21,7 @@ import type {
 } from './ports'
 import { transitionRun } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import { enqueueUsageV2RunFinalization } from './usage-v2-coordinator'
 import {
   allPageNumbers,
   appendV4LifecycleEvent,
@@ -257,6 +258,7 @@ export class DeliveryRunner {
       transaction.putDelivery(delivery)
       transaction.putStep(updatedStep)
       transaction.putRun(updatedRun)
+      enqueueUsageV2RunFinalization(transaction, this.dependencies.clock)
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.completed',

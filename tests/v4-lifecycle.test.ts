@@ -27,6 +27,21 @@ function run(status: RunRecord['status'] = 'PLANNING'): RunRecord {
 }
 
 describe('visual deck v4 lifecycle', () => {
+  test('persists a Usage V2 finalization outbox in the same failure transaction', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-07-30T01:00:00.000Z'))
+    await repository.createRun({ ...run('EXECUTING'), accountingProtocol: 'FRAMEFLOW_USAGE_V2' })
+
+    expect(await failVisualDeckV4Run({ repository, clock, runId: 'run-v4', errorCode: 'WORKER_FATAL' }))
+      .toBe(true)
+    expect((await repository.listSteps('run-v4')).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({
+        status: 'RUNNING', idempotencyKey: 'run-v4:usage-v2:finalize',
+        output: { idempotencyKey: 'finalize:run-v4', deliveryState: 'PENDING' },
+      })
+    expect(await repository.getTerminalEvent('run-v4')).toMatchObject({ type: 'run.failed' })
+  })
+
   test('resolves repaired issues once while preserving issues still reported by the new review', async () => {
     const repository = new InMemoryAgentRepository()
     await repository.createRun(run())

@@ -16,6 +16,12 @@ import type {
 } from '../presentation-contracts'
 import type { ReleaseIdentity } from '../release-identity'
 import type { TerminalAccounting } from '../terminal-accounting-contracts'
+import type { UsageAccountingProtocol } from '../usage-accounting-contracts'
+import type {
+  UsageOperationEventV2,
+  UsagePermit,
+  UsageRunBill,
+} from '../usage-accounting-contracts'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -375,6 +381,53 @@ export interface BatchBudgetPort {
   }>): Promise<void>
 }
 
+export interface UsageAccountingPort {
+  authorizeOperation(input: Readonly<{
+    host: HostContext
+    runId: string
+    operationIdempotencyKey: string
+    pageNumber: number
+    revisionRound: number
+    model: string
+  }>): Promise<UsagePermit>
+
+  ingestEvent(input: Readonly<{
+    host: HostContext
+    event: UsageOperationEventV2
+  }>): Promise<Readonly<{ replayed: boolean; bill: UsageRunBill }>>
+
+  getRunBill(input: Readonly<{
+    host: HostContext
+    runId: string
+  }>): Promise<UsageRunBill>
+
+  finalizeRun(input: Readonly<{
+    host: HostContext
+    runId: string
+    idempotencyKey: string
+  }>): Promise<UsageRunBill>
+}
+
+export type ProviderBillingSnapshot = Readonly<{
+  model: string
+  operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+  resolution: '1K'
+  aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+  costBasis: 'FIXED_PER_OPERATION'
+  costAmountMicros: number
+  currency: string
+  providerPricingVersion: string
+}>
+
+export interface ProviderBillingCatalogPort {
+  snapshot(input: Readonly<{
+    model: string
+    operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+    resolution: '1K'
+    aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+  }>): ProviderBillingSnapshot
+}
+
 export class BudgetReservationError extends Error {
   constructor(
     readonly code: string,
@@ -467,6 +520,8 @@ export type RunRecord = Readonly<{
   targetAudience?: string
   presentationGoal?: string
   imageModel: string
+  /** Frozen when the Run is created. Missing legacy records are interpreted as V1. */
+  accountingProtocol?: UsageAccountingProtocol
   automationLevel: CreateRunRequest['automationLevel']
   presentationMode?: CreateRunRequest['presentationMode']
   coverDesignMode?: CreateRunRequest['coverDesignMode']

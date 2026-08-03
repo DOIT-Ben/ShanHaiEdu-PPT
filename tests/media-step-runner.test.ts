@@ -7,6 +7,11 @@ import type { RunRecord } from '../src/core/ports'
 import { hashInput } from '../src/core/hash'
 import { reserveBudget } from '../src/core/policy'
 import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
+import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
+import type { UsageAccountingPort } from '../src/core/ports'
+import { UsageAccountingRequestError, type UsageRunBill } from '../src/usage-accounting-contracts'
+import { createHash } from 'node:crypto'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -59,7 +64,211 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
   return { repository, budget, images, clock, runner: new MediaStepRunner({ repository, budget, images, clock }) }
 }
 
+function usageBill(): UsageRunBill {
+  return {
+    pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
+    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
+    generatedOperations: 1, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 1,
+    chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 1,
+    lastEventAt: '2026-08-03T07:00:00.000Z', settledAt: null, firstUnknownAt: '2026-08-03T07:00:00.000Z',
+    reconciliationAttempts: 0, nextReconcileAt: null, reconciliationDeadlineAt: null, reconciliationLastError: null,
+  }
+}
+
+class MediaUsagePort implements UsageAccountingPort {
+  readonly order: string[] = []
+  readonly permitKeys: string[] = []
+  readonly events: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
+  permitResult: 'ALLOW' | 'DENY' | 'UNKNOWN' = 'ALLOW'
+
+  async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
+    this.order.push('permit')
+    this.permitKeys.push(input.operationIdempotencyKey)
+    if (this.permitResult === 'UNKNOWN') {
+      throw new UsageAccountingRequestError('HOST_USAGE_V2_PERMIT_UNKNOWN', 'UNKNOWN')
+    }
+    if (this.permitResult === 'DENY') {
+      return {
+        allowed: false as const, stopReason: 'AUTHORIZATION_CAP_REACHED' as const,
+        authorizedOperations: 30, authorizationCapOperations: 30, providerSpendSafetyCapOperations: 30,
+      }
+    }
+    return { allowed: true as const, permitId: 'permit-1', pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
+  }
+
+  async ingestEvent(input: Parameters<UsageAccountingPort['ingestEvent']>[0]) {
+    this.order.push('event')
+    this.events.push(structuredClone(input.event))
+    return { replayed: false, bill: usageBill() }
+  }
+
+  async getRunBill() { return usageBill() }
+  async finalizeRun() { return { ...usageBill(), status: 'SETTLED' as const } }
+}
+
+async function usageFixture() {
+  const repository = new InMemoryAgentRepository()
+  const budget = new MockBudgetPort()
+  const images = new MockImageGenerationPort()
+  const clock = new FixedClock()
+  const usage = new MediaUsagePort()
+  await repository.createRun(run({
+    presentationMode: 'VISUAL_DECK_V4', accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+    imageModel: 'image-2', committedBudgetUnits: 10,
+  }))
+  const billingCatalog = parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
+    model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
+    costBasis: 'FIXED_PER_OPERATION', costAmountMicros: 40_000, currency: 'USD',
+    providerPricingVersion: 'image-2-2026-08',
+  }] }))
+  const usageV2 = new UsageV2Coordinator({ repository, usage, billingCatalog, clock })
+  const originalSubmit = images.submit.bind(images)
+  images.submit = async (input) => {
+    usage.order.push('provider')
+    return originalSubmit(input)
+  }
+  return {
+    repository, budget, images, clock, usage,
+    runner: new MediaStepRunner({ repository, budget, images, clock, usageV2 }),
+  }
+}
+
+const usageRequest = {
+  ...request,
+  pageNumber: 1,
+  revisionRound: 0,
+  batchReservation: {
+    batchId: 'genbatch_0123456789abcdef0123456789abcdef',
+    reservationId: 'usage-v2:genbatch_0123456789abcdef0123456789abcdef',
+  },
+} as const
+
 describe('media step runner', () => {
+  test('resumes a 4.2 V1 batch page without changing the persisted Provider step identity', async () => {
+    const { repository, images, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4',
+      accountingProtocol: 'LEGACY_RESERVATION_V1',
+      committedBudgetUnits: 10,
+    })
+    const legacyInputHash = hashInput({
+      tool: 'generate_slide_image',
+      slideId: request.slideId,
+      versionId: request.versionId,
+      prompt: request.prompt,
+      model: request.model,
+      aspectRatio: '16:9',
+      budgetUnits: request.budgetUnits,
+    })
+    const batchReservation = { batchId: 'legacy-batch-1', reservationId: 'legacy-reservation-1' }
+    await repository.transact('run-1', (transaction) => transaction.putStep({
+      id: request.stepId,
+      runId: request.runId,
+      idempotencyKey: request.idempotencyKey,
+      inputHash: legacyInputHash,
+      tool: 'generate_slide_image',
+      status: 'RESERVED',
+      budgetUnits: request.budgetUnits,
+      budgetReservationId: batchReservation.reservationId,
+      externalOperationId: null,
+      errorCode: null,
+      output: {
+        slideId: request.slideId,
+        versionId: request.versionId,
+        model: request.model,
+        operationMode: 'TEXT_TO_IMAGE',
+        backgroundMode: 'OPAQUE',
+        batchId: batchReservation.batchId,
+      },
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
+    }))
+
+    await expect(runner.submitSlideImage({
+      ...request,
+      batchReservation,
+      pageNumber: 1,
+      revisionRound: 0,
+    })).resolves.toMatchObject({ step: { status: 'WAITING' }, replayed: false })
+
+    expect(images.submitCalls).toBe(1)
+  })
+
+  test('keeps an accepted Provider operation durable when Usage event reconciliation has a hard conflict', async () => {
+    const { repository, images, runner } = await usageFixture()
+    const eventId = `pptu_obs_${createHash('sha256')
+      .update(['run-1', usageRequest.idempotencyKey].join('\0')).digest('hex').slice(0, 32)}`
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'conflicting-observed', runId: 'run-1',
+        idempotencyKey: `run-1:usage-v2:event:${eventId}`, inputHash: 'conflicting-hash',
+        tool: 'report_usage_v2', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: 'different-provider-operation', errorCode: null,
+        output: {
+          deliveryState: 'ACKNOWLEDGED', nextAttemptAt: null, billStatus: 'ACTIVE',
+          event: {
+            schemaVersion: '2', eventId, sequence: 1, eventType: 'OPERATION_OBSERVED', pptRunId: 'run-1',
+            batchId: usageRequest.batchReservation.batchId, pageNumber: 1, revisionRound: 0,
+            idempotencyKey: usageRequest.idempotencyKey, providerOperationId: 'different-provider-operation',
+            model: 'image-2', status: 'PROCESSING', providerBilling: {
+              result: 'UNKNOWN', estimatedCostAmountMicros: 40_000, currency: 'USD', pricingVersion: 'image-2-2026-08',
+            },
+            operationCreatedAt: '2026-07-21T00:00:00.000Z', operationCompletedAt: null,
+            eventAt: '2026-07-21T00:00:00.000Z',
+          },
+        },
+        createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+      })
+    })
+
+    await expect(runner.submitSlideImage(usageRequest)).rejects.toThrow('USAGE_V2_PROVIDER_OPERATION_CONFLICT')
+
+    expect(images.submitCalls).toBe(1)
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === usageRequest.idempotencyKey))
+      .toMatchObject({ status: 'WAITING', externalOperationId: expect.any(String), errorCode: null })
+  })
+
+  test('requires a persisted Usage V2 permit before Provider submission without a legacy reservation', async () => {
+    const { repository, budget, images, usage, runner } = await usageFixture()
+
+    const result = await runner.submitSlideImage(usageRequest)
+
+    expect(result.step.status).toBe('WAITING')
+    expect(usage.order).toEqual(['permit', 'provider', 'event'])
+    expect(usage.permitKeys).toEqual([usageRequest.idempotencyKey])
+    expect(usage.events).toHaveLength(1)
+    expect(images.submitCalls).toBe(1)
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === usageRequest.idempotencyKey))
+      .toMatchObject({ output: { usageV2: { billingSnapshot: { costAmountMicros: 40_000 }, permit: { allowed: true } } } })
+  })
+
+  test('stops before Provider when the Usage V2 permit is denied', async () => {
+    const { budget, images, usage, runner } = await usageFixture()
+    usage.permitResult = 'DENY'
+
+    const result = await runner.submitSlideImage(usageRequest)
+
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'AUTHORIZATION_CAP_REACHED' })
+    expect(images.submitCalls).toBe(0)
+    expect(budget.reservationRequests).toHaveLength(0)
+  })
+
+  test('keeps an unknown permit recoverable and retries the same key before one Provider submission', async () => {
+    const { images, usage, runner } = await usageFixture()
+    usage.permitResult = 'UNKNOWN'
+
+    const unknown = await runner.submitSlideImage(usageRequest)
+    usage.permitResult = 'ALLOW'
+    const recovered = await runner.submitSlideImage(usageRequest)
+
+    expect(unknown.step).toMatchObject({ status: 'RESERVATION_UNKNOWN', errorCode: 'HOST_USAGE_V2_PERMIT_UNKNOWN' })
+    expect(recovered.step.status).toBe('WAITING')
+    expect(usage.permitKeys).toEqual([usageRequest.idempotencyKey, usageRequest.idempotencyKey])
+    expect(images.submitCalls).toBe(1)
+  })
+
   test('reconciles an accepted image edit after response loss without a second POST', async () => {
     const { repository, images, runner } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',

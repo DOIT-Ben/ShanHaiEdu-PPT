@@ -13,11 +13,23 @@ import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
 import { V4_PLANNING_STAGE_COUNT } from './visual-deck-v4-planner'
-import type { AgentRepository, AgentTransaction, ClockPort, RunListCursor, RunRecord } from './ports'
+import type {
+  AgentRepository,
+  AgentTransaction,
+  ClockPort,
+  ProviderBillingCatalogPort,
+  RunListCursor,
+  RunRecord,
+} from './ports'
 import { applyRunAction, PolicyError } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { buildIdentity, releaseIdentityForMode, type BuildIdentity } from '../release-identity'
+import {
+  usageAccountingProtocolSchema,
+  type UsageAccountingProtocol,
+} from '../usage-accounting-contracts'
+import { enqueueUsageV2RunFinalization } from './usage-v2-coordinator'
 import {
   allPageNumbers,
   activeRevisionLifecycle,
@@ -47,11 +59,19 @@ function owns(run: RunRecord, host: HostContext) {
 }
 
 export class RunService {
+  private readonly defaultAccountingProtocol: UsageAccountingProtocol
+
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     clock: ClockPort
     buildIdentity?: BuildIdentity
-  }>) {}
+    defaultAccountingProtocol?: UsageAccountingProtocol
+    providerBillingCatalog?: ProviderBillingCatalogPort
+  }>) {
+    this.defaultAccountingProtocol = usageAccountingProtocolSchema.parse(
+      dependencies.defaultAccountingProtocol ?? 'LEGACY_RESERVATION_V1',
+    )
+  }
 
   async create(request: unknown, idempotencyKey: string) {
     const parsed = createRunRequestSchema.safeParse(request)
@@ -76,6 +96,33 @@ export class RunService {
       ? tenantSettings.maxRevisionRounds
       : parsed.data.maxRevisionRounds
     const now = this.dependencies.clock.now().toISOString()
+    const accountingProtocol = parsed.data.host.tenantId === 'frameflow'
+      && parsed.data.presentationMode === 'VISUAL_DECK_V4'
+      ? this.defaultAccountingProtocol
+      : 'LEGACY_RESERVATION_V1' as const
+    if (accountingProtocol === 'FRAMEFLOW_USAGE_V2') {
+      if (!this.dependencies.providerBillingCatalog) {
+        throw new RunServiceError(
+          503,
+          'USAGE_V2_PROVIDER_BILLING_CATALOG_REQUIRED',
+          'Usage V2 billing catalog is unavailable',
+        )
+      }
+      try {
+        this.dependencies.providerBillingCatalog.snapshot({
+          model: parsed.data.imageModel,
+          operationMode: 'TEXT_TO_IMAGE',
+          resolution: '1K',
+          aspectRatio: parsed.data.visualDeckV4!.deckOptions.aspectRatio,
+        })
+      } catch {
+        throw new RunServiceError(
+          503,
+          'USAGE_V2_PROVIDER_BILLING_PROFILE_NOT_FOUND',
+          'Usage V2 initial image billing profile is unavailable',
+        )
+      }
+    }
     const run: RunRecord = {
       id: runId,
       creationKey,
@@ -87,6 +134,7 @@ export class RunService {
       ...(parsed.data.targetAudience ? { targetAudience: parsed.data.targetAudience } : {}),
       ...(parsed.data.presentationGoal ? { presentationGoal: parsed.data.presentationGoal } : {}),
       imageModel: parsed.data.imageModel,
+      accountingProtocol,
       automationLevel: parsed.data.automationLevel,
       presentationMode: parsed.data.presentationMode,
       coverDesignMode: parsed.data.coverDesignMode,
@@ -423,6 +471,7 @@ export class RunService {
     if (action.type === 'CANCEL' && isVisualDeckV4(updated)) {
       closeActiveV4LifecycleStages(transaction, 'CANCELLED_BY_USER')
     }
+    if (action.type === 'CANCEL') enqueueUsageV2RunFinalization(transaction, this.dependencies.clock)
     if (previous.status !== updated.status) {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,

@@ -7,6 +7,14 @@ import { generationBatchStepKeyFor } from '../src/core/generation-batch'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import type { RunRecord, StepRecord } from '../src/core/ports'
 import { storedGenerationBatchSchema } from '../src/generation-batch-contracts'
+import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
+import type { UsageAccountingPort } from '../src/core/ports'
+import {
+  UsageAccountingRequestError,
+  type UsageOperationEventV2,
+  type UsageRunBill,
+} from '../src/usage-accounting-contracts'
 
 function run(): RunRecord {
   return {
@@ -121,7 +129,203 @@ async function attachRevisionBatch(
   return { pageKey, batchId, batchKey, reservationId }
 }
 
+function usageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
+  return {
+    pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
+    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
+    generatedOperations: 1, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 1,
+    chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
+    lastEventAt: null, settledAt: null, firstUnknownAt: null, reconciliationAttempts: 0,
+    nextReconcileAt: null, reconciliationDeadlineAt: null, reconciliationLastError: null,
+    ...overrides,
+  }
+}
+
+class AdminUsagePort implements UsageAccountingPort {
+  readonly eventAttempts: UsageOperationEventV2[] = []
+  readonly acceptedEvents: UsageOperationEventV2[] = []
+  rejectNextEvent = false
+
+  async authorizeOperation() {
+    return { allowed: true as const, permitId: 'permit-1', pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
+  }
+
+  async ingestEvent(input: Parameters<UsageAccountingPort['ingestEvent']>[0]) {
+    this.eventAttempts.push(structuredClone(input.event))
+    if (this.rejectNextEvent) {
+      this.rejectNextEvent = false
+      throw new UsageAccountingRequestError('PPT_USAGE_IDEMPOTENCY_CONFLICT', 'REJECTED')
+    }
+    if (!this.acceptedEvents.some((event) => event.eventId === input.event.eventId)) {
+      this.acceptedEvents.push(structuredClone(input.event))
+    }
+    return { replayed: false, bill: usageBill({ lastEventSequence: input.event.sequence }) }
+  }
+
+  async getRunBill() { return usageBill() }
+  async finalizeRun() { return usageBill({ status: 'SETTLED' }) }
+}
+
+async function v2AdminFixture(withBatch = true, withProviderOperation = true) {
+  const repository = new InMemoryAgentRepository()
+  const budget = new MockBudgetPort()
+  const images = new MockImageGenerationPort()
+  const clock = new FixedClock()
+  const usage = new AdminUsagePort()
+  const batchId = `genbatch_${'b'.repeat(32)}`
+  const batchKey = generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })
+  const reservationId = `usage-v2:${batchId}`
+  const pageKey = `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`
+  await repository.createRun({
+    ...run(),
+    status: 'EXECUTING',
+    presentationMode: 'VISUAL_DECK_V4',
+    accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+    automationLevel: 'BOUNDED_AUTO',
+    imageModel: 'nano-banana-pro',
+    revisionRound: 1,
+  })
+  await repository.transact('run-1', (transaction) => {
+    transaction.putStep({
+      id: 'step-image-1', runId: 'run-1', idempotencyKey: pageKey, inputHash: 'v2-image-hash',
+      tool: 'generate_slide_image', status: 'RESERVED', budgetUnits: 4,
+      budgetReservationId: reservationId, externalOperationId: null, errorCode: null,
+      output: {
+        slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r1:v1', model: 'image-2',
+        operationMode: 'IMAGE_EDIT', backgroundMode: 'OPAQUE', pageNumber: 1, revisionRound: 1,
+        batchId,
+      },
+      createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+    })
+    if (withBatch) transaction.putStep({
+      id: 'step-v2-batch', runId: 'run-1', idempotencyKey: batchKey, inputHash: 'v2-batch-hash',
+      tool: 'generate_image_batch', status: 'RUNNING', budgetUnits: 4,
+      budgetReservationId: reservationId, externalOperationId: null, errorCode: null,
+      output: storedGenerationBatchSchema.parse({
+        batchId, proposalHash: 'd'.repeat(64), revisionRound: 1,
+        submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', accountingModel: 'image-2', operationMode: 'IMAGE_EDIT',
+        pageCount: 1, pages: [{ pageNumber: 1, idempotencyKey: pageKey, promptHash: 'e'.repeat(64) }],
+        accounting: {
+          estimatedUnits: 4, committedUnits: 4, settledUnits: 0, releasedUnits: 0,
+          reconciliationUnits: 4, authorization: 'RESERVED', settlement: 'PENDING',
+        },
+        progress: { submitted: 1, completed: 0, failed: 0 }, status: 'RECONCILIATION_REQUIRED',
+        createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+      }),
+      createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
+    })
+  })
+  const billingCatalog = parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
+    model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
+    costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'image-2-2026-08',
+  }] }))
+  const usageV2 = new UsageV2Coordinator({ repository, usage, billingCatalog, clock })
+  await usageV2.authorizeMediaOperation({
+    runId: 'run-1', mediaStepKey: pageKey, batchId, pageNumber: 1, revisionRound: 1,
+    model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', aspectRatio: '16:9',
+  })
+  await repository.transact('run-1', (transaction) => {
+    const page = transaction.getStep(pageKey)!
+    transaction.putStep({
+      ...page, status: 'BILLING_UNKNOWN', externalOperationId: 'provider-operation-1',
+      errorCode: 'PROVIDER_BILLING_UNKNOWN',
+    })
+  })
+  if (withProviderOperation) {
+    await usageV2.recordProviderSubmission({
+      runId: 'run-1', mediaStepKey: pageKey, operationId: 'provider-operation-1', state: 'PROCESSING',
+    })
+  } else {
+    await repository.transact('run-1', (transaction) => {
+      const page = transaction.getStep(pageKey)!
+      transaction.putStep({ ...page, externalOperationId: null })
+    })
+  }
+  const media = new MediaStepRunner({ repository, budget, images, clock, usageV2 })
+  const service = new AdminOperationsService({ repository, budget, media, clock, usageV2 })
+  const base = {
+    host: { tenantId: 'frameflow', externalUserId: 'admin-1', role: 'ADMIN' as const },
+    runId: 'run-1', stepId: 'step-image-1', expectedVersion: 1,
+    idempotencyKey: 'admin-v2-action-1', reason: '已核对 Usage V2 对账记录。',
+  }
+  return { repository, budget, images, usage, usageV2, service, base, batchKey }
+}
+
 describe('admin operations service', () => {
+  test.each([
+    ['MARK_CHARGED', 'FAILED_CHARGED', 'SETTLED'],
+    ['MARK_NOT_CHARGED', 'FAILED_NOT_CHARGED', 'RELEASED'],
+  ] as const)('resolves a V2 page with %s through one durable Usage event and no legacy credit API', async (
+    action,
+    expectedPageStatus,
+    expectedSettlement,
+  ) => {
+    const { repository, budget, usage, service, base, batchKey } = await v2AdminFixture()
+
+    const first = await service.act({ ...base, action })
+    const replay = await service.act({ ...base, action })
+
+    expect(first.step.status).toBe(expectedPageStatus)
+    expect(replay.replayed).toBe(true)
+    expect(usage.acceptedEvents.map((event) => event.eventType)).toEqual(['OPERATION_OBSERVED', 'BILLING_RESOLVED'])
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === batchKey))
+      .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: expectedSettlement } } })
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+    expect(budget.batchFinalizations).toHaveLength(0)
+  })
+
+  test('fails closed when a V2 accounting decision has no persisted GenerationBatch context', async () => {
+    const { budget, service, base } = await v2AdminFixture(false)
+
+    await expect(service.act({ ...base, action: 'MARK_CHARGED' })).rejects.toMatchObject({
+      status: 409, code: 'BATCH_ACCOUNTING_CONTEXT_INVALID',
+    })
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.settled.size).toBe(0)
+  })
+
+  test('fails closed for a V2 no-charge decision without a Provider operation or observed event', async () => {
+    const { repository, budget, usage, service, base, batchKey } = await v2AdminFixture(true, false)
+
+    await expect(service.act({ ...base, action: 'MARK_NOT_CHARGED' })).rejects.toMatchObject({
+      status: 409, code: 'USAGE_V2_PROVIDER_OPERATION_REQUIRED',
+    })
+
+    expect(usage.acceptedEvents).toHaveLength(0)
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchFinalizations).toHaveLength(0)
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === batchKey))
+      .toMatchObject({ status: 'RUNNING', output: { accounting: { settlement: 'PENDING' } } })
+  })
+
+  test('retries a hard-rejected V2 event through the administrator action without changing its identity', async () => {
+    const { repository, usage, service, base } = await v2AdminFixture()
+    usage.rejectNextEvent = true
+
+    await service.act({ ...base, action: 'MARK_CHARGED' })
+    const failedUsage = (await repository.listSteps('run-1')).find((step) =>
+      step.tool === 'report_usage_v2' && step.status === 'FAILED')!
+    const rejectedAttempt = usage.eventAttempts.at(-1)!
+    const blockedRun = (await repository.getRun('run-1'))!
+
+    await expect(service.act({
+      host: base.host,
+      runId: 'run-1',
+      stepId: failedUsage.id,
+      action: 'REINSPECT',
+      expectedVersion: blockedRun.version,
+      idempotencyKey: 'admin-v2-event-retry-1',
+      reason: '宿主冲突已修复，按原事件重新投递。',
+    })).resolves.toMatchObject({ step: { status: 'COMPLETED' }, replayed: false })
+
+    expect(usage.eventAttempts.at(-1)).toEqual(rejectedAttempt)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', resumeState: null })
+    expect((await repository.listEvents('run-1')).some((event) =>
+      event.type === 'issue.resolved' && event.payload.issueId === `${failedUsage.id}:usage-v2-delivery`)).toBe(true)
+  })
+
   test('marks an unknown submission not charged exactly once and releases both budgets', async () => {
     const { repository, budget, service, base } = await fixture('SUBMISSION_UNKNOWN')
     const first = await service.act({ ...base, action: 'MARK_NOT_CHARGED' })

@@ -13,6 +13,7 @@ import {
   renewRunLease,
 } from '../src/core/lease'
 import type { AgentRepository, RunRecord } from '../src/core/ports'
+import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 
 const cleanupPaths: string[] = []
 
@@ -241,5 +242,28 @@ describe('run lease', () => {
     expect(await acquireMediaReconciliationLease({
       repository, clock, runId: 'cancelled-batch', token: 'worker-a', ttlMs: 5_000,
     })).not.toBeNull()
+  })
+
+  test('discovers a durable Usage V2 finalization after SQLite reopen and grants one reconciliation lease', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'ppt-agent-usage-v2-lease-'))
+    cleanupPaths.push(directory)
+    const filename = path.join(directory, 'agent.sqlite')
+    const clock = new FixedClock()
+    const first = new SqliteAgentRepository(filename)
+    await seed(first, {
+      ...run('usage-v2-terminal', 'CANCELLED'),
+      presentationMode: 'VISUAL_DECK_V4', accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+    })
+    await first.transact('usage-v2-terminal', (transaction) => {
+      enqueueUsageV2RunFinalization(transaction, clock)
+    })
+    first.close()
+
+    const reopened = new SqliteAgentRepository(filename)
+    expect(await reopened.listRunsWithPendingMedia(10)).toEqual(['usage-v2-terminal'])
+    expect(await acquireMediaReconciliationLease({
+      repository: reopened, clock, runId: 'usage-v2-terminal', token: 'worker-a', ttlMs: 5_000,
+    })).not.toBeNull()
+    reopened.close()
   })
 })

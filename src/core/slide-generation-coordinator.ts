@@ -479,6 +479,7 @@ export class SlideGenerationCoordinator {
       stepId: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
       idempotencyKey: requirement.idempotencyKey,
       ...(batchReservation ? { batchReservation } : {}),
+      ...(batchReservation ? { pageNumber: requirement.pageNumber, revisionRound: run.revisionRound } : {}),
       ...(canRetryReleasedV4Submission(run, existingStep) ? {
         budgetReservationKey: `${requirement.idempotencyKey}:budget-recovery:${run.technicalRecovery?.attempt ?? 1}`,
       } : {}),

@@ -7,6 +7,7 @@ import {
   type StoredGenerationBatch,
 } from '../generation-batch-contracts'
 import type { PresentationBlueprint } from '../presentation-contracts'
+import { usageOperationEventV2Schema } from '../usage-accounting-contracts'
 import { hashInput } from './hash'
 import {
   BudgetReservationError,
@@ -19,6 +20,7 @@ import {
 } from './ports'
 import { releaseBudget, reserveBudget } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import { accountingProtocolFor } from './usage-v2-coordinator'
 
 type Requirement = Readonly<{
   pageNumber: number
@@ -306,6 +308,10 @@ export type GenerationBatchReservation = Readonly<{
   reservationId: string
 }>
 
+function usageV2BatchReservationId(batch: Pick<StoredGenerationBatch, 'batchId'>) {
+  return `usage-v2:${batch.batchId}`
+}
+
 type BatchFinalization = Readonly<{
   batch: StoredGenerationBatch
   settledUnits: number
@@ -343,6 +349,44 @@ export async function reserveGenerationBatch(input: Readonly<{
     revisionRound: input.revisionRound,
     scope: input.scope ?? 'INITIAL',
   })
+  const run = await input.repository.getRun(input.runId)
+  if (!run) throw new Error('RUN_NOT_FOUND')
+  if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') {
+    return input.repository.transact(input.runId, (transaction) => {
+      const step = requireBatchStep(transaction, key)
+      const batch = storedGenerationBatchSchema.parse(step.output)
+      const reservationId = usageV2BatchReservationId(batch)
+      if (step.budgetReservationId) {
+        if (step.budgetReservationId !== reservationId) throw new Error('GENERATION_BATCH_RESERVATION_CONFLICT')
+        return { batchId: batch.batchId, reservationId }
+      }
+      if (step.status === 'FAILED') return null
+      const now = input.clock.now().toISOString()
+      const policy = reserveBudget(transaction.run, step.budgetUnits)
+      const updatedRun = { ...transaction.run, ...policy, updatedAt: now }
+      const next = updatedBatch(batch, {
+        ...batch.accounting,
+        committedUnits: step.budgetUnits,
+        authorization: 'RESERVED',
+        settlement: 'PENDING',
+      }, now, 'PROCESSING')
+      transaction.putRun(updatedRun)
+      transaction.putStep({
+        ...step,
+        status: 'RUNNING',
+        budgetReservationId: reservationId,
+        output: next,
+        updatedAt: now,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'budget.updated',
+        payload: { budgetUnits: updatedRun.budgetUnits, committedBudgetUnits: updatedRun.committedBudgetUnits },
+      })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
+      return { batchId: batch.batchId, reservationId }
+    })
+  }
   const prepared = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
     const batch = storedGenerationBatchSchema.parse(step.output)
@@ -458,6 +502,7 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
 }>): Promise<boolean> {
   const run = await input.repository.getRun(input.runId)
   if (!run) throw new Error('RUN_NOT_FOUND')
+  if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') return true
   try {
     await input.budget.preflightBatchFinalization({ host: run.host })
     return true
@@ -535,6 +580,78 @@ function batchFinalization(batch: StoredGenerationBatch, steps: readonly StepRec
   return { batch, settledUnits, releasedUnits }
 }
 
+function usageV2BatchOutboxReady(batch: StoredGenerationBatch, steps: readonly StepRecord[]) {
+  const events = steps
+    .filter((step) => step.tool === 'report_usage_v2')
+    .flatMap((step) => {
+      const output = step.output && typeof step.output === 'object'
+        ? step.output as { event?: unknown }
+        : {}
+      const parsed = usageOperationEventV2Schema.safeParse(output.event)
+      return parsed.success && parsed.data.batchId === batch.batchId ? [{ step, event: parsed.data }] : []
+    })
+  const mediaByKey = new Map(steps
+    .filter((step) => step.tool === 'generate_slide_image')
+    .map((step) => [step.idempotencyKey, step]))
+  for (const page of batch.pages) {
+    const media = mediaByKey.get(page.idempotencyKey)
+    if (!media) return false
+    if (!media.externalOperationId) continue
+    const observed = events.find(({ event }) => event.eventType === 'OPERATION_OBSERVED'
+      && event.idempotencyKey === page.idempotencyKey
+      && event.providerOperationId === media.externalOperationId)
+    if (!observed || observed.step.status !== 'COMPLETED') return false
+    if (observed.event.providerBilling.result !== 'UNKNOWN') continue
+    const resolved = events.find(({ event }) => event.eventType === 'BILLING_RESOLVED'
+      && event.idempotencyKey === `${page.idempotencyKey}:billing-resolved`
+      && event.providerOperationId === media.externalOperationId)
+    if (!resolved || resolved.step.status !== 'COMPLETED') return false
+  }
+  return !events.some(({ step }) => step.status !== 'COMPLETED')
+}
+
+async function finalizeUsageV2GenerationBatch(input: Readonly<{
+  repository: AgentRepository
+  clock: ClockPort
+  runId: string
+  key: string
+  scope: GenerationBatchScope
+}>) {
+  return input.repository.transact(input.runId, (transaction) => {
+    const step = requireBatchStep(transaction, input.key)
+    const batch = storedGenerationBatchSchema.parse(step.output)
+    if (['SETTLED', 'RELEASED'].includes(batch.accounting.settlement)) return true
+    if (step.budgetReservationId !== usageV2BatchReservationId(batch)) return false
+    const steps = transaction.listSteps()
+    const finalization = batchFinalization(batch, steps, transaction.run)
+    if (!finalization || !usageV2BatchOutboxReady(batch, steps)) return false
+    const now = input.clock.now().toISOString()
+    const fullyReleased = finalization.settledUnits === 0
+    const next = updatedBatch(batch, {
+      ...batch.accounting,
+      committedUnits: finalization.settledUnits,
+      settledUnits: finalization.settledUnits,
+      releasedUnits: finalization.releasedUnits,
+      reconciliationUnits: 0,
+      settlement: fullyReleased ? 'RELEASED' : 'SETTLED',
+    }, now, 'COMPLETED')
+    const updatedRun = finalization.releasedUnits > 0
+      ? { ...transaction.run, ...releaseBudget(transaction.run, finalization.releasedUnits), updatedAt: now }
+      : transaction.run
+    if (finalization.releasedUnits > 0) transaction.putRun(updatedRun)
+    transaction.putStep({ ...step, status: 'COMPLETED', output: next, updatedAt: now })
+    if (finalization.releasedUnits > 0) {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'budget.updated',
+        payload: { budgetUnits: updatedRun.budgetUnits, committedBudgetUnits: updatedRun.committedBudgetUnits },
+      })
+    }
+    appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, input.scope === 'INITIAL')
+    return true
+  })
+}
+
 /** Finalizes one batch authorization with one atomic settle/release instruction. */
 export async function finalizeGenerationBatch(input: Readonly<{
   repository: AgentRepository
@@ -548,6 +665,17 @@ export async function finalizeGenerationBatch(input: Readonly<{
     revisionRound: input.revisionRound,
     scope: input.scope ?? 'INITIAL',
   })
+  const run = await input.repository.getRun(input.runId)
+  if (!run) throw new Error('RUN_NOT_FOUND')
+  if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') {
+    return finalizeUsageV2GenerationBatch({
+      repository: input.repository,
+      clock: input.clock,
+      runId: input.runId,
+      key,
+      scope: input.scope ?? 'INITIAL',
+    })
+  }
   const pending = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
     const batch = storedGenerationBatchSchema.parse(step.output)

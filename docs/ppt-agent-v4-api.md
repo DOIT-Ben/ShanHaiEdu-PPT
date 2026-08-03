@@ -8,7 +8,7 @@ PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资�
 
 | 字段 | 固定值 | 用途 |
 | --- | --- | --- |
-| 软件版本 | `4.2.0` | 部署与故障定位 |
+| 软件版本 | `4.3.0` | 部署与故障定位 |
 | 演示模式 | `VISUAL_DECK_V4` | NotebookLM 风格整页视觉链路 |
 | HTTP/SSE 合同 | `"1"` | 公共 API 数据格式 |
 | V4 编译器 | `visual-deck-v4-chain-3` | 一轮 Critic/Optimizer 规划身份；旧 `chain-1/chain-2` Run 仍按持久化身份恢复 |
@@ -85,45 +85,100 @@ Provider 模型。该配置在 gateway 模式为必填，修改只影响尚未�
 
 初稿与返修都按一张图片一个 Agent 图片单位计量，宿主仍负责把图片单位换算为积分。10 页 Run 在管理员
 允许 2 轮返修时，理论最大值是 `10 + 10 + 10 = 30` 图片单位；按宿主当前 10 积分/图即为 300 积分
-冻结上限。实际完成后仍按 GenerationBatch 原子结算，未使用部分释放，PPT Agent 不硬编码积分价格。
+冻结上限。Usage V2 由宿主在 Run 级父授权内按实际操作结算，未使用部分在 Run 终态释放；PPT Agent
+不硬编码用户积分价格。
 
 若 `/images/edits` 响应丢失，`SUBMITTING/SUBMISSION_UNKNOWN` 只允许用原 Key 和持久化
 `IMAGE_EDIT` 模式查询。只有网关权威返回 `NOT_SUBMITTED` 才能在后续恢复轮次用同一 Key 重提；
 `SUBMITTED` 继续查询原任务，`UNKNOWN` 保持待恢复，禁止换模型、换 Key 或再次 POST。
 
-## 批次预算端口
+## Usage V2 账务端口
 
 初始 V4 出图是一个业务批次，最多 50 张独立页面并发。`generationBatch.submissionMode` 当前为
 `GATEWAY_INDIVIDUAL_OPERATIONS`，表示 Provider 尚无原生批次任务，并不意味着逐页向用户扣费。
 
-宿主实现的 `BatchBudgetPort` 必须提供两项幂等操作：
+`4.3.0` 新增宿主无关的 `UsageAccountingPort`。协议由 Run 创建时的 `accountingProtocol` 冻结：
 
-```ts
-preflightBatchFinalization({ host })
-  -> confirms atomic batch finalization support
+- `FRAMEFLOW_USAGE_V2`：新 V4 Run 使用 Run 级父授权、逐操作 permit、Usage 事件和终态 finalize。
+- `LEGACY_RESERVATION_V1`：旧 Run 与未启用 V2 的新 Run继续使用原 reservation 合同。
+- 缺少 `accountingProtocol` 的历史 Run 一律解释为 V1；运行中修改环境变量不会改变既有 Run。
 
-reserveBatch({ host, model, units, batchId, idempotencyKey })
-  -> { reservationId }
+### 图片操作 permit
 
-finalizeBatch({
-  host, reservationId, batchId,
-  settledUnits, releasedUnits,
-  idempotencyKey: `finalize:${batchKey}`
-})
+每次真实图片 Provider 调用前，Agent 调用：
+
+```http
+POST /api/internal/ppt-agent/usage/v2/runs/{runId}/permits
+Authorization: Bearer <FRAMEFLOW_INTERNAL_TOKEN>
+X-PPT-Agent-User: <externalUserId>
+Idempotency-Key: <providerOperationKey>
+Content-Type: application/json
+
+{
+  "operationIdempotencyKey": "<providerOperationKey>",
+  "pageNumber": 3,
+  "revisionRound": 1,
+  "model": "image-2"
+}
 ```
 
-`preflightBatchFinalization` 在任何图片提交前调用，必须明确确认宿主具备原子账务能力。`reserveBatch`
-随后只调用一次。`finalizeBatch` 是一个**原子账务动作**，只能调用一次，且必须满足
-`settledUnits + releasedUnits = reservedUnits`：已确认完成或已收费的页面计入 `settledUnits`，明确未收费的
-页面计入 `releasedUnits`。宿主不得将它拆成“先结算再释放”两次调用。
+permit 未明确返回 `allowed: true` 时，Agent 不调用 Provider。响应未知时保留同一个操作 Key 恢复；明确
+拒绝时终止该操作，不新建 Run、换 Key 或重复提交。
 
-若调用响应丢失，Agent 保留 `batchId`、`reservationId` 和同一个 `finalize:` 键进入恢复队列；不会创建
-新预授权或新扣费。宿主在接入前必须支持该原子能力，否则 Agent 必须在出图前拒绝启用 V4，而不是降级为
-逐页计费或对未生成页面全额扣费。
+### Usage 事件
+
+Provider 接受操作后，Agent 将不可变事件写入本地 SQLite Outbox，再按 Run 内严格递增的 `sequence`
+依次调用：
+
+```http
+POST /api/internal/ppt-agent/usage/v2/events
+Idempotency-Key: <event.idempotencyKey>
+```
+
+- `OPERATION_OBSERVED`：每个已接受的 Provider 操作恰好一次。同步完成可直接携带最终 `CHARGED`。
+- `BILLING_RESOLVED`：仅当 observed 的费用为 `UNKNOWN` 且后续得到最终收费事实时追加。
+- observed 的 Key 等于 Provider operation Key；resolved 的 Key 固定为 `<operationKey>:billing-resolved`。
+- 事件响应丢失时原 `eventId`、`sequence`、body 和 Header 原样重放，禁止重排或分配新身份。
+
+固定 Provider 成本只来自服务端 `PPT_AGENT_PROVIDER_BILLING_CATALOG_JSON`，并在 Provider 调用前快照到
+媒体 Step；重启或价格配置变化不得改写已经发生的操作。该目录记录 Provider 成本事实，不是用户积分价格。
+新建 V2 Run 的初稿模型若缺少对应 `TEXT_TO_IMAGE/1K` 成本档案，Agent 在持久化 Run 和执行规划前返回
+`USAGE_V2_PROVIDER_BILLING_PROFILE_NOT_FOUND`，不会把配置缺项包装成 permit 响应未知。
+
+管理员对费用未知的页面执行 `MARK_CHARGED` 或 `MARK_NOT_CHARGED` 时，V2 不调用旧 reservation API：
+存在已观察 Provider 操作时先以冻结成本和稳定 Key 创建 `BILLING_RESOLVED` Outbox，再归约本地批次。
+两种人工裁决都必须具备 GenerationBatch、Provider operation ID 和 observed 事件；任一缺失即明确失败关闭，
+不能只修改 Agent 本地账本。
+
+宿主以确定性 4xx 明确拒绝 Usage 事件时，Agent 保留原事件，停止自动等价重试并把 Run 置为管理员处理状态。
+运维列表会为该 `report_usage_v2` Step 暴露现有 `REINSPECT` 动作；宿主冲突修复后，该动作只重投原
+`eventId/sequence/body/Idempotency-Key`，成功后恢复先前执行阶段，不会重新提交 Provider 图片任务。
+
+### Run 终态 finalize
+
+初稿批次和返修批次完成时只归约 Agent 本地进度，不调用宿主 finalize。只有 Run 在同一事务进入
+`COMPLETED`、`FAILED` 或 `CANCELLED` 并创建 `finalize_usage_v2` Outbox 后，worker 才调用：
+
+```http
+POST /api/internal/ppt-agent/usage/v2/runs/{runId}/finalize
+Idempotency-Key: finalize:{runId}
+```
+
+`SETTLED` 与 `CAP_EXCEEDED` 结束 Outbox；`RECONCILING` 保持可恢复；`REVIEW_REQUIRED` 与
+`LEGACY_RECONCILIATION` 保存宿主账单并停止自动等价重试。网络结果未知时只用同一个
+`finalize:{runId}` 恢复。
+
+### V1 兼容期
+
+V1 Run 仍使用 `/credits/reservations`、`/credits/reservations/{id}/finalize` 和原有
+`BatchBudgetPort`，行为不变。V2 Run 的初稿与返修整条路径不得调用这些旧端点。只要 SQLite 中仍存在
+V2 Run，就不得回退到不包含 V2 恢复器的 `4.2.x` 或更早版本。
+`4.3.x` 不把 V2 的页码与返修轮次计入既有 Provider Step 输入 hash，因此 `4.2.x` 已持久化的 V1
+`RESERVED/SUBMITTING` 页面能够用原 Provider Key 恢复，不会在升级后产生幂等冲突。
 
 公开 Run 详情中的 `generationBatch.accounting` 用于展示：`estimatedUnits`、`settledUnits`、
 `releasedUnits`、`authorization`、`settlement` 和 `reconciliationUnits`。它不公开图片 prompt、页面幂等键
-或宿主 reservation 标识。
+、宿主 reservation 标识、Provider 成本或内部 Usage 账单。
 
 ## 恢复与交付
 

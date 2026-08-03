@@ -18,6 +18,7 @@ import {
 import { persistedMediaStepModel, type MediaStepRunner } from './media-step-runner'
 import { hashInput } from './hash'
 import { releaseBudget } from './policy'
+import { accountingProtocolFor, type UsageV2Coordinator } from './usage-v2-coordinator'
 
 export type AdminOperationsAction = 'REINSPECT' | 'MARK_NOT_CHARGED' | 'MARK_CHARGED'
 
@@ -94,6 +95,7 @@ export class AdminOperationsService implements AdminOperationsPort {
     budget: BudgetPort & BatchBudgetPort
     media: MediaStepRunner
     clock: ClockPort
+    usageV2?: UsageV2Coordinator
   }>) {}
 
   async act(input: Readonly<{
@@ -133,7 +135,10 @@ export class AdminOperationsService implements AdminOperationsPort {
       if (!currentTarget || currentTarget.id !== input.stepId) {
         throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
       }
+      const usageEventRetry = currentTarget.tool === 'report_usage_v2'
+        && currentTarget.status === 'FAILED'
       if (input.action === 'REINSPECT'
+        && !usageEventRetry
         && (!['WAITING', 'BILLING_UNKNOWN'].includes(currentTarget.status) || !currentTarget.externalOperationId)) {
         throw new AdminOperationsError(409, 'STEP_NOT_REINSPECTABLE', 'step cannot be reinspected')
       }
@@ -142,7 +147,23 @@ export class AdminOperationsService implements AdminOperationsPort {
         throw new AdminOperationsError(409, 'STEP_NOT_RECONCILABLE', 'step cannot be manually reconciled')
       }
       if (input.action !== 'REINSPECT') {
-        batchAccountingContext(input.runId, currentTarget, transaction.listSteps())
+        const batch = batchAccountingContext(input.runId, currentTarget, transaction.listSteps())
+        if (accountingProtocolFor(transaction.run) === 'FRAMEFLOW_USAGE_V2') {
+          if (!batch) {
+            throw new AdminOperationsError(
+              409,
+              'USAGE_V2_BATCH_CONTEXT_REQUIRED',
+              'Usage V2 accounting requires its persisted GenerationBatch context',
+            )
+          }
+          if (!currentTarget.externalOperationId) {
+            throw new AdminOperationsError(
+              409,
+              'USAGE_V2_PROVIDER_OPERATION_REQUIRED',
+              'a Usage V2 billing decision requires a Provider operation identity',
+            )
+          }
+        }
       }
       const actionStep: StepRecord = {
         id: `${input.runId}:admin:${hashInput(actionKey).slice(0, 24)}`,
@@ -166,10 +187,20 @@ export class AdminOperationsService implements AdminOperationsPort {
 
     let updated: StepRecord
     if (input.action === 'REINSPECT') {
-      if (!['WAITING', 'BILLING_UNKNOWN'].includes(prepared.target.status) || !prepared.target.externalOperationId) {
+      if (prepared.target.tool === 'report_usage_v2' && prepared.target.status === 'FAILED') {
+        if (!this.dependencies.usageV2) {
+          throw new AdminOperationsError(503, 'USAGE_V2_COORDINATOR_REQUIRED', 'Usage V2 recovery is unavailable')
+        }
+        await this.dependencies.usageV2.retryRejectedEvent(input.runId, prepared.target.idempotencyKey)
+        const refreshed = (await this.dependencies.repository.listSteps(input.runId))
+          .find((step) => step.idempotencyKey === prepared.target.idempotencyKey)
+        if (!refreshed) throw new AdminOperationsError(409, 'ADMIN_ACTION_TARGET_MISSING', 'admin action target is unavailable')
+        updated = refreshed
+      } else if (!['WAITING', 'BILLING_UNKNOWN'].includes(prepared.target.status) || !prepared.target.externalOperationId) {
         throw new AdminOperationsError(409, 'STEP_NOT_REINSPECTABLE', 'step cannot be reinspected')
+      } else {
+        updated = (await this.dependencies.media.refreshSlideImage(input.runId, prepared.target.idempotencyKey)).step
       }
-      updated = (await this.dependencies.media.refreshSlideImage(input.runId, prepared.target.idempotencyKey)).step
     } else {
       updated = await this.resolveAccounting(input.runId, prepared.target.idempotencyKey, input.action === 'MARK_CHARGED')
     }
@@ -178,7 +209,10 @@ export class AdminOperationsService implements AdminOperationsPort {
       const actionStep = transaction.getStep(actionKey)
       const current = transaction.getStep(prepared.target.idempotencyKey)
       if (!actionStep || !current) throw new AdminOperationsError(409, 'ADMIN_ACTION_STATE_MISSING', 'admin action state is unavailable')
-      if (input.action === 'REINSPECT' && ['WAITING', 'BILLING_UNKNOWN'].includes(current.status)) {
+      if (input.action === 'REINSPECT' && (
+        ['WAITING', 'BILLING_UNKNOWN'].includes(current.status)
+        || (current.tool === 'report_usage_v2' && current.status !== 'COMPLETED')
+      )) {
         const now = this.dependencies.clock.now().toISOString()
         transaction.putStep({
           ...actionStep,
@@ -212,6 +246,43 @@ export class AdminOperationsService implements AdminOperationsPort {
     if (!run || !step) throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
     const desiredStatus = charged ? 'FAILED_CHARGED' : 'FAILED_NOT_CHARGED'
     const batch = batchAccountingContext(runId, step, steps)
+    if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') {
+      if (!batch) {
+        throw new AdminOperationsError(
+          409,
+          'USAGE_V2_BATCH_CONTEXT_REQUIRED',
+          'Usage V2 accounting requires its persisted GenerationBatch context',
+        )
+      }
+      if (!step.externalOperationId) {
+        throw new AdminOperationsError(
+          409,
+          'USAGE_V2_PROVIDER_OPERATION_REQUIRED',
+          'a Usage V2 billing decision requires a Provider operation identity',
+        )
+      }
+      if (!this.dependencies.usageV2) {
+        throw new AdminOperationsError(503, 'USAGE_V2_COORDINATOR_REQUIRED', 'Usage V2 recovery is unavailable')
+      }
+      try {
+        await this.dependencies.usageV2.recordProviderResult({
+          runId,
+          mediaStepKey: stepKey,
+          status: 'FAILED',
+          billingState: charged ? 'CHARGED' : 'NOT_CHARGED',
+        })
+      } catch (error) {
+        if (error instanceof Error && error.message === 'USAGE_V2_OBSERVED_REQUIRED') {
+          throw new AdminOperationsError(
+            409,
+            'USAGE_V2_OBSERVED_REQUIRED',
+            'the Provider operation must be observed before billing can be resolved',
+          )
+        }
+        throw error
+      }
+      return this.resolveBatchAccounting(runId, stepKey, desiredStatus, charged, batch)
+    }
     if (batch) return this.resolveBatchAccounting(runId, stepKey, desiredStatus, charged, batch)
     if (step.status === desiredStatus) return step
     if (!canResolveAccounting(step.status, charged)) {
