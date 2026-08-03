@@ -7,6 +7,7 @@ import {
   usageV2FinalizeStepKey,
   UsageV2Coordinator,
 } from '../src/core/usage-v2-coordinator'
+import { reconcileVisualDeckV4TerminalState } from '../src/core/v4-lifecycle'
 import type { RunRecord, StepRecord, UsageAccountingPort } from '../src/core/ports'
 import { UsageAccountingRequestError, type UsageOperationEventV2, type UsageRunBill } from '../src/usage-accounting-contracts'
 
@@ -289,30 +290,57 @@ describe('Usage V2 coordinator', () => {
       .toHaveLength(1)
   })
 
-  test('moves a hard-rejected Usage event into visible review and retries the exact event after repair', async () => {
-    const { repository, usage, coordinator } = await fixture()
+  test('moves a hard-rejected V4 Usage event into technical failure recovery without user approval', async () => {
+    const { repository, usage, coordinator, clock } = await fixture()
     usage.rejectEvents = true
 
     await authorizeAndAttachOperation(coordinator, repository, 1)
 
     const failed = (await repository.listSteps('run-1')).find((step) => step.tool === 'report_usage_v2')!
     expect(failed).toMatchObject({ status: 'FAILED', errorCode: 'PPT_USAGE_IDEMPOTENCY_CONFLICT' })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', resumeState: null })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      resumeState: null,
+      pendingTerminalFailure: {
+        errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED',
+        reason: 'INTERNAL_FAILURE',
+      },
+      terminalAccounting: { accountingStatus: 'RECONCILIATION_REQUIRED' },
+      technicalRecovery: { reason: 'TERMINAL_ACCOUNTING_PENDING', active: true },
+    })
     expect(failed).toMatchObject({ output: { blockedRunStatus: 'EXECUTING' } })
-    expect((await repository.listEvents('run-1')).some((event) =>
+    const rejectedEvents = await repository.listEvents('run-1')
+    expect(rejectedEvents.some((event) =>
       event.type === 'issue.detected' && event.payload.id === `${failed.id}:usage-v2-delivery`)).toBe(true)
+    expect(rejectedEvents.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(rejectedEvents.some((event) => event.type === 'run.failed')).toBe(false)
 
     usage.rejectEvents = false
     await expect(coordinator.retryRejectedEvent('run-1', failed.idempotencyKey)).resolves.toBe(true)
 
     expect(usage.eventAttempts).toHaveLength(2)
     expect(usage.eventAttempts[1]).toEqual(usage.eventAttempts[0])
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', resumeState: null })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING', pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
     expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === failed.idempotencyKey))
       .toMatchObject({ status: 'COMPLETED', errorCode: null })
+
+    await repository.transact('run-1', (transaction) => {
+      const image = transaction.getStep('run-1:slide:1:image:r0:v1')!
+      transaction.putStep({ ...image, status: 'FAILED_NOT_CHARGED', errorCode: 'PROVIDER_REJECTED' })
+      transaction.putRun({ ...transaction.run, committedBudgetUnits: 0 })
+      expect(reconcileVisualDeckV4TerminalState(transaction, clock)).toBe(true)
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', terminalAccounting: { accountingStatus: 'FINAL' },
+    })
+    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
   })
 
-  test('restores a Usage-blocked Run when the worker later confirms an initially unknown admin retry', async () => {
+  test('keeps a V4 Usage conflict in technical recovery when an admin retry is initially unknown', async () => {
     const { repository, usage, coordinator, clock } = await fixture()
     usage.rejectEvents = true
     await authorizeAndAttachOperation(coordinator, repository, 1)
@@ -321,13 +349,18 @@ describe('Usage V2 coordinator', () => {
     usage.failFirstEventUnknown = true
 
     expect(await coordinator.retryRejectedEvent('run-1', failed.idempotencyKey)).toBe(false)
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN' })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING', pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
 
     clock.advance(1_000)
     expect(await coordinator.flushEvents('run-1')).toBe(true)
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING' })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING', pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
     expect((await repository.listEvents('run-1')).some((event) =>
       event.type === 'issue.resolved' && event.payload.issueId === `${failed.id}:usage-v2-delivery`)).toBe(true)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('keeps V2 page and revision identity strict outside the legacy Provider input hash', async () => {

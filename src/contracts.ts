@@ -104,6 +104,7 @@ export const v4RunFailureCodeSchema = z.enum([
   'QUALITY_ISSUE_STATE_INCONSISTENT',
   'TECHNICAL_RECOVERY_EXHAUSTED',
   'TECHNICAL_CONFIGURATION_REQUIRED',
+  'TECHNICAL_CONTRACT_INVALID',
 ])
 
 export const pendingTerminalFailureSchema = z.object({

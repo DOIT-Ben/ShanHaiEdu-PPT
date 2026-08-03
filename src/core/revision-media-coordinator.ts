@@ -27,7 +27,11 @@ import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type { AgentRepository, ArtifactPort, BatchBudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import {
+  beginTechnicalRecovery,
+  isTechnicalFailureCode,
+  technicalFailureDisposition,
+} from './technical-recovery'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import {
   compileV4RepairContract,
@@ -40,7 +44,9 @@ import {
 import {
   allPageNumbers,
   appendV4LifecycleEvent,
+  failVisualDeckV4Transaction,
   isVisualDeckV4,
+  reconcileVisualDeckV4TerminalState,
   revisionDetails,
   v4LifecyclePayload,
 } from './v4-lifecycle'
@@ -274,14 +280,29 @@ export class RevisionMediaCoordinator {
       const deckArtifactsComplete = !isVisualDeckV4(latest) || await this.hasCompleteDeckArtifacts(latest)
       await this.dependencies.repository.transact(runId, (transaction) => {
         const now = this.dependencies.clock.now().toISOString()
-        const nextStatus = deckArtifactsComplete ? 'PAGE_REVIEW' : 'NEEDS_HUMAN'
-        const policy = transitionRun(transaction.run, nextStatus)
-        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
         appendV4LifecycleEvent(transaction, 'revision.progress', {
           completed,
           total: targets.length,
           ...details,
         })
+        if (!deckArtifactsComplete) {
+          appendV4LifecycleEvent(transaction, 'revision.completed', {
+            completed,
+            total: targets.length,
+            ...details,
+            reason: 'REVISION_FAILED',
+            retryable: false,
+          })
+          failVisualDeckV4Transaction({
+            transaction,
+            clock: this.dependencies.clock,
+            errorCode: 'TECHNICAL_CONTRACT_INVALID',
+            reason: 'REVISION_FAILED',
+          })
+          return
+        }
+        const policy = transitionRun(transaction.run, 'PAGE_REVIEW')
+        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
         appendV4LifecycleEvent(transaction, 'revision.completed', {
           completed,
           total: targets.length,
@@ -290,25 +311,13 @@ export class RevisionMediaCoordinator {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
-          payload: {
-            from: 'REVISING',
-            to: nextStatus,
-            ...(deckArtifactsComplete ? {} : { reason: 'PAGE_ARTIFACTS_INCOMPLETE' }),
-          },
+          payload: { from: 'REVISING', to: 'PAGE_REVIEW' },
         })
-        if (deckArtifactsComplete) {
-          appendV4LifecycleEvent(transaction, 'page_review.started', {
-            completed: 0,
-            total: transaction.run.slideCount,
-            pageNumbers: allPageNumbers(transaction.run),
-          })
-        } else {
-          transaction.appendEvent({
-            schemaVersion: CONTRACT_VERSION,
-            type: 'approval.required',
-            payload: { kind: 'HUMAN_REVIEW', summary: '仍有页面缺少有效产物，请仅修订缺失页后继续。' },
-          })
-        }
+        appendV4LifecycleEvent(transaction, 'page_review.started', {
+          completed: 0,
+          total: transaction.run.slideCount,
+          pageNumbers: allPageNumbers(transaction.run),
+        })
       })
     } else if (failed) {
       await this.failV4Revision(latest, failed, targets.length)
@@ -662,13 +671,24 @@ export class RevisionMediaCoordinator {
           })
         }
       }
-      appendV4LifecycleEvent(transaction, 'revision.completed', {
-        completed,
-        total,
-        ...details,
-        reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
-        retryable: transaction.run.technicalRecovery?.retryable ?? false,
-      })
+      const events = transaction.listEvents()
+      const started = [...events].reverse().find((event) => event.type === 'revision.started')
+      const completedEvent = [...events].reverse().find((event) => event.type === 'revision.completed')
+      const stageAlreadyClosed = completedEvent && (!started || completedEvent.sequence > started.sequence)
+      if (!stageAlreadyClosed && transaction.run.status !== 'FAILED') {
+        appendV4LifecycleEvent(transaction, 'revision.completed', {
+          completed,
+          total,
+          ...details,
+          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+          retryable: technicalFailureDisposition(failed.errorCode ?? 'REVISION_MEDIA_FAILED') === 'RETRYABLE'
+            && !transaction.run.pendingTerminalFailure
+            && (transaction.run.technicalRecovery?.retryable ?? false),
+        })
+      }
+      if (transaction.run.pendingTerminalFailure) {
+        reconcileVisualDeckV4TerminalState(transaction, this.dependencies.clock)
+      }
     })
   }
 

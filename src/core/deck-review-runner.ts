@@ -31,7 +31,11 @@ import { StructuredModelError } from './ports'
 import { revisionContractRepairIssues } from './revision-contract-repair'
 import { compileVisualDeckV4RevisionIssueGroups } from './revision-plan-representability'
 import { transitionRun } from './policy'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import {
+  beginTechnicalRecovery,
+  isTechnicalFailureCode,
+  technicalFailureDisposition,
+} from './technical-recovery'
 import {
   allPageNumbers,
   appendAcceptedQualityIssueResolutions,
@@ -506,34 +510,53 @@ export class DeckReviewRunner {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
       const transitionRequired = fromStatus !== 'NEEDS_HUMAN'
-      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
-      const policy = transitionRequired && !v4TechnicalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
+      const v4FailureDisposition = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        ? technicalFailureDisposition(diagnostic.errorCode)
+        : null
+      const v4TechnicalFailure = v4FailureDisposition !== null
+      const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && !v4TechnicalFailure
+      const policy = transitionRequired && !v4TechnicalFailure && !v4InternalFailure
+        ? transitionRun(transaction.run, 'NEEDS_HUMAN')
+        : transaction.run
       const updatedStep: StepRecord = {
         ...step,
-        status: v4TechnicalFailure ? 'RUNNING' : 'FAILED',
+        status: v4FailureDisposition === 'RETRYABLE' ? 'RUNNING' : 'FAILED',
         errorCode: diagnostic.errorCode,
         output: { diagnostic },
         updatedAt: now,
       }
       transaction.putStep(updatedStep)
-      if (transitionRequired && !v4TechnicalFailure) transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
-      const technicalRecovery = v4TechnicalFailure
-        ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
-        : null
+      if (transitionRequired && !v4TechnicalFailure && !v4InternalFailure) {
+        transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
-        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: technicalRecovery?.technicalRecovery?.retryable ?? false },
+        payload: { stepId: step.id, errorCode: diagnostic.errorCode, retryable: v4FailureDisposition === 'RETRYABLE' },
       })
+      const technicalRecovery = v4TechnicalFailure
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
+        : null
       if (technicalRecovery) {
-        appendV4LifecycleEvent(transaction, 'deck_review.completed', {
-          completed: 0,
-          total: 1,
-          pageNumbers: allPageNumbers(transaction.run),
-          reason: 'DECK_REVIEW_FAILED',
-          retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
-        })
+        if (!transaction.run.pendingTerminalFailure && transaction.run.status !== 'FAILED') {
+          appendV4LifecycleEvent(transaction, 'deck_review.completed', {
+            completed: 0,
+            total: 1,
+            pageNumbers: allPageNumbers(transaction.run),
+            reason: 'DECK_REVIEW_FAILED',
+            retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+          })
+        }
       } else if (transitionRequired) {
+        if (v4InternalFailure) {
+          failVisualDeckV4Transaction({
+            transaction,
+            clock: this.dependencies.clock,
+            errorCode: 'TECHNICAL_CONTRACT_INVALID',
+            reason: 'DECK_REVIEW_FAILED',
+          })
+          return { step: updatedStep, review: null, passed: false, replayed: false }
+        }
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',

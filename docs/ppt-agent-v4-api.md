@@ -13,15 +13,21 @@ PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资�
 | HTTP/SSE 合同 | `"1"` | 公共 API 数据格式 |
 | V4 编译器 | `visual-deck-v4-chain-3` | 一轮 Critic/Optimizer 规划身份；旧 `chain-1/chain-2` Run 仍按持久化身份恢复 |
 
-`GET /health/live` 与每个 Run 详情的 `release` 都必须返回这些身份字段。模式名不是软件发布版本。
+无认证 `GET /health/live` 只表示 HTTP 进程存活；无认证 `GET /health/ready` 以 `200 READY` 或
+`503 NOT_READY` 表示 worker 是否可接单。两者的 `release` 返回软件版本、合同版本、Git SHA 与 release ID，
+Run 详情的 `release` 另外冻结本次 Run 的模式和编译器版本。两个健康响应都携带
+`X-PPT-Agent-Contract-Version: 1`，并通过 `Link: </openapi/v1.json>; rel="service-desc"` 发现机器合同。
+模式名不是软件发布版本，liveness 也不能替代 readiness。
 
 ## Agent HTTP API
 
-完整机器可读定义见 [`openapi-v1.json`](./openapi-v1.json)。所有资源均在 `/v1` 下，模式由请求
-中的 `presentationMode: "VISUAL_DECK_V4"` 和 `visualDeckV4` 配置选择，不存在专用 `/v4` URL。
+完整机器可读定义见 [`openapi-v1.json`](./openapi-v1.json)，运行中服务以无认证
+`GET /openapi/v1.json` 返回该 release 的同一份版本化定义。业务资源均在 `/v1` 下，模式由请求中的
+`presentationMode: "VISUAL_DECK_V4"` 和 `visualDeckV4` 配置选择，不存在专用 `/v4` URL。
 
 | 操作 | API | 幂等要求 |
 | --- | --- | --- |
+| 合同发现 | `GET /openapi/v1.json` | 无；无需认证 |
 | 创建任务 | `POST /v1/runs` | 稳定业务 `Idempotency-Key` |
 | 查询规划、状态、批次和交付 | `GET /v1/runs/{runId}` | 无 |
 | 实时进度 | `GET /v1/runs/{runId}/events?after={sequence}` | 按 `sequence` 断线续传 |
@@ -154,9 +160,12 @@ Idempotency-Key: <event.idempotencyKey>
 两种人工裁决都必须具备 GenerationBatch、Provider operation ID 和 observed 事件；任一缺失即明确失败关闭，
 不能只修改 Agent 本地账本。
 
-宿主以确定性 4xx 明确拒绝 Usage 事件时，Agent 保留原事件，停止自动等价重试并把 Run 置为管理员处理状态。
-运维列表会为该 `report_usage_v2` Step 暴露现有 `REINSPECT` 动作；宿主冲突修复后，该动作只重投原
-`eventId/sequence/body/Idempotency-Key`，成功后恢复先前执行阶段，不会重新提交 Provider 图片任务。
+宿主以确定性 4xx 明确拒绝 Usage 事件时，Agent 保留原事件并停止自动等价重试。V4 Run 不进入普通用户
+审批：账务仍未闭环时以 `pendingTerminalFailure.errorCode=TECHNICAL_CONFIGURATION_REQUIRED` 留在
+`RECOVERING`，账务闭环后发布结构化 `run.failed`。运维列表会为该 `report_usage_v2` Step 暴露现有
+`REINSPECT` 动作；宿主冲突修复后，该动作只重投原 `eventId/sequence/body/Idempotency-Key`。重投成功只
+归并原账务事实并继续技术终态收敛，不恢复旧执行阶段，也不会重新提交 Provider 图片任务。非 V4 Run 保留
+历史的管理员处理与恢复行为。
 
 ### Run 终态 finalize
 
@@ -231,7 +240,12 @@ Run 详情的 `qualityDisposition` 明确区分质量结果：
 - `QUALITY_ISSUE_STATE_INCONSISTENT`
 - `TECHNICAL_RECOVERY_EXHAUSTED`
 - `TECHNICAL_CONFIGURATION_REQUIRED`
+- `TECHNICAL_CONTRACT_INVALID`
 - `WORKER_FATAL`
+
+`TECHNICAL_CONTRACT_INVALID` 表示图片提示、来源引用、蓝图页、返修产物或交付输入等内部硬合同不合法；
+`TECHNICAL_CONFIGURATION_REQUIRED` 表示 Provider 权限、模型配置或宿主账务合同等需要运维修复的技术故障。
+两者都不要求普通用户确认，消费者只按版本化 `run.failed.payload.errorCode` 分支。
 
 新 V4 `run.failed` 事件可携带 `terminalAccounting`：
 

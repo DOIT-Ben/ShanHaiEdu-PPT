@@ -774,6 +774,15 @@ describe('mock runtime', () => {
     expect(planned.data.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(3)
     expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
     expect(planned.data.generationPlan?.pages).toHaveLength(3)
+    const prematureDeliveryId = `${runId}:delivery:r0`
+    const prematureDownload = await runtime.handler(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(prematureDeliveryId)}/content?format=pptx`,
+    ))
+    expect(prematureDownload.status).toBe(409)
+    expect(await prematureDownload.json()).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      error: { code: 'DELIVERY_NOT_AVAILABLE', details: { reason: 'RUN_NOT_COMPLETED' } },
+    })
     expect((await repository.listSteps(runId)).find((step) =>
       step.tool === 'record_v4_slide_briefs_reflection')?.output).toMatchObject({
         status: 'REFLECTION_SKIPPED', reason: 'CONTRACT_INVALID',

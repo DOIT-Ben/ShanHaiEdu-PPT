@@ -14,7 +14,14 @@
         "description": "Process liveness. This does not imply that the worker loop is making progress.",
         "security": [],
         "responses": {
-          "200": { "description": "HTTP process is alive", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Liveness" } } } }
+          "200": {
+            "description": "HTTP process is alive",
+            "headers": {
+              "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Liveness" } } }
+          }
         }
       }
     },
@@ -24,8 +31,41 @@
         "description": "Worker readiness based on heartbeat, tick age, and the latest tick result.",
         "security": [],
         "responses": {
-          "200": { "description": "Worker is ready", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } } },
-          "503": { "description": "HTTP is alive but worker is not ready", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } } }
+          "200": {
+            "description": "Worker is ready",
+            "headers": {
+              "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } }
+          },
+          "503": {
+            "description": "HTTP is alive but worker is not ready",
+            "headers": {
+              "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } }
+          }
+        }
+      }
+    },
+    "/openapi/v1.json": {
+      "get": {
+        "operationId": "getOpenApiV1",
+        "description": "Returns the exact versioned OpenAPI document served by this release. Health responses advertise this path with a service-desc Link header.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "PPT Agent OpenAPI v1 document",
+            "headers": {
+              "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+            },
+            "content": {
+              "application/vnd.oai.openapi+json": { "schema": { "type": "object" } }
+            }
+          }
         }
       }
     },
@@ -499,7 +539,7 @@
                 "properties": {
                   "type": { "const": "run.failed" },
                   "payload": {
-                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED"] }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
                     "unevaluatedProperties": false
                   }
                 }
@@ -609,14 +649,26 @@
           { "$ref": "#/components/schemas/ForwardCompatibleAgentEvent" }
         ]
       },
+      "BuildIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["softwareVersion", "contractVersion", "gitSha", "releaseId"],
+        "properties": {
+          "softwareVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "contractVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "gitSha": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "releaseId": { "type": "string", "minLength": 1, "maxLength": 160 }
+        }
+      },
       "Liveness": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["service", "status", "version", "checkedAt", "startedAt", "uptimeMs"],
+        "required": ["service", "status", "version", "release", "checkedAt", "startedAt", "uptimeMs"],
         "properties": {
           "service": { "const": "ppt-agent" },
           "status": { "const": "UP" },
           "version": { "type": "string" },
+          "release": { "$ref": "#/components/schemas/BuildIdentity" },
           "checkedAt": { "type": "string", "format": "date-time" },
           "startedAt": { "type": "string", "format": "date-time" },
           "uptimeMs": { "type": "integer", "minimum": 0 }
@@ -625,23 +677,26 @@
       "Readiness": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["service", "status", "reason", "version", "checkedAt", "worker"],
+        "required": ["service", "status", "reason", "version", "release", "checkedAt", "worker"],
         "properties": {
           "service": { "const": "ppt-agent" },
           "status": { "enum": ["READY", "NOT_READY"] },
           "reason": { "type": ["string", "null"], "enum": ["WORKER_NOT_STARTED", "WORKER_HEARTBEAT_STALE", "WORKER_TICK_STUCK", "WORKER_TICK_FAILED", null] },
           "version": { "type": "string" },
+          "release": { "$ref": "#/components/schemas/BuildIdentity" },
           "checkedAt": { "type": "string", "format": "date-time" },
           "worker": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["tickInProgress", "tickCount", "lastHeartbeatAt", "heartbeatAgeMs", "lastTickStartedAt", "lastTickCompletedAt", "lastTickFailedAt", "tickAgeMs", "lastFailure"],
+            "required": ["tickInProgress", "tickCount", "activeOperationCount", "lastHeartbeatAt", "heartbeatAgeMs", "lastTickStartedAt", "lastTickActivityAt", "lastTickCompletedAt", "lastTickFailedAt", "tickAgeMs", "lastFailure"],
             "properties": {
               "tickInProgress": { "type": "boolean" },
               "tickCount": { "type": "integer", "minimum": 0 },
+              "activeOperationCount": { "type": "integer", "minimum": 0 },
               "lastHeartbeatAt": { "type": ["string", "null"], "format": "date-time" },
               "heartbeatAgeMs": { "type": ["integer", "null"], "minimum": 0 },
               "lastTickStartedAt": { "type": ["string", "null"], "format": "date-time" },
+              "lastTickActivityAt": { "type": ["string", "null"], "format": "date-time" },
               "lastTickCompletedAt": { "type": ["string", "null"], "format": "date-time" },
               "lastTickFailedAt": { "type": ["string", "null"], "format": "date-time" },
               "tickAgeMs": { "type": ["integer", "null"], "minimum": 0 },
@@ -1060,7 +1115,7 @@
         "additionalProperties": false,
         "required": ["errorCode", "reason", "requestedAt"],
         "properties": {
-          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED"] },
+          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] },
           "reason": { "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "REVISION_REJECTED_BY_USER", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER"] },
           "requestedAt": { "type": "string", "format": "date-time" }
         }

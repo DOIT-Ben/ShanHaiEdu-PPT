@@ -20,8 +20,12 @@
 | `contractVersion` | HTTP/SSE 数据合同版本，当前为 `"1"` |
 | `gitSha` / `releaseId` | 可用于生产问题定位和发布追溯 |
 
-完整机器合同见 [`docs/openapi-v1.json`](./openapi-v1.json)。宿主无关的能力与账务端口见
-[`docs/ppt-agent-v4-api.md`](./ppt-agent-v4-api.md)；本文只说明 FrameFlow 必须实现的调用顺序和用户交互语义。
+完整机器合同见 [`docs/openapi-v1.json`](./openapi-v1.json)。运行中服务通过无认证
+`GET /openapi/v1.json` 返回同一份 release 合同；无认证 `GET /health/live` 只表示进程存活，
+`GET /health/ready` 以 `200 READY` 或 `503 NOT_READY` 表示 worker 是否可接单。两个健康响应都携带
+`X-PPT-Agent-Contract-Version`，并用 `Link` 的 `rel="service-desc"` 指向合同发现 URL。宿主无关的能力与
+账务端口见 [`docs/ppt-agent-v4-api.md`](./ppt-agent-v4-api.md)；本文只说明 FrameFlow 必须实现的调用顺序和
+用户交互语义。
 
 ## 1. 边界与部署地址
 
@@ -402,7 +406,7 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | `REVISING` | 显示局部修订进度；未受影响页面不会重做 |
 | `DELIVERING` | 等待 Agent 组装预览和 PPTX |
 | `COMPLETED` | 重新读取详情；仅当 `deliveryAvailability.state=AVAILABLE` 时展示“已生成”和下载入口，否则按稳定 `reason` 继续等待或报错 |
-| `PAUSED` | 按 `resumeState` 显示可恢复状态，用户确认后发送 `RESUME` |
+| `PAUSED` | 只按版本化原因处理明确的用户暂停或预算/业务门；满足相应条件后发送 `RESUME`，技术故障不得靠该状态或文案猜测 |
 | `NEEDS_HUMAN` | 仅处理合同明确保留的人工业务动作；标准 V4 质量耗尽或技术故障不得依赖普通用户放行 |
 | `FAILED` / `CANCELLED` | 保留稳定错误/取消原因、终态账务和已有审计记录；`FAILED` 的账务仍为 `RECONCILIATION_REQUIRED` 时继续监听。仅 4.3.0 遗留的 `FAILED(QUALITY_REMEDIATION_EXHAUSTED)` 可在硬门禁通过后用稳定动作键发送 `RETRY_DELIVERY` |
 
@@ -411,6 +415,9 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 `FAILED(TECHNICAL_RECOVERY_EXHAUSTED)`，不会无限重试或转成普通用户待办。`MODEL_AUTH_FAILED`、
 `MODEL_FORBIDDEN` 与 `MODEL_NOT_FOUND` 等模型鉴权、权限和配置故障进入
 `FAILED(TECHNICAL_CONFIGURATION_REQUIRED)`，**不产生** `approval.required`，只能由管理员修复上游配置。
+图片提示、来源引用、蓝图页、返修产物或交付输入违反内部硬合同时进入
+`FAILED(TECHNICAL_CONTRACT_INVALID)`；该状态同样不要求普通用户确认。FrameFlow 只能读取版本化
+`run.failed.payload.errorCode`，不能匹配模型文案、`actorId` 或提示关键字。
 质量反射的非法 JSON、Schema 不匹配或局部 Patch 无效不会阻断主链，而是记录跳过并沿用已经通过硬合同
 校验的候选。只有提交结果未知时才允许用原反射键恢复一次，不从 Source 阶段重新提交，也不创建新 Run。
 未知计费或提交状态时，Agent 会保留原幂等键等待恢复；FrameFlow 不得通过换键强制重新扣费。
@@ -422,6 +429,8 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 套审或用户审批。若 `run.failed` 已发出但其中 `terminalAccounting.accountingStatus` 为
 `RECONCILIATION_REQUIRED`，该事件不是 SSE 关闭点；FrameFlow 必须继续监听，直到收到
 `run.accounting.finalized`，并以该事件和最新 Run 详情中的 `terminalAccounting` 为最终费用事实。
+Usage V2 事件被宿主以确定性 4xx 硬拒绝时也遵循该技术终态流程：管理员修复冲突后只能按原身份重投事件；
+成功确认只推进账务归并，不表示 Run 恢复执行，也不允许 FrameFlow 创建新 Run、换 Key 或再次提交图片。
 
 恢复 4.3.0 遗留质量失败时，Agent 仅在以下条件全部成立后执行 `FAILED -> DECK_REVIEW`：最近失败码确为
 `QUALITY_REMEDIATION_EXHAUSTED`，本地终态账务重新归约为 `FINAL`，Usage V2（如启用）已完成且宿主确认，

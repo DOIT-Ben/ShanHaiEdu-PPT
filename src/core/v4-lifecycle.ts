@@ -460,7 +460,6 @@ export function failVisualDeckV4Transaction(input: Readonly<{
   if (terminalAccounting.accountingStatus !== 'FINAL') {
     const fromStatus = transaction.run.status
     const now = input.clock.now()
-    closeActiveV4LifecycleStages(transaction, 'INTERNAL_FAILURE')
     const recovery: TechnicalRecovery = {
       resumeState: fromStatus as TechnicalRecovery['resumeState'],
       reason: 'TERMINAL_ACCOUNTING_PENDING',

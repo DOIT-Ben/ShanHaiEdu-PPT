@@ -557,7 +557,11 @@ function batchFinalization(batch: StoredGenerationBatch, steps: readonly StepRec
       settledUnits += step.budgetUnits
       continue
     }
-    if (step.status === 'FAILED' && run.technicalRecovery?.active && isTechnicalFailureCode(step.errorCode ?? '')) {
+    if (step.status === 'FAILED'
+      && run.technicalRecovery?.active
+      && run.technicalRecovery.retryable
+      && !run.pendingTerminalFailure
+      && isTechnicalFailureCode(step.errorCode ?? '')) {
       // The existing authorization remains valid while the stable image key is
       // being retried. Releasing it here would make recovery submit against a
       // finalized host reservation.

@@ -740,7 +740,7 @@ describe('slide generation coordinator', () => {
     expect(budget.settled.size).toBe(1)
   })
 
-  test('releases one V4 batch authorization when every page is definitely unsubmitted', async () => {
+  test('releases one V4 batch authorization and fails technically when every prompt is invalid', async () => {
     const { repository, images, budget, coordinator } = await fixture()
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
@@ -748,12 +748,19 @@ describe('slide generation coordinator', () => {
     await coordinator.submitBlueprintImages('run-1', 10)
     for (const key of images.operations.keys()) images.fail(key, 'INVALID_IMAGE_PROMPT', 'NOT_CHARGED')
 
-    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 0 })
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({ status: 'FAILED', completed: 0 })
     expect(budget.released.size).toBe(1)
     expect(budget.reservations.size).toBe(0)
-    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', committedBudgetUnits: 0, qualityDisposition: 'HARD_FAILURE',
+    })
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
       .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'RELEASED', releasedUnits: 30 } } })
+    const events = await repository.listEvents('run-1')
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'TECHNICAL_CONTRACT_INVALID', requiresUserAction: false },
+    })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('settles a cancelled V4 batch after its submitted pages complete during terminal reconciliation', async () => {
@@ -959,7 +966,7 @@ describe('slide generation coordinator', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 60 })
   })
 
-  test('moves to human review when a completed provider operation failed', async () => {
+  test('moves a rejected provider operation into technical accounting recovery', async () => {
     const { repository, images, coordinator } = await fixture()
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
@@ -970,15 +977,20 @@ describe('slide generation coordinator', () => {
     images.fail(keys[1]!, 'PROVIDER_REJECTED', 'CHARGED')
     const result = await coordinator.refreshBlueprintImages('run-1')
 
-    expect(result.status).toBe('NEEDS_HUMAN')
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', committedBudgetUnits: 30 })
+    expect(result.status).toBe('RECOVERING')
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      committedBudgetUnits: 30,
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      terminalAccounting: { accountingStatus: 'RECONCILIATION_REQUIRED' },
+    })
     const events = await repository.listEvents('run-1')
     expect(events.find((event) => event.type === 'phase.changed')?.payload)
-      .toMatchObject({ from: 'EXECUTING', to: 'NEEDS_HUMAN' })
-    expect(events.map((event) => event.type)).toContain('approval.required')
+      .toMatchObject({ from: 'EXECUTING', to: 'RECOVERING', reason: 'TERMINAL_ACCOUNTING_PENDING' })
+    expect(events.map((event) => event.type)).not.toContain('approval.required')
     const lifecycle = events.filter((event) => event.type.startsWith('generation.'))
     expect(lifecycle.filter((event) => event.type === 'generation.completed')).toHaveLength(1)
-    expect(lifecycle.at(-1)).toMatchObject({
+    expect(lifecycle.find((event) => event.type === 'generation.completed')).toMatchObject({
       type: 'generation.completed',
       payload: { completed: 1, total: 3, retryable: false },
     })

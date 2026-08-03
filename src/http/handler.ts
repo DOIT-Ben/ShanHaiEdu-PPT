@@ -32,6 +32,10 @@ import { publicDeliveryRecordSchema, type DeliveryRecord } from '../presentation
 import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
+import { OPENAPI_DOCUMENT_JSON } from './openapi-document'
+
+const OPENAPI_PATH = '/openapi/v1.json'
+const OPENAPI_LINK = `<${OPENAPI_PATH}>; rel="service-desc"; type="application/vnd.oai.openapi+json"`
 
 export interface HostAuthenticationPort {
   authenticate(request: Request): Promise<HostContext | null>
@@ -122,8 +126,30 @@ function publicRun(run: RunRecord) {
   })
 }
 
-function json(data: unknown, status = 200) {
-  return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
+function json(data: unknown, status = 200, headers?: HeadersInit) {
+  const responseHeaders = new Headers(headers)
+  if (!responseHeaders.has('Cache-Control')) responseHeaders.set('Cache-Control', 'no-store')
+  return Response.json(data, { status, headers: responseHeaders })
+}
+
+function observabilityHeaders() {
+  return {
+    Link: OPENAPI_LINK,
+    'X-PPT-Agent-Contract-Version': CONTRACT_VERSION,
+  }
+}
+
+function openApiResponse() {
+  return new Response(OPENAPI_DOCUMENT_JSON, {
+    status: 200,
+    headers: {
+      'Cache-Control': 'no-cache',
+      'Content-Type': 'application/vnd.oai.openapi+json; charset=utf-8',
+      Link: OPENAPI_LINK,
+      'X-Content-Type-Options': 'nosniff',
+      'X-PPT-Agent-Contract-Version': CONTRACT_VERSION,
+    },
+  })
 }
 
 function errorResponse(status: number, code: string, message: string, requestId: string, details?: unknown) {
@@ -377,11 +403,14 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
     try {
       const url = new URL(request.url)
       if (request.method === 'GET' && url.pathname === '/health/live') {
-        return json(dependencies.health.liveness())
+        return json(dependencies.health.liveness(), 200, observabilityHeaders())
       }
       if (request.method === 'GET' && url.pathname === '/health/ready') {
         const readiness = dependencies.health.readiness()
-        return json(readiness, readiness.status === 'READY' ? 200 : 503)
+        return json(readiness, readiness.status === 'READY' ? 200 : 503, observabilityHeaders())
+      }
+      if (request.method === 'GET' && url.pathname === OPENAPI_PATH) {
+        return openApiResponse()
       }
       const host = await dependencies.authentication.authenticate(request)
       if (!host) return errorResponse(401, 'UNAUTHENTICATED', 'authentication is required', requestId)

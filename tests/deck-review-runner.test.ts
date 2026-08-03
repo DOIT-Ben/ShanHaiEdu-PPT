@@ -832,6 +832,47 @@ describe('deck review runner', () => {
     expect(events.map((event) => event.type)).toContain('approval.required')
   })
 
+  test('fails a v4 run with a versioned technical reason when deck-review contract repair is exhausted', async () => {
+    const { repository, runner } = await fixture({
+      ...passingReview(),
+      issues: [{
+        id: 'issue-deck-invalid-v4',
+        category: 'FACTUAL_RISK',
+        severity: 'CRITICAL',
+        summary: '评估器返回了不属于当前课件的页面引用。',
+        slideIds: ['run-1:slide:99'],
+        sourceChunkIds: ['chunk-invented'],
+        status: 'OPEN',
+      }],
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+      })
+    })
+
+    expect(await runner.review('run-1')).toMatchObject({
+      review: null, passed: false, step: { status: 'FAILED', errorCode: 'DECK_REVIEW_SLIDE_REFERENCE_INVALID' },
+    })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', qualityDisposition: 'HARD_FAILURE',
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.at(-1)).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'run.failed',
+      payload: {
+        errorCode: 'TECHNICAL_CONTRACT_INVALID',
+        reason: 'DECK_REVIEW_FAILED',
+        requiresUserAction: false,
+        nextAction: null,
+      },
+    })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
   test('retries a transient deck review provider failure with the stable model key', async () => {
     const { reviewer, runner } = await fixture()
     const evaluateOnce = reviewer.evaluate.bind(reviewer)

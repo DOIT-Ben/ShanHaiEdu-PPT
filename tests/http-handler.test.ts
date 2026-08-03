@@ -133,19 +133,43 @@ describe('HTTP v1 handler', () => {
     expect(await explicit.json()).toMatchObject({ data: { maxRevisionRounds: 4 } })
   })
 
-  test('distinguishes HTTP liveness from worker readiness without authentication', async () => {
+  test('exposes liveness, readiness, release identity and OpenAPI discovery without authentication', async () => {
     const { handle, health } = fixture()
     const live = await handle(new Request('http://ppt-agent.test/health/live'))
     const beforeTick = await handle(new Request('http://ppt-agent.test/health/ready'))
+    const openapi = await handle(new Request('http://ppt-agent.test/openapi/v1.json'))
     await health.runTick(async () => ({ scannedRuns: 0, activeRuns: 0 }))
     const ready = await handle(new Request('http://ppt-agent.test/health/ready'))
 
     expect(live.status).toBe(200)
-    expect(await live.json()).toMatchObject({ service: 'ppt-agent', status: 'UP', version: 'test' })
+    expect(live.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(live.headers.get('Link')).toContain('</openapi/v1.json>; rel="service-desc"')
+    expect(await live.json()).toMatchObject({
+      service: 'ppt-agent', status: 'UP', version: 'test',
+      release: { softwareVersion: 'test', contractVersion: CONTRACT_VERSION },
+    })
     expect(beforeTick.status).toBe(503)
+    expect(beforeTick.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(beforeTick.headers.get('Link')).toContain('</openapi/v1.json>; rel="service-desc"')
     expect(await beforeTick.json()).toMatchObject({ status: 'NOT_READY', reason: 'WORKER_NOT_STARTED' })
     expect(ready.status).toBe(200)
-    expect(await ready.json()).toMatchObject({ status: 'READY', worker: { tickCount: 1 } })
+    expect(ready.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(await ready.json()).toMatchObject({
+      status: 'READY',
+      release: { softwareVersion: 'test', contractVersion: CONTRACT_VERSION },
+      worker: { tickCount: 1, activeOperationCount: 0 },
+    })
+    expect(openapi.status).toBe(200)
+    expect(openapi.headers.get('Content-Type')).toContain('application/vnd.oai.openapi+json')
+    expect(openapi.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(await openapi.json()).toMatchObject({
+      openapi: '3.1.0',
+      info: { title: 'PPT Agent API', version: '4.3.1' },
+      paths: {
+        '/health/live': { get: { operationId: 'getLiveness' } },
+        '/v1/runs/{runId}': { get: { operationId: 'getRun' } },
+      },
+    })
   })
 
   test('creates and replays a Run without exposing private source or lease data', async () => {
@@ -564,6 +588,15 @@ describe('HTTP v1 handler', () => {
       bytes: sourcesBytes, idempotencyKey: `${runId}:sources`,
     })
     const deliveryId = `${runId}:delivery:r0`
+    const contentPath = `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=pptx`
+    const expectPptxUnavailable = async (reason: string) => {
+      const response = await handle(request(contentPath))
+      expect(response.status).toBe(409)
+      expect(await response.json()).toMatchObject({
+        schemaVersion: CONTRACT_VERSION,
+        error: { code: 'DELIVERY_NOT_AVAILABLE', details: { reason } },
+      })
+    }
     await repository.transact(runId, (transaction) => {
       transaction.putDelivery({
         id: deliveryId,
@@ -636,6 +669,7 @@ describe('HTTP v1 handler', () => {
         deliveryAvailability: { state: 'UNAVAILABLE', reason: 'QUALITY_RECOVERY' },
       },
     })
+    await expectPptxUnavailable('QUALITY_RECOVERY')
 
     await repository.transact(runId, (transaction) => {
       const {
@@ -652,6 +686,19 @@ describe('HTTP v1 handler', () => {
         deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_FAILED' },
       },
     })
+    await expectPptxUnavailable('RUN_FAILED')
+
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
+    })
+    expect(await (await handle(request(`/v1/runs/${runId}`))).json()).toMatchObject({
+      data: {
+        status: 'CANCELLED',
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_CANCELLED' },
+      },
+    })
+    await expectPptxUnavailable('RUN_CANCELLED')
 
     await repository.transact(runId, (transaction) => {
       transaction.putRun({
@@ -667,6 +714,29 @@ describe('HTTP v1 handler', () => {
         deliveryAvailability: { state: 'UNAVAILABLE', reason: 'VERIFIED_FINAL_DELIVERY_MISSING' },
       },
     })
+    await expectPptxUnavailable('VERIFIED_FINAL_DELIVERY_MISSING')
+
+    const legacyDelivery = (await repository.listDeliveries(runId))[0]!
+    await repository.transact(runId, (transaction) => {
+      transaction.putDelivery({
+        ...legacyDelivery,
+        disposition: 'FINAL',
+        identity: {
+          status: 'VERIFIED',
+          slideCount: 2,
+          pageNumbers: [1, 2],
+          blueprintHash: 'a'.repeat(64),
+        },
+      })
+    })
+    expect(await (await handle(request(`/v1/runs/${runId}`))).json()).toMatchObject({
+      data: {
+        status: 'COMPLETED',
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'DELIVERY_CONTRACT_INVALID' },
+      },
+    })
+    await expectPptxUnavailable('DELIVERY_CONTRACT_INVALID')
 
     const otherHeaders = { 'X-Test-Tenant': 'frameflow', 'X-Test-User': 'user-2' }
     const hidden = await handle(new Request(

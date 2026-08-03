@@ -463,7 +463,7 @@ describe('revision media coordinator', () => {
       event.type === 'issue.resolved' && event.payload.issueId === 'issue-1')).toBe(true)
   })
 
-  test('keeps a V4 run recoverable when another page still has no usable artifact', async () => {
+  test('moves a V4 run into technical accounting recovery when another page has no usable artifact', async () => {
     const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
       blueprint: visualDeckV4Blueprint(),
     })
@@ -475,16 +475,19 @@ describe('revision media coordinator', () => {
     await coordinator.submit('run-1', 5)
     images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
 
-    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 1, total: 1 })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', revisionRound: 1 })
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'RECOVERING', completed: 1, total: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      revisionRound: 1,
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONTRACT_INVALID', reason: 'REVISION_FAILED' },
+      terminalAccounting: { accountingStatus: 'RECONCILIATION_REQUIRED' },
+    })
     const events = await repository.listEvents('run-1')
-    expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: 'phase.changed',
-        payload: { from: 'REVISING', to: 'NEEDS_HUMAN', reason: 'PAGE_ARTIFACTS_INCOMPLETE' },
-      }),
-      expect.objectContaining({ type: 'approval.required', payload: expect.objectContaining({ kind: 'HUMAN_REVIEW' }) }),
-    ]))
+    expect(events.some((event) => event.type === 'phase.changed'
+      && event.payload.to === 'RECOVERING'
+      && event.payload.reason === 'TERMINAL_ACCOUNTING_PENDING')).toBe(true)
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
     expect(events.some((event) => event.type === 'page_review.started')).toBe(false)
   })
 
@@ -977,7 +980,7 @@ describe('revision media coordinator', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 25, status: 'REVISING' })
   })
 
-  test('ends a v4 revision once when the submitted redraw later fails', async () => {
+  test('ends a v4 revision once in technical recovery when the provider rejects a submitted redraw', async () => {
     const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
@@ -985,16 +988,21 @@ describe('revision media coordinator', () => {
     await coordinator.submit('run-1', 5)
     images.fail(await revisionImageKey(repository, 2), 'PROVIDER_REJECTED', 'UNKNOWN')
 
-    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 0 })
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'RECOVERING', completed: 0 })
     expect(await repository.getRun('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN', committedBudgetUnits: 25,
+      status: 'RECOVERING',
+      committedBudgetUnits: 25,
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      terminalAccounting: { accountingStatus: 'RECONCILIATION_REQUIRED' },
     })
-    const lifecycle = (await repository.listEvents('run-1'))
+    const events = await repository.listEvents('run-1')
+    const lifecycle = events
       .filter((event) => event.type.startsWith('revision.'))
     expect(lifecycle.filter((event) => event.type === 'revision.completed')).toHaveLength(1)
     expect(lifecycle.at(-1)).toMatchObject({
       type: 'revision.completed',
       payload: { reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false },
     })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 })

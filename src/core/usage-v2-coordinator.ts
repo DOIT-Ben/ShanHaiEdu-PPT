@@ -22,6 +22,7 @@ import type {
   StepRecord,
   UsageAccountingPort,
 } from './ports'
+import { failVisualDeckV4Transaction, isVisualDeckV4 } from './v4-lifecycle'
 
 type UsageMediaMetadata = Readonly<{
   protocol: 'FRAMEFLOW_USAGE_V2'
@@ -627,21 +628,6 @@ export class UsageV2Coordinator {
         },
         updatedAt: now,
       })
-      if (usageReviewResumeStatuses.has(transaction.run.status as UsageReviewResumeStatus)) {
-        const from = transaction.run.status
-        const updated = { ...transaction.run, ...transitionRun(transaction.run, 'NEEDS_HUMAN'), updatedAt: now }
-        transaction.putRun(updated)
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'phase.changed',
-          payload: { from, to: 'NEEDS_HUMAN', reason: errorCode },
-        })
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'approval.required',
-          payload: { kind: 'HUMAN_REVIEW', summary: 'Usage V2 事件被宿主明确拒绝，需要管理员修复冲突后重投原事件。' },
-        })
-      }
       const issueId = `${step.id}:usage-v2-delivery`
       const open = new Set<string>()
       for (const event of transaction.listEvents()) {
@@ -661,6 +647,30 @@ export class UsageV2Coordinator {
           status: 'OPEN',
         },
       })
+      if (usageReviewResumeStatuses.has(transaction.run.status as UsageReviewResumeStatus)) {
+        const from = transaction.run.status
+        if (isVisualDeckV4(transaction.run)) {
+          failVisualDeckV4Transaction({
+            transaction,
+            clock: this.dependencies.clock,
+            errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED',
+            reason: 'INTERNAL_FAILURE',
+          })
+        } else {
+          const updated = { ...transaction.run, ...transitionRun(transaction.run, 'NEEDS_HUMAN'), updatedAt: now }
+          transaction.putRun(updated)
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'phase.changed',
+            payload: { from, to: 'NEEDS_HUMAN', reason: errorCode },
+          })
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'approval.required',
+            payload: { kind: 'HUMAN_REVIEW', summary: 'Usage V2 事件被宿主明确拒绝，需要管理员修复冲突后重投原事件。' },
+          })
+        }
+      }
     })
   }
 

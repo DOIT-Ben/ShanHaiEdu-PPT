@@ -35,6 +35,7 @@ describe('OpenAPI v1 contract', () => {
     expect(Object.keys(document.paths).sort()).toEqual([
       '/health/live',
       '/health/ready',
+      '/openapi/v1.json',
       '/v1/admin/operations',
       '/v1/admin/operations/{runId}/actions',
       '/v1/admin/planning-failures',
@@ -60,6 +61,33 @@ describe('OpenAPI v1 contract', () => {
     expect(document.paths['/v1/admin/settings/revision-rounds']?.patch).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
     expect(document.paths['/health/ready']?.get).toBeDefined()
+    const healthResponseHeaders = (path: '/health/live' | '/health/ready', status: '200' | '503') => {
+      const operation = document.paths[path]?.get as {
+        responses?: Record<string, { headers?: Record<string, unknown> }>
+      } | undefined
+      return operation?.responses?.[status]?.headers
+    }
+    for (const [path, status] of [
+      ['/health/live', '200'],
+      ['/health/ready', '200'],
+      ['/health/ready', '503'],
+    ] as const) {
+      expect(healthResponseHeaders(path, status)?.Link).toBeDefined()
+      expect(healthResponseHeaders(path, status)?.['X-PPT-Agent-Contract-Version']).toBeDefined()
+    }
+    expect(JSON.stringify(document.paths['/openapi/v1.json'])).toContain('application/vnd.oai.openapi+json')
+    expect(JSON.stringify(document.paths['/openapi/v1.json'])).toContain('service-desc')
+    expect(document.components.schemas.BuildIdentity).toBeDefined()
+    expect(document.components.schemas.Liveness?.required).toEqual(expect.arrayContaining(['release']))
+    expect(document.components.schemas.Readiness?.required).toEqual(expect.arrayContaining(['release']))
+    expect(JSON.stringify(document.components.schemas.Liveness?.properties?.release))
+      .toContain('#/components/schemas/BuildIdentity')
+    expect(JSON.stringify(document.components.schemas.Readiness?.properties?.release))
+      .toContain('#/components/schemas/BuildIdentity')
+    expect(JSON.stringify(document.components.schemas.Readiness?.properties?.worker))
+      .toContain('activeOperationCount')
+    expect(JSON.stringify(document.components.schemas.Readiness?.properties?.worker))
+      .toContain('lastTickActivityAt')
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
     expect(document.components.parameters.TenantId).toMatchObject({ name: 'X-PPT-Agent-Tenant', required: true })
     expect(document.components.parameters.ExternalUserId).toMatchObject({ name: 'X-PPT-Agent-User', required: true })
@@ -130,6 +158,7 @@ describe('OpenAPI v1 contract', () => {
       'QUALITY_ISSUE_STATE_INCONSISTENT',
       'TECHNICAL_RECOVERY_EXHAUSTED',
       'TECHNICAL_CONFIGURATION_REQUIRED',
+      'TECHNICAL_CONTRACT_INVALID',
     ]) {
       expect(v4LifecycleEvent).toContain(errorCode)
     }

@@ -300,7 +300,7 @@ describe('admin operations service', () => {
       .toMatchObject({ status: 'RUNNING', output: { accounting: { settlement: 'PENDING' } } })
   })
 
-  test('retries a hard-rejected V2 event through the administrator action without changing its identity', async () => {
+  test('retries a hard-rejected V4 Usage event without resuming the failed execution', async () => {
     const { repository, usage, service, base } = await v2AdminFixture()
     usage.rejectNextEvent = true
 
@@ -321,9 +321,16 @@ describe('admin operations service', () => {
     })).resolves.toMatchObject({ step: { status: 'COMPLETED' }, replayed: false })
 
     expect(usage.eventAttempts.at(-1)).toEqual(rejectedAttempt)
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'EXECUTING', resumeState: null })
-    expect((await repository.listEvents('run-1')).some((event) =>
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      resumeState: null,
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) =>
       event.type === 'issue.resolved' && event.payload.issueId === `${failedUsage.id}:usage-v2-delivery`)).toBe(true)
+    expect(events.some((event) => event.type === 'run.resumed')).toBe(false)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 
   test('marks an unknown submission not charged exactly once and releases both budgets', async () => {

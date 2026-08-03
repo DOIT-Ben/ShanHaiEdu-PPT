@@ -1,4 +1,9 @@
-import { CONTRACT_VERSION, type RunStatus, type TechnicalRecovery } from '../contracts'
+import {
+  CONTRACT_VERSION,
+  type RunStatus,
+  type TechnicalRecovery,
+  type V4RunFailureCode,
+} from '../contracts'
 import type { AgentTransaction, ClockPort, RunRecord } from './ports'
 import { transitionRun } from './policy'
 import { failVisualDeckV4Transaction, reconcileVisualDeckV4TerminalState } from './v4-lifecycle'
@@ -10,15 +15,40 @@ const RECOVERABLE_STATES = new Set<RunStatus>([
 
 export type TechnicalFailureDisposition = 'RETRYABLE' | 'NON_RETRYABLE'
 
+function isTechnicalContractFailure(errorCode: string) {
+  return /(^|_)(CONTRACT_INVALID|INVALID_IMAGE_PROMPT)(_|$)/.test(errorCode)
+    || /^(DECK_REVIEW_(SOURCE_COVERAGE_INCOMPLETE|SOURCE_REFERENCE_INVALID|SLIDE_REFERENCE_INVALID)|REVISION_SOURCE_REFERENCE_INVALID|PAGE_ARTIFACTS?_INCOMPLETE|PAGE_ARTIFACT_NOT_FOUND|BLUEPRINT_SLIDE_NOT_FOUND|DELIVERY_INPUT_FAILED)$/.test(errorCode)
+}
+
+function terminalFailureCode(reason: string, attempt: number): V4RunFailureCode {
+  if (attempt >= MAX_TECHNICAL_RECOVERY_ATTEMPTS) return 'TECHNICAL_RECOVERY_EXHAUSTED'
+  return isTechnicalContractFailure(reason)
+    ? 'TECHNICAL_CONTRACT_INVALID'
+    : 'TECHNICAL_CONFIGURATION_REQUIRED'
+}
+
+function terminalLifecycleReason(resumeState: TechnicalRecovery['resumeState']) {
+  switch (resumeState) {
+    case 'PLANNING': return 'PLANNING_FAILED' as const
+    case 'PAGE_REVIEW': return 'PAGE_REVIEW_FAILED' as const
+    case 'DECK_REVIEW': return 'DECK_REVIEW_FAILED' as const
+    case 'REVISING': return 'REVISION_FAILED' as const
+    case 'DELIVERING': return 'DELIVERY_FAILED' as const
+    case 'EXECUTING': return 'INTERNAL_FAILURE' as const
+  }
+}
+
 /**
  * Separates transient Provider failures from configuration failures that only
  * an operator can resolve. Both are technical failures, never content review.
  */
 export function technicalFailureDisposition(errorCode: string): TechnicalFailureDisposition | null {
   const normalized = errorCode.toUpperCase()
+  if (isTechnicalContractFailure(normalized)) return 'NON_RETRYABLE'
   if (/(^|_)(401|403|404)(_|$)|AUTH|PERMISSION|MODEL_(FORBIDDEN|NOT_FOUND)|CONTENT_POLICY|UNSUPPORTED/.test(normalized)) {
     return 'NON_RETRYABLE'
   }
+  if (/^(PROVIDER_REJECTED|IMAGE_TASK_FAILED)$/.test(normalized)) return 'NON_RETRYABLE'
   return /TIMEOUT|RATE_LIMIT|429|408|425|5\d\d|UNAVAILABLE|TEMPORARY|GATEWAY|NETWORK|UNKNOWN|NO_HEALTHY_ROUTE|MODEL_JSON_INVALID|SUBMISSION_NOT_FOUND|VISUAL_REVIEW_FAILED|PAGE_REVIEW_FAILED|DECK_REVIEW_FAILED|DELIVERY_FAILED|V4_PLANNING_STAGE_FAILED/.test(normalized)
     ? 'RETRYABLE'
     : null
@@ -63,9 +93,8 @@ export function beginTechnicalRecovery(transaction: AgentTransaction, clock: Clo
       failVisualDeckV4Transaction({
         transaction,
         clock,
-        errorCode: recovery.attempt >= MAX_TECHNICAL_RECOVERY_ATTEMPTS
-          ? 'TECHNICAL_RECOVERY_EXHAUSTED'
-          : 'TECHNICAL_CONFIGURATION_REQUIRED',
+        errorCode: terminalFailureCode(reason, recovery.attempt),
+        reason: terminalLifecycleReason(resumeState),
       })
       return transaction.run
     }
@@ -83,9 +112,7 @@ export function beginTechnicalRecovery(transaction: AgentTransaction, clock: Clo
       payload: {
         from: run.status,
         to: 'NEEDS_HUMAN',
-        reason: recovery.attempt >= MAX_TECHNICAL_RECOVERY_ATTEMPTS
-          ? 'TECHNICAL_RECOVERY_EXHAUSTED'
-          : 'TECHNICAL_CONFIGURATION_REQUIRED',
+        reason: terminalFailureCode(reason, recovery.attempt),
       },
     })
     transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'technical.recovery.completed', payload: exhausted })

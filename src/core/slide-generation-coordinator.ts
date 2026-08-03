@@ -12,7 +12,11 @@ import {
   reserveGenerationBatch,
   type GenerationBatchReservation,
 } from './generation-batch'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import {
+  beginTechnicalRecovery,
+  isTechnicalFailureCode,
+  technicalFailureDisposition,
+} from './technical-recovery'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
 import type {
@@ -784,17 +788,28 @@ export class SlideGenerationCoordinator {
         ? beginTechnicalRecovery(transaction, this.dependencies.clock, step.errorCode ?? 'IMAGE_SUBMISSION_FAILED')
         : null
       if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && (technical || fromStatus === 'RECOVERING')) {
-        const completed = transaction.listSteps().filter((candidate) =>
-          candidate.tool === 'generate_slide_image' && candidate.status === 'COMPLETED').length
-        appendV4LifecycleEvent(transaction, 'generation.completed', {
-          completed: Math.min(completed, transaction.run.slideCount),
-          total: transaction.run.slideCount,
-          pageNumbers: allPageNumbers(transaction.run),
-          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
-          retryable: technical?.technicalRecovery?.retryable
-            ?? transaction.run.technicalRecovery?.retryable
-            ?? false,
-        })
+        const events = transaction.listEvents()
+        const started = [...events].reverse().find((event) => event.type === 'generation.started')
+        const completedEvent = [...events].reverse().find((event) => event.type === 'generation.completed')
+        const stageAlreadyClosed = completedEvent && (!started || completedEvent.sequence > started.sequence)
+        if (!stageAlreadyClosed && transaction.run.status !== 'FAILED') {
+          const completed = transaction.listSteps().filter((candidate) =>
+            candidate.tool === 'generate_slide_image' && candidate.status === 'COMPLETED').length
+          appendV4LifecycleEvent(transaction, 'generation.completed', {
+            completed: Math.min(completed, transaction.run.slideCount),
+            total: transaction.run.slideCount,
+            pageNumbers: allPageNumbers(transaction.run),
+            reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+            retryable: technicalFailureDisposition(step.errorCode ?? 'IMAGE_SUBMISSION_FAILED') === 'RETRYABLE'
+              && !transaction.run.pendingTerminalFailure
+              && (technical?.technicalRecovery?.retryable
+                ?? transaction.run.technicalRecovery?.retryable
+                ?? false),
+          })
+        }
+        if (transaction.run.pendingTerminalFailure) {
+          reconcileVisualDeckV4TerminalState(transaction, this.dependencies.clock)
+        }
         return
       }
       if (fromStatus !== 'NEEDS_HUMAN') {
