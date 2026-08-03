@@ -37,10 +37,13 @@ import {
   appendAcceptedQualityIssueResolutions,
   appendFixedIssueResolutions,
   appendV4LifecycleEvent,
+  classifyAutomatedQualityAcceptanceIssues,
   ensureAutomatedQualityAcceptanceIssue,
   failVisualDeckV4Transaction,
+  isHardQualityIssue,
   isVisualDeckV4,
   markAutomatedQualityAcceptance,
+  qualityPolicyAuditForRun,
 } from './v4-lifecycle'
 
 export const DECK_QUALITY_THRESHOLD = 80
@@ -177,8 +180,7 @@ export class DeckReviewRunner {
           if (blueprint.renderMode === 'VISUAL_DECK_V4') {
             const repairableIssues = draft.issues.filter((issue) => issue.severity !== 'INFO'
               && (draft.qualityScore < DECK_QUALITY_THRESHOLD
-                || issue.severity === 'CRITICAL'
-                || issue.category === 'FACTUAL_RISK'))
+                || isHardQualityIssue(issue)))
             compileVisualDeckV4RevisionIssueGroups(repairableIssues)
           }
           return deckReviewSchema.parse({
@@ -228,15 +230,26 @@ export class DeckReviewRunner {
         }
         if (existing.status === 'COMPLETED') {
           const review = deckReviewSchema.parse(existing.output)
-          const initiallyPassed = passesDeckQuality(review) && !hasOpenBlockingIssues(transaction.listEvents())
           const remediationExhausted = isVisualDeckV4(transaction.run)
+            && transaction.run.automationLevel === 'BOUNDED_AUTO'
             && transaction.run.revisionRound >= transaction.run.maxRevisionRounds
           const disposition = remediationExhausted
             ? appendAcceptedQualityIssueResolutions(transaction)
             : { acceptedIssueIds: [] as string[], blockingIssueIds: [] as string[] }
-          const passed = initiallyPassed && disposition.acceptedIssueIds.length === 0
-          const acceptedForDelivery = remediationExhausted && !passed && disposition.blockingIssueIds.length === 0
-          if (acceptedForDelivery && transaction.run.status === 'DECK_REVIEW') {
+          const acceptedQuality = classifyAutomatedQualityAcceptanceIssues(
+            transaction,
+            disposition.acceptedIssueIds,
+          )
+          const initiallyPassed = passesDeckQuality(review)
+            && !hasOpenQualityIssues(transaction.listEvents())
+            && acceptedQuality.invalidIssueIds.length === 0
+          const hasAcceptedQualityIssue = acceptedQuality.acceptedIssueIds.length > 0
+            || qualityPolicyAuditForRun(transaction.run) !== null
+          const policyAcceptedForDelivery = remediationExhausted
+            && disposition.blockingIssueIds.length === 0
+            && acceptedQuality.invalidIssueIds.length === 0
+            && (hasAcceptedQualityIssue || !initiallyPassed)
+          if (policyAcceptedForDelivery && transaction.run.status === 'DECK_REVIEW') {
             const now = this.dependencies.clock.now().toISOString()
             const policy = transitionRun(transaction.run, 'DELIVERING')
             const acceptedIssueIds = ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
@@ -247,7 +260,8 @@ export class DeckReviewRunner {
             })
             appendV4LifecycleEvent(transaction, 'deck_review.completed', {
               completed: 1, total: 1, pageNumbers: allPageNumbers(transaction.run),
-              reason: 'DECK_REVIEW_REJECTED', retryable: false,
+              reason: passesDeckQuality(review) ? null : 'DECK_REVIEW_REJECTED',
+              retryable: passesDeckQuality(review) ? null : false,
             })
             transaction.appendEvent({
               schemaVersion: CONTRACT_VERSION,
@@ -259,9 +273,10 @@ export class DeckReviewRunner {
             })
           }
           const replayHasHardBlocker = disposition.blockingIssueIds.length > 0
+            || acceptedQuality.invalidIssueIds.length > 0
           const replayHasInconsistentPassingReview = passesDeckQuality(review) && !initiallyPassed
-          if (!passed && isVisualDeckV4(transaction.run)
-            && transaction.run.status === 'DECK_REVIEW' && !acceptedForDelivery
+          if (!initiallyPassed && isVisualDeckV4(transaction.run)
+            && transaction.run.status === 'DECK_REVIEW' && !policyAcceptedForDelivery
             && (replayHasHardBlocker || replayHasInconsistentPassingReview)) {
             failVisualDeckV4Transaction({
               transaction,
@@ -270,7 +285,12 @@ export class DeckReviewRunner {
               reason: 'DECK_REVIEW_REJECTED',
             })
           }
-          return { step: existing, review, passed, replayed: true }
+          return {
+            step: existing,
+            review,
+            passed: initiallyPassed && !policyAcceptedForDelivery,
+            replayed: true,
+          }
         }
         if (existing.status === 'FAILED') {
           return { step: existing, review: null, passed: false, replayed: true }
@@ -319,7 +339,7 @@ export class DeckReviewRunner {
         return {
           step,
           review: persisted,
-          passed: passesDeckQuality(persisted) && !hasOpenBlockingIssues(transaction.listEvents()),
+          passed: passesDeckQuality(persisted) && !hasOpenQualityIssues(transaction.listEvents()),
           replayed: true,
         }
       }
@@ -358,34 +378,58 @@ export class DeckReviewRunner {
         transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'issue.detected', payload: issue })
       }
       const currentReviewPassed = passesDeckQuality(review)
+      const hasHistoricalIssue = hasOpenQualityIssues(transaction.listEvents())
       const hasHistoricalBlocker = hasOpenBlockingIssues(transaction.listEvents())
       const remediationExhausted = isVisualDeckV4(transaction.run)
+        && transaction.run.automationLevel === 'BOUNDED_AUTO'
         && transaction.run.revisionRound >= transaction.run.maxRevisionRounds
       const disposition = remediationExhausted
         ? appendAcceptedQualityIssueResolutions(transaction)
         : { acceptedIssueIds: [] as string[], blockingIssueIds: [] as string[] }
-      const passed = currentReviewPassed && !hasHistoricalBlocker && disposition.acceptedIssueIds.length === 0
-      const acceptedForDelivery = remediationExhausted && !passed && disposition.blockingIssueIds.length === 0
-      const shouldDeliver = passed || acceptedForDelivery
+      const acceptedQuality = classifyAutomatedQualityAcceptanceIssues(
+        transaction,
+        disposition.acceptedIssueIds,
+      )
+      const reviewPassed = currentReviewPassed
+        && !hasHistoricalIssue
+        && disposition.blockingIssueIds.length === 0
+        && acceptedQuality.invalidIssueIds.length === 0
+      const hasAcceptedQualityIssue = acceptedQuality.acceptedIssueIds.length > 0
+        || qualityPolicyAuditForRun(transaction.run) !== null
+      const policyAcceptedForDelivery = remediationExhausted
+        && disposition.blockingIssueIds.length === 0
+        && acceptedQuality.invalidIssueIds.length === 0
+        && (hasAcceptedQualityIssue || !reviewPassed)
+      const shouldDeliver = reviewPassed || policyAcceptedForDelivery
       const requiresHuman = currentReviewPassed && hasHistoricalBlocker && !remediationExhausted
       const requiresInternalFailure = isVisualDeckV4(transaction.run)
-        && (disposition.blockingIssueIds.length > 0 || (requiresHuman && !acceptedForDelivery))
+        && (disposition.blockingIssueIds.length > 0
+          || acceptedQuality.invalidIssueIds.length > 0
+          || (requiresHuman && !policyAcceptedForDelivery))
       const policy = shouldDeliver
         ? transitionRun(transaction.run, 'DELIVERING')
         : requiresHuman && !requiresInternalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
-      const acceptedIssueIds = acceptedForDelivery
+      const acceptedIssueIds = policyAcceptedForDelivery
         ? ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
         : []
-      const qualityRun = acceptedForDelivery
+      const qualityRun = policyAcceptedForDelivery
         ? markAutomatedQualityAcceptance({ ...transaction.run, ...policy }, acceptedIssueIds, now)
         : { ...transaction.run, ...policy }
-      transaction.putRun({ ...qualityRun, qualityScore: review.qualityScore, updatedAt: now })
+      const dispositionRun = reviewPassed && !policyAcceptedForDelivery && !qualityRun.qualityOverride
+        ? { ...qualityRun, qualityDisposition: 'REVIEW_PASSED' as const, qualityPolicyAudit: null }
+        : !qualityRun.qualityOverride
+          ? { ...qualityRun, qualityDisposition: 'PENDING' as const }
+          : qualityRun
+      const persistedRun = isVisualDeckV4(transaction.run) && !shouldDeliver
+        ? { ...dispositionRun, qualityDisposition: 'PENDING' as const }
+        : dispositionRun
+      transaction.putRun({ ...persistedRun, qualityScore: review.qualityScore, updatedAt: now })
       appendV4LifecycleEvent(transaction, 'deck_review.completed', {
         completed: 1,
         total: 1,
         pageNumbers: allPageNumbers(transaction.run),
-        reason: passed ? null : 'DECK_REVIEW_REJECTED',
-        retryable: passed ? null : acceptedForDelivery ? false : !requiresHuman,
+        reason: currentReviewPassed ? null : 'DECK_REVIEW_REJECTED',
+        retryable: currentReviewPassed ? null : policyAcceptedForDelivery ? false : !requiresHuman,
         requiresUserAction: requiresHuman && !requiresInternalFailure,
         nextAction: requiresHuman && !requiresInternalFailure ? 'REVIEW_RESULT' : null,
       })
@@ -419,7 +463,12 @@ export class DeckReviewRunner {
           payload: { kind: 'HUMAN_REVIEW', summary: '仍有未进入修订计划的历史阻断问题，需要人工复核。' },
         })
       }
-      return { step: updatedStep, review, passed, replayed: false }
+      return {
+        step: updatedStep,
+        review,
+        passed: reviewPassed && !policyAcceptedForDelivery,
+        replayed: false,
+      }
     })
   }
 
@@ -448,7 +497,7 @@ export class DeckReviewRunner {
         return {
           step,
           review: persisted,
-          passed: passesDeckQuality(persisted) && !hasOpenBlockingIssues(transaction.listEvents()),
+          passed: passesDeckQuality(persisted) && !hasOpenQualityIssues(transaction.listEvents()),
           replayed: true,
         }
       }
@@ -657,11 +706,18 @@ export function deckReviewStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) 
 
 export function passesDeckQuality(review: DeckReview) {
   return review.qualityScore >= DECK_QUALITY_THRESHOLD
-    && !review.issues.some((issue) => issue.severity === 'CRITICAL')
-    && !review.issues.some((issue) => issue.category === 'FACTUAL_RISK')
+    && review.issues.length === 0
 }
 
 function hasOpenBlockingIssues(events: readonly AgentEvent[]) {
+  return openQualityIssues(events).some(isHardQualityIssue)
+}
+
+function hasOpenQualityIssues(events: readonly AgentEvent[]) {
+  return openQualityIssues(events).length > 0
+}
+
+function openQualityIssues(events: readonly AgentEvent[]) {
   const open = new Map<string, ReturnType<typeof issueSummarySchema.parse>>()
   for (const event of events) {
     if (event.type === 'issue.detected') {
@@ -675,8 +731,7 @@ function hasOpenBlockingIssues(events: readonly AgentEvent[]) {
       if (typeof issueId === 'string') open.delete(issueId)
     }
   }
-  return [...open.values()].some((issue) =>
-    issue.severity === 'CRITICAL' || issue.category === 'FACTUAL_RISK')
+  return [...open.values()]
 }
 
 function successfulV4RevisionRounds(events: readonly AgentEvent[]) {

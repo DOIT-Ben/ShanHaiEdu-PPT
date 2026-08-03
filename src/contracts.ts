@@ -36,6 +36,32 @@ export const runStatusSchema = z.enum([
 
 export const automationLevelSchema = z.enum(['SUPERVISED', 'BOUNDED_AUTO'])
 
+export const qualityDispositionSchema = z.enum([
+  'PENDING',
+  'REVIEW_PASSED',
+  'SYSTEM_POLICY_ACCEPTED',
+  'ADMIN_OVERRIDE',
+  'HARD_FAILURE',
+])
+
+export const qualityPolicyAuditSchema = z.object({
+  provenance: z.literal('SYSTEM_POLICY'),
+  policyId: identifierSchema,
+  reason: z.string().trim().min(10).max(2_000),
+  issueIds: z.array(identifierSchema).min(1).max(50)
+    .refine((value) => new Set(value).size === value.length),
+  acceptedAt: z.string().datetime(),
+}).strict()
+
+export const qualityOverrideAuditSchema = z.object({
+  actorId: identifierSchema,
+  actorRole: z.enum(['USER', 'ADMIN']),
+  reason: z.string().trim().min(10).max(2_000),
+  issueIds: z.array(identifierSchema).min(1).max(50)
+    .refine((value) => new Set(value).size === value.length),
+  acceptedAt: z.string().datetime(),
+}).strict()
+
 export const technicalRecoverySchema = z.object({
   resumeState: z.enum(['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING']),
   reason: z.string().trim().min(1).max(100),
@@ -361,6 +387,9 @@ export const runSnapshotSchema = z.object({
   committedBudgetUnits: z.number().int().nonnegative(),
   qualityScore: z.number().int().min(0).max(100).nullable(),
   qualityOverride: z.boolean(),
+  qualityDisposition: qualityDispositionSchema.default('PENDING'),
+  qualityPolicyAudit: qualityPolicyAuditSchema.nullable().default(null),
+  qualityOverrideAudit: qualityOverrideAuditSchema.nullable().default(null),
   presentationMode: presentationModeSchema.default('SLIDE_IMAGE_V2'),
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
   assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
@@ -387,6 +416,51 @@ export const runSnapshotSchema = z.object({
   }
   if (value.status === 'RECOVERING' && (!value.technicalRecovery || !value.technicalRecovery.active)) {
     context.addIssue({ code: 'custom', path: ['technicalRecovery'], message: 'recovering run requires active technical recovery' })
+  }
+  if (['PENDING', 'REVIEW_PASSED'].includes(value.qualityDisposition)
+    && (value.qualityOverride || value.qualityPolicyAudit || value.qualityOverrideAudit)) {
+    context.addIssue({
+      code: 'custom', path: ['qualityDisposition'],
+      message: 'pending or review-passed disposition cannot carry quality override provenance',
+    })
+  }
+  if (value.qualityDisposition === 'SYSTEM_POLICY_ACCEPTED') {
+    if (!value.qualityOverride || !value.qualityPolicyAudit || value.qualityOverrideAudit) {
+      context.addIssue({
+        code: 'custom', path: ['qualityDisposition'],
+        message: 'system policy disposition requires only a system policy audit',
+      })
+    }
+    if (value.presentationMode !== 'VISUAL_DECK_V4') {
+      context.addIssue({ code: 'custom', path: ['presentationMode'], message: 'system quality policy is v4-only' })
+    }
+  } else if (value.qualityPolicyAudit) {
+    context.addIssue({
+      code: 'custom', path: ['qualityPolicyAudit'],
+      message: 'system policy audit requires system policy disposition',
+    })
+  }
+  if (value.qualityDisposition === 'ADMIN_OVERRIDE') {
+    if (!value.qualityOverride || !value.qualityOverrideAudit || value.qualityPolicyAudit) {
+      context.addIssue({
+        code: 'custom', path: ['qualityDisposition'],
+        message: 'admin override disposition requires only an actor audit',
+      })
+    }
+    if (value.presentationMode === 'VISUAL_DECK_V4' && value.qualityOverrideAudit?.actorRole !== 'ADMIN') {
+      context.addIssue({ code: 'custom', path: ['qualityOverrideAudit', 'actorRole'], message: 'v4 override requires admin actor' })
+    }
+  } else if (value.qualityOverrideAudit) {
+    context.addIssue({
+      code: 'custom', path: ['qualityOverrideAudit'],
+      message: 'actor audit requires admin override disposition',
+    })
+  }
+  if (value.qualityDisposition === 'HARD_FAILURE' && value.status !== 'FAILED') {
+    context.addIssue({ code: 'custom', path: ['qualityDisposition'], message: 'hard failure disposition requires failed status' })
+  }
+  if (value.status === 'FAILED' && value.qualityDisposition !== 'HARD_FAILURE') {
+    context.addIssue({ code: 'custom', path: ['qualityDisposition'], message: 'failed status requires hard failure disposition' })
   }
 })
 
@@ -559,6 +633,9 @@ export const apiErrorSchema = z.object({
 
 export type HostContext = z.infer<typeof hostContextSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
+export type QualityDisposition = z.infer<typeof qualityDispositionSchema>
+export type QualityPolicyAudit = z.infer<typeof qualityPolicyAuditSchema>
+export type QualityOverrideAudit = z.infer<typeof qualityOverrideAuditSchema>
 export type TechnicalRecovery = z.infer<typeof technicalRecoverySchema>
 export type PendingTerminalFailure = z.infer<typeof pendingTerminalFailureSchema>
 export type PresentationMode = z.infer<typeof presentationModeSchema>

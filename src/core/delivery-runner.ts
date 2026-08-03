@@ -1,3 +1,8 @@
+import { createHash } from 'node:crypto'
+import { posix as posixPath } from 'node:path'
+import JSZip from 'jszip'
+import { SaxesParser, type SaxesTagNS } from 'saxes'
+import sharp from 'sharp'
 import { CONTRACT_VERSION } from '../contracts'
 import {
   deliveryRecordSchema,
@@ -26,10 +31,51 @@ import {
   allPageNumbers,
   appendV4LifecycleEvent,
   isVisualDeckV4,
+  qualityPolicyAuditForRun,
+  V4_NON_BLOCKING_QUALITY_POLICY_ID,
   v4LifecyclePayload,
 } from './v4-lifecycle'
 
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const
+const PREVIEW_NAME = 'presentation-preview.png'
+const PPTX_NAME = 'presentation.pptx'
+const SOURCES_NAME = 'asset-sources.json'
+const ROOT_RELATIONSHIPS_PART = '_rels/.rels'
+const PRESENTATION_PART = 'ppt/presentation.xml'
+const PRESENTATION_RELATIONSHIPS_PART = 'ppt/_rels/presentation.xml.rels'
+const PRESENTATION_NAMESPACES = new Set([
+  'http://schemas.openxmlformats.org/presentationml/2006/main',
+  'http://purl.oclc.org/ooxml/presentationml/main',
+])
+const OFFICE_RELATIONSHIP_NAMESPACES = new Set([
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+  'http://purl.oclc.org/ooxml/officeDocument/relationships',
+])
+const PACKAGE_RELATIONSHIP_NAMESPACES = new Set([
+  'http://schemas.openxmlformats.org/package/2006/relationships',
+  'http://purl.oclc.org/ooxml/package/relationships',
+])
+const OFFICE_DOCUMENT_RELATIONSHIP_TYPES = new Set([
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',
+  'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument',
+])
+const SLIDE_RELATIONSHIP_TYPES = new Set([
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide',
+  'http://purl.oclc.org/ooxml/officeDocument/relationships/slide',
+])
+
+type StoredFinalArtifact = Readonly<{
+  artifactId: string
+  mimeType: string
+  bytes: Uint8Array
+  sha256: string
+}>
+
+type StoredFinalArtifacts = Readonly<{
+  preview: StoredFinalArtifact | null
+  pptx: StoredFinalArtifact | null
+  sources: StoredFinalArtifact | null
+}>
 
 export type DeliveryResult = Readonly<{
   status: RunRecord['status']
@@ -61,6 +107,15 @@ export class DeliveryRunner {
     if (prepared) return prepared
 
     try {
+      const storedArtifacts = await this.loadStoredFinalArtifacts(run, idempotencyKey)
+      if (storedArtifacts.preview && storedArtifacts.pptx && storedArtifacts.sources) {
+        const delivery = await this.buildVerifiedDelivery(run, blueprint, {
+          preview: storedArtifacts.preview,
+          pptx: storedArtifacts.pptx,
+          sources: storedArtifacts.sources,
+        })
+        return this.complete(run, idempotencyKey, delivery, blueprint)
+      }
       const slides = await loadPresentationSlides(this.dependencies.artifacts, run, slideArtifacts)
       const previewArtifacts = await renderAndStoreSlidePreviews({
         artifacts: this.dependencies.artifacts,
@@ -82,10 +137,10 @@ export class DeliveryRunner {
       const previewBytes = await this.dependencies.renderer.renderPreviewFromSlidePreviews({ slides: previewSlides })
       const pptxBytes = await this.dependencies.renderer.renderPptx({ blueprint, slides })
       if (previewBytes.length === 0 || pptxBytes.length === 0) throw new Error('DELIVERY_RENDER_EMPTY')
+      if (isVisualDeckV4(run)) {
+        await assertReadableV4DeliveryArtifacts(previewBytes, pptxBytes, blueprint.slides.length)
+      }
 
-      const previewName = 'presentation-preview.png'
-      const pptxName = 'presentation.pptx'
-      const sourcesName = 'asset-sources.json'
       const provenances = await this.webAssetProvenances(runId)
       const sourcesBytes = new TextEncoder().encode(JSON.stringify({
         schemaVersion: CONTRACT_VERSION,
@@ -93,90 +148,176 @@ export class DeliveryRunner {
         generatedAt: this.dependencies.clock.now().toISOString(),
         assets: provenances,
       }, null, 2))
-      const preview = await this.dependencies.artifacts.put({
-        tenantId: run.host.tenantId,
-        runId,
-        name: previewName,
-        mimeType: 'image/png',
-        bytes: previewBytes,
-        idempotencyKey: `${idempotencyKey}:preview`,
-      })
-      const pptx = await this.dependencies.artifacts.put({
-        tenantId: run.host.tenantId,
-        runId,
-        name: pptxName,
-        mimeType: PPTX_MIME,
-        bytes: pptxBytes,
-        idempotencyKey: `${idempotencyKey}:pptx`,
-      })
-      const sources = await this.dependencies.artifacts.put({
-        tenantId: run.host.tenantId,
-        runId,
-        name: sourcesName,
-        mimeType: 'application/json',
-        bytes: sourcesBytes,
-        idempotencyKey: `${idempotencyKey}:sources`,
-      })
-      const delivery = deliveryRecordSchema.parse({
-        id: `${run.id}:delivery:r${run.revisionRound}`,
-        runId,
-        revisionRound: run.revisionRound,
-        qualityScore: run.qualityScore,
-        qualityOverride: run.qualityOverride,
-        disposition: 'FINAL',
-        qualityStatus: run.qualityOverride ? 'OVERRIDDEN_INTERNAL' : 'APPROVED',
-        openIssueIds: run.qualityOverrideIssueIds ?? [],
-        identity: {
-          status: 'VERIFIED',
-          slideCount: blueprint.slides.length,
-          pageNumbers: blueprint.slides.map((slide) => slide.pageNumber),
-          blueprintHash: hashInput(blueprint),
-          ...(blueprint.visualDeckV4Proposal
-            ? { proposalHash: hashInput(blueprint.visualDeckV4Proposal) }
-            : {}),
-        },
-        qualityOverrideAudit: run.qualityOverride
-          && run.qualityOverrideBy
-          && run.qualityOverrideRole
-          && run.qualityOverrideReason
-          && run.qualityOverrideIssueIds?.length
-          && run.qualityOverrideAt
-          ? {
-              actorId: run.qualityOverrideBy,
-              actorRole: run.qualityOverrideRole,
-              reason: run.qualityOverrideReason,
-              issueIds: run.qualityOverrideIssueIds,
-              acceptedAt: run.qualityOverrideAt,
-            }
-          : null,
-        preview: {
-          artifactId: preview.artifactId,
-          name: previewName,
+      const finalArtifacts = {
+        preview: await this.storeOrReuseFinalArtifact({
+          run,
+          existing: storedArtifacts.preview,
+          name: PREVIEW_NAME,
           mimeType: 'image/png',
-          sha256: preview.sha256,
-          byteLength: previewBytes.length,
-        },
-        pptx: {
-          artifactId: pptx.artifactId,
-          name: pptxName,
+          bytes: previewBytes,
+          idempotencyKey: `${idempotencyKey}:preview`,
+        }),
+        pptx: await this.storeOrReuseFinalArtifact({
+          run,
+          existing: storedArtifacts.pptx,
+          name: PPTX_NAME,
           mimeType: PPTX_MIME,
-          sha256: pptx.sha256,
-          byteLength: pptxBytes.length,
-        },
-        sources: {
-          artifactId: sources.artifactId,
-          name: sourcesName,
+          bytes: pptxBytes,
+          idempotencyKey: `${idempotencyKey}:pptx`,
+        }),
+        sources: await this.storeOrReuseFinalArtifact({
+          run,
+          existing: storedArtifacts.sources,
+          name: SOURCES_NAME,
           mimeType: 'application/json',
-          sha256: sources.sha256,
-          byteLength: sourcesBytes.length,
-        },
-        ...(run.release ? { release: run.release } : {}),
-        createdAt: this.dependencies.clock.now().toISOString(),
-      })
+          bytes: sourcesBytes,
+          idempotencyKey: `${idempotencyKey}:sources`,
+        }),
+      }
+      const delivery = await this.buildVerifiedDelivery(run, blueprint, finalArtifacts)
       return this.complete(run, idempotencyKey, delivery, blueprint)
     } catch {
       return this.fail(run, idempotencyKey, 'DELIVERY_FAILED')
     }
+  }
+
+  private async loadStoredFinalArtifacts(run: RunRecord, idempotencyKey: string): Promise<StoredFinalArtifacts> {
+    const [preview, pptx, sources] = await Promise.all([
+      this.dependencies.artifacts.getByIdempotencyKey({
+        tenantId: run.host.tenantId,
+        idempotencyKey: `${idempotencyKey}:preview`,
+      }),
+      this.dependencies.artifacts.getByIdempotencyKey({
+        tenantId: run.host.tenantId,
+        idempotencyKey: `${idempotencyKey}:pptx`,
+      }),
+      this.dependencies.artifacts.getByIdempotencyKey({
+        tenantId: run.host.tenantId,
+        idempotencyKey: `${idempotencyKey}:sources`,
+      }),
+    ])
+    return { preview, pptx, sources }
+  }
+
+  private async storeOrReuseFinalArtifact(input: Readonly<{
+    run: RunRecord
+    existing: StoredFinalArtifact | null
+    name: string
+    mimeType: string
+    bytes: Uint8Array
+    idempotencyKey: string
+  }>): Promise<StoredFinalArtifact> {
+    if (input.existing) {
+      if (input.existing.mimeType !== input.mimeType || input.existing.bytes.length === 0) {
+        throw new Error('FINAL_DELIVERY_ARTIFACT_INVALID')
+      }
+      return input.existing
+    }
+    const stored = await this.dependencies.artifacts.put({
+      tenantId: input.run.host.tenantId,
+      runId: input.run.id,
+      name: input.name,
+      mimeType: input.mimeType,
+      bytes: input.bytes,
+      idempotencyKey: input.idempotencyKey,
+    })
+    return {
+      artifactId: stored.artifactId,
+      mimeType: input.mimeType,
+      bytes: input.bytes,
+      sha256: stored.sha256,
+    }
+  }
+
+  private async buildVerifiedDelivery(
+    run: RunRecord,
+    blueprint: Awaited<ReturnType<typeof getActiveBlueprint>>,
+    artifacts: Readonly<{
+      preview: StoredFinalArtifact
+      pptx: StoredFinalArtifact
+      sources: StoredFinalArtifact
+    }>,
+  ) {
+    if (artifacts.preview.mimeType !== 'image/png'
+      || artifacts.pptx.mimeType !== PPTX_MIME
+      || artifacts.sources.mimeType !== 'application/json'
+      || artifacts.preview.bytes.length === 0
+      || artifacts.pptx.bytes.length === 0
+      || artifacts.sources.bytes.length === 0) {
+      throw new Error('FINAL_DELIVERY_ARTIFACT_INVALID')
+    }
+    if (isVisualDeckV4(run)) {
+      await assertReadableV4DeliveryArtifacts(
+        artifacts.preview.bytes,
+        artifacts.pptx.bytes,
+        blueprint.slides.length,
+      )
+    }
+    const qualityPolicyAudit = qualityPolicyAuditForRun(run)
+    const delivery = deliveryRecordSchema.parse({
+      id: `${run.id}:delivery:r${run.revisionRound}`,
+      runId: run.id,
+      revisionRound: run.revisionRound,
+      qualityScore: run.qualityScore,
+      qualityOverride: run.qualityOverride,
+      disposition: 'FINAL',
+      qualityStatus: qualityPolicyAudit
+        ? 'SYSTEM_POLICY_ACCEPTED'
+        : run.qualityOverride ? 'OVERRIDDEN_INTERNAL' : 'APPROVED',
+      openIssueIds: run.qualityOverrideIssueIds ?? [],
+      identity: {
+        status: 'VERIFIED',
+        slideCount: blueprint.slides.length,
+        pageNumbers: blueprint.slides.map((slide) => slide.pageNumber),
+        blueprintHash: hashInput(blueprint),
+        ...(blueprint.visualDeckV4Proposal
+          ? { proposalHash: hashInput(blueprint.visualDeckV4Proposal) }
+          : {}),
+      },
+      qualityPolicyAudit,
+      qualityOverrideAudit: !qualityPolicyAudit
+        && run.qualityOverride
+        && run.qualityOverrideBy
+        && run.qualityOverrideRole
+        && run.qualityOverrideReason
+        && run.qualityOverrideIssueIds?.length
+        && run.qualityOverrideAt
+        ? {
+            actorId: run.qualityOverrideBy,
+            actorRole: run.qualityOverrideRole,
+            reason: run.qualityOverrideReason,
+            issueIds: run.qualityOverrideIssueIds,
+            acceptedAt: run.qualityOverrideAt,
+          }
+        : null,
+      preview: {
+        artifactId: artifacts.preview.artifactId,
+        name: PREVIEW_NAME,
+        mimeType: 'image/png',
+        sha256: artifacts.preview.sha256,
+        byteLength: artifacts.preview.bytes.length,
+      },
+      pptx: {
+        artifactId: artifacts.pptx.artifactId,
+        name: PPTX_NAME,
+        mimeType: PPTX_MIME,
+        sha256: artifacts.pptx.sha256,
+        byteLength: artifacts.pptx.bytes.length,
+      },
+      sources: {
+        artifactId: artifacts.sources.artifactId,
+        name: SOURCES_NAME,
+        mimeType: 'application/json',
+        sha256: artifacts.sources.sha256,
+        byteLength: artifacts.sources.bytes.length,
+      },
+      ...(run.release ? { release: run.release } : {}),
+      createdAt: this.dependencies.clock.now().toISOString(),
+    })
+    if (isVisualDeckV4(run)) {
+      await assertStoredFinalDeliveryArtifacts(this.dependencies.artifacts, run, delivery)
+    }
+    return delivery
   }
 
   private async prepare(run: RunRecord, idempotencyKey: string, inputHash: string) {
@@ -360,6 +501,225 @@ export class DeliveryRunner {
 
 }
 
+async function assertReadableV4DeliveryArtifacts(
+  previewBytes: Uint8Array,
+  pptxBytes: Uint8Array,
+  expectedSlideCount: number,
+) {
+  const preview = sharp(previewBytes, { failOn: 'error' })
+  const metadata = await preview.metadata()
+  if (metadata.format !== 'png' || !metadata.width || !metadata.height) {
+    throw new Error('FINAL_PREVIEW_INVALID')
+  }
+  await preview.raw().toBuffer()
+
+  const archive = await JSZip.loadAsync(pptxBytes, { checkCRC32: true, createFolders: false })
+  const requiredEntries = [
+    '[Content_Types].xml',
+    ROOT_RELATIONSHIPS_PART,
+    PRESENTATION_PART,
+    PRESENTATION_RELATIONSHIPS_PART,
+  ]
+  if (requiredEntries.some((entry) => !archive.file(entry))) throw new Error('FINAL_PPTX_STRUCTURE_INVALID')
+  const xmlParts = await parsePptxXmlParts(archive)
+  const rootRelationships = parsePptxRelationships(xmlParts.get(ROOT_RELATIONSHIPS_PART)!, ROOT_RELATIONSHIPS_PART)
+  const officeDocumentRelationships = rootRelationships.filter((relationship) =>
+    OFFICE_DOCUMENT_RELATIONSHIP_TYPES.has(relationship.type))
+  if (officeDocumentRelationships.length !== 1) throw new Error('FINAL_PPTX_ROOT_RELATIONSHIP_INVALID')
+  const officeDocumentRelationship = officeDocumentRelationships[0]!
+  if (officeDocumentRelationship.targetMode?.toUpperCase() === 'EXTERNAL'
+    || resolvePptxRelationshipTarget(null, officeDocumentRelationship.target) !== PRESENTATION_PART) {
+    throw new Error('FINAL_PPTX_ROOT_RELATIONSHIP_INVALID')
+  }
+  const slideEntries = Object.keys(archive.files)
+    .filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry))
+    .sort((left, right) => left.localeCompare(right, 'en', { numeric: true }))
+  const expectedEntries = Array.from(
+    { length: expectedSlideCount },
+    (_, index) => `ppt/slides/slide${index + 1}.xml`,
+  )
+  if (JSON.stringify(slideEntries) !== JSON.stringify(expectedEntries)) {
+    throw new Error('FINAL_PPTX_SLIDE_COUNT_INVALID')
+  }
+  const slideRelationshipIds = parsePresentationSlideRelationshipIds(xmlParts.get(PRESENTATION_PART)!)
+  if (slideRelationshipIds.length !== expectedSlideCount) throw new Error('FINAL_PPTX_SLIDE_COUNT_INVALID')
+  const relationships = parsePptxRelationships(
+    xmlParts.get(PRESENTATION_RELATIONSHIPS_PART)!,
+    PRESENTATION_RELATIONSHIPS_PART,
+  )
+  const relationshipsById = new Map(relationships.map((relationship) => [relationship.id, relationship]))
+  if (relationshipsById.size !== relationships.length) throw new Error('FINAL_PPTX_RELATIONSHIP_INVALID')
+
+  const referencedIds = new Set(slideRelationshipIds)
+  const slideRelationships = relationships.filter((relationship) => SLIDE_RELATIONSHIP_TYPES.has(relationship.type))
+  if (slideRelationships.length !== slideRelationshipIds.length
+    || slideRelationships.some((relationship) => !referencedIds.has(relationship.id))) {
+    throw new Error('FINAL_PPTX_RELATIONSHIP_INVALID')
+  }
+  const referencedSlideEntries = slideRelationshipIds.map((relationshipId) => {
+    const relationship = relationshipsById.get(relationshipId)
+    if (!relationship
+      || !SLIDE_RELATIONSHIP_TYPES.has(relationship.type)
+      || relationship.targetMode?.toUpperCase() === 'EXTERNAL') {
+      throw new Error('FINAL_PPTX_RELATIONSHIP_INVALID')
+    }
+    const target = resolvePptxRelationshipTarget(PRESENTATION_PART, relationship.target)
+    if (!archive.file(target)) throw new Error('FINAL_PPTX_RELATIONSHIP_TARGET_MISSING')
+    return target
+  })
+  if (JSON.stringify(referencedSlideEntries) !== JSON.stringify(expectedEntries)) {
+    throw new Error('FINAL_PPTX_SLIDE_SET_INVALID')
+  }
+}
+
+type PptxRelationship = Readonly<{
+  id: string
+  type: string
+  target: string
+  targetMode: string | null
+}>
+
+async function parsePptxXmlParts(archive: JSZip) {
+  const entries = Object.values(archive.files)
+    .filter((entry) => !entry.dir && (entry.name.endsWith('.xml') || entry.name.endsWith('.rels')))
+  const contents = await Promise.all(entries.map(async (entry) => [entry.name, await entry.async('string')] as const))
+  for (const [name, xml] of contents) parseXmlPart(xml, name)
+  return new Map(contents)
+}
+
+function parseXmlPart(
+  xml: string,
+  fileName: string,
+  handlers: Readonly<{
+    openTag?: (tag: SaxesTagNS) => void
+    closeTag?: (tag: SaxesTagNS) => void
+  }> = {},
+) {
+  if (xml.length === 0) throw new Error('FINAL_PPTX_XML_INVALID')
+  const parser = new SaxesParser<{ xmlns: true; fileName: string }>({ xmlns: true, fileName })
+  parser.on('doctype', () => {
+    throw new Error('FINAL_PPTX_XML_DOCTYPE_INVALID')
+  })
+  if (handlers.openTag) parser.on('opentag', handlers.openTag)
+  if (handlers.closeTag) parser.on('closetag', handlers.closeTag)
+  parser.write(xml).close()
+}
+
+function parsePresentationSlideRelationshipIds(xml: string) {
+  const relationshipIds: string[] = []
+  let depth = 0
+  let slideListDepth: number | null = null
+  let sawPresentation = false
+  let sawSlideList = false
+  parseXmlPart(xml, PRESENTATION_PART, {
+    openTag(tag) {
+      depth += 1
+      if (depth === 1) {
+        if (tag.local !== 'presentation' || !PRESENTATION_NAMESPACES.has(tag.uri)) {
+          throw new Error('FINAL_PPTX_PRESENTATION_INVALID')
+        }
+        sawPresentation = true
+      } else if (depth === 2 && tag.local === 'sldIdLst' && PRESENTATION_NAMESPACES.has(tag.uri)) {
+        if (sawSlideList) throw new Error('FINAL_PPTX_PRESENTATION_INVALID')
+        sawSlideList = true
+        slideListDepth = depth
+      } else if (slideListDepth !== null
+        && depth === slideListDepth + 1
+        && tag.local === 'sldId'
+        && PRESENTATION_NAMESPACES.has(tag.uri)) {
+        const relationshipId = Object.values(tag.attributes)
+          .find((attribute) => attribute.local === 'id'
+            && OFFICE_RELATIONSHIP_NAMESPACES.has(attribute.uri))?.value
+        if (!relationshipId) throw new Error('FINAL_PPTX_SLIDE_RELATIONSHIP_MISSING')
+        relationshipIds.push(relationshipId)
+      }
+    },
+    closeTag() {
+      if (depth === slideListDepth) slideListDepth = null
+      depth -= 1
+    },
+  })
+  if (!sawPresentation || !sawSlideList || new Set(relationshipIds).size !== relationshipIds.length) {
+    throw new Error('FINAL_PPTX_PRESENTATION_INVALID')
+  }
+  return relationshipIds
+}
+
+function parsePptxRelationships(xml: string, fileName: string) {
+  const relationships: PptxRelationship[] = []
+  let depth = 0
+  let sawRelationships = false
+  parseXmlPart(xml, fileName, {
+    openTag(tag) {
+      depth += 1
+      if (depth === 1) {
+        if (tag.local !== 'Relationships' || !PACKAGE_RELATIONSHIP_NAMESPACES.has(tag.uri)) {
+          throw new Error('FINAL_PPTX_RELATIONSHIPS_INVALID')
+        }
+        sawRelationships = true
+        return
+      }
+      if (depth !== 2 || tag.local !== 'Relationship' || !PACKAGE_RELATIONSHIP_NAMESPACES.has(tag.uri)) return
+      const attributes = Object.values(tag.attributes)
+      const value = (name: string) => attributes.find((attribute) => attribute.local === name && attribute.uri === '')?.value
+      const id = value('Id')
+      const type = value('Type')
+      const target = value('Target')
+      if (!id || !type || !target) throw new Error('FINAL_PPTX_RELATIONSHIP_INVALID')
+      relationships.push({ id, type, target, targetMode: value('TargetMode') ?? null })
+    },
+    closeTag() {
+      depth -= 1
+    },
+  })
+  if (!sawRelationships) throw new Error('FINAL_PPTX_RELATIONSHIPS_INVALID')
+  return relationships
+}
+
+function resolvePptxRelationshipTarget(sourcePart: string | null, rawTarget: string) {
+  let target: string
+  try {
+    target = decodeURI(rawTarget)
+  } catch {
+    throw new Error('FINAL_PPTX_RELATIONSHIP_TARGET_INVALID')
+  }
+  if (!target || target.includes('\\') || target.includes('?') || target.includes('#')) {
+    throw new Error('FINAL_PPTX_RELATIONSHIP_TARGET_INVALID')
+  }
+  const resolved = target.startsWith('/')
+    ? posixPath.normalize(target.slice(1))
+    : posixPath.normalize(sourcePart === null ? target : posixPath.join(posixPath.dirname(sourcePart), target))
+  if (!resolved || resolved === '..' || resolved.startsWith('../') || posixPath.isAbsolute(resolved)) {
+    throw new Error('FINAL_PPTX_RELATIONSHIP_TARGET_INVALID')
+  }
+  return resolved
+}
+
+async function assertStoredFinalDeliveryArtifacts(
+  artifacts: ArtifactPort,
+  run: RunRecord,
+  delivery: DeliveryRecord,
+) {
+  for (const artifact of [delivery.preview, delivery.pptx, delivery.sources].filter((value) => value !== undefined)) {
+    if (!artifacts.verifyIntegrity({
+      tenantId: run.host.tenantId,
+      artifactId: artifact.artifactId,
+      mimeType: artifact.mimeType,
+      byteLength: artifact.byteLength,
+      sha256: artifact.sha256,
+    })) throw new Error('FINAL_DELIVERY_ARTIFACT_INTEGRITY_INVALID')
+    const stored = await artifacts.get({ tenantId: run.host.tenantId, artifactId: artifact.artifactId })
+    const digest = stored ? createHash('sha256').update(stored.bytes).digest('hex') : null
+    if (!stored
+      || stored.mimeType !== artifact.mimeType
+      || stored.bytes.length !== artifact.byteLength
+      || stored.sha256 !== artifact.sha256
+      || digest !== artifact.sha256) {
+      throw new Error('FINAL_DELIVERY_ARTIFACT_READBACK_INVALID')
+    }
+  }
+}
+
 export function deliveryStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) {
   return `${run.id}:delivery:r${run.revisionRound}`
 }
@@ -384,13 +744,43 @@ export function assertFinalDeliveryForCompletion(
   const proposalHash = blueprint.visualDeckV4Proposal ? hashInput(blueprint.visualDeckV4Proposal) : undefined
   if (proposalHash !== delivery.identity.proposalHash) throw new Error('FINAL_DELIVERY_PROPOSAL_MISMATCH')
   if (delivery.qualityOverride) {
-    if (delivery.qualityStatus !== 'OVERRIDDEN_INTERNAL' || !delivery.qualityOverrideAudit) {
-      throw new Error('FINAL_DELIVERY_OVERRIDE_AUDIT_REQUIRED')
+    if (delivery.qualityStatus === 'SYSTEM_POLICY_ACCEPTED') {
+      if (!delivery.qualityPolicyAudit || delivery.qualityOverrideAudit) {
+        throw new Error('FINAL_DELIVERY_POLICY_AUDIT_REQUIRED')
+      }
+      if (!isVisualDeckV4(run) || run.automationLevel !== 'BOUNDED_AUTO') {
+        throw new Error('FINAL_DELIVERY_POLICY_MODE_INVALID')
+      }
+      const runPolicyAudit = qualityPolicyAuditForRun(run)
+      if (!runPolicyAudit
+        || (run.qualityDisposition && run.qualityDisposition !== 'SYSTEM_POLICY_ACCEPTED')
+        || runPolicyAudit.policyId !== V4_NON_BLOCKING_QUALITY_POLICY_ID
+        || JSON.stringify(delivery.qualityPolicyAudit) !== JSON.stringify(runPolicyAudit)
+        || JSON.stringify(delivery.openIssueIds) !== JSON.stringify(runPolicyAudit.issueIds)) {
+        throw new Error('FINAL_DELIVERY_POLICY_AUDIT_INVALID')
+      }
+    } else {
+      if (delivery.qualityStatus !== 'OVERRIDDEN_INTERNAL' || !delivery.qualityOverrideAudit
+        || delivery.qualityPolicyAudit) {
+        throw new Error('FINAL_DELIVERY_OVERRIDE_AUDIT_REQUIRED')
+      }
+      if (run.presentationMode === 'VISUAL_DECK_V4' && delivery.qualityOverrideAudit.actorRole !== 'ADMIN') {
+        throw new Error('FINAL_DELIVERY_V4_ADMIN_OVERRIDE_REQUIRED')
+      }
+      if (delivery.qualityOverrideAudit.actorId !== run.qualityOverrideBy
+        || delivery.qualityOverrideAudit.actorRole !== run.qualityOverrideRole
+        || delivery.qualityOverrideAudit.reason !== run.qualityOverrideReason
+        || delivery.qualityOverrideAudit.acceptedAt !== run.qualityOverrideAt
+        || JSON.stringify(delivery.qualityOverrideAudit.issueIds) !== JSON.stringify(run.qualityOverrideIssueIds)
+        || JSON.stringify(delivery.openIssueIds) !== JSON.stringify(delivery.qualityOverrideAudit.issueIds)
+        || (run.qualityDisposition && run.qualityDisposition !== 'ADMIN_OVERRIDE')) {
+        throw new Error('FINAL_DELIVERY_OVERRIDE_AUDIT_INVALID')
+      }
     }
-    if (run.presentationMode === 'VISUAL_DECK_V4' && delivery.qualityOverrideAudit.actorRole !== 'ADMIN') {
-      throw new Error('FINAL_DELIVERY_V4_ADMIN_OVERRIDE_REQUIRED')
-    }
-  } else if (delivery.qualityStatus !== 'APPROVED' || delivery.openIssueIds.length > 0) {
+  } else if (delivery.qualityStatus !== 'APPROVED'
+    || delivery.qualityPolicyAudit
+    || delivery.qualityOverrideAudit
+    || delivery.openIssueIds.length > 0) {
     throw new Error('FINAL_DELIVERY_QUALITY_STATUS_INVALID')
   }
 }

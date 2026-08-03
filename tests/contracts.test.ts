@@ -313,7 +313,7 @@ describe('public v1 contracts', () => {
     expect(() => runActionSchema.parse({ ...base, repairDomain: 'LAYOUT', targetElementId: 'knowledge-2-1' })).toThrow()
   })
 
-  test('requires resumeState exactly while paused', () => {
+  test('requires resumeState exactly while paused and enforces public quality state invariants', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,
       runId: 'run-1',
@@ -336,7 +336,98 @@ describe('public v1 contracts', () => {
     expect(() => runSnapshotSchema.parse({ ...base, status: 'PAUSED', resumeState: null })).toThrow()
     expect(() => runSnapshotSchema.parse({ ...base, status: 'EXECUTING', resumeState: 'PAGE_REVIEW' })).toThrow()
     expect(() => runSnapshotSchema.parse({ ...base, status: 'EXECUTING', resumeState: null, revisionRound: 3 })).toThrow()
-    expect(runSnapshotSchema.parse({ ...base, status: 'PAUSED', resumeState: 'DECK_REVIEW' }).resumeState).toBe('DECK_REVIEW')
+    const paused = runSnapshotSchema.parse({ ...base, status: 'PAUSED', resumeState: 'DECK_REVIEW' })
+    expect(paused.resumeState).toBe('DECK_REVIEW')
+    expect(paused).toMatchObject({
+      qualityDisposition: 'PENDING', qualityPolicyAudit: null, qualityOverrideAudit: null,
+    })
+
+    const policyAudit = {
+      provenance: 'SYSTEM_POLICY' as const,
+      policyId: 'v4-non-blocking-quality-v1',
+      reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      issueIds: ['issue-visual-1'],
+      acceptedAt: '2026-07-21T00:00:00.000Z',
+    }
+    expect(runSnapshotSchema.safeParse({
+      ...base,
+      status: 'DELIVERING',
+      resumeState: null,
+      presentationMode: 'VISUAL_DECK_V4',
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+      qualityOverride: false,
+      qualityPolicyAudit: policyAudit,
+    }).success).toBe(false)
+    expect(runSnapshotSchema.safeParse({
+      ...base,
+      status: 'DELIVERING',
+      resumeState: null,
+      presentationMode: 'VISUAL_DECK_V4',
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+      qualityOverride: true,
+      qualityPolicyAudit: policyAudit,
+      qualityOverrideAudit: {
+        actorId: 'admin-1', actorRole: 'ADMIN', reason: '管理员已逐项复核并接受当前问题。',
+        issueIds: ['issue-visual-1'], acceptedAt: '2026-07-21T00:00:00.000Z',
+      },
+    }).success).toBe(false)
+    expect(runSnapshotSchema.safeParse({
+      ...base,
+      status: 'DELIVERING',
+      resumeState: null,
+      qualityDisposition: 'ADMIN_OVERRIDE',
+      qualityOverride: true,
+      qualityOverrideAudit: null,
+    }).success).toBe(false)
+    expect(runSnapshotSchema.parse({
+      ...base,
+      status: 'DELIVERING',
+      resumeState: null,
+      presentationMode: 'VISUAL_DECK_V4',
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+      qualityOverride: true,
+      qualityPolicyAudit: policyAudit,
+    })).toMatchObject({ qualityDisposition: 'SYSTEM_POLICY_ACCEPTED', qualityPolicyAudit: policyAudit })
+    expect(runSnapshotSchema.parse({
+      ...base,
+      status: 'DELIVERING',
+      resumeState: null,
+      qualityDisposition: 'REVIEW_PASSED',
+    })).toMatchObject({ qualityOverride: false, qualityDisposition: 'REVIEW_PASSED' })
+    expect(runSnapshotSchema.parse({
+      ...base,
+      status: 'FAILED',
+      resumeState: null,
+      qualityDisposition: 'HARD_FAILURE',
+    })).toMatchObject({ status: 'FAILED', qualityDisposition: 'HARD_FAILURE' })
+
+    const failedWithoutHardFailure = runSnapshotSchema.safeParse({
+      ...base, status: 'FAILED', resumeState: null,
+    })
+    expect(failedWithoutHardFailure.success).toBe(false)
+    if (!failedWithoutHardFailure.success) {
+      expect(failedWithoutHardFailure.error.issues.map((issue) => issue.message))
+        .toContain('failed status requires hard failure disposition')
+    }
+
+    const pendingOverride = runSnapshotSchema.safeParse({
+      ...base, status: 'EXECUTING', resumeState: null, qualityOverride: true,
+    })
+    expect(pendingOverride.success).toBe(false)
+    if (!pendingOverride.success) {
+      expect(pendingOverride.error.issues.map((issue) => issue.message))
+        .toContain('pending or review-passed disposition cannot carry quality override provenance')
+    }
+    expect(runSnapshotSchema.safeParse({
+      ...base,
+      status: 'COMPLETED',
+      resumeState: null,
+      qualityDisposition: 'REVIEW_PASSED',
+      qualityOverride: true,
+    }).success).toBe(false)
+    expect(runSnapshotSchema.safeParse({
+      ...base, status: 'EXECUTING', resumeState: null, qualityDisposition: 'HARD_FAILURE',
+    }).success).toBe(false)
   })
 
   test('validates event payload by event type', () => {

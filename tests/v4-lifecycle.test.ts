@@ -9,6 +9,7 @@ import {
   appendV4LifecycleEvent,
   failVisualDeckV4Run,
   failVisualDeckV4Transaction,
+  qualityPolicyAuditForRun,
   reconcileVisualDeckV4TerminalState,
 } from '../src/core/v4-lifecycle'
 
@@ -67,7 +68,7 @@ describe('visual deck v4 lifecycle', () => {
     expect(resolved[0]).toMatchObject({ payload: { issueId: 'issue-fixed', resolution: 'FIXED' } })
   })
 
-  test('accepts only allowlisted quality issues and reports every hard blocker', async () => {
+  test('reports every hard blocker without accepting any recommendation in the same decision', async () => {
     const repository = new InMemoryAgentRepository()
     await repository.createRun(run('DECK_REVIEW'))
 
@@ -81,6 +82,19 @@ describe('visual deck v4 lifecycle', () => {
       }, {
         id: 'billing-issue', category: 'BUDGET_RESERVATION_UNKNOWN' as const, severity: 'CRITICAL' as const,
         summary: '账务预授权状态未知。', slideIds: [], sourceChunkIds: [], status: 'OPEN' as const,
+      }, {
+        id: 'factual-issue', category: 'FACTUAL_RISK' as const, severity: 'WARNING' as const,
+        summary: '第二页存在事实错误。', slideIds: ['run-v4:slide:2'], sourceChunkIds: ['chunk-2'], status: 'OPEN' as const,
+      }, {
+        id: 'curriculum-issue', category: 'CURRICULUM_GAP' as const, severity: 'WARNING' as const,
+        summary: '课程关键事实缺失。', slideIds: ['run-v4:slide:3'], sourceChunkIds: ['chunk-3'], status: 'OPEN' as const,
+      }, {
+        id: 'critical-visual-issue', category: 'IMAGE_QUALITY' as const, severity: 'CRITICAL' as const,
+        summary: '页面存在安全相关的严重视觉错误。', slideIds: ['run-v4:slide:1'], sourceChunkIds: [], status: 'OPEN' as const,
+      }, {
+        id: 'knowledge-domain-issue', category: 'IMAGE_QUALITY' as const, severity: 'WARNING' as const,
+        summary: '页面问题需要修改来源约束内的知识内容。', slideIds: ['run-v4:slide:1'],
+        sourceChunkIds: ['chunk-1'], status: 'OPEN' as const, repairDomain: 'KNOWLEDGE' as const,
       }]) {
         transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'issue.detected', payload: issue })
       }
@@ -88,13 +102,99 @@ describe('visual deck v4 lifecycle', () => {
     })
 
     expect(disposition).toEqual({
-      acceptedIssueIds: ['quality-issue'],
-      blockingIssueIds: ['source-issue', 'billing-issue'],
+      acceptedIssueIds: [],
+      blockingIssueIds: [
+        'source-issue', 'billing-issue', 'factual-issue', 'curriculum-issue', 'critical-visual-issue',
+        'knowledge-domain-issue',
+      ],
     })
     expect((await repository.listEvents('run-v4')).filter((event) => event.type === 'issue.resolved'))
-      .toEqual([expect.objectContaining({
-        payload: { issueId: 'quality-issue', resolution: 'ACCEPTED' },
-      })])
+      .toEqual([])
+  })
+
+  test('treats a rejected legacy page review without quality impact as a hard blocker', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun({ ...run('DECK_REVIEW'), automationLevel: 'BOUNDED_AUTO' })
+
+    const disposition = await repository.transact('run-v4', (transaction) => {
+      transaction.putStep({
+        id: 'step-legacy-page-review',
+        runId: 'run-v4',
+        idempotencyKey: 'run-v4:slide:2:image:r0:v1:review',
+        inputHash: 'legacy-page-review-input',
+        tool: 'review_slide_image',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: {
+          approved: false,
+          textDetected: false,
+          visualScore: 55,
+          reasons: ['对象数量与教材事实不一致。'],
+          retryInstruction: 'Render exactly five countable objects and preserve their source-grounded relationship.',
+        },
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'step-legacy-page-review:visual-review',
+          category: 'IMAGE_QUALITY',
+          severity: 'WARNING',
+          summary: '对象数量与教材事实不一致。',
+          slideIds: ['run-v4:slide:2'],
+          sourceChunkIds: [],
+          status: 'OPEN',
+        },
+      })
+      return appendAcceptedQualityIssueResolutions(transaction)
+    })
+
+    expect(disposition).toEqual({
+      acceptedIssueIds: [],
+      blockingIssueIds: ['step-legacy-page-review:visual-review'],
+    })
+    expect((await repository.listEvents('run-v4')).some((event) =>
+      event.type === 'issue.resolved' && event.payload.resolution === 'ACCEPTED')).toBe(false)
+  })
+
+  test('fails closed for indistinguishable legacy quality actors and trusts only explicit policy audit', () => {
+    const legacyActor = {
+      ...run('DELIVERING'),
+      qualityOverride: true,
+      qualityOverrideBy: 'ppt-agent-quality-policy',
+      qualityOverrideRole: 'ADMIN' as const,
+      qualityOverrideIssueIds: ['legacy-quality-issue'],
+      qualityOverrideAt: '2026-07-21T00:00:00.000Z',
+    }
+    expect(qualityPolicyAuditForRun({
+      ...legacyActor,
+      qualityOverrideReason: '管理员已逐项复核并接受当前问题。',
+    })).toBeNull()
+    expect(qualityPolicyAuditForRun({
+      ...legacyActor,
+      qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+    })).toBeNull()
+
+    const explicitPolicyAudit = {
+      provenance: 'SYSTEM_POLICY' as const,
+      policyId: 'v4-non-blocking-quality-v1',
+      reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      issueIds: ['legacy-quality-issue'],
+      acceptedAt: '2026-07-21T00:00:00.000Z',
+    }
+    expect(qualityPolicyAuditForRun({
+      ...legacyActor,
+      qualityOverrideBy: null,
+      qualityOverrideRole: null,
+      qualityOverrideReason: explicitPolicyAudit.reason,
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+      qualityPolicyAudit: explicitPolicyAudit,
+    })).toEqual(explicitPolicyAudit)
   })
 
   test('deduplicates one active stage but preserves a later retry attempt', async () => {

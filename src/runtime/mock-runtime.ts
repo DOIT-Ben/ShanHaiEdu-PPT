@@ -862,14 +862,25 @@ export function createAgentRuntime(input: RuntimeInput) {
 export function createMockRuntime(input: Omit<RuntimeInput,
   'model' | 'visualReviewer' | 'deckReviewer' | 'revisionPlanner' | 'revisionApplication'> & Readonly<{
     reflectionFailureMode?: MockReflectionFailureMode
+    visualReviewer?: VisualReviewPort
+    deckReviewer?: DeckReviewPort
+    revisionPlanner?: RevisionPlanningPort
+    revisionApplication?: RevisionApplicationPort
   }>) {
-  const { reflectionFailureMode = 'NONE', ...runtimeInput } = input
+  const {
+    reflectionFailureMode = 'NONE',
+    visualReviewer = new PassingVisualReview(),
+    deckReviewer = new PassingDeckReview(),
+    revisionPlanner = new UnsupportedRevisionPlanning(),
+    revisionApplication = new UnsupportedRevisionApplication(),
+    ...runtimeInput
+  } = input
   return createAgentRuntime({
     ...runtimeInput,
     model: new DeterministicPlanningModel(reflectionFailureMode),
-    visualReviewer: new PassingVisualReview(),
-    deckReviewer: new PassingDeckReview(),
-    revisionPlanner: new UnsupportedRevisionPlanning(),
-    revisionApplication: new UnsupportedRevisionApplication(),
+    visualReviewer,
+    deckReviewer,
+    revisionPlanner,
+    revisionApplication,
   })
 }

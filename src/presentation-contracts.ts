@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { qualityOverrideAuditSchema, qualityPolicyAuditSchema } from './contracts'
 import { layoutPresentationText } from './presentation-text-layout'
 import { releaseIdentitySchema } from './release-identity'
 import { visualDeckV4ProposalSchema } from './visual-deck-v4-contracts'
@@ -360,12 +361,20 @@ export const slideVisualReviewSchema = z.object({
   visualScore: z.number().int().min(0).max(100),
   reasons: z.array(z.string().trim().min(1).max(300)).max(6),
   retryInstruction: z.string().trim().min(10).max(1_000).nullable(),
+  qualityImpact: z.enum(['PASS', 'NON_BLOCKING_RECOMMENDATION', 'HARD_BLOCKER']).optional(),
 }).strict().superRefine((value, context) => {
+  const qualityImpact = value.qualityImpact ?? (value.approved ? 'PASS' : 'HARD_BLOCKER')
   if (value.approved && value.textDetected) {
     context.addIssue({ code: 'custom', path: ['approved'], message: 'an image with detected text cannot be approved' })
   }
   if (!value.approved && value.retryInstruction === null) {
     context.addIssue({ code: 'custom', path: ['retryInstruction'], message: 'rejected image requires a retry instruction' })
+  }
+  if (value.approved !== (qualityImpact === 'PASS')) {
+    context.addIssue({ code: 'custom', path: ['qualityImpact'], message: 'quality impact must agree with approval' })
+  }
+  if (!value.approved && value.textDetected && qualityImpact !== 'HARD_BLOCKER') {
+    context.addIssue({ code: 'custom', path: ['qualityImpact'], message: 'detected invalid text is a hard blocker' })
   }
 })
 
@@ -510,17 +519,12 @@ const deliveryRecordObjectSchema = z.object({
   qualityScore: z.number().int().min(0).max(100).nullable(),
   qualityOverride: z.boolean(),
   disposition: z.literal('FINAL').default('FINAL'),
-  qualityStatus: z.enum(['APPROVED', 'OVERRIDDEN_INTERNAL']).optional(),
+  qualityStatus: z.enum(['APPROVED', 'SYSTEM_POLICY_ACCEPTED', 'OVERRIDDEN_INTERNAL']).optional(),
   openIssueIds: z.array(identifierSchema).max(50)
     .refine((value) => new Set(value).size === value.length).default([]),
   identity: deliveryIdentitySchema.default({ status: 'LEGACY_UNVERIFIED' }),
-  qualityOverrideAudit: z.object({
-    actorId: identifierSchema,
-    actorRole: z.enum(['USER', 'ADMIN']),
-    reason: z.string().trim().min(10).max(2_000),
-    issueIds: z.array(identifierSchema).min(1).max(50),
-    acceptedAt: z.string().datetime(),
-  }).strict().nullable().optional(),
+  qualityPolicyAudit: qualityPolicyAuditSchema.nullable().optional(),
+  qualityOverrideAudit: qualityOverrideAuditSchema.nullable().optional(),
   preview: deliveryArtifactSchema.extend({ mimeType: z.literal('image/png') }).strict(),
   pptx: deliveryArtifactSchema.extend({
     mimeType: z.literal('application/vnd.openxmlformats-officedocument.presentationml.presentation'),
@@ -529,18 +533,56 @@ const deliveryRecordObjectSchema = z.object({
   release: releaseIdentitySchema.optional(),
   createdAt: z.string().datetime(),
 }).strict().superRefine((value, context) => {
-  if (value.qualityStatus === 'OVERRIDDEN_INTERNAL' && !value.qualityOverride) {
+  const hasSystemPolicyAudit = Boolean(value.qualityPolicyAudit)
+  const qualityStatus = value.qualityStatus
+    ?? (hasSystemPolicyAudit
+      ? 'SYSTEM_POLICY_ACCEPTED'
+      : value.qualityOverride ? 'OVERRIDDEN_INTERNAL' : 'APPROVED')
+  if (qualityStatus === 'OVERRIDDEN_INTERNAL' && !value.qualityOverride) {
     context.addIssue({ code: 'custom', path: ['qualityStatus'], message: 'internal override status requires qualityOverride' })
   }
-  if (value.qualityStatus === 'APPROVED' && value.qualityOverride) {
+  if (qualityStatus === 'SYSTEM_POLICY_ACCEPTED' && (!value.qualityOverride || !hasSystemPolicyAudit)) {
+    context.addIssue({ code: 'custom', path: ['qualityPolicyAudit'], message: 'system policy status requires policy audit' })
+  }
+  if (qualityStatus === 'APPROVED' && value.qualityOverride) {
     context.addIssue({ code: 'custom', path: ['qualityStatus'], message: 'quality override cannot be marked approved' })
+  }
+  if (value.qualityPolicyAudit && qualityStatus !== 'SYSTEM_POLICY_ACCEPTED') {
+    context.addIssue({ code: 'custom', path: ['qualityPolicyAudit'], message: 'policy audit requires system policy status' })
+  }
+  if (value.qualityOverrideAudit && qualityStatus !== 'OVERRIDDEN_INTERNAL') {
+    context.addIssue({ code: 'custom', path: ['qualityOverrideAudit'], message: 'actor audit requires internal override status' })
+  }
+  const legacyUnauditedOverride = qualityStatus === 'OVERRIDDEN_INTERNAL'
+    && value.identity.status === 'LEGACY_UNVERIFIED'
+    && !value.qualityOverrideAudit
+    && !value.qualityPolicyAudit
+  if (qualityStatus === 'OVERRIDDEN_INTERNAL' && !value.qualityOverrideAudit && !legacyUnauditedOverride) {
+    context.addIssue({ code: 'custom', path: ['qualityOverrideAudit'], message: 'internal override status requires actor audit' })
+  }
+  const auditIssueIds = qualityStatus === 'SYSTEM_POLICY_ACCEPTED'
+    ? value.qualityPolicyAudit?.issueIds
+    : qualityStatus === 'OVERRIDDEN_INTERNAL' ? value.qualityOverrideAudit?.issueIds : []
+  if (auditIssueIds && JSON.stringify(value.openIssueIds) !== JSON.stringify(auditIssueIds)) {
+    context.addIssue({ code: 'custom', path: ['openIssueIds'], message: 'delivery issue ids must match quality audit' })
+  }
+  if (qualityStatus === 'APPROVED' && value.openIssueIds.length > 0) {
+    context.addIssue({ code: 'custom', path: ['openIssueIds'], message: 'approved delivery cannot retain open issues' })
   }
 })
 
-export const deliveryRecordSchema = deliveryRecordObjectSchema.transform((value) => ({
-  ...value,
-  qualityStatus: value.qualityStatus ?? (value.qualityOverride ? 'OVERRIDDEN_INTERNAL' as const : 'APPROVED' as const),
-}))
+export const deliveryRecordSchema = deliveryRecordObjectSchema.transform((value) => {
+  const qualityPolicyAudit = value.qualityPolicyAudit ?? null
+  return {
+    ...value,
+    qualityStatus: value.qualityStatus
+      ?? (qualityPolicyAudit
+        ? 'SYSTEM_POLICY_ACCEPTED' as const
+        : value.qualityOverride ? 'OVERRIDDEN_INTERNAL' as const : 'APPROVED' as const),
+    qualityPolicyAudit,
+    qualityOverrideAudit: value.qualityOverrideAudit ?? null,
+  }
+})
 
 export type BlueprintDraft = z.infer<typeof blueprintDraftSchema>
 export type PresentationBlueprint = z.infer<typeof presentationBlueprintSchema>

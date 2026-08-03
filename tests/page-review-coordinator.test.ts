@@ -301,6 +301,36 @@ describe('page review coordinator', () => {
     })
   })
 
+  test('keeps a rejected supervised v4 page behind internal review when automatic revision is disabled', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'SUPERVISED',
+        maxRevisionRounds: 0,
+      },
+    })
+    const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact((imageStep.output as { artifactId: string }).artifactId, {
+      approved: false,
+      textDetected: false,
+      visualScore: 55,
+      reasons: ['第二页构图需要内部复核。'],
+      retryInstruction: 'Remove the duplicated countable objects on page two.',
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', rejected: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'NEEDS_HUMAN',
+      qualityOverride: false,
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(true)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
+  })
+
   test('accepts quality findings and continues to deck review when v4 remediation is disabled', async () => {
     const planned = visualDeckV4Blueprint()
     const { repository, reviewerPort, coordinator } = await fixture({
@@ -312,22 +342,52 @@ describe('page review coordinator', () => {
     })
     const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
     ;(reviewerPort as MockVisualReviewPort).respondToArtifact((imageStep.output as { artifactId: string }).artifactId, {
-      approved: false, textDetected: false, visualScore: 55,
-      reasons: ['第二页仍存在阻断课堂使用的视觉错误。'],
-      retryInstruction: 'Remove the duplicated countable objects on page two.',
+      approved: false, textDetected: false, visualScore: 78,
+      reasons: ['第二页视觉间距仍可优化，但不影响事实、来源或课堂使用。'],
+      retryInstruction: 'Increase the spacing between the two complete object groups without changing their count.',
+      qualityImpact: 'NON_BLOCKING_RECOMMENDATION',
     })
 
     expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'DECK_REVIEW', rejected: 1 })
-    expect(await repository.getRun('run-1')).toMatchObject({ status: 'DECK_REVIEW', revisionRound: 0 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'DECK_REVIEW', revisionRound: 0, qualityDisposition: 'PENDING',
+      qualityOverride: false, qualityPolicyAudit: null,
+    })
     const events = await repository.listEvents('run-1')
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
     expect(events.some((event) => event.type === 'run.failed')).toBe(false)
     expect(events.some((event) => event.type === 'issue.resolved'
-      && event.payload.resolution === 'ACCEPTED')).toBe(true)
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
     expect(events.find((event) => event.type === 'page_review.completed')).toMatchObject({
       payload: { reason: 'PAGE_REVIEW_REJECTED', retryable: false },
     })
     expect(events.at(-1)).toMatchObject({ type: 'deck_review.started' })
+  })
+
+  test('fails instead of policy-accepting a rejected page without an explicit non-blocking classification', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, reviewerPort, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
+        revisionRound: 0, maxRevisionRounds: 0,
+      },
+    })
+    const imageStep = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-2')!
+    ;(reviewerPort as MockVisualReviewPort).respondToArtifact((imageStep.output as { artifactId: string }).artifactId, {
+      approved: false, textDetected: false, visualScore: 55,
+      reasons: ['第二页的对象数量与教材事实矛盾，阻断课堂使用。'],
+      retryInstruction: 'Render exactly five countable objects and preserve the source-grounded grouping relationship.',
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', qualityDisposition: 'HARD_FAILURE', qualityOverride: false,
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
   })
 
   test('keeps prior issues open while a redraw still fails and resolves them after the page passes', async () => {
@@ -519,8 +579,10 @@ describe('page review coordinator', () => {
       bytes: new TextEncoder().encode('revised-slide-2-over-budget'), idempotencyKey: 'revised-slide-2-over-budget',
     })
     ;(reviewerPort as MockVisualReviewPort).respondToArtifact(revisedArtifact.artifactId, {
-      approved: false, textDetected: false, visualScore: 55, reasons: ['页面仍有复杂视觉问题。'],
+      approved: false, textDetected: false, visualScore: 76,
+      reasons: ['页面仍有非阻断的视觉复杂度优化建议。'],
       retryInstruction: 'C'.repeat(1_000),
+      qualityImpact: 'NON_BLOCKING_RECOMMENDATION',
     })
     await repository.transact('run-1', (transaction) => {
       const now = transaction.run.updatedAt
@@ -580,7 +642,7 @@ describe('page review coordinator', () => {
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) =>
-      event.type === 'issue.resolved' && event.payload.resolution === 'ACCEPTED')).toBe(true)
+      event.type === 'issue.resolved' && event.payload.resolution === 'ACCEPTED')).toBe(false)
   })
 
   test('replays a completed page-review phase without model calls', async () => {

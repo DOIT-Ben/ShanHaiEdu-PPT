@@ -596,6 +596,7 @@ describe('run service', () => {
     expect(accepted).toMatchObject({
       status: 'DELIVERING', qualityOverride: true, qualityOverrideRole: 'ADMIN',
       qualityOverrideIssueIds: ['issue-v4-visual-1'],
+      qualityDisposition: 'ADMIN_OVERRIDE', qualityPolicyAudit: null,
     })
   })
 
@@ -1019,12 +1020,28 @@ describe('run service', () => {
           sourceChunkIds: [], status: 'OPEN',
         },
       })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.resolved',
+        payload: { issueId: 'v4-quality-recovery-page-issue', resolution: 'ACCEPTED' },
+      })
+      const {
+        qualityDisposition: _qualityDisposition,
+        qualityPolicyAudit: _qualityPolicyAudit,
+        ...legacyRun
+      } = transaction.run
       const failed = {
-        ...transaction.run,
+        ...legacyRun,
         status: 'FAILED' as const,
         version: 7,
         committedBudgetUnits: 2,
         terminalAccounting,
+        qualityOverride: true,
+        qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+        qualityOverrideBy: 'ppt-agent-quality-policy',
+        qualityOverrideRole: 'ADMIN' as const,
+        qualityOverrideIssueIds: ['v4-quality-recovery-page-issue'],
+        qualityOverrideAt: '2026-07-21T00:00:00.000Z',
       }
       transaction.putRun(failed)
       transaction.appendEvent({
@@ -1073,7 +1090,19 @@ describe('run service', () => {
       expectedVersion: 7,
     }, 'retry-v4-quality-delivery-0001')
 
-    expect(recovered).toMatchObject({ status: 'DECK_REVIEW', version: 8, committedBudgetUnits: 2 })
+    expect(recovered).toMatchObject({
+      status: 'DECK_REVIEW',
+      version: 8,
+      committedBudgetUnits: 2,
+      qualityOverride: false,
+      qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      qualityOverrideBy: 'ppt-agent-quality-policy',
+      qualityOverrideRole: 'ADMIN',
+      qualityOverrideIssueIds: ['v4-quality-recovery-page-issue'],
+      qualityOverrideAt: '2026-07-21T00:00:00.000Z',
+      qualityDisposition: 'PENDING',
+    })
+    expect(recovered.qualityPolicyAudit).toBeNull()
     expect(replayed).toEqual(recovered)
     const afterSteps = await repository.listSteps(created.run.id)
     expect(afterSteps.filter((step) => step.tool === 'generate_slide_image'))
@@ -1087,6 +1116,39 @@ describe('run service', () => {
     expect(events.filter((event) => event.type === 'run.resumed')).toHaveLength(1)
     expect(events.filter((event) => event.type === 'deck_review.started')).toHaveLength(1)
     expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+  })
+
+  test('clears an explicit system policy audit before resuming a failed v4 quality gate', async () => {
+    const seeded = await failedV4QualityRecoveryFixture()
+    const policyAudit = {
+      provenance: 'SYSTEM_POLICY' as const,
+      policyId: 'v4-non-blocking-quality-v1',
+      reason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      issueIds: ['v4-quality-recovery-page-issue'],
+      acceptedAt: '2026-07-21T00:00:00.000Z',
+    }
+
+    await seeded.repository.transact(seeded.runId, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        qualityOverride: true,
+        qualityDisposition: 'HARD_FAILURE',
+        qualityPolicyAudit: policyAudit,
+      })
+    })
+
+    const recovered = await seeded.service.act(seeded.runId, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: seeded.expectedVersion,
+    }, 'retry-v4-quality-clears-policy-audit')
+
+    expect(recovered).toMatchObject({
+      status: 'DECK_REVIEW',
+      qualityOverride: false,
+      qualityDisposition: 'PENDING',
+      qualityPolicyAudit: null,
+    })
   })
 
   test('rejects quality recovery before state mutation when Usage V2 finalization requires review', async () => {

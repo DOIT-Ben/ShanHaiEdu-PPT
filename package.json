@@ -13,7 +13,9 @@
     "check": "bun run check:boundaries && bun test && bun run typecheck && bun run build"
   },
   "dependencies": {
+    "jszip": "^3.10.1",
     "pptxgenjs": "^4.0.1",
+    "saxes": "^6.0.0",
     "sharp": "^0.35.3",
     "zod": "^4.0.2"
   },

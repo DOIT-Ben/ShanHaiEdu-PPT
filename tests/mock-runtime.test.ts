@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import sharp from 'sharp'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import type { FrameFlowBackendClient } from '../src/adapters/frameflow-host'
 import {
@@ -19,6 +20,7 @@ import {
   type ImageGenerationPort,
   type RevisionApplicationPort,
   type RevisionPlanningPort,
+  type VisualReviewPort,
 } from '../src/core/ports'
 import { createAgentRuntime, createMockRuntime } from '../src/runtime/mock-runtime'
 import { PPT_AGENT_CONTRACT_VERSION, PPT_AGENT_SOFTWARE_VERSION } from '../src/release-identity'
@@ -52,12 +54,21 @@ class CountingCompletedImageGeneration implements ImageGenerationPort {
     this.submissions.push(structuredClone(input))
     const operationId = `counting-image-${hashInput(input.idempotencyKey).slice(0, 24)}`
     if (!this.artifactsByOperation.has(operationId)) {
+      const digest = Buffer.from(hashInput(input.idempotencyKey).slice(0, 6), 'hex')
+      const bytes = await sharp({
+        create: {
+          width: 1280,
+          height: 720,
+          channels: 3,
+          background: { r: digest[0]!, g: digest[1]!, b: digest[2]! },
+        },
+      }).png().toBuffer()
       const artifact = await this.artifacts.put({
         tenantId: input.tenantId,
         runId: input.idempotencyKey.split(':slide:')[0]!,
         name: `${operationId}.png`,
         mimeType: 'image/png',
-        bytes: new TextEncoder().encode(`image:${input.idempotencyKey}`),
+        bytes,
         idempotencyKey: `${input.idempotencyKey}:artifact`,
       })
       this.artifactsByOperation.set(operationId, artifact.artifactId)
@@ -77,6 +88,310 @@ class CountingCompletedImageGeneration implements ImageGenerationPort {
     return artifactId
       ? { state: 'COMPLETED' as const, artifactId }
       : { state: 'FAILED' as const, errorCode: 'COUNTING_IMAGE_NOT_FOUND', billingState: 'NOT_CHARGED' as const }
+  }
+}
+
+class CountingFrameFlowBackend implements FrameFlowBackendClient {
+  readonly reserveCalls: Parameters<FrameFlowBackendClient['reserveCredits']>[0][] = []
+  readonly settleCalls: Parameters<FrameFlowBackendClient['settleCredits']>[0][] = []
+  readonly releaseCalls: Parameters<FrameFlowBackendClient['releaseCredits']>[0][] = []
+  readonly finalizeCalls: Parameters<FrameFlowBackendClient['finalizeCredits']>[0][] = []
+
+  async getDocumentAttachment(): Promise<never> { throw new Error('COUNTING_BACKEND_TEXT_SOURCE_ONLY') }
+
+  async reserveCredits(input: Parameters<FrameFlowBackendClient['reserveCredits']>[0]) {
+    this.reserveCalls.push(structuredClone(input))
+    return { reservationId: `counting-budget:${input.idempotencyKey}` }
+  }
+
+  async settleCredits(input: Parameters<FrameFlowBackendClient['settleCredits']>[0]) {
+    this.settleCalls.push(structuredClone(input))
+  }
+
+  async releaseCredits(input: Parameters<FrameFlowBackendClient['releaseCredits']>[0]) {
+    this.releaseCalls.push(structuredClone(input))
+  }
+
+  async finalizeCredits(input: Parameters<FrameFlowBackendClient['finalizeCredits']>[0]) {
+    this.finalizeCalls.push(structuredClone(input))
+  }
+
+  async preflightBatchFinalization() {}
+
+  snapshot() {
+    return {
+      reserve: this.reserveCalls.length,
+      settle: this.settleCalls.length,
+      release: this.releaseCalls.length,
+      finalize: this.finalizeCalls.length,
+    }
+  }
+}
+
+class ScenarioVisualReview implements VisualReviewPort {
+  readonly requests: Parameters<VisualReviewPort['review']>[0][] = []
+
+  constructor(
+    private readonly rejectedPage: number | null,
+    private readonly hardBlocker = false,
+  ) {}
+
+  async review(input: Parameters<VisualReviewPort['review']>[0]) {
+    this.requests.push(structuredClone(input))
+    const pageNumber = Number(/:slide:(\d+):/.exec(input.idempotencyKey)?.[1])
+    if (pageNumber === this.rejectedPage) {
+      return {
+        approved: false,
+        textDetected: false,
+        visualScore: this.hardBlocker ? 45 : 68,
+        reasons: [this.hardBlocker
+          ? '页面对象数量与教材事实矛盾，阻断课堂使用。'
+          : '页面构图仍有可优化空间，但不影响事实、来源、安全或文件完整性。'],
+        retryInstruction: this.hardBlocker
+          ? 'Render exactly five countable objects and preserve the source-grounded grouping relationship.'
+          : 'Simplify the composition while preserving all approved facts and copy.',
+        qualityImpact: this.hardBlocker ? 'HARD_BLOCKER' : 'NON_BLOCKING_RECOMMENDATION',
+      }
+    }
+    return { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
+  }
+}
+
+class ScenarioDeckReview implements DeckReviewPort {
+  readonly evaluations: Parameters<DeckReviewPort['evaluate']>[0][] = []
+
+  constructor(private readonly outcome: 'PASS' | 'NON_BLOCKING_REJECT' | 'HARD_BLOCKER') {}
+
+  async evaluate(input: Parameters<DeckReviewPort['evaluate']>[0]) {
+    this.evaluations.push(structuredClone(input))
+    const base = {
+      curriculumCoverageScore: 92,
+      narrativeCoherenceScore: 90,
+      visualConsistencyScore: 90,
+      compositionScore: 90,
+      reviewedSourceChunkIds: input.sourceChunks.map((chunk) => chunk.id),
+    }
+    if (this.outcome === 'NON_BLOCKING_REJECT') {
+      return {
+        ...base,
+        qualityScore: 72,
+        summary: '整套内容和来源完整，但第二页构图仍有一项非阻断改进建议。',
+        issues: [{
+          id: 'deck-composition-recommendation',
+          category: 'COMPOSITION_CONFLICT',
+          severity: 'WARNING',
+          summary: '第二页主体间距可进一步优化。',
+          slideIds: [input.slides[1]!.slideId],
+          sourceChunkIds: [],
+          status: 'OPEN',
+          repairDomain: 'LAYOUT',
+        }],
+      }
+    }
+    if (this.outcome === 'HARD_BLOCKER') {
+      return {
+        ...base,
+        qualityScore: 88,
+        summary: '第二页存在事实错误，必须阻断交付。',
+        issues: [{
+          id: 'deck-factual-hard-blocker',
+          category: 'FACTUAL_RISK',
+          severity: 'WARNING',
+          summary: '第二页陈述与教材事实不一致。',
+          slideIds: [input.slides[1]!.slideId],
+          sourceChunkIds: [input.sourceChunks[0]!.id],
+          status: 'OPEN',
+          repairDomain: 'KNOWLEDGE',
+        }],
+      }
+    }
+    return {
+      ...base,
+      qualityScore: 90,
+      summary: '整套审查通过，事实、来源、视觉和文件交付条件均满足。',
+      issues: [],
+    }
+  }
+}
+
+type QualityPolicyScenario = Readonly<{
+  id: string
+  rejectedPage: number | null
+  deckOutcome: 'PASS' | 'NON_BLOCKING_REJECT' | 'HARD_BLOCKER'
+  hardPageBlocker?: boolean
+}>
+
+async function runQualityPolicyScenario(scenario: QualityPolicyScenario) {
+  const repository = new InMemoryAgentRepository()
+  const artifacts = new MockArtifactPort()
+  const images = new CountingCompletedImageGeneration(artifacts)
+  const frameFlowBackend = new CountingFrameFlowBackend()
+  const visualReviewer = new ScenarioVisualReview(scenario.rejectedPage, scenario.hardPageBlocker)
+  const deckReviewer = new ScenarioDeckReview(scenario.deckOutcome)
+  const runtimeInput = {
+    repository,
+    artifacts,
+    images,
+    frameFlowBackend,
+    visualReviewer,
+    deckReviewer,
+    apiToken: token,
+  }
+  const runtime = createMockRuntime(runtimeInput)
+  const created = await runtime.handler(request('/v1/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `quality-policy-${scenario.id}` },
+    body: JSON.stringify({
+      schemaVersion: '1',
+      host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+      source: {
+        kind: 'TEXT',
+        name: '五以内数的分与合.txt',
+        text: '把五只小鸟分成两个非空组，记录每一种分法，并检查两组合起来仍然是五只。'.repeat(6),
+      },
+      slideCount: 2,
+      visualDirection: '明亮清晰的儿童课堂信息图',
+      imageModel: 'mock-image',
+      automationLevel: 'BOUNDED_AUTO',
+      budgetUnits: 2,
+      maxRevisionRounds: 0,
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: {
+        instruction: '制作两页讲解五以内数的分与合的课堂视觉 PPT',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: {
+          deckType: 'DETAILED_DECK',
+          language: 'zh-CN',
+          length: { slideCount: 2 },
+          aspectRatio: '16:9',
+          audience: '幼儿园大班学生',
+          focus: '理解 5 的分与合',
+        },
+      },
+    }),
+  }))
+  expect(created.status).toBe(201)
+  const runId = (await created.json() as { data: { id: string } }).data.id
+
+  await runtime.tick()
+  await runtime.tick()
+  expect(await repository.getRun(runId)).toMatchObject({
+    status: 'PAGE_REVIEW',
+    committedBudgetUnits: 2,
+    maxRevisionRounds: 0,
+  })
+  expect(images.submissions).toHaveLength(2)
+  const billingAfterGeneration = frameFlowBackend.snapshot()
+  expect(Object.values(billingAfterGeneration).reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0)
+
+  const observedStatuses: string[] = ['PAGE_REVIEW']
+  let publicQualityAtDeckReview: unknown = null
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await runtime.tick()
+    const current = await repository.getRun(runId)
+    if (!current) throw new Error('SCENARIO_RUN_NOT_FOUND')
+    observedStatuses.push(current.status)
+    if (current.status === 'DECK_REVIEW') {
+      const detail = await runtime.handler(request(`/v1/runs/${runId}`))
+      publicQualityAtDeckReview = (await detail.json() as { data: {
+        qualityDisposition: string
+        qualityPolicyAudit: unknown
+      } }).data
+    }
+    if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(current.status)) break
+  }
+
+  return {
+    repository,
+    artifacts,
+    images,
+    frameFlowBackend,
+    visualReviewer,
+    deckReviewer,
+    runtime,
+    runId,
+    observedStatuses,
+    publicQualityAtDeckReview,
+    billingAfterGeneration,
+  }
+}
+
+async function assertReadableFinalDelivery(
+  scenario: Awaited<ReturnType<typeof runQualityPolicyScenario>>,
+  expectedSlideCount: number,
+) {
+  const detailResponse = await scenario.runtime.handler(request(`/v1/runs/${scenario.runId}`))
+  expect(detailResponse.status).toBe(200)
+  const detail = await detailResponse.json() as { data: {
+    qualityDisposition: string
+    deliveries: Array<{
+      id: string
+      disposition: string
+      qualityStatus: string
+      qualityOverrideAudit?: unknown
+      qualityPolicyAudit?: {
+        provenance: string
+        policyId: string
+        reason: string
+        issueIds: string[]
+        acceptedAt: string
+      } | null
+      identity: { status: string; slideCount?: number; pageNumbers?: number[] }
+    }>
+  } }
+  expect(detail.data.qualityDisposition).toBe('SYSTEM_POLICY_ACCEPTED')
+  expect(detail.data.deliveries).toHaveLength(1)
+  const delivery = detail.data.deliveries[0]!
+  expect(delivery).toMatchObject({
+    disposition: 'FINAL',
+    qualityStatus: 'SYSTEM_POLICY_ACCEPTED',
+    qualityOverrideAudit: null,
+    qualityPolicyAudit: {
+      provenance: 'SYSTEM_POLICY',
+      policyId: 'v4-non-blocking-quality-v1',
+    },
+    identity: {
+      status: 'VERIFIED',
+      slideCount: expectedSlideCount,
+      pageNumbers: Array.from({ length: expectedSlideCount }, (_, index) => index + 1),
+    },
+  })
+  expect(delivery.qualityPolicyAudit?.reason.length).toBeGreaterThan(10)
+  expect(delivery.qualityPolicyAudit?.issueIds.length).toBeGreaterThan(0)
+
+  const contentPath = `/v1/runs/${scenario.runId}/deliveries/${encodeURIComponent(delivery.id)}/content`
+  const previewResponse = await scenario.runtime.handler(request(`${contentPath}?format=preview`))
+  expect(previewResponse.status).toBe(200)
+  expect(previewResponse.headers.get('Content-Type')).toContain('image/png')
+  const previewBytes = new Uint8Array(await previewResponse.arrayBuffer())
+  expect([...previewBytes.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+
+  const pptxResponse = await scenario.runtime.handler(request(`${contentPath}?format=pptx`))
+  expect(pptxResponse.status).toBe(200)
+  expect(pptxResponse.headers.get('Content-Type')).toContain('presentationml.presentation')
+  const pptxBytes = new Uint8Array(await pptxResponse.arrayBuffer())
+  expect(pptxBytes.length).toBeGreaterThan(10_000)
+  expect([...pptxBytes.slice(0, 2)]).toEqual([80, 75])
+
+  const directory = await mkdtemp(join(tmpdir(), `ppt-agent-${scenario.runId}-`))
+  try {
+    const path = join(directory, 'delivery.pptx')
+    await writeFile(path, pptxBytes)
+    const validation = Bun.spawn(['unzip', '-t', path], { stdout: 'pipe', stderr: 'pipe' })
+    await Promise.all([new Response(validation.stdout).text(), new Response(validation.stderr).text()])
+    expect(await validation.exited).toBe(0)
+    const listing = Bun.spawn(['unzip', '-Z1', path], { stdout: 'pipe', stderr: 'pipe' })
+    const [entries, listingError, listingExit] = await Promise.all([
+      new Response(listing.stdout).text(),
+      new Response(listing.stderr).text(),
+      listing.exited,
+    ])
+    expect(listingError).toBe('')
+    expect(listingExit).toBe(0)
+    expect(entries.split('\n').filter((entry) => /^ppt\/slides\/slide\d+\.xml$/.test(entry)))
+      .toHaveLength(expectedSlideCount)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
   }
 }
 
@@ -452,6 +767,7 @@ describe('mock runtime', () => {
     const completedRun = (await repository.getRun(runId))!
     expect(completedRun).toMatchObject({
       status: 'COMPLETED', presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 3, qualityScore: 90,
+      qualityDisposition: 'REVIEW_PASSED',
     })
     const events = await repository.listEvents(runId)
     expect(validateLifecycle(events, completedRun.status, completedRun.revisionRound)).toMatchObject({
@@ -538,6 +854,126 @@ describe('mock runtime', () => {
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
+  })
+
+  test('automatically completes a new v4 run after a non-blocking page-review rejection with revisions disabled', async () => {
+    const scenario = await runQualityPolicyScenario({
+      id: 'page-review-rejection',
+      rejectedPage: 2,
+      deckOutcome: 'PASS',
+    })
+
+    expect(scenario.observedStatuses).toEqual(['PAGE_REVIEW', 'DECK_REVIEW', 'DELIVERING', 'COMPLETED'])
+    expect(scenario.publicQualityAtDeckReview).toMatchObject({
+      qualityDisposition: 'PENDING', qualityPolicyAudit: null,
+    })
+    expect(scenario.visualReviewer.requests).toHaveLength(2)
+    expect(scenario.deckReviewer.evaluations).toHaveLength(1)
+    expect(scenario.images.submissions).toHaveLength(2)
+    expect(scenario.frameFlowBackend.snapshot()).toEqual(scenario.billingAfterGeneration)
+    expect(await scenario.repository.getRun(scenario.runId)).toMatchObject({
+      status: 'COMPLETED',
+      committedBudgetUnits: 2,
+      qualityOverride: true,
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+    })
+    const events = await scenario.repository.listEvents(scenario.runId)
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'page_review.completed')).toMatchObject({
+      payload: { reason: 'PAGE_REVIEW_REJECTED', retryable: false },
+    })
+    expect(events.find((event) => event.type === 'deck_review.completed')).toMatchObject({
+      payload: { reason: null },
+    })
+    await assertReadableFinalDelivery(scenario, 2)
+  })
+
+  test('automatically completes a new v4 run after a non-blocking deck-review rejection with revisions disabled', async () => {
+    const scenario = await runQualityPolicyScenario({
+      id: 'deck-review-rejection',
+      rejectedPage: null,
+      deckOutcome: 'NON_BLOCKING_REJECT',
+    })
+
+    expect(scenario.observedStatuses).toEqual(['PAGE_REVIEW', 'DECK_REVIEW', 'DELIVERING', 'COMPLETED'])
+    expect(scenario.visualReviewer.requests).toHaveLength(2)
+    expect(scenario.deckReviewer.evaluations).toHaveLength(1)
+    expect(scenario.images.submissions).toHaveLength(2)
+    expect(scenario.frameFlowBackend.snapshot()).toEqual(scenario.billingAfterGeneration)
+    expect(await scenario.repository.getRun(scenario.runId)).toMatchObject({
+      status: 'COMPLETED',
+      committedBudgetUnits: 2,
+      qualityOverride: true,
+      qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
+    })
+    const events = await scenario.repository.listEvents(scenario.runId)
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'page_review.completed')).toMatchObject({
+      payload: { reason: null },
+    })
+    expect(events.find((event) => event.type === 'deck_review.completed')).toMatchObject({
+      payload: { reason: 'DECK_REVIEW_REJECTED', retryable: false },
+    })
+    await assertReadableFinalDelivery(scenario, 2)
+  })
+
+  test('fails a new v4 run instead of policy-delivering a hard deck-review blocker', async () => {
+    const scenario = await runQualityPolicyScenario({
+      id: 'deck-review-hard-blocker',
+      rejectedPage: null,
+      deckOutcome: 'HARD_BLOCKER',
+    })
+
+    expect(scenario.observedStatuses).toEqual(['PAGE_REVIEW', 'DECK_REVIEW', 'FAILED'])
+    expect(scenario.visualReviewer.requests).toHaveLength(2)
+    expect(scenario.deckReviewer.evaluations).toHaveLength(1)
+    expect(scenario.images.submissions).toHaveLength(2)
+    expect(scenario.frameFlowBackend.snapshot()).toEqual(scenario.billingAfterGeneration)
+    expect(await scenario.repository.getRun(scenario.runId)).toMatchObject({
+      status: 'FAILED',
+      committedBudgetUnits: 2,
+      qualityOverride: false,
+      qualityDisposition: 'HARD_FAILURE',
+    })
+    expect(await scenario.repository.listDeliveries(scenario.runId)).toEqual([])
+    const events = await scenario.repository.listEvents(scenario.runId)
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+    })
+    const detail = await scenario.runtime.handler(request(`/v1/runs/${scenario.runId}`))
+    expect(await detail.json()).toMatchObject({ data: { qualityDisposition: 'HARD_FAILURE' } })
+  })
+
+  test('fails a new v4 run instead of policy-delivering a hard page-review blocker', async () => {
+    const scenario = await runQualityPolicyScenario({
+      id: 'page-review-hard-blocker',
+      rejectedPage: 2,
+      deckOutcome: 'PASS',
+      hardPageBlocker: true,
+    })
+
+    expect(scenario.observedStatuses).toEqual(['PAGE_REVIEW', 'FAILED'])
+    expect(scenario.visualReviewer.requests).toHaveLength(2)
+    expect(scenario.deckReviewer.evaluations).toHaveLength(0)
+    expect(scenario.images.submissions).toHaveLength(2)
+    expect(scenario.frameFlowBackend.snapshot()).toEqual(scenario.billingAfterGeneration)
+    expect(await scenario.repository.getRun(scenario.runId)).toMatchObject({
+      status: 'FAILED', committedBudgetUnits: 2, qualityOverride: false,
+      qualityDisposition: 'HARD_FAILURE',
+    })
+    expect(await scenario.repository.listDeliveries(scenario.runId)).toEqual([])
+    const events = await scenario.repository.listEvents(scenario.runId)
+    expect(events.some((event) => event.type === 'deck_review.started')).toBe(false)
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
   })
 
   test('routes a failed deck review through approved local revision and re-review', async () => {
@@ -687,12 +1123,15 @@ describe('mock runtime', () => {
     expect(renderer).toMatchObject({ previewCalls: 1, pptxCalls: 1 })
   })
 
-  test('recovers an exhausted v4 quality failure through the worker without resubmitting or rebilling images', async () => {
+  test('fails closed for an exhausted legacy quality actor without resubmitting or rebilling images', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
     const renderer = new MockPresentationRendererPort()
     const images = new CountingCompletedImageGeneration(artifacts)
-    const runtime = createMockRuntime({ repository, artifacts, renderer, images, apiToken: token })
+    const frameFlowBackend = new CountingFrameFlowBackend()
+    const runtime = createMockRuntime({
+      repository, artifacts, renderer, images, frameFlowBackend, apiToken: token, appVersion: '4.3.0',
+    })
     const created = await runtime.handler(request('/v1/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-v4-quality-recovery-create' },
@@ -708,7 +1147,7 @@ describe('mock runtime', () => {
         imageModel: 'mock-image',
         automationLevel: 'BOUNDED_AUTO',
         budgetUnits: 2,
-        maxRevisionRounds: 0,
+        maxRevisionRounds: 2,
         presentationMode: 'VISUAL_DECK_V4',
         visualDeckV4: {
           instruction: '制作两页讲解五以内数的分与合的课堂视觉 PPT',
@@ -722,16 +1161,28 @@ describe('mock runtime', () => {
     }))
     const runId = (await created.json() as { data: { id: string } }).data.id
     expect(created.status).toBe(201)
+    const originalRun = (await repository.getRun(runId))!
+    const originalIdentity = {
+      id: originalRun.id,
+      creationKey: originalRun.creationKey,
+      requestHash: originalRun.requestHash,
+      host: originalRun.host,
+      release: originalRun.release,
+    }
+    expect(originalRun.release).toMatchObject({ softwareVersion: '4.3.0', presentationMode: 'VISUAL_DECK_V4' })
 
     await runtime.tick()
     await runtime.tick()
     const generated = (await repository.getRun(runId))!
-    expect(generated).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 2, maxRevisionRounds: 0 })
+    expect(generated).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 2, maxRevisionRounds: 2 })
     const beforeSteps = await repository.listSteps(runId)
     const beforeImageSteps = beforeSteps.filter((step) => step.tool === 'generate_slide_image')
     const beforeBatches = beforeSteps.filter((step) => step.tool === 'generate_image_batch')
     expect(beforeImageSteps).toHaveLength(2)
     expect(images.submissions).toHaveLength(2)
+    const billingBeforeRecovery = frameFlowBackend.snapshot()
+    expect(billingBeforeRecovery.reserve).toBeGreaterThan(0)
+    expect(Object.values(billingBeforeRecovery).reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0)
     const terminalAccounting = deriveV4TerminalAccounting(generated, beforeSteps)
     expect(terminalAccounting.accountingStatus).toBe('FINAL')
     await repository.transact(runId, (transaction) => {
@@ -739,16 +1190,32 @@ describe('mock runtime', () => {
         schemaVersion: '1',
         type: 'issue.detected',
         payload: {
-          id: 'legacy-v4-quality-issue', category: 'IMAGE_QUALITY', severity: 'WARNING',
-          summary: '旧版本页审发现一项非确定性的构图问题。', slideIds: [`${runId}:slide:2`],
-          sourceChunkIds: [], status: 'OPEN',
+          id: 'legacy-v4-quality-issue', category: 'COMPOSITION_CONFLICT', severity: 'WARNING',
+          summary: '旧版本整稿审查发现一项非阻断的构图建议。', slideIds: [`${runId}:slide:2`],
+          sourceChunkIds: [], status: 'OPEN', repairDomain: 'LAYOUT',
         },
       })
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'issue.resolved',
+        payload: { issueId: 'legacy-v4-quality-issue', resolution: 'ACCEPTED' },
+      })
+      const {
+        qualityDisposition: _qualityDisposition,
+        qualityPolicyAudit: _qualityPolicyAudit,
+        ...legacyRun
+      } = transaction.run
       const failed = {
-        ...transaction.run,
+        ...legacyRun,
         status: 'FAILED' as const,
         version: transaction.run.version + 1,
         terminalAccounting,
+        qualityOverride: true,
+        qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+        qualityOverrideBy: 'ppt-agent-quality-policy',
+        qualityOverrideRole: 'ADMIN' as const,
+        qualityOverrideIssueIds: ['legacy-v4-quality-issue'],
+        qualityOverrideAt: '2026-07-21T00:00:00.000Z',
       }
       transaction.putRun(failed)
       transaction.appendEvent({
@@ -771,20 +1238,40 @@ describe('mock runtime', () => {
       body: JSON.stringify({ schemaVersion: '1', type: 'RETRY_DELIVERY', expectedVersion: failed.version }),
     }))
     expect(resumed.status).toBe(200)
+    expect(await resumed.json()).toMatchObject({
+      data: {
+        status: 'DECK_REVIEW',
+        qualityOverride: false,
+        qualityDisposition: 'PENDING',
+        qualityPolicyAudit: null,
+        qualityOverrideAudit: null,
+      },
+    })
     await runtime.tick()
     await runtime.tick()
 
     expect(await repository.getRun(runId)).toMatchObject({
-      status: 'COMPLETED', committedBudgetUnits: 2, qualityOverride: true,
+      ...originalIdentity,
+      status: 'FAILED',
+      committedBudgetUnits: 2,
+      qualityOverride: false,
+      qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+      qualityOverrideBy: 'ppt-agent-quality-policy',
+      qualityOverrideRole: 'ADMIN',
+      qualityOverrideIssueIds: ['legacy-v4-quality-issue'],
+      qualityOverrideAt: '2026-07-21T00:00:00.000Z',
+      qualityDisposition: 'HARD_FAILURE',
     })
+    expect((await repository.getRun(runId))!.qualityPolicyAudit).toBeNull()
     expect(images.submissions).toHaveLength(2)
+    expect(frameFlowBackend.snapshot()).toEqual(billingBeforeRecovery)
     const afterSteps = await repository.listSteps(runId)
     expect(afterSteps.filter((step) => step.tool === 'generate_slide_image')).toEqual(beforeImageSteps)
     expect(afterSteps.filter((step) => step.tool === 'generate_image_batch')).toEqual(beforeBatches)
-    expect(await repository.listDeliveries(runId)).toEqual([
-      expect.objectContaining({ qualityStatus: 'OVERRIDDEN_INTERNAL', qualityOverride: true }),
-    ])
-    expect(await repository.getTerminalEvent(runId)).toMatchObject({ type: 'run.completed' })
+    expect(await repository.listDeliveries(runId)).toEqual([])
+    expect(await repository.getTerminalEvent(runId)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+    })
   })
 
   test('rejects missing or mismatched service credentials', async () => {

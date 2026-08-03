@@ -13,16 +13,16 @@ import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
 import {
   allPageNumbers,
-  appendAcceptedQualityIssueResolutions,
   appendFixedIssueResolutions,
   appendV4LifecycleEvent,
+  classifyOpenQualityIssuesForAcceptance,
   failVisualDeckV4Transaction,
-  ensureAutomatedQualityAcceptanceIssue,
-  markAutomatedQualityAcceptance,
   revisionDetails,
 } from './v4-lifecycle'
 
 const COMPOSITE_REVIEW_VERSION = 'classroom-v4'
+
+type AutomaticPageRevisionOutcome = 'STARTED' | 'EXHAUSTED' | 'NOT_ALLOWED'
 
 function compositeReviewVersion(deckTitle: string, pageNumber: number) {
   return deckTitle.includes('5以内数的分与合') && pageNumber === 2
@@ -153,14 +153,15 @@ export class PageReviewCoordinator {
       await this.resolveSupersededPageIssues(run, reviews)
     }
     if (executionFailed || rejected > 0) {
-      const autoRevisionStarted = fullPageRaster
+      const automaticRevision = fullPageRaster
         && !executionFailed
         && rejected > 0
         && reviews.length === total
-        && await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
-      if (!autoRevisionStarted) {
+        ? await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
+        : 'NOT_ALLOWED'
+      if (automaticRevision !== 'STARTED') {
         const problemPageNumbers = this.problemPageNumbers(blueprint, imageSteps, reviews)
-        if (fullPageRaster && !executionFailed && rejected > 0) {
+        if (fullPageRaster && !executionFailed && rejected > 0 && automaticRevision === 'EXHAUSTED') {
           await this.moveToDeckReview(runId, total, {
             reason: 'PAGE_REVIEW_REJECTED',
             pageNumbers: problemPageNumbers,
@@ -188,9 +189,9 @@ export class PageReviewCoordinator {
     blueprint: PresentationBlueprint,
     imageSteps: readonly (StepRecord | null)[],
     reviews: readonly ReviewSlideResult[],
-  ) {
-    if (run.automationLevel !== 'BOUNDED_AUTO') return false
-    if (run.revisionRound >= run.maxRevisionRounds) return false
+  ): Promise<AutomaticPageRevisionOutcome> {
+    if (run.automationLevel !== 'BOUNDED_AUTO') return 'NOT_ALLOWED'
+    if (run.revisionRound >= run.maxRevisionRounds) return 'EXHAUSTED'
     const targetRevisionRound = run.revisionRound + 1
     const rejected = imageSteps.flatMap((imageStep, index) => {
       if (!imageStep) return []
@@ -200,7 +201,7 @@ export class PageReviewCoordinator {
       if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
       return [{ slide, reviewResult }]
     })
-    if (rejected.length === 0) return false
+    if (rejected.length === 0) return 'EXHAUSTED'
     const steps = await this.dependencies.repository.listSteps(run.id)
     try {
       for (const { slide, reviewResult } of rejected) {
@@ -213,7 +214,7 @@ export class PageReviewCoordinator {
         })
       }
     } catch (error) {
-      if (error instanceof Error && error.message === 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED') return false
+      if (error instanceof Error && error.message === 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED') return 'EXHAUSTED'
       throw error
     }
     const plan = revisionPlanSchema.parse({
@@ -288,7 +289,7 @@ export class PageReviewCoordinator {
         payload: { from: 'PAGE_REVIEW', to: 'REVISING', reason: 'PAGE_REVIEW_REJECTED' },
       })
     })
-    return true
+    return 'STARTED'
   }
 
   private async resolveSupersededPageIssues(run: RunRecord, reviews: readonly ReviewSlideResult[]) {
@@ -348,9 +349,12 @@ export class PageReviewCoordinator {
   ) {
     await this.dependencies.repository.transact(runId, (transaction) => {
       if (transaction.run.status === 'DECK_REVIEW') return
+      if (accepted && transaction.run.automationLevel !== 'BOUNDED_AUTO') {
+        throw new Error('SYSTEM_QUALITY_POLICY_NOT_ALLOWED')
+      }
       const now = this.dependencies.clock.now().toISOString()
       const disposition = accepted
-        ? appendAcceptedQualityIssueResolutions(transaction, accepted.acceptedIssueIds)
+        ? classifyOpenQualityIssuesForAcceptance(transaction, accepted.acceptedIssueIds)
         : { acceptedIssueIds: [] as string[], blockingIssueIds: [] as string[] }
       if (disposition.blockingIssueIds.length > 0) {
         appendV4LifecycleEvent(transaction, 'page_review.completed', {
@@ -369,12 +373,12 @@ export class PageReviewCoordinator {
         return
       }
       const policy = transitionRun(transaction.run, 'DECK_REVIEW')
-      const acceptedIssueIds = accepted
-        ? ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
-        : []
-      const next = accepted
-        ? markAutomatedQualityAcceptance({ ...transaction.run, ...policy }, acceptedIssueIds, now)
-        : { ...transaction.run, ...policy }
+      const next = {
+        ...transaction.run,
+        ...policy,
+        qualityDisposition: 'PENDING' as const,
+        qualityPolicyAudit: null,
+      }
       transaction.putRun({ ...next, updatedAt: now })
       appendV4LifecycleEvent(transaction, 'page_review.completed', {
         completed: total,
@@ -421,7 +425,9 @@ export class PageReviewCoordinator {
         })
         return
       }
-      if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && reason.includes('REJECTED')) {
+      if (transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && transaction.run.automationLevel === 'BOUNDED_AUTO'
+        && reason.includes('REJECTED')) {
         appendV4LifecycleEvent(transaction, 'page_review.completed', {
           completed: progress?.completed ?? 0,
           total: progress?.total ?? transaction.run.slideCount,

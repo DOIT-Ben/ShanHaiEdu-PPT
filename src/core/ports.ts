@@ -3,6 +3,8 @@ import type {
   CreateRunRequest,
   HostContext,
   PendingTerminalFailure,
+  QualityDisposition,
+  QualityPolicyAudit,
   RunStatus,
   TechnicalRecovery,
 } from '../contracts'
@@ -556,6 +558,8 @@ export type RunRecord = Readonly<{
   qualityOverrideRole?: HostContext['role'] | null
   qualityOverrideIssueIds?: readonly string[]
   qualityOverrideAt?: string | null
+  qualityDisposition?: QualityDisposition
+  qualityPolicyAudit?: QualityPolicyAudit | null
   leaseToken: string | null
   leaseUntil: string | null
   leaseVersion: number
