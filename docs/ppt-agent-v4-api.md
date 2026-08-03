@@ -39,6 +39,10 @@ X-PPT-Agent-Project: <externalProjectId>  # 可选
 
 身份由认证层绑定，请求体的 `host` 只能与该上下文一致。浏览器不得直接持有任一服务 Token。
 
+Run 快照、每条 `AgentEvent`、公开 Delivery 和 JSON 错误体都携带同一个
+`schemaVersion: "1"`。Run 的身份字段固定为 `data.id`；事件和 Delivery 分别使用 `runId` 指回该值。
+宿主不得从 `actorId`、原因文本、工具摘要或未列入 OpenAPI 的字段推断生命周期或交付状态。
+
 ## 自动执行的规划
 
 正常 V4 规划使用三次生成调用和两个质量 Critic：
@@ -190,7 +194,7 @@ V2 Run，就不得回退到不包含 V2 恢复器的 `4.2.x` 或更早版本。
 
 | Run 状态 | 宿主可依赖的结果 |
 | --- | --- |
-| `COMPLETED` | 存在完整性校验通过的 `FINAL` PNG 总览和图片型 PPTX |
+| `COMPLETED` | Run 生命周期已完成；只有详情的 `deliveryAvailability.state` 为 `AVAILABLE` 时才存在可消费交付 |
 | `FAILED` | `run.failed` 提供稳定错误码、是否可重试和终态账务投影 |
 | `CANCELLED` | 停止新提交；已提交任务和批次账务继续以原幂等键对账 |
 
@@ -268,10 +272,29 @@ Agent 仅在以下条件全部满足时执行 `FAILED -> DECK_REVIEW` 并追加 
 恢复不会追加 `approval.resolved` 或提前追加 `delivery.started`，也不会创建、换 Key 或重提任何图片任务。
 条件不满足时返回 `409` 并保持原 Run 不变。
 
-Run 详情中的每个新交付都具有以下消费者身份：
+Run 详情始终返回机器可判定的 `deliveryAvailability`。只有以下对象出现时，宿主才可声明“已生成”、
+展示预览或请求 PPTX：
 
 ```json
 {
+  "state": "AVAILABLE",
+  "deliveryId": "run-...:delivery:r0",
+  "disposition": "FINAL",
+  "identityStatus": "VERIFIED"
+}
+```
+
+其余情况统一为 `{ "state": "UNAVAILABLE", "reason": "..." }`。稳定原因包括
+`RUN_NOT_COMPLETED`、`RUN_FAILED`、`RUN_CANCELLED`、`QUALITY_RECOVERY`、`ACCOUNTING_PENDING`、
+`VERIFIED_FINAL_DELIVERY_MISSING`、`DELIVERY_CONTRACT_INVALID` 和 `DELIVERY_CONTENT_INVALID`。
+Usage V2 的 Run 即使已经进入 `COMPLETED`，在宿主终态 finalize 得到确认前仍返回
+`ACCOUNTING_PENDING`；宿主应继续读取 Run 详情，不能提前暴露下载。
+
+`deliveries` 只包含与 `deliveryAvailability.deliveryId` 一致的一个公开交付，其消费者身份为：
+
+```json
+{
+  "schemaVersion": "1",
   "disposition": "FINAL",
   "qualityStatus": "APPROVED",
   "openIssueIds": [],
@@ -292,8 +315,13 @@ Run 详情中的每个新交付都具有以下消费者身份：
 和实际 `ppt/slides/slideN.xml` 数量校验。非空但损坏或页数不符的文件进入技术恢复，不会成为 FINAL。若 Artifact 已写入
 但首次读回暂时失败，恢复会按原交付幂等键读取并复用已验证字节，只补写缺失 Artifact，不用重新渲染出的变化字节覆盖
 同一身份。
-历史交付在读取时归一化为 `identity.status: "LEGACY_UNVERIFIED"`，不会伪造旧记录中不存在的页集或哈希证据。
-当前合同不产出 DRAFT；未审核页面不得冒充 FINAL。
+历史 `LEGACY_UNVERIFIED` 交付只在持久化兼容层归一化，不会出现在公开 `deliveries` 中，也不能访问内容接口。
+当前公开合同不产出 DRAFT 或未验证 Delivery；未审核页面不得冒充 FINAL。
+
+内容接口会在每次读取时再次核对 Run/Delivery 合同以及 Artifact 的 MIME、长度和 SHA-256。成功响应携带
+`X-PPT-Agent-Schema-Version`、`X-PPT-Agent-Delivery-ID`、`X-PPT-Agent-Content-SHA256` 和 `ETag`。
+门禁未通过时返回 `409 DELIVERY_NOT_AVAILABLE`，并在版本化错误体的 `details.reason` 中返回上述稳定原因；
+响应不会包含磁盘路径、Provider 原始响应或凭据。
 
 当质量模型未通过但 `BOUNDED_AUTO` 返修被禁用或已耗尽，且没有硬阻断时，Delivery 的 `qualityStatus` 为
 `SYSTEM_POLICY_ACCEPTED`。`qualityPolicyAudit` 保存 `provenance: "SYSTEM_POLICY"`、策略 ID、原因、被接受的

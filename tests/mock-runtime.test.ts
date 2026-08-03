@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
+import { CONTRACT_VERSION, agentEventSchema, runSnapshotSchema } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import type { FrameFlowBackendClient } from '../src/adapters/frameflow-host'
 import {
@@ -33,6 +34,7 @@ import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 import type { UsageRunBill } from '../src/usage-accounting-contracts'
 import { deriveV4TerminalAccounting } from '../src/core/v4-terminal-accounting'
 import { v4LifecyclePayload } from '../src/core/v4-lifecycle'
+import { deliveryRecordSchema } from '../src/presentation-contracts'
 
 const token = 'test-runtime-token-0001'
 
@@ -713,6 +715,7 @@ describe('mock runtime', () => {
     }))
     expect(created.status).toBe(201)
     const createdPayload = await created.json() as { data: {
+      schemaVersion: string
       id: string
       release: {
         softwareVersion: string
@@ -724,6 +727,12 @@ describe('mock runtime', () => {
       }
     } }
     const runId = createdPayload.data.id
+    expect(runSnapshotSchema.parse(createdPayload.data)).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      id: runId,
+      status: 'PLANNING',
+      presentationMode: 'VISUAL_DECK_V4',
+    })
     expect(createdPayload.data.release).toEqual({
       softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
       presentationMode: 'VISUAL_DECK_V4',
@@ -746,8 +755,17 @@ describe('mock runtime', () => {
       release: { softwareVersion: string; presentationMode: string; contractVersion: string }
       blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } }
       generationPlan?: { title: string; slideCount: number; pages: unknown[]; output: { editable: boolean } }
+      deliveryAvailability?: unknown
     } }
     expect(planned.data.status).toBe('EXECUTING')
+    expect(runSnapshotSchema.parse(planned.data)).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      id: runId,
+      status: 'EXECUTING',
+    })
+    expect(planned.data.deliveryAvailability).toEqual({
+      state: 'UNAVAILABLE', reason: 'RUN_NOT_COMPLETED',
+    })
     expect(planned.data.release).toMatchObject({
       softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
       presentationMode: 'VISUAL_DECK_V4',
@@ -806,6 +824,7 @@ describe('mock runtime', () => {
     const historyResponse = await runtime.handler(request(`/v1/runs/${runId}/events/history?after=0`))
     const history = await historyResponse.json() as { data: typeof events }
     expect(history.data).toEqual(events)
+    expect(history.data.map((event) => agentEventSchema.parse(event))).toEqual(events)
     const reconnectAfter = events.find((event) => event.type === 'generation.started')!.sequence
     const streamResponse = await runtime.handler(request(`/v1/runs/${runId}/events?after=${reconnectAfter}`))
     const streamed = (await streamResponse.text()).split('\n')
@@ -825,6 +844,7 @@ describe('mock runtime', () => {
     const delivery = (await repository.listDeliveries(runId))[0]!
     const deliveredBlueprint = await getActiveBlueprint(repository, runId, completedRun.revisionRound)
     expect(delivery).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
       disposition: 'FINAL',
       qualityStatus: 'APPROVED',
       openIssueIds: [],
@@ -836,13 +856,47 @@ describe('mock runtime', () => {
         proposalHash: hashInput(deliveredBlueprint.visualDeckV4Proposal),
       },
     })
-    const artifact = artifacts.artifacts.get(delivery.pptx.artifactId)
-    expect(artifact?.bytes.length).toBeGreaterThan(10_000)
+    const finalDetailResponse = await runtime.handler(request(`/v1/runs/${runId}`))
+    const finalDetail = await finalDetailResponse.json() as { data: Record<string, unknown> & {
+      deliveries: unknown[]
+      deliveryAvailability: unknown
+    } }
+    expect(runSnapshotSchema.parse(finalDetail.data)).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      id: runId,
+      status: 'COMPLETED',
+    })
+    expect(finalDetail.data.deliveryAvailability).toEqual({
+      state: 'AVAILABLE',
+      deliveryId: delivery.id,
+      disposition: 'FINAL',
+      identityStatus: 'VERIFIED',
+    })
+    expect(finalDetail.data.deliveries).toHaveLength(1)
+    expect(deliveryRecordSchema.parse(finalDetail.data.deliveries[0])).toEqual(delivery)
+
+    const contentPath = `/v1/runs/${runId}/deliveries/${encodeURIComponent(delivery.id)}/content`
+    const previewResponse = await runtime.handler(request(`${contentPath}?format=preview`))
+    expect(previewResponse.status).toBe(200)
+    expect(previewResponse.headers.get('X-PPT-Agent-Schema-Version')).toBe(CONTRACT_VERSION)
+    expect(previewResponse.headers.get('X-PPT-Agent-Content-SHA256')).toBe(delivery.preview.sha256)
+    expect([...new Uint8Array(await previewResponse.arrayBuffer()).slice(0, 8)])
+      .toEqual([137, 80, 78, 71, 13, 10, 26, 10])
+
+    const pptxResponse = await runtime.handler(request(`${contentPath}?format=pptx`))
+    expect(pptxResponse.status).toBe(200)
+    expect(pptxResponse.headers.get('Content-Type')).toBe(delivery.pptx.mimeType)
+    expect(pptxResponse.headers.get('Content-Length')).toBe(String(delivery.pptx.byteLength))
+    expect(pptxResponse.headers.get('X-PPT-Agent-Schema-Version')).toBe(CONTRACT_VERSION)
+    expect(pptxResponse.headers.get('X-PPT-Agent-Delivery-ID')).toBe(delivery.id)
+    expect(pptxResponse.headers.get('X-PPT-Agent-Content-SHA256')).toBe(delivery.pptx.sha256)
+    const pptxBytes = new Uint8Array(await pptxResponse.arrayBuffer())
+    expect(pptxBytes.length).toBeGreaterThan(10_000)
 
     const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-v4-chain-'))
     try {
       const path = join(directory, 'visual-deck.pptx')
-      await writeFile(path, artifact!.bytes)
+      await writeFile(path, pptxBytes)
       for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1) {
         const process = Bun.spawn(['unzip', '-p', path, `ppt/slides/slide${pageNumber}.xml`], { stdout: 'pipe', stderr: 'pipe' })
         const xml = await new Response(process.stdout).text()
@@ -854,6 +908,23 @@ describe('mock runtime', () => {
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
+
+    const storedPptx = artifacts.artifacts.get(delivery.pptx.artifactId)!
+    artifacts.artifacts.set(delivery.pptx.artifactId, {
+      ...storedPptx,
+      bytes: new TextEncoder().encode('corrupted-after-verification'),
+    })
+    const corrupted = await runtime.handler(request(`${contentPath}?format=pptx`))
+    expect(corrupted.status).toBe(409)
+    expect(await corrupted.json()).toEqual({
+      schemaVersion: CONTRACT_VERSION,
+      error: {
+        code: 'DELIVERY_NOT_AVAILABLE',
+        message: 'delivery is not available',
+        requestId: expect.any(String),
+        details: { reason: 'DELIVERY_CONTENT_INVALID' },
+      },
+    })
   })
 
   test('automatically completes a new v4 run after a non-blocking page-review rejection with revisions disabled', async () => {

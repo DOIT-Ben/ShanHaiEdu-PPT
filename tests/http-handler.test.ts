@@ -156,6 +156,7 @@ describe('HTTP v1 handler', () => {
 
     expect(first.status).toBe(201)
     expect(firstBody.replayed).toBe(false)
+    expect(firstBody.data.schemaVersion).toBe(CONTRACT_VERSION)
     expect(firstBody.data.source).toBeUndefined()
     expect(firstBody.data.requestHash).toBeUndefined()
     expect(firstBody.data.leaseToken).toBeUndefined()
@@ -263,6 +264,10 @@ describe('HTTP v1 handler', () => {
     expect(roleSpoofed.status).toBe(403)
     expect(projectSpoofed.status).toBe(403)
     expect(unauthenticated.status).toBe(401)
+    expect(await unauthenticated.json()).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      error: { code: 'UNAUTHENTICATED', requestId: expect.any(String) },
+    })
   })
 
   test('persists the authenticated project and role instead of body-supplied identity', async () => {
@@ -538,7 +543,7 @@ describe('HTTP v1 handler', () => {
     expect(budget.released).toEqual(new Set(['reservation-1']))
   })
 
-  test('returns owned delivery metadata and streams only the selected controlled artifact', async () => {
+  test('never exposes a non-terminal or unverified delivery as generated content', async () => {
     const { repository, artifacts, handle } = fixture()
     const created = await createRun(handle)
     const runId = (await created.json() as { data: { id: string } }).data.id
@@ -583,20 +588,85 @@ describe('HTTP v1 handler', () => {
       })
     })
 
-    const detail = await handle(request(`/v1/runs/${runId}`))
-    expect((await detail.json() as { data: { deliveries: unknown[] } }).data.deliveries).toHaveLength(1)
-    const previewResponse = await handle(request(
-      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=preview`,
-    ))
-    expect(previewResponse.status).toBe(200)
-    expect(previewResponse.headers.get('Content-Type')).toBe('image/png')
-    expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(previewBytes)
-    const sourcesResponse = await handle(request(
-      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=sources`,
-    ))
-    expect(sourcesResponse.status).toBe(200)
-    expect(sourcesResponse.headers.get('Content-Type')).toBe('application/json')
-    expect(new Uint8Array(await sourcesResponse.arrayBuffer())).toEqual(sourcesBytes)
+    const pendingDetail = await handle(request(`/v1/runs/${runId}`))
+    expect(await pendingDetail.json()).toMatchObject({
+      data: {
+        schemaVersion: CONTRACT_VERSION,
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_NOT_COMPLETED' },
+      },
+    })
+    for (const format of ['preview', 'pptx', 'sources']) {
+      const unavailable = await handle(request(
+        `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=${format}`,
+      ))
+      expect(unavailable.status).toBe(409)
+      expect(await unavailable.json()).toMatchObject({
+        schemaVersion: CONTRACT_VERSION,
+        error: {
+          code: 'DELIVERY_NOT_AVAILABLE',
+          details: { reason: 'RUN_NOT_COMPLETED' },
+        },
+      })
+    }
+
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'RECOVERING',
+        pendingTerminalFailure: {
+          errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+          reason: 'PAGE_REVIEW_REJECTED',
+          requestedAt: transaction.run.updatedAt,
+        },
+        technicalRecovery: {
+          resumeState: 'DECK_REVIEW',
+          reason: 'QUALITY_ACCOUNTING_PENDING',
+          retryable: true,
+          attempt: 1,
+          maxAttempts: 5,
+          nextAttemptAt: transaction.run.updatedAt,
+          active: true,
+        },
+      })
+    })
+    expect(await (await handle(request(`/v1/runs/${runId}`))).json()).toMatchObject({
+      data: {
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'QUALITY_RECOVERY' },
+      },
+    })
+
+    await repository.transact(runId, (transaction) => {
+      const {
+        pendingTerminalFailure: _pendingTerminalFailure,
+        technicalRecovery: _technicalRecovery,
+        ...withoutRecovery
+      } = transaction.run
+      transaction.putRun({ ...withoutRecovery, status: 'FAILED' })
+    })
+    expect(await (await handle(request(`/v1/runs/${runId}`))).json()).toMatchObject({
+      data: {
+        status: 'FAILED',
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_FAILED' },
+      },
+    })
+
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'COMPLETED',
+        qualityDisposition: 'REVIEW_PASSED',
+      })
+    })
+    const completedDetail = await handle(request(`/v1/runs/${runId}`))
+    expect(await completedDetail.json()).toMatchObject({
+      data: {
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'VERIFIED_FINAL_DELIVERY_MISSING' },
+      },
+    })
 
     const otherHeaders = { 'X-Test-Tenant': 'frameflow', 'X-Test-User': 'user-2' }
     const hidden = await handle(new Request(
@@ -604,5 +674,71 @@ describe('HTTP v1 handler', () => {
       { headers: otherHeaders },
     ))
     expect(hidden.status).toBe(404)
+  })
+
+  test('keeps a completed Usage V2 delivery unavailable until terminal accounting is acknowledged', async () => {
+    const { repository, artifacts, handle } = fixture()
+    const created = await createRun(handle, 'http-create-accounting-pending-delivery')
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    const previewBytes = new TextEncoder().encode('verified-preview-bytes')
+    const pptxBytes = new TextEncoder().encode('verified-pptx-bytes')
+    const preview = await artifacts.put({
+      tenantId: 'frameflow', runId, name: 'preview.png', mimeType: 'image/png',
+      bytes: previewBytes, idempotencyKey: `${runId}:pending-preview`,
+    })
+    const pptx = await artifacts.put({
+      tenantId: 'frameflow', runId, name: 'lesson.pptx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      bytes: pptxBytes, idempotencyKey: `${runId}:pending-pptx`,
+    })
+    const deliveryId = `${runId}:delivery:r0`
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'COMPLETED',
+        accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+        presentationMode: 'VISUAL_DECK_V4',
+        qualityDisposition: 'REVIEW_PASSED',
+      })
+      transaction.putDelivery({
+        id: deliveryId,
+        runId,
+        revisionRound: 0,
+        qualityScore: 90,
+        qualityOverride: false,
+        identity: {
+          status: 'VERIFIED',
+          slideCount: 2,
+          pageNumbers: [1, 2],
+          blueprintHash: 'a'.repeat(64),
+        },
+        preview: {
+          artifactId: preview.artifactId, name: 'preview.png', mimeType: 'image/png',
+          sha256: preview.sha256, byteLength: previewBytes.length,
+        },
+        pptx: {
+          artifactId: pptx.artifactId, name: 'lesson.pptx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          sha256: pptx.sha256, byteLength: pptxBytes.length,
+        },
+        createdAt: transaction.run.createdAt,
+      })
+    })
+
+    const detail = await handle(request(`/v1/runs/${runId}`))
+    expect(await detail.json()).toMatchObject({
+      data: {
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_PENDING' },
+      },
+    })
+    const content = await handle(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=pptx`,
+    ))
+    expect(content.status).toBe(409)
+    expect(await content.json()).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      error: { code: 'DELIVERY_NOT_AVAILABLE', details: { reason: 'ACCOUNTING_PENDING' } },
+    })
   })
 })

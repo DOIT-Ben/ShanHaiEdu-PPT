@@ -1,13 +1,18 @@
-import { randomUUID } from 'node:crypto'
-import type { HostContext } from '../contracts'
+import { createHash, randomUUID } from 'node:crypto'
+import type { DeliveryAvailability, DeliveryUnavailableReason, HostContext } from '../contracts'
 import {
   adminRevisionRoundsSettingsSchema,
   adminRevisionRoundsUpdateSchema,
   apiErrorSchema,
+  CONTRACT_VERSION,
+  deliveryAvailabilitySchema,
+  deliveryUnavailableErrorSchema,
   MAX_PLANNING_RETRIES,
+  runSnapshotSchema,
   runStatusSchema,
 } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
+import { assertFinalDeliveryForCompletion } from '../core/delivery-runner'
 import { getGenerationBatch } from '../core/generation-batch'
 import { qualityPolicyAuditForRun } from '../core/v4-lifecycle'
 import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-operations'
@@ -17,7 +22,13 @@ import {
 } from '../core/admin-revision-rounds-settings'
 import type { AgentRepository, ArtifactPort, RunRecord } from '../core/ports'
 import { RunService, RunServiceError } from '../core/run-service'
+import {
+  accountingProtocolFor,
+  isUsageV2RunFinalizationAcknowledged,
+  usageV2FinalizeStepKey,
+} from '../core/usage-v2-coordinator'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
+import { publicDeliveryRecordSchema, type DeliveryRecord } from '../presentation-contracts'
 import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
@@ -73,7 +84,8 @@ function publicRun(run: RunRecord) {
             : ['DELIVERING', 'COMPLETED'].includes(run.status)
               ? 'REVIEW_PASSED' as const
               : 'PENDING' as const
-  return {
+  return runSnapshotSchema.parse({
+    schemaVersion: CONTRACT_VERSION,
     id: run.id,
     host: run.host,
     status: run.status,
@@ -102,13 +114,12 @@ function publicRun(run: RunRecord) {
     committedBudgetUnits: run.committedBudgetUnits,
     qualityScore: run.qualityScore,
     qualityOverride: ['PENDING', 'REVIEW_PASSED'].includes(qualityDisposition) ? false : run.qualityOverride,
-    qualityOverrideReason: run.qualityOverrideReason,
     qualityDisposition,
     qualityPolicyAudit,
     qualityOverrideAudit,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
-  }
+  })
 }
 
 function json(data: unknown, status = 200) {
@@ -117,9 +128,22 @@ function json(data: unknown, status = 200) {
 
 function errorResponse(status: number, code: string, message: string, requestId: string, details?: unknown) {
   const body = apiErrorSchema.parse({
+    schemaVersion: CONTRACT_VERSION,
     error: { code, message, requestId, ...(details === undefined ? {} : { details }) },
   })
   return json(body, status)
+}
+
+function deliveryUnavailableResponse(reason: DeliveryUnavailableReason, requestId: string) {
+  return json(deliveryUnavailableErrorSchema.parse({
+    schemaVersion: CONTRACT_VERSION,
+    error: {
+      code: 'DELIVERY_NOT_AVAILABLE',
+      message: 'delivery is not available',
+      requestId,
+      details: { reason },
+    },
+  }), 409)
 }
 
 function publicRevisionRoundsSettings(settings: Readonly<{
@@ -178,25 +202,111 @@ function decodeCursor(cursor: string) {
   }
 }
 
-async function runDetail(repository: AgentRepository, run: RunRecord) {
-  const [deliveries, snapshot, generationBatch] = await Promise.all([
-    repository.listDeliveries(run.id),
+type DeliveryProjection = Readonly<{
+  deliveryAvailability: DeliveryAvailability
+  deliveries: readonly DeliveryRecord[]
+  delivery: DeliveryRecord | null
+}>
+
+function unavailableDelivery(reason: DeliveryUnavailableReason): DeliveryProjection {
+  return {
+    deliveryAvailability: deliveryAvailabilitySchema.parse({ state: 'UNAVAILABLE', reason }),
+    deliveries: [],
+    delivery: null,
+  }
+}
+
+async function projectDelivery(
+  repository: AgentRepository,
+  artifacts: ArtifactPort,
+  run: RunRecord,
+  blueprint: Awaited<ReturnType<typeof getActiveBlueprint>> | null,
+): Promise<DeliveryProjection> {
+  if (run.terminalAccounting?.accountingStatus === 'RECONCILIATION_REQUIRED') {
+    return unavailableDelivery('ACCOUNTING_PENDING')
+  }
+  if (run.status === 'RECOVERING' && run.pendingTerminalFailure) {
+    return unavailableDelivery('QUALITY_RECOVERY')
+  }
+  if (run.status === 'FAILED') return unavailableDelivery('RUN_FAILED')
+  if (run.status === 'CANCELLED') return unavailableDelivery('RUN_CANCELLED')
+  if (run.status !== 'COMPLETED') return unavailableDelivery('RUN_NOT_COMPLETED')
+
+  if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') {
+    const finalization = (await repository.listSteps(run.id))
+      .find((step) => step.idempotencyKey === usageV2FinalizeStepKey(run.id))
+    if (!isUsageV2RunFinalizationAcknowledged(finalization)) {
+      return unavailableDelivery('ACCOUNTING_PENDING')
+    }
+  }
+
+  let storedDeliveries: readonly DeliveryRecord[]
+  try {
+    storedDeliveries = await repository.listDeliveries(run.id)
+  } catch {
+    return unavailableDelivery('DELIVERY_CONTRACT_INVALID')
+  }
+  const candidates = storedDeliveries.filter((delivery) =>
+    delivery.runId === run.id
+    && delivery.revisionRound === run.revisionRound
+    && delivery.disposition === 'FINAL'
+    && delivery.identity.status === 'VERIFIED')
+  if (candidates.length === 0) return unavailableDelivery('VERIFIED_FINAL_DELIVERY_MISSING')
+  if (candidates.length !== 1 || !blueprint) return unavailableDelivery('DELIVERY_CONTRACT_INVALID')
+
+  const parsed = publicDeliveryRecordSchema.safeParse(candidates[0])
+  if (!parsed.success) return unavailableDelivery('DELIVERY_CONTRACT_INVALID')
+  const delivery = parsed.data
+  try {
+    assertFinalDeliveryForCompletion(run, blueprint, delivery)
+  } catch {
+    return unavailableDelivery('DELIVERY_CONTRACT_INVALID')
+  }
+  const references = [delivery.preview, delivery.pptx, delivery.sources]
+    .filter((reference) => reference !== undefined)
+  try {
+    if (!references.every((reference) => artifacts.verifyIntegrity({
+      tenantId: run.host.tenantId,
+      artifactId: reference.artifactId,
+      mimeType: reference.mimeType,
+      byteLength: reference.byteLength,
+      sha256: reference.sha256,
+    }))) return unavailableDelivery('DELIVERY_CONTENT_INVALID')
+  } catch {
+    return unavailableDelivery('DELIVERY_CONTENT_INVALID')
+  }
+  return {
+    deliveryAvailability: deliveryAvailabilitySchema.parse({
+      state: 'AVAILABLE',
+      deliveryId: delivery.id,
+      disposition: 'FINAL',
+      identityStatus: 'VERIFIED',
+    }),
+    deliveries: [delivery],
+    delivery,
+  }
+}
+
+async function runDetail(repository: AgentRepository, artifacts: ArtifactPort, run: RunRecord) {
+  const [snapshot, generationBatch] = await Promise.all([
     repository.getRunEventSnapshot(run.id),
     getGenerationBatch(repository, run),
   ])
   const blueprint = await getActiveBlueprint(repository, run.id, run.revisionRound).catch(() => null)
+  const deliveryProjection = await projectDelivery(repository, artifacts, run, blueprint)
   const generationPlan = blueprint?.visualDeckV4Proposal
     ? visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal)
     : null
-  return {
+  return runSnapshotSchema.parse({
     ...publicRun(run),
     blueprint,
     generationPlan,
     ...(generationBatch ? { generationBatch } : {}),
-    deliveries,
+    deliveries: deliveryProjection.deliveries,
+    deliveryAvailability: deliveryProjection.deliveryAvailability,
     issues: snapshot.openIssues,
     progress: snapshot.progress,
-  }
+  })
 }
 
 function sseResponse(input: Readonly<{
@@ -440,7 +550,7 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
 
       if (parts.length === 3 && request.method === 'GET') {
         const run = await dependencies.runs.getOwned(runId, host)
-        return json({ data: await runDetail(dependencies.repository, run) })
+        return json({ data: await runDetail(dependencies.repository, dependencies.artifacts, run) })
       }
 
       if (parts.length === 4 && parts[3] === 'actions' && request.method === 'POST') {
@@ -495,26 +605,51 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         } catch {
           return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId)
         }
-        const delivery = (await dependencies.repository.listDeliveries(run.id))
-          .find((candidate) => candidate.id === deliveryId)
-        if (!delivery) return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId)
         const format = url.searchParams.get('format') ?? 'pptx'
         if (format !== 'preview' && format !== 'pptx' && format !== 'sources') {
           return errorResponse(422, 'INVALID_DELIVERY_FORMAT', 'format must be preview, pptx or sources', requestId)
+        }
+        const blueprint = run.status === 'COMPLETED'
+          ? await getActiveBlueprint(dependencies.repository, run.id, run.revisionRound).catch(() => null)
+          : null
+        const projection = await projectDelivery(
+          dependencies.repository,
+          dependencies.artifacts,
+          run,
+          blueprint,
+        )
+        if (projection.deliveryAvailability.state === 'UNAVAILABLE') {
+          return deliveryUnavailableResponse(projection.deliveryAvailability.reason, requestId)
+        }
+        const delivery = projection.delivery
+        if (!delivery || delivery.id !== deliveryId) {
+          return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId)
         }
         const reference = format === 'preview' ? delivery.preview : format === 'sources' ? delivery.sources : delivery.pptx
         if (!reference) return errorResponse(404, 'DELIVERY_CONTENT_NOT_FOUND', 'delivery content was not found', requestId)
         const artifact = await dependencies.artifacts.get({
           tenantId: run.host.tenantId,
           artifactId: reference.artifactId,
-        })
-        if (!artifact) return errorResponse(404, 'DELIVERY_CONTENT_NOT_FOUND', 'delivery content was not found', requestId)
+        }).catch(() => null)
+        const digest = artifact ? createHash('sha256').update(artifact.bytes).digest('hex') : null
+        if (!artifact
+          || artifact.mimeType !== reference.mimeType
+          || artifact.bytes.length !== reference.byteLength
+          || artifact.sha256 !== reference.sha256
+          || digest !== reference.sha256) {
+          return deliveryUnavailableResponse('DELIVERY_CONTENT_INVALID', requestId)
+        }
+        const safeName = reference.name.replace(/["\\\r\n]/g, '_')
         return new Response(new Uint8Array(artifact.bytes), {
           headers: {
             'Cache-Control': 'private, no-store',
-            'Content-Disposition': `attachment; filename="${reference.name}"`,
+            'Content-Disposition': `attachment; filename="${safeName}"`,
             'Content-Length': String(artifact.bytes.length),
             'Content-Type': reference.mimeType,
+            ETag: `"${reference.sha256}"`,
+            'X-PPT-Agent-Content-SHA256': reference.sha256,
+            'X-PPT-Agent-Delivery-ID': delivery.id,
+            'X-PPT-Agent-Schema-Version': CONTRACT_VERSION,
             'X-Content-Type-Options': 'nosniff',
           },
         })

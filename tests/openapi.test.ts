@@ -17,7 +17,7 @@ describe('OpenAPI v1 contract', () => {
         schemas: Record<string, {
           required?: string[]
           oneOf?: Array<{ $ref?: string; properties?: Record<string, { const?: string }> }>
-          properties?: Record<string, { enum?: Array<string | null>; description?: string }>
+          properties?: Record<string, { enum?: Array<string | null>; description?: string; const?: string }>
           allOf?: Array<{
             if?: { properties?: Record<string, { const?: string }> }
             then?: {
@@ -76,6 +76,8 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(document.paths['/v1/runs']?.get)).toContain('keyset')
     expect(document.components.schemas.HostContext?.properties?.role?.enum).toEqual(['USER', 'ADMIN'])
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
+    expect(document.components.schemas.PublicRun?.required).toContain('schemaVersion')
+    expect(document.components.schemas.PublicRun?.properties?.schemaVersion?.const).toBe('1')
     expect(document.components.schemas.PublicRun?.properties?.technicalRecovery).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.generationBatch).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.pendingTerminalFailure).toBeDefined()
@@ -137,6 +139,8 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(document.components.schemas.TerminalAccounting)).toContain('RECONCILIATION_REQUIRED')
     expect(document.components.schemas.DeliveryRecord).toBeDefined()
     const deliveryRecord = JSON.stringify(document.components.schemas.DeliveryRecord)
+    expect(document.components.schemas.DeliveryRecord?.required).toContain('schemaVersion')
+    expect(document.components.schemas.DeliveryRecord?.properties?.schemaVersion?.const).toBe('1')
     expect(deliveryRecord).toContain('"disposition":{"const":"FINAL"}')
     expect(deliveryRecord).toContain('OVERRIDDEN_INTERNAL')
     expect(deliveryRecord).toContain('SYSTEM_POLICY_ACCEPTED')
@@ -144,11 +148,14 @@ describe('OpenAPI v1 contract', () => {
     expect(deliveryRecord).toContain('SYSTEM_POLICY')
     expect(deliveryRecord).toContain('#/components/schemas/DeliveryIdentity')
     const deliveryIdentity = JSON.stringify(document.components.schemas.DeliveryIdentity)
-    expect(deliveryIdentity).toContain('LEGACY_UNVERIFIED')
+    expect(deliveryIdentity).not.toContain('LEGACY_UNVERIFIED')
     expect(deliveryIdentity).toContain('blueprintHash')
     expect(deliveryIdentity).toContain('proposalHash')
     expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
       .toContain('#/components/schemas/DeliveryRecord')
+    expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
+      .toContain('#/components/schemas/DeliveryAvailability')
+    expect(document.components.schemas.DeliveryAvailability).toBeDefined()
     expect(JSON.stringify(document.paths['/v1/runs/{runId}']?.get))
       .toContain('#/components/schemas/RunDetailEnvelope')
     expect(document.components.schemas.CreateRunRequest?.properties?.targetAudience).toBeDefined()
@@ -189,5 +196,15 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.PlanningFailure?.properties?.errorCode?.enum).toEqual(expect.arrayContaining([
       'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID', 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE',
     ]))
+    expect(document.components.schemas.ErrorEnvelope?.required).toContain('schemaVersion')
+    expect(document.components.schemas.ErrorEnvelope?.properties?.schemaVersion?.const).toBe('1')
+    const contentContract = JSON.stringify(document.paths['/v1/runs/{runId}/deliveries/{deliveryId}/content'])
+    expect(contentContract).toContain('DELIVERY_NOT_AVAILABLE')
+    expect(contentContract).toContain('#/components/schemas/DeliveryUnavailableError')
+    expect(JSON.stringify(document.components.schemas.DeliveryUnavailableError))
+      .toContain('#/components/schemas/DeliveryUnavailableReason')
+    expect(contentContract).toContain('X-PPT-Agent-Schema-Version')
+    expect(contentContract).toContain('X-PPT-Agent-Delivery-ID')
+    expect(contentContract).toContain('X-PPT-Agent-Content-SHA256')
   })
 })

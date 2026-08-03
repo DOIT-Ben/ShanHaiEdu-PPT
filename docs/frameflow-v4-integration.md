@@ -78,6 +78,7 @@ EXECUTING -> PAGE_REVIEW -> DECK_REVIEW -> DELIVERING -> COMPLETED
         |
         v
 GET /v1/runs/{runId}
+仅当 deliveryAvailability.state == AVAILABLE
 GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=pptx
 ```
 
@@ -175,6 +176,7 @@ Content-Type: application/json
 ```json
 {
   "data": {
+    "schemaVersion": "1",
     "id": "run-...",
     "status": "PLANNING",
     "version": 0,
@@ -399,7 +401,7 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | `AWAITING_REVISION_APPROVAL` | 展示修订摘要，等待 `APPROVE_REVISION` 或拒绝 |
 | `REVISING` | 显示局部修订进度；未受影响页面不会重做 |
 | `DELIVERING` | 等待 Agent 组装预览和 PPTX |
-| `COMPLETED` | 展示交付下载入口 |
+| `COMPLETED` | 重新读取详情；仅当 `deliveryAvailability.state=AVAILABLE` 时展示“已生成”和下载入口，否则按稳定 `reason` 继续等待或报错 |
 | `PAUSED` | 按 `resumeState` 显示可恢复状态，用户确认后发送 `RESUME` |
 | `NEEDS_HUMAN` | 仅处理合同明确保留的人工业务动作；标准 V4 质量耗尽或技术故障不得依赖普通用户放行 |
 | `FAILED` / `CANCELLED` | 保留稳定错误/取消原因、终态账务和已有审计记录；`FAILED` 的账务仍为 `RECONCILIATION_REQUIRED` 时继续监听。仅 4.3.0 遗留的 `FAILED(QUALITY_REMEDIATION_EXHAUSTED)` 可在硬门禁通过后用稳定动作键发送 `RETRY_DELIVERY` |
@@ -428,7 +430,38 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 
 ## 9. 交付下载
 
-在 `COMPLETED` 详情的 `deliveries` 中读取 `id`，然后：
+`COMPLETED` 只是必要条件，不是可下载信号。FrameFlow 必须同时确认：
+
+```json
+{
+  "schemaVersion": "1",
+  "status": "COMPLETED",
+  "deliveryAvailability": {
+    "state": "AVAILABLE",
+    "deliveryId": "run-...:delivery:r0",
+    "disposition": "FINAL",
+    "identityStatus": "VERIFIED"
+  },
+  "deliveries": [
+    {
+      "schemaVersion": "1",
+      "id": "run-...:delivery:r0",
+      "runId": "run-...",
+      "disposition": "FINAL",
+      "identity": { "status": "VERIFIED" }
+    }
+  ]
+}
+```
+
+`deliveryAvailability.deliveryId` 必须等于唯一公开 Delivery 的 `id`，且 Delivery `runId` 必须等于 Run
+`data.id`。不要根据 `actorId`、原因文本、`run.completed` 的显示文案或本地缓存猜测可用性。
+`UNAVAILABLE` 的稳定原因包括 `RUN_NOT_COMPLETED`、`RUN_FAILED`、`RUN_CANCELLED`、
+`QUALITY_RECOVERY`、`ACCOUNTING_PENDING`、`VERIFIED_FINAL_DELIVERY_MISSING`、
+`DELIVERY_CONTRACT_INVALID` 和 `DELIVERY_CONTENT_INVALID`。特别是 Usage V2 已进入 `COMPLETED` 但终态
+账务尚未确认时仍为 `ACCOUNTING_PENDING`，应继续轮询详情，不得显示预览或 PPTX。
+
+门禁通过后使用 `deliveryAvailability.deliveryId` 请求：
 
 ```http
 GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=preview
@@ -444,8 +477,10 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 | `pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` | 图片型 PPTX |
 | `sources` | `application/json` | 素材来源与许可清单 |
 
-下载请求必须继续带认证和宿主身份头。FrameFlow 应使用响应的 `Content-Disposition`、`Content-Length`
-和 `X-Content-Type-Options`，不要把 `artifactId` 暴露成可跨租户访问的裸路径。
+下载请求必须继续带认证和宿主身份头。FrameFlow 应核对 `X-PPT-Agent-Schema-Version: 1`、
+`X-PPT-Agent-Delivery-ID`、`X-PPT-Agent-Content-SHA256`、`ETag`、`Content-Disposition`、
+`Content-Length` 和 `Content-Type`，不要把 `artifactId` 暴露成可跨租户访问的裸路径。若门禁或内容完整性
+复核失败，接口返回 `409 DELIVERY_NOT_AVAILABLE`，`error.details.reason` 是上述稳定枚举。
 
 ## 10. 错误、预算和重试
 
@@ -453,6 +488,7 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 
 ```json
 {
+  "schemaVersion": "1",
   "error": {
     "code": "RUN_VERSION_CONFLICT",
     "message": "run version does not match expectedVersion",
@@ -470,7 +506,7 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 | `401` | Token 缺失或无效 | 检查服务端凭据，不把 Token 下发浏览器 |
 | `403` | 宿主不匹配或需要管理员 | 检查身份边界/切管理员流程 |
 | `404` | 资源不属于当前宿主或不存在 | 按资源不存在处理，不泄漏详情 |
-| `409` | 版本冲突、幂等冲突、状态前置条件不满足 | 重新 GET 最新 Run；幂等冲突不能换键盲重试 |
+| `409` | 版本冲突、幂等冲突、状态前置条件不满足或 Delivery 不可用 | 重新 GET 最新 Run；按 `error.code/details.reason` 分支，幂等冲突不能换键盲重试 |
 | `422` | 合同字段或动作不合法 | 修正字段或引导用户 |
 | `429` | 限流 | 使用 `Retry-After`；保持原幂等键 |
 | `500` | Agent 内部错误 | 使用 `requestId` 联系运维，避免并发重复提交 |
@@ -498,4 +534,4 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 - [ ] 展示 `release` 作为唯一版本身份，记录 `gitSha` 和 `releaseId` 以便问题追溯。
 - [ ] 对 `RECOVERING` 显示自动恢复状态；标准 V4 的质量/技术失败按 `FAILED` 展示，不提供普通用户质量放行入口。
 - [ ] 将 `generationBatch` 作为整单进度和账务汇总展示，不将内部页级 reservation 映射为多次用户扣费。
-- [ ] 只从 `deliveries` 的受保护内容接口下载 PNG/PPTX/来源清单。
+- [ ] 只在 `COMPLETED + deliveryAvailability.state=AVAILABLE` 时使用其 `deliveryId` 下载，并核对版本、Delivery ID 与 SHA-256 响应头。

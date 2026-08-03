@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import { CONTRACT_VERSION } from '../src/contracts'
 import {
   blueprintDraftSchema,
   blueprintReflectionSchema,
   deckReviewDraftSchema,
   deliveryRecordSchema,
+  publicDeliveryRecordSchema,
   revisionPlanSchema,
 } from '../src/presentation-contracts'
 
@@ -236,6 +238,7 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
   expect(delivery.preview.mimeType).toBe('image/png')
   expect(delivery.sources?.mimeType).toBe('application/json')
   expect(delivery).toMatchObject({
+    schemaVersion: CONTRACT_VERSION,
     disposition: 'FINAL',
     qualityStatus: 'APPROVED',
     openIssueIds: [],
@@ -255,7 +258,8 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
     qualityOverrideAudit: _qualityOverrideAudit,
     ...legacyDelivery
   } = delivery
-  expect(deliveryRecordSchema.parse({
+  expect(publicDeliveryRecordSchema.safeParse(delivery).success).toBe(false)
+  const verifiedDelivery = deliveryRecordSchema.parse({
     ...legacyDelivery,
     identity: {
       status: 'VERIFIED',
@@ -264,7 +268,9 @@ test('delivery contract requires one PNG preview and one PPTX artifact', () => {
       blueprintHash: 'd'.repeat(64),
       proposalHash: 'e'.repeat(64),
     },
-  }).identity).toMatchObject({ status: 'VERIFIED', pageNumbers: [1, 2] })
+  })
+  expect(verifiedDelivery.identity).toMatchObject({ status: 'VERIFIED', pageNumbers: [1, 2] })
+  expect(publicDeliveryRecordSchema.safeParse(verifiedDelivery).success).toBe(true)
   expect(deliveryRecordSchema.safeParse({
     ...delivery,
     identity: {

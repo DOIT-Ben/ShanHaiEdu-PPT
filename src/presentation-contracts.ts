@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { qualityOverrideAuditSchema, qualityPolicyAuditSchema } from './contracts'
+import { CONTRACT_VERSION, qualityOverrideAuditSchema, qualityPolicyAuditSchema } from './contracts'
 import { layoutPresentationText } from './presentation-text-layout'
 import { releaseIdentitySchema } from './release-identity'
 import { visualDeckV4ProposalSchema } from './visual-deck-v4-contracts'
@@ -513,6 +513,7 @@ export const deliveryIdentitySchema = z.discriminatedUnion('status', [
 ])
 
 const deliveryRecordObjectSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION).default(CONTRACT_VERSION),
   id: identifierSchema,
   runId: identifierSchema,
   revisionRound: z.number().int().min(0).max(4),
@@ -584,6 +585,11 @@ export const deliveryRecordSchema = deliveryRecordObjectSchema.transform((value)
   }
 })
 
+export const publicDeliveryRecordSchema = deliveryRecordSchema.refine(
+  (value) => value.identity.status === 'VERIFIED',
+  { path: ['identity', 'status'], message: 'public delivery must have a verified identity' },
+)
+
 export type BlueprintDraft = z.infer<typeof blueprintDraftSchema>
 export type PresentationBlueprint = z.infer<typeof presentationBlueprintSchema>
 export type AssetIntent = z.infer<typeof assetIntentSchema>
@@ -595,6 +601,7 @@ export type RevisionPlanDraft = z.infer<typeof revisionPlanDraftSchema>
 export type RevisionPlan = z.infer<typeof revisionPlanSchema>
 export type DeliveryRecordInput = z.input<typeof deliveryRecordSchema>
 export type DeliveryRecord = z.output<typeof deliveryRecordSchema>
+export type PublicDeliveryRecord = z.output<typeof publicDeliveryRecordSchema>
 
 export function revisionRepairDomain(operation: z.infer<typeof revisionOperationSchema>) {
   if (operation.kind === 'UPDATE_CONTENT') return 'KNOWLEDGE' as const

@@ -370,13 +370,42 @@ export const issueSummarySchema = z.object({
   planningFailure: planningFailureSchema.optional(),
 }).strict()
 
+export const deliveryUnavailableReasonSchema = z.enum([
+  'RUN_NOT_COMPLETED',
+  'RUN_FAILED',
+  'RUN_CANCELLED',
+  'QUALITY_RECOVERY',
+  'ACCOUNTING_PENDING',
+  'VERIFIED_FINAL_DELIVERY_MISSING',
+  'DELIVERY_CONTRACT_INVALID',
+  'DELIVERY_CONTENT_INVALID',
+])
+
+export const deliveryAvailabilitySchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('UNAVAILABLE'),
+    reason: deliveryUnavailableReasonSchema,
+  }).strict(),
+  z.object({
+    state: z.literal('AVAILABLE'),
+    deliveryId: identifierSchema,
+    disposition: z.literal('FINAL'),
+    identityStatus: z.literal('VERIFIED'),
+  }).strict(),
+])
+
 export const runSnapshotSchema = z.object({
   schemaVersion: z.literal(CONTRACT_VERSION),
-  runId: identifierSchema,
+  id: identifierSchema,
   host: hostContextSchema,
   status: runStatusSchema,
   resumeState: runStatusSchema.nullable(),
   technicalRecovery: technicalRecoverySchema.optional(),
+  visualDirection: z.string().trim().min(3).max(1_000),
+  targetAudience: z.string().trim().min(3).max(500).nullable(),
+  presentationGoal: z.string().trim().min(3).max(1_000).nullable(),
+  imageModel: z.string().trim().min(1).max(120),
+  automationLevel: automationLevelSchema,
   version: z.number().int().nonnegative(),
   slideCount: z.number().int().min(2).max(50),
   revisionRound: z.number().int().nonnegative(),
@@ -394,11 +423,22 @@ export const runSnapshotSchema = z.object({
   coverDesignMode: coverDesignModeSchema.default('INDEPENDENT'),
   assetAcquisitionPolicy: assetAcquisitionPolicySchema.default('AI_FIRST'),
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
+  visualDeckV4: visualDeckV4ConfigSchema.optional(),
   release: releaseIdentitySchema.optional(),
   generationBatch: generationBatchSchema.optional(),
   pendingTerminalFailure: pendingTerminalFailureSchema.optional(),
   terminalAccounting: terminalAccountingSchema.optional(),
-  issues: z.array(issueSummarySchema),
+  blueprint: z.unknown().nullable().optional(),
+  generationPlan: z.unknown().nullable().optional(),
+  deliveries: z.array(z.unknown()).max(1).optional(),
+  deliveryAvailability: deliveryAvailabilitySchema.optional(),
+  issues: z.array(issueSummarySchema).optional(),
+  progress: z.array(z.object({
+    stepId: identifierSchema,
+    completed: z.number().int().nonnegative(),
+    total: z.number().int().positive(),
+    summary: z.string().max(500).optional(),
+  }).strict()).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 }).strict().superRefine((value, context) => {
@@ -623,11 +663,22 @@ const unknownAgentEventSchema = z.object({
 export const agentEventSchema = z.union([knownAgentEventSchema, unknownAgentEventSchema])
 
 export const apiErrorSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
   error: z.object({
     code: z.string().trim().min(1).max(100),
     message: nonEmptyTextSchema.max(1_000),
     requestId: identifierSchema,
     details: z.unknown().optional(),
+  }).strict(),
+}).strict()
+
+export const deliveryUnavailableErrorSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  error: z.object({
+    code: z.literal('DELIVERY_NOT_AVAILABLE'),
+    message: z.literal('delivery is not available'),
+    requestId: identifierSchema,
+    details: z.object({ reason: deliveryUnavailableReasonSchema }).strict(),
   }).strict(),
 }).strict()
 
@@ -644,6 +695,9 @@ export type AssetAcquisitionPolicy = z.infer<typeof assetAcquisitionPolicySchema
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>
 export type RunAction = z.infer<typeof runActionSchema>
 export type PlanningFailure = z.infer<typeof planningFailureSchema>
+export type DeliveryUnavailableReason = z.infer<typeof deliveryUnavailableReasonSchema>
+export type DeliveryAvailability = z.infer<typeof deliveryAvailabilitySchema>
+export type DeliveryUnavailableError = z.infer<typeof deliveryUnavailableErrorSchema>
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>
 export type V4LifecycleStage = z.infer<typeof v4LifecycleStageSchema>
 export type V4RevisionKind = z.infer<typeof v4RevisionKindSchema>

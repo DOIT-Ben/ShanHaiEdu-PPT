@@ -4,6 +4,7 @@ import {
   normalizeEvaluationRequest,
   presentationSlideEntries,
   referencedSlideImageEntry,
+  requireAvailableDelivery,
   REQUIRED_COMPLETED_LIFECYCLE,
   validateLifecycle,
   validateQualityGate,
@@ -60,6 +61,64 @@ function completedLifecycleEvents(): LifecycleEvent[] {
 }
 
 describe('V4 real evaluation harness', () => {
+  test('consumes only the exact delivery authorized by deliveryAvailability', () => {
+    const delivery = {
+      schemaVersion: '1' as const,
+      id: 'run-1:delivery:r0',
+      runId: 'run-1',
+      revisionRound: 0,
+      qualityScore: 90,
+      qualityOverride: false,
+      disposition: 'FINAL' as const,
+      qualityStatus: 'APPROVED' as const,
+      openIssueIds: [],
+      identity: {
+        status: 'VERIFIED' as const,
+        slideCount: 2,
+        pageNumbers: [1, 2],
+        blueprintHash: 'a'.repeat(64),
+      },
+      qualityPolicyAudit: null,
+      qualityOverrideAudit: null,
+      preview: {
+        artifactId: 'preview-1', name: 'preview.png', mimeType: 'image/png' as const,
+        sha256: 'b'.repeat(64), byteLength: 100,
+      },
+      pptx: {
+        artifactId: 'pptx-1', name: 'presentation.pptx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const,
+        sha256: 'c'.repeat(64), byteLength: 200,
+      },
+      createdAt: '2026-08-04T00:00:00.000Z',
+    }
+    const run = {
+      schemaVersion: '1' as const,
+      id: 'run-1',
+      status: 'COMPLETED',
+      version: 8,
+      slideCount: 2,
+      revisionRound: 0,
+      committedBudgetUnits: 2,
+      qualityScore: 90,
+      qualityOverride: false,
+      issues: [],
+      deliveryAvailability: {
+        state: 'AVAILABLE', deliveryId: delivery.id, disposition: 'FINAL', identityStatus: 'VERIFIED',
+      },
+      deliveries: [delivery],
+    }
+
+    expect(requireAvailableDelivery(run)).toEqual(delivery)
+    expect(() => requireAvailableDelivery({
+      ...run,
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_PENDING' },
+    })).toThrow('DELIVERY_UNAVAILABLE:ACCOUNTING_PENDING')
+    expect(() => requireAvailableDelivery({
+      ...run,
+      deliveryAvailability: { ...run.deliveryAvailability, deliveryId: 'delivery-other' },
+    })).toThrow('DELIVERY_PUBLIC_IDENTITY_MISMATCH')
+  })
+
   test('executes an already matching V4 request without editing it', () => {
     const input = request()
     const normalized = normalizeEvaluationRequest(input, 10)

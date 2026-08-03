@@ -300,13 +300,31 @@
       ],
       "get": {
         "operationId": "downloadDeliveryContent",
+        "description": "Returns content only when the owned Run detail reports deliveryAvailability.state AVAILABLE for this exact VERIFIED FINAL Delivery. COMPLETED alone is insufficient; quality recovery, pending accounting, missing verification, and integrity failures return a versioned structured error.",
         "parameters": [
           { "$ref": "#/components/parameters/RunId" },
           { "name": "deliveryId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
           { "name": "format", "in": "query", "schema": { "enum": ["preview", "pptx", "sources"], "default": "pptx" } }
         ],
         "responses": {
-          "200": { "description": "Owned PNG preview, editable PPTX, or JSON asset source manifest" },
+          "200": {
+            "description": "Integrity-checked owned PNG preview, image-based PPTX, or JSON asset source manifest",
+            "headers": {
+              "X-PPT-Agent-Schema-Version": { "required": true, "schema": { "const": "1" } },
+              "X-PPT-Agent-Delivery-ID": { "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+              "X-PPT-Agent-Content-SHA256": { "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+              "ETag": { "required": true, "schema": { "type": "string" } }
+            },
+            "content": {
+              "image/png": { "schema": { "type": "string", "format": "binary" } },
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation": { "schema": { "type": "string", "format": "binary" } },
+              "application/json": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "409": {
+            "description": "Delivery is not consumable. error.code is DELIVERY_NOT_AVAILABLE and error.details.reason is a DeliveryUnavailableReason.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeliveryUnavailableError" } } }
+          },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }
@@ -882,8 +900,9 @@
       },
       "PublicRun": {
         "type": "object",
-        "required": ["id", "host", "status", "version", "slideCount", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityOverride", "qualityDisposition", "qualityPolicyAudit", "qualityOverrideAudit", "createdAt", "updatedAt"],
+        "required": ["schemaVersion", "id", "host", "status", "resumeState", "visualDirection", "targetAudience", "presentationGoal", "imageModel", "automationLevel", "version", "slideCount", "revisionRound", "maxRevisionRounds", "planningAttempt", "maxPlanningRetries", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityScore", "qualityOverride", "qualityDisposition", "qualityPolicyAudit", "qualityOverrideAudit", "createdAt", "updatedAt"],
         "properties": {
+          "schemaVersion": { "const": "1" },
           "id": { "type": "string" },
           "host": { "$ref": "#/components/schemas/HostContext" },
           "status": { "enum": ["PLANNING", "AWAITING_BLUEPRINT_APPROVAL", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "AWAITING_REVISION_APPROVAL", "REVISING", "PAUSED", "RECOVERING", "NEEDS_HUMAN", "DELIVERING", "COMPLETED", "FAILED", "CANCELLED"] },
@@ -898,14 +917,20 @@
           "visualDirection": { "type": "string" },
           "targetAudience": { "type": ["string", "null"] },
           "presentationGoal": { "type": ["string", "null"] },
+          "imageModel": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "automationLevel": { "enum": ["SUPERVISED", "BOUNDED_AUTO"] },
           "planningAttempt": { "type": "integer", "minimum": 0, "maximum": 2 },
           "maxPlanningRetries": { "const": 2 },
+          "revisionRound": { "type": "integer", "minimum": 0 },
+          "maxRevisionRounds": { "type": "integer", "minimum": 0, "maximum": 4 },
           "presentationMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3", "VISUAL_DECK_V4"] },
           "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"] },
           "assetAcquisitionPolicy": { "enum": ["AI_FIRST", "SEARCH_FIRST"] },
           "maxVisualAssetsPerSlide": { "type": "integer" },
+          "visualDeckV4": { "$ref": "#/components/schemas/CreateRunRequest/properties/visualDeckV4" },
           "budgetUnits": { "type": "integer" },
           "committedBudgetUnits": { "type": "integer" },
+          "qualityScore": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 },
           "qualityOverride": { "type": "boolean" },
           "qualityDisposition": {
             "description": "Final quality provenance. PENDING and REVIEW_PASSED require qualityOverride false and null quality audits. PENDING remains in force until both page and deck review finish; REVIEW_PASSED means no open findings; SYSTEM_POLICY_ACCEPTED means only explicit non-blocking findings were accepted by system policy; ADMIN_OVERRIDE identifies a real administrator action; HARD_FAILURE identifies a blocking failure and is required whenever status is FAILED.",
@@ -1053,6 +1078,43 @@
           "releaseId": { "type": "string", "minLength": 1, "maxLength": 160 }
         }
       },
+      "DeliveryUnavailableReason": {
+        "enum": [
+          "RUN_NOT_COMPLETED",
+          "RUN_FAILED",
+          "RUN_CANCELLED",
+          "QUALITY_RECOVERY",
+          "ACCOUNTING_PENDING",
+          "VERIFIED_FINAL_DELIVERY_MISSING",
+          "DELIVERY_CONTRACT_INVALID",
+          "DELIVERY_CONTENT_INVALID"
+        ]
+      },
+      "DeliveryAvailability": {
+        "description": "The only authoritative signal for exposing generated output. AVAILABLE is emitted only for the current integrity-checked VERIFIED FINAL Delivery of a COMPLETED Run whose accounting is closed.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "reason"],
+            "properties": {
+              "state": { "const": "UNAVAILABLE" },
+              "reason": { "$ref": "#/components/schemas/DeliveryUnavailableReason" }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "deliveryId", "disposition", "identityStatus"],
+            "properties": {
+              "state": { "const": "AVAILABLE" },
+              "deliveryId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "disposition": { "const": "FINAL" },
+              "identityStatus": { "const": "VERIFIED" }
+            }
+          }
+        ]
+      },
       "DeliveryArtifact": {
         "type": "object",
         "additionalProperties": false,
@@ -1066,26 +1128,16 @@
         }
       },
       "DeliveryIdentity": {
-        "oneOf": [
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["status", "slideCount", "pageNumbers", "blueprintHash"],
-            "properties": {
-              "status": { "const": "VERIFIED" },
-              "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
-              "pageNumbers": { "type": "array", "minItems": 2, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 50 } },
-              "blueprintHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-              "proposalHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
-            }
-          },
-          {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["status"],
-            "properties": { "status": { "const": "LEGACY_UNVERIFIED" } }
-          }
-        ]
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "slideCount", "pageNumbers", "blueprintHash"],
+        "properties": {
+          "status": { "const": "VERIFIED" },
+          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+          "pageNumbers": { "type": "array", "minItems": 2, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 50 } },
+          "blueprintHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "proposalHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
       },
       "QualityPolicyAudit": {
         "type": "object",
@@ -1114,8 +1166,9 @@
       "DeliveryRecord": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "runId", "revisionRound", "qualityScore", "qualityOverride", "disposition", "qualityStatus", "openIssueIds", "identity", "preview", "pptx", "createdAt"],
+        "required": ["schemaVersion", "id", "runId", "revisionRound", "qualityScore", "qualityOverride", "disposition", "qualityStatus", "openIssueIds", "identity", "preview", "pptx", "createdAt"],
         "properties": {
+          "schemaVersion": { "const": "1" },
           "id": { "type": "string", "minLength": 1, "maxLength": 160 },
           "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "revisionRound": { "type": "integer", "minimum": 0, "maximum": 4 },
@@ -1159,29 +1212,13 @@
           {
             "if": { "properties": { "qualityStatus": { "const": "OVERRIDDEN_INTERNAL" } }, "required": ["qualityStatus"] },
             "then": {
+              "required": ["qualityOverrideAudit"],
               "properties": {
                 "qualityOverride": { "const": true },
-                "qualityPolicyAudit": { "type": "null" }
-              },
-              "oneOf": [
-                {
-                  "required": ["qualityOverrideAudit"],
-                  "properties": {
-                    "openIssueIds": { "minItems": 1 },
-                    "qualityOverrideAudit": { "$ref": "#/components/schemas/QualityOverrideAudit" }
-                  }
-                },
-                {
-                  "properties": {
-                    "identity": {
-                      "type": "object",
-                      "required": ["status"],
-                      "properties": { "status": { "const": "LEGACY_UNVERIFIED" } }
-                    },
-                    "qualityOverrideAudit": { "type": "null" }
-                  }
-                }
-              ]
+                "openIssueIds": { "minItems": 1 },
+                "qualityPolicyAudit": { "type": "null" },
+                "qualityOverrideAudit": { "$ref": "#/components/schemas/QualityOverrideAudit" }
+              }
             }
           },
           {
@@ -1361,6 +1398,7 @@
               { "$ref": "#/components/schemas/PublicRun" },
               {
                 "type": "object",
+                "required": ["blueprint", "generationPlan", "deliveries", "deliveryAvailability", "issues", "progress"],
                 "properties": {
                   "blueprint": { "type": ["object", "null"] },
                   "generationPlan": {
@@ -1369,7 +1407,8 @@
                       { "type": "null" }
                     ]
                   },
-                  "deliveries": { "type": "array", "items": { "$ref": "#/components/schemas/DeliveryRecord" } }
+                  "deliveries": { "type": "array", "maxItems": 1, "items": { "$ref": "#/components/schemas/DeliveryRecord" } },
+                  "deliveryAvailability": { "$ref": "#/components/schemas/DeliveryAvailability" }
                 }
               }
             ]
@@ -1379,8 +1418,9 @@
       "ErrorEnvelope": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["error"],
+        "required": ["schemaVersion", "error"],
         "properties": {
+          "schemaVersion": { "const": "1" },
           "error": {
             "type": "object",
             "additionalProperties": false,
@@ -1390,6 +1430,32 @@
               "message": { "type": "string" },
               "requestId": { "type": "string" },
               "details": {}
+            }
+          }
+        }
+      },
+      "DeliveryUnavailableError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "error"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "message", "requestId", "details"],
+            "properties": {
+              "code": { "const": "DELIVERY_NOT_AVAILABLE" },
+              "message": { "const": "delivery is not available" },
+              "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reason"],
+                "properties": {
+                  "reason": { "$ref": "#/components/schemas/DeliveryUnavailableReason" }
+                }
+              }
             }
           }
         }

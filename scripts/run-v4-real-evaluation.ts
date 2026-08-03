@@ -4,9 +4,12 @@ import path from 'node:path'
 import {
   agentEventSchema,
   createRunRequestSchema,
+  deliveryAvailabilitySchema,
   issueSummarySchema,
+  runSnapshotSchema,
   type CreateRunRequest,
 } from '../src/contracts'
+import { publicDeliveryRecordSchema, type DeliveryRecord } from '../src/presentation-contracts'
 
 const DEFAULT_SERVICE_URL = 'http://127.0.0.1:4320'
 const DEFAULT_CASE_IDS = ['01-raw-requirement', '02-planned-outline', '03-page-design'] as const
@@ -37,6 +40,7 @@ export const REQUIRED_COMPLETED_LIFECYCLE = [
 ] as const
 
 type RunDetail = Record<string, unknown> & Readonly<{
+  schemaVersion: '1'
   id: string
   status: string
   version: number
@@ -45,7 +49,8 @@ type RunDetail = Record<string, unknown> & Readonly<{
   committedBudgetUnits: number
   qualityScore: number | null
   qualityOverride: boolean
-  deliveries?: Array<{ id: string }>
+  deliveries?: unknown[]
+  deliveryAvailability?: unknown
   issues: unknown[]
 }>
 
@@ -555,7 +560,7 @@ async function getRun(config: EvaluationConfig, request: CreateRunRequest, runId
   const body = await jsonRequest<{ data: RunDetail }>(config, request, `/v1/runs/${runId}`, {
     headers: requestHeaders(request, config.apiToken),
   })
-  return body.data
+  return runSnapshotSchema.parse(body.data) as RunDetail
 }
 
 async function waitFor(
@@ -575,6 +580,7 @@ async function waitFor(
       version: run.version,
       committedBudgetUnits: run.committedBudgetUnits,
       issues: run.issues?.length ?? 0,
+      deliveryAvailability: run.deliveryAvailability ?? null,
     })
     if (fingerprint !== previous) {
       const snapshot = { at: new Date().toISOString(), ...JSON.parse(fingerprint) }
@@ -586,6 +592,29 @@ async function waitFor(
     await Bun.sleep(config.pollMs)
   }
   throw new Error(`RUN_WAIT_TIMEOUT:${runId}`)
+}
+
+function isAccountingPending(run: RunDetail) {
+  const availability = deliveryAvailabilitySchema.safeParse(run.deliveryAvailability)
+  return run.status === 'COMPLETED'
+    && availability.success
+    && availability.data.state === 'UNAVAILABLE'
+    && availability.data.reason === 'ACCOUNTING_PENDING'
+}
+
+export function requireAvailableDelivery(run: RunDetail) {
+  if (run.status !== 'COMPLETED') throw new Error(`DELIVERY_RUN_NOT_COMPLETED:${run.status}`)
+  const availability = deliveryAvailabilitySchema.parse(run.deliveryAvailability)
+  if (availability.state !== 'AVAILABLE') {
+    throw new Error(`DELIVERY_UNAVAILABLE:${availability.reason}`)
+  }
+  const deliveries = (run.deliveries ?? []).map((delivery) => publicDeliveryRecordSchema.parse(delivery))
+  if (deliveries.length !== 1) throw new Error('DELIVERY_PUBLIC_CARDINALITY_INVALID')
+  const delivery = deliveries[0]!
+  if (delivery.id !== availability.deliveryId || delivery.runId !== run.id) {
+    throw new Error('DELIVERY_PUBLIC_IDENTITY_MISMATCH')
+  }
+  return delivery
 }
 
 async function readEventHistory(config: EvaluationConfig, request: CreateRunRequest, runId: string) {
@@ -738,22 +767,51 @@ async function downloadDelivery(
   config: EvaluationConfig,
   request: CreateRunRequest,
   runId: string,
-  deliveryId: string,
+  delivery: DeliveryRecord,
   caseDirectory: string,
 ) {
   const files = {
-    pptx: 'presentation.pptx',
-    preview: 'contact-sheet.png',
-    sources: 'source-manifest.json',
+    pptx: { filename: 'presentation.pptx', reference: delivery.pptx },
+    preview: { filename: 'contact-sheet.png', reference: delivery.preview },
+    sources: { filename: 'source-manifest.json', reference: delivery.sources },
   } as const
-  for (const [format, filename] of Object.entries(files)) {
+  const evidence: Record<string, unknown> = {}
+  for (const [format, output] of Object.entries(files)) {
+    if (!output.reference) throw new Error(`DELIVERY_REFERENCE_MISSING:${format}`)
     const response = await fetch(
-      `${config.serviceUrl}/v1/runs/${runId}/deliveries/${deliveryId}/content?format=${format}`,
+      `${config.serviceUrl}/v1/runs/${runId}/deliveries/${delivery.id}/content?format=${format}`,
       { headers: requestHeaders(request, config.apiToken) },
     )
     if (!response.ok) throw new Error(`DELIVERY_DOWNLOAD_FAILED:${format}:${response.status}`)
-    await writeFile(path.join(caseDirectory, filename), new Uint8Array(await response.arrayBuffer()), { mode: 0o600 })
+    const bytes = new Uint8Array(await response.arrayBuffer())
+    const contentSha256 = sha256(bytes)
+    const contentType = response.headers.get('Content-Type')
+    const contentLength = response.headers.get('Content-Length')
+    const schemaVersion = response.headers.get('X-PPT-Agent-Schema-Version')
+    const deliveryId = response.headers.get('X-PPT-Agent-Delivery-ID')
+    const headerSha256 = response.headers.get('X-PPT-Agent-Content-SHA256')
+    const etag = response.headers.get('ETag')
+    if (schemaVersion !== '1'
+      || deliveryId !== delivery.id
+      || contentType !== output.reference.mimeType
+      || contentLength !== String(output.reference.byteLength)
+      || bytes.byteLength !== output.reference.byteLength
+      || headerSha256 !== output.reference.sha256
+      || contentSha256 !== output.reference.sha256
+      || etag !== `"${output.reference.sha256}"`) {
+      throw new Error(`DELIVERY_DOWNLOAD_CONTRACT_INVALID:${format}`)
+    }
+    await writeFile(path.join(caseDirectory, output.filename), bytes, { mode: 0o600 })
+    evidence[format] = {
+      schemaVersion,
+      deliveryId,
+      contentType,
+      byteLength: bytes.byteLength,
+      sha256: contentSha256,
+      etag,
+    }
   }
+  return evidence
 }
 
 async function runCase(config: EvaluationConfig, caseId: string) {
@@ -773,7 +831,8 @@ async function runCase(config: EvaluationConfig, caseId: string) {
     },
     body: JSON.stringify(request),
   })
-  const runId = created.data.id
+  const createdRun = runSnapshotSchema.parse(created.data) as RunDetail
+  const runId = createdRun.id
   await writeJson(path.join(caseDirectory, 'created.json'), created)
 
   const planned = await waitFor(
@@ -785,9 +844,19 @@ async function runCase(config: EvaluationConfig, caseId: string) {
     timeline,
   )
   await writeJson(path.join(caseDirectory, 'planning.json'), planned)
-  const finalRun = TERMINAL_STATUSES.has(planned.status)
+  let finalRun = TERMINAL_STATUSES.has(planned.status)
     ? planned
     : await waitFor(config, request, runId, (run) => TERMINAL_STATUSES.has(run.status), config.runTimeoutMs, timeline)
+  if (isAccountingPending(finalRun)) {
+    finalRun = await waitFor(
+      config,
+      request,
+      runId,
+      (run) => !isAccountingPending(run),
+      config.runTimeoutMs,
+      timeline,
+    )
+  }
   const events = await readEventHistory(config, request, runId)
   await Promise.all([
     writeJson(path.join(caseDirectory, 'final-run.json'), finalRun),
@@ -799,9 +868,13 @@ async function runCase(config: EvaluationConfig, caseId: string) {
   let pptxSha256: string | null = null
   let pptxByteLength: number | null = null
   if (finalRun.status === 'COMPLETED') {
-    const deliveryId = finalRun.deliveries?.[0]?.id
-    if (!deliveryId) throw new Error(`DELIVERY_MISSING:${runId}`)
-    await downloadDelivery(config, request, runId, deliveryId, caseDirectory)
+    const delivery = requireAvailableDelivery(finalRun)
+    const contentEvidence = await downloadDelivery(config, request, runId, delivery, caseDirectory)
+    await writeJson(path.join(caseDirectory, 'delivery-content.json'), {
+      schemaVersion: '1',
+      delivery,
+      content: contentEvidence,
+    })
     const pptxPath = path.join(caseDirectory, 'presentation.pptx')
     const pptxBytes = await Bun.file(pptxPath).bytes()
     const pageValidation = await extractAndValidatePages(caseDirectory, pptxPath)

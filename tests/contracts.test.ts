@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import {
   CONTRACT_VERSION,
   agentEventSchema,
+  apiErrorSchema,
   createRunRequestSchema,
+  deliveryUnavailableErrorSchema,
   runActionSchema,
   runSnapshotSchema,
 } from '../src/contracts'
@@ -316,8 +318,13 @@ describe('public v1 contracts', () => {
   test('requires resumeState exactly while paused and enforces public quality state invariants', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,
-      runId: 'run-1',
+      id: 'run-1',
       host,
+      visualDirection: '清晰、克制的课堂信息图风格',
+      targetAudience: null,
+      presentationGoal: null,
+      imageModel: 'image-2',
+      automationLevel: 'SUPERVISED' as const,
       version: 3,
       slideCount: 15,
       revisionRound: 0,
@@ -447,6 +454,26 @@ describe('public v1 contracts', () => {
     expect(agentEventSchema.parse({ ...event, type: 'future.event', payload: { value: 1 } }).type)
       .toBe('future.event')
     expect(() => agentEventSchema.parse({ ...event, type: 'budget.updated', payload: { value: 1 } })).toThrow()
+  })
+
+  test('versions the stable machine-readable API error envelope', () => {
+    const error = {
+      schemaVersion: CONTRACT_VERSION,
+      error: {
+        code: 'DELIVERY_NOT_AVAILABLE',
+        message: 'delivery is not available',
+        requestId: 'request-1',
+        details: { reason: 'RUN_NOT_COMPLETED' },
+      },
+    } as const
+    expect(apiErrorSchema.parse(error)).toMatchObject({
+      schemaVersion: CONTRACT_VERSION, error: { code: 'DELIVERY_NOT_AVAILABLE' },
+    })
+    expect(deliveryUnavailableErrorSchema.parse(error)).toEqual(error)
+    expect(deliveryUnavailableErrorSchema.safeParse({
+      ...error,
+      error: { ...error.error, details: { reason: 'INTERNAL_PATH_LEAKED' } },
+    }).success).toBe(false)
   })
 
   test('validates stable visual deck v4 lifecycle fields', () => {
