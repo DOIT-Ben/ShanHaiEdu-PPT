@@ -8,10 +8,11 @@ import {
   type V4RunFailureCode,
   type TechnicalRecovery,
 } from '../contracts'
-import type { RevisionPlan } from '../presentation-contracts'
+import { revisionPlanSchema, type RevisionPlan } from '../presentation-contracts'
 import type { AgentRepository, AgentTransaction, ClockPort, NewAgentEvent, RunRecord } from './ports'
 import { isTerminalStatus, transitionRun } from './policy'
 import { deriveV4TerminalAccounting } from './v4-terminal-accounting'
+import { hashInput } from './hash'
 import { enqueueUsageV2RunFinalization } from './usage-v2-coordinator'
 
 export type V4LifecycleEventType =
@@ -152,6 +153,150 @@ export function appendFixedIssueResolutions(
       schemaVersion: CONTRACT_VERSION,
       type: 'issue.resolved',
       payload: { issueId, resolution: 'FIXED' },
+    })
+  }
+}
+
+const ACCEPTED_QUALITY_ISSUE_CATEGORIES = new Set([
+  'CURRICULUM_GAP',
+  'FACTUAL_RISK',
+  'SEQUENCE_BREAK',
+  'DUPLICATION',
+  'COVER_IMPACT',
+  'VISUAL_CONSISTENCY',
+  'COMPOSITION_CONFLICT',
+  'IMAGE_QUALITY',
+  'ASSET_RELEVANCE',
+  'LAYERING_CONFLICT',
+  'CHILD_READABILITY',
+])
+
+const QUALITY_OVERRIDE_ISSUE_LIMIT = 50
+
+export function appendAcceptedQualityIssueResolutions(
+  transaction: AgentTransaction,
+  issueIds?: readonly string[],
+) {
+  const selected = issueIds ? new Set(issueIds) : null
+  const open = new Map<string, Extract<AgentEvent, { type: 'issue.detected' }>['payload']>()
+  for (const event of transaction.listEvents()) {
+    if (event.type === 'issue.detected') open.set(event.payload.id, event.payload)
+    if (event.type === 'issue.resolved') open.delete(event.payload.issueId)
+  }
+  const technicallyFailedRevisionRounds = new Set(transaction.listEvents().flatMap((event) =>
+    event.type === 'revision.completed'
+      && ['PROVIDER_TEMPORARILY_UNAVAILABLE', 'BUDGET_INSUFFICIENT', 'INTERNAL_FAILURE'].includes(event.payload.reason ?? '')
+      ? [event.payload.revisionRound]
+      : []))
+  const issuesWithFailedRevisionExecution = new Set(transaction.listSteps().flatMap((step) => {
+    if (!['plan_revision', 'plan_page_revision'].includes(step.tool) || step.status !== 'COMPLETED') return []
+    const plan = revisionPlanSchema.safeParse(step.output)
+    return plan.success && technicallyFailedRevisionRounds.has(plan.data.revisionRound)
+      ? plan.data.operations.flatMap((operation) => operation.issueIds)
+      : []
+  }))
+  const acceptedIssueIds: string[] = []
+  const blockingIssueIds: string[] = []
+  for (const issue of open.values()) {
+    if (!ACCEPTED_QUALITY_ISSUE_CATEGORIES.has(issue.category)
+      || issuesWithFailedRevisionExecution.has(issue.id)) {
+      blockingIssueIds.push(issue.id)
+      continue
+    }
+    if (selected && !selected.has(issue.id)) continue
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'issue.resolved',
+      payload: { issueId: issue.id, resolution: 'ACCEPTED' },
+    })
+    acceptedIssueIds.push(issue.id)
+  }
+  return { acceptedIssueIds, blockingIssueIds }
+}
+
+export function markAutomatedQualityAcceptance(
+  run: RunRecord,
+  issueIds: readonly string[],
+  acceptedAt: string,
+) {
+  return {
+    ...run,
+    qualityOverride: true,
+    qualityOverrideReason: 'PPT Agent 按非阻断质量策略接受当前版本并继续交付。',
+    qualityOverrideBy: 'ppt-agent-quality-policy',
+    qualityOverrideRole: 'ADMIN' as const,
+    qualityOverrideIssueIds: [...new Set(issueIds)].slice(0, QUALITY_OVERRIDE_ISSUE_LIMIT),
+    qualityOverrideAt: run.qualityOverrideAt ?? acceptedAt,
+  }
+}
+
+export function ensureAutomatedQualityAcceptanceIssue(
+  transaction: AgentTransaction,
+  acceptedIssueIds: readonly string[],
+) {
+  const overflowIssueId = `quality-policy-${hashInput({
+    runId: transaction.run.id,
+    kind: 'ACCEPTED_ISSUE_OVERFLOW',
+  }).slice(0, 32)}`
+  const acceptedFromEvents = transaction.listEvents().flatMap((event) =>
+    event.type === 'issue.resolved' && event.payload.resolution === 'ACCEPTED'
+      ? [event.payload.issueId]
+      : [])
+  const completeAcceptedIssueIds = [...new Set([
+    ...(transaction.run.qualityOverrideIssueIds ?? []),
+    ...acceptedFromEvents,
+    ...acceptedIssueIds,
+  ])]
+    .filter((issueId) => issueId !== overflowIssueId)
+  if (completeAcceptedIssueIds.length > QUALITY_OVERRIDE_ISSUE_LIMIT) {
+    ensureAcceptedQualityPolicyIssue(
+      transaction,
+      overflowIssueId,
+      '已按非阻断质量策略接受超过交付合同枚举上限的问题；完整清单保留在 Issue 事件流中。',
+    )
+    return [...completeAcceptedIssueIds.slice(0, QUALITY_OVERRIDE_ISSUE_LIMIT - 1), overflowIssueId]
+  }
+  if (completeAcceptedIssueIds.length > 0) return completeAcceptedIssueIds
+  const issueId = `quality-policy-${hashInput({
+    runId: transaction.run.id,
+    revisionRound: transaction.run.revisionRound,
+    kind: 'NO_ACTIONABLE_ISSUE',
+  }).slice(0, 32)}`
+  ensureAcceptedQualityPolicyIssue(
+    transaction,
+    issueId,
+    '模型质量评分未达到设定阈值，但没有返回可执行的具体问题。',
+  )
+  return [issueId]
+}
+
+function ensureAcceptedQualityPolicyIssue(
+  transaction: AgentTransaction,
+  issueId: string,
+  summary: string,
+) {
+  const events = transaction.listEvents()
+  if (!events.some((event) => event.type === 'issue.detected' && event.payload.id === issueId)) {
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'issue.detected',
+      payload: {
+        id: issueId,
+        category: 'VISUAL_CONSISTENCY',
+        severity: 'WARNING',
+        summary,
+        slideIds: allPageNumbers(transaction.run).map((pageNumber) => `${transaction.run.id}:slide:${pageNumber}`),
+        sourceChunkIds: [],
+        status: 'OPEN',
+      },
+    })
+  }
+  if (!transaction.listEvents().some((event) =>
+    event.type === 'issue.resolved' && event.payload.issueId === issueId)) {
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'issue.resolved',
+      payload: { issueId, resolution: 'ACCEPTED' },
     })
   }
 }

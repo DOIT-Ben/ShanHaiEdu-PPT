@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   CONTRACT_VERSION,
   MAX_PLANNING_RETRIES,
@@ -9,6 +10,11 @@ import {
 import { presentationBlueprintSchema, revisionPlanSchema } from '../presentation-contracts'
 import { revisionBlueprintStepKey } from './active-blueprint'
 import { deliveryStepKey } from './delivery-runner'
+import {
+  blueprintImageRequirements,
+  controlledVisualDeckPageArtifact,
+  latestCompletedAssetStep,
+} from './blueprint-assets'
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
@@ -16,12 +22,14 @@ import { V4_PLANNING_STAGE_COUNT } from './visual-deck-v4-planner'
 import type {
   AgentRepository,
   AgentTransaction,
+  ArtifactPort,
   ClockPort,
   ProviderBillingCatalogPort,
   RunListCursor,
   RunRecord,
+  StepRecord,
 } from './ports'
-import { applyRunAction, PolicyError } from './policy'
+import { applyRunAction, PolicyError, recoverV4QualityFailure } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { buildIdentity, releaseIdentityForMode, type BuildIdentity } from '../release-identity'
@@ -29,7 +37,13 @@ import {
   usageAccountingProtocolSchema,
   type UsageAccountingProtocol,
 } from '../usage-accounting-contracts'
-import { enqueueUsageV2RunFinalization } from './usage-v2-coordinator'
+import {
+  accountingProtocolFor,
+  enqueueUsageV2RunFinalization,
+  isUsageV2RunFinalizationAcknowledged,
+  usageV2FinalizeStepKey,
+} from './usage-v2-coordinator'
+import { deriveV4TerminalAccounting } from './v4-terminal-accounting'
 import {
   allPageNumbers,
   activeRevisionLifecycle,
@@ -46,6 +60,19 @@ const ADMIN_ONLY_CRITICAL_CATEGORIES = new Set([
   'SOURCE_INCOMPLETE',
   'PLANNING_FAILED',
 ])
+
+type QualityRecoveryArtifactProof = Readonly<{
+  runId: string
+  runVersion: number
+  entries: readonly Readonly<{
+    pageNumber: number
+    stepKey: string
+    artifactId: string
+    sha256: string
+    byteLength: number
+    mimeType: string
+  }>[]
+}>
 
 export class RunServiceError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -64,6 +91,7 @@ export class RunService {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
     clock: ClockPort
+    artifacts?: ArtifactPort
     buildIdentity?: BuildIdentity
     defaultAccountingProtocol?: UsageAccountingProtocol
     providerBillingCatalog?: ProviderBillingCatalogPort
@@ -202,6 +230,9 @@ export class RunService {
     }
 
     try {
+      const qualityRecoveryArtifactProof = parsed.data.type === 'RETRY_DELIVERY'
+        ? await this.assertV4QualityFailureArtifactsAvailable(runId, host, parsed.data.expectedVersion)
+        : null
       return await this.dependencies.repository.transact(runId, (transaction) => {
         if (!owns(transaction.run, host)) throw new RunServiceError(404, 'RUN_NOT_FOUND', 'run was not found')
         const actionStepKey = `${runId}:action:${key}`
@@ -219,10 +250,19 @@ export class RunService {
         if (parsed.data.expectedVersion !== transaction.run.version) {
           throw new RunServiceError(409, 'RUN_VERSION_CONFLICT', 'run version does not match expectedVersion')
         }
-        const approvedRevisionRound = this.assertActionPrerequisites(transaction, parsed.data, host)
+        const qualityFailureRecovery = parsed.data.type === 'RETRY_DELIVERY'
+          && transaction.run.status === 'FAILED'
+        const approvedRevisionRound = this.assertActionPrerequisites(
+          transaction,
+          parsed.data,
+          host,
+          qualityRecoveryArtifactProof,
+        )
         const nextPlanningAttempt = this.planningRetryAttempt(transaction, parsed.data)
         const previous = transaction.run
-        const policy = applyRunAction(previous, parsed.data, { actorRole: host.role ?? 'USER' })
+        const policy = qualityFailureRecovery
+          ? recoverV4QualityFailure(previous)
+          : applyRunAction(previous, parsed.data, { actorRole: host.role ?? 'USER' })
         const now = this.dependencies.clock.now().toISOString()
         const updated: RunRecord = {
           ...previous,
@@ -245,7 +285,7 @@ export class RunService {
           updatedAt: now,
         }
         transaction.putRun(updated)
-        this.appendActionEvents(transaction, previous, updated, parsed.data)
+        this.appendActionEvents(transaction, previous, updated, parsed.data, qualityFailureRecovery)
         transaction.putStep({
           id: `action-${hashInput({ runId, key }).slice(0, 28)}`,
           runId,
@@ -286,6 +326,7 @@ export class RunService {
     transaction: AgentTransaction,
     action: RunAction,
     host: HostContext,
+    qualityRecoveryArtifactProof: QualityRecoveryArtifactProof | null,
   ) {
     if (action.type === 'ACCEPT_WITH_OVERRIDE') {
       if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && (host.role ?? 'USER') !== 'ADMIN') {
@@ -315,6 +356,10 @@ export class RunService {
       return null
     }
     if (action.type === 'RETRY_DELIVERY') {
+      if (transaction.run.status === 'FAILED') {
+        this.assertV4QualityFailureRecovery(transaction, qualityRecoveryArtifactProof)
+        return null
+      }
       const failed = transaction.getStep(deliveryStepKey(transaction.run))
       if (!failed || failed.tool !== 'deliver_presentation' || failed.status !== 'FAILED') {
         throw new RunServiceError(409, 'DELIVERY_FAILURE_NOT_READY', 'failed delivery attempt is not available')
@@ -467,6 +512,7 @@ export class RunService {
     previous: RunRecord,
     updated: RunRecord,
     action: RunAction,
+    qualityFailureRecovery = false,
   ) {
     if (action.type === 'CANCEL' && isVisualDeckV4(updated)) {
       closeActiveV4LifecycleStages(transaction, 'CANCELLED_BY_USER')
@@ -478,6 +524,19 @@ export class RunService {
         type: 'phase.changed',
         payload: { from: previous.status, to: updated.status, reason: `USER_${action.type}` },
       })
+    }
+    if (qualityFailureRecovery) {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.resumed',
+        payload: { status: 'DECK_REVIEW' },
+      })
+      appendV4LifecycleEvent(transaction, 'deck_review.started', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(updated),
+      })
+      return
     }
     if (action.type === 'PAUSE') {
       transaction.appendEvent({
@@ -586,4 +645,181 @@ export class RunService {
       }
     }
   }
+
+  private assertV4QualityFailureRecovery(
+    transaction: AgentTransaction,
+    artifactProof: QualityRecoveryArtifactProof | null,
+  ) {
+    const run = transaction.run
+    if (!isVisualDeckV4(run)) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_RECOVERY_NOT_ALLOWED', 'quality recovery requires a V4 run')
+    }
+    const lastResumeSequence = [...transaction.listEvents()].reverse()
+      .find((event) => event.type === 'run.resumed')?.sequence ?? 0
+    const failure = [...transaction.listEvents()].reverse().find((event) =>
+      event.sequence > lastResumeSequence && event.type === 'run.failed')
+    if (!failure || failure.type !== 'run.failed'
+      || failure.payload.errorCode !== 'QUALITY_REMEDIATION_EXHAUSTED') {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_RECOVERY_NOT_ALLOWED', 'run is not a recoverable quality failure')
+    }
+    if (run.pendingTerminalFailure) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_ACCOUNTING_NOT_FINAL', 'terminal accounting is still pending')
+    }
+    const authoritativeAccounting = deriveV4TerminalAccounting(run, transaction.listSteps())
+    if (authoritativeAccounting.accountingStatus !== 'FINAL'
+      || run.terminalAccounting?.accountingStatus !== 'FINAL'
+      || JSON.stringify(authoritativeAccounting) !== JSON.stringify(run.terminalAccounting)) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_ACCOUNTING_NOT_FINAL', 'terminal accounting is not final')
+    }
+    if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2'
+      && !isUsageV2RunFinalizationAcknowledged(transaction.getStep(usageV2FinalizeStepKey(run.id)))) {
+      throw new RunServiceError(
+        409,
+        'QUALITY_FAILURE_USAGE_FINALIZATION_NOT_ACKNOWLEDGED',
+        'Usage V2 finalization requires reconciliation before quality recovery',
+      )
+    }
+    const blueprintStep = transaction.getStep(run.revisionRound === 0
+      ? planningStepKey(run.id, run.planningAttempt ?? 0)
+      : revisionBlueprintStepKey(run.id, run.revisionRound))
+    const blueprint = presentationBlueprintSchema.safeParse(blueprintStep?.output)
+    if (!blueprintStep || blueprintStep.status !== 'COMPLETED'
+      || !blueprint.success || blueprint.data.renderMode !== 'VISUAL_DECK_V4') {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_BLUEPRINT_INVALID', 'active V4 blueprint is not valid')
+    }
+    const steps = transaction.listSteps()
+    const requirements = blueprintImageRequirements(run, blueprint.data)
+    const artifactReferences = requirements.map((requirement) => {
+      const minimumRevisionRound = minimumRequiredV4ImageRound(
+        steps, run.id, requirement.slideId, run.revisionRound,
+      )
+      const step = latestCompletedAssetStep(
+        steps, requirement, run.revisionRound, minimumRevisionRound,
+      )
+      const reference = controlledVisualDeckPageArtifact(step, requirement)
+      return step && reference ? {
+        pageNumber: requirement.pageNumber,
+        stepKey: step.idempotencyKey,
+        artifactId: reference.artifactId,
+      } : null
+    })
+    const artifactsComplete = artifactReferences.every((reference) => reference !== null)
+      && new Set(artifactReferences.map((reference) => reference?.artifactId)).size === artifactReferences.length
+    const proofIdentityMatches = artifactProof !== null
+      && artifactProof.runId === run.id
+      && artifactProof.runVersion === run.version
+      && JSON.stringify(artifactReferences) === JSON.stringify(artifactProof.entries.map((entry) => ({
+        pageNumber: entry.pageNumber,
+        stepKey: entry.stepKey,
+        artifactId: entry.artifactId,
+      })))
+    const artifactIntegrityMatches = artifactProof !== null
+      && this.dependencies.artifacts !== undefined
+      && artifactProof.entries.every((entry) => this.dependencies.artifacts!.verifyIntegrity({
+        tenantId: run.host.tenantId,
+        artifactId: entry.artifactId,
+        mimeType: entry.mimeType,
+        byteLength: entry.byteLength,
+        sha256: entry.sha256,
+      }))
+    if (!artifactsComplete || !proofIdentityMatches || !artifactIntegrityMatches) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE', 'current V4 page artifacts are incomplete')
+    }
+    if (transaction.getDelivery(deliveryStepKey(run))
+      || transaction.listSteps().some((step) => step.tool === 'deliver_presentation')) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_DELIVERY_EXISTS', 'a delivery already exists for this run')
+    }
+  }
+
+  private async assertV4QualityFailureArtifactsAvailable(
+    runId: string,
+    host: HostContext,
+    expectedVersion: number,
+  ) {
+    const run = await this.dependencies.repository.getRun(runId)
+    if (!run || !owns(run, host) || run.status !== 'FAILED'
+      || !isVisualDeckV4(run) || run.version !== expectedVersion) return null
+    const events = await this.dependencies.repository.listEvents(runId)
+    const lastResumeSequence = [...events].reverse()
+      .find((event) => event.type === 'run.resumed')?.sequence ?? 0
+    const failure = [...events].reverse().find((event) =>
+      event.sequence > lastResumeSequence && event.type === 'run.failed')
+    if (!failure || failure.type !== 'run.failed'
+      || failure.payload.errorCode !== 'QUALITY_REMEDIATION_EXHAUSTED') return null
+
+    const steps = await this.dependencies.repository.listSteps(runId)
+    const blueprintStep = steps.find((step) => step.idempotencyKey === (run.revisionRound === 0
+      ? planningStepKey(run.id, run.planningAttempt ?? 0)
+      : revisionBlueprintStepKey(run.id, run.revisionRound)))
+    const blueprint = presentationBlueprintSchema.safeParse(blueprintStep?.output)
+    if (!blueprintStep || blueprintStep.status !== 'COMPLETED'
+      || !blueprint.success || blueprint.data.renderMode !== 'VISUAL_DECK_V4') return null
+
+    const artifacts = this.dependencies.artifacts
+    if (!artifacts) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE', 'controlled artifact access is unavailable')
+    }
+    const requirements = blueprintImageRequirements(run, blueprint.data)
+    const references = requirements.map((requirement) => {
+      const minimumRevisionRound = minimumRequiredV4ImageRound(
+        steps, run.id, requirement.slideId, run.revisionRound,
+      )
+      const step = latestCompletedAssetStep(
+        steps, requirement, run.revisionRound, minimumRevisionRound,
+      )
+      const reference = controlledVisualDeckPageArtifact(step, requirement)
+      return step && reference ? {
+        pageNumber: requirement.pageNumber,
+        stepKey: step.idempotencyKey,
+        artifactId: reference.artifactId,
+      } : null
+    })
+    if (references.some((reference) => reference === null)) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE', 'current V4 page artifact identity is invalid')
+    }
+    if (new Set(references.map((reference) => reference?.artifactId)).size !== references.length) {
+      throw new RunServiceError(409, 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE', 'current V4 page artifacts are not unique')
+    }
+    const proofEntries: QualityRecoveryArtifactProof['entries'][number][] = []
+    for (const reference of references) {
+      if (!reference) throw new Error('QUALITY_RECOVERY_ARTIFACT_PROOF_INVALID')
+      const artifact = await artifacts.get({ tenantId: run.host.tenantId, artifactId: reference.artifactId })
+      const digest = artifact ? createHash('sha256').update(artifact.bytes).digest('hex') : null
+      if (!artifact || !artifact.mimeType.startsWith('image/') || artifact.bytes.length === 0
+        || artifact.sha256 !== digest) {
+        throw new RunServiceError(409, 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE', 'current V4 page artifact is unavailable')
+      }
+      proofEntries.push({
+        ...reference,
+        sha256: artifact.sha256,
+        byteLength: artifact.bytes.length,
+        mimeType: artifact.mimeType,
+      })
+    }
+    return {
+      runId: run.id,
+      runVersion: run.version,
+      entries: proofEntries,
+    } satisfies QualityRecoveryArtifactProof
+  }
+}
+
+function minimumRequiredV4ImageRound(
+  steps: readonly StepRecord[],
+  runId: string,
+  slideId: string,
+  maxRevisionRound: number,
+) {
+  let minimumRevisionRound = 0
+  for (const step of steps) {
+    if (step.status !== 'COMPLETED'
+      || (step.tool !== 'plan_revision' && step.tool !== 'plan_page_revision')) continue
+    const plan = revisionPlanSchema.safeParse(step.output)
+    if (!plan.success || plan.data.revisionRound > maxRevisionRound
+      || step.idempotencyKey !== revisionPlanStepKey(runId, plan.data.revisionRound)) continue
+    if (plan.data.operations.some((operation) => operation.slideId === slideId)) {
+      minimumRevisionRound = Math.max(minimumRevisionRound, plan.data.revisionRound)
+    }
+  }
+  return minimumRevisionRound
 }

@@ -8,7 +8,7 @@ PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资�
 
 | 字段 | 固定值 | 用途 |
 | --- | --- | --- |
-| 软件版本 | `4.3.0` | 部署与故障定位 |
+| 软件版本 | `4.3.1` | 部署与故障定位 |
 | 演示模式 | `VISUAL_DECK_V4` | NotebookLM 风格整页视觉链路 |
 | HTTP/SSE 合同 | `"1"` | 公共 API 数据格式 |
 | V4 编译器 | `visual-deck-v4-chain-3` | 一轮 Critic/Optimizer 规划身份；旧 `chain-1/chain-2` Run 仍按持久化身份恢复 |
@@ -194,8 +194,13 @@ V2 Run，就不得回退到不包含 V2 恢复器的 `4.2.x` 或更早版本。
 | `FAILED` | `run.failed` 提供稳定错误码、是否可重试和终态账务投影 |
 | `CANCELLED` | 停止新提交；已提交任务和批次账务继续以原幂等键对账 |
 
-达到自动返修轮次、页审无法继续返修或历史质量 Issue 状态不一致时，V4 不再创建普通用户
-`HUMAN_REVIEW` 待办。对应稳定失败码为：
+`maxRevisionRounds` 表示最多允许执行的图片返修轮次。`0` 的准确语义是“不返修”：页审或套审发现模型质量问题时，
+Agent 记录原始 `*_REJECTED` 结果，将质量 Issue 以 `issue.resolved(resolution: "ACCEPTED")` 审计，并继续合成
+当前图片版本。该路径不会创建新图片 Step、不会增加 `committedBudgetUnits`，最终 Delivery 标记为
+`qualityStatus: "OVERRIDDEN_INTERNAL"`，不会伪造成审查通过。
+
+只有来源、蓝图、页面素材完整性、Provider 执行、账务、安全或文件合法性等确定性硬合同仍可阻断交付。
+对应稳定失败码包括：
 
 - `QUALITY_REMEDIATION_EXHAUSTED`
 - `QUALITY_ISSUE_STATE_INCONSISTENT`
@@ -220,11 +225,27 @@ V2 Run，就不得回退到不包含 V2 恢复器的 `4.2.x` 或更早版本。
 `RECONCILIATION_REQUIRED` 表示仍有提交或计费事实待确认，宿主不得自行猜测收费结果，也不得换幂等键重建任务。
 该字段对历史事件保持可选兼容。
 
-质量返修已耗尽但账务尚未确定时，Run 会进入内部 `RECOVERING`，详情同时返回
+质量处理过程中若账务尚未确定，Run 会进入内部 `RECOVERING`，详情同时返回
 `pendingTerminalFailure` 与最新 `terminalAccounting`；它不会回到页审/套审，也不会产生普通用户审批。
 若技术失败已经先进入 `FAILED`，且其 `run.failed.terminalAccounting.accountingStatus` 为
 `RECONCILIATION_REQUIRED`，SSE 必须继续监听。账务最终确定后 Agent 追加一次
 `run.accounting.finalized`，Run 详情中的 `terminalAccounting` 同步变为 `FINAL`，此时消费者才关闭流。
+
+`4.3.0` 已产生的 `FAILED(QUALITY_REMEDIATION_EXHAUSTED)` Run 可复用现有动作合同恢复：
+
+```http
+POST /v1/runs/{runId}/actions
+Idempotency-Key: <stable-action-key>
+Content-Type: application/json
+
+{"schemaVersion":"1","type":"RETRY_DELIVERY","expectedVersion":<currentVersion>}
+```
+
+Agent 仅在以下条件全部满足时执行 `FAILED -> DECK_REVIEW` 并追加 `run.resumed`：当前失败确为 V4 质量耗尽、
+权威 Step 归约和 Run 投影的终态账务均为 `FINAL`、Usage V2（如启用）已由宿主确认完成、活动 V4 Blueprint
+合法、每页图片 Step 的 Run/页码/版本身份一致、受控 Artifact 为同租户非空完整图片，并且尚无 Delivery。
+恢复不会追加 `approval.resolved` 或提前追加 `delivery.started`，也不会创建、换 Key 或重提任何图片任务。
+条件不满足时返回 `409` 并保持原 Run 不变。
 
 Run 详情中的每个新交付都具有以下消费者身份：
 
@@ -248,6 +269,11 @@ Run 详情中的每个新交付都具有以下消费者身份：
 `COMPLETED` 只允许引用页集、修订轮次、活动 Blueprint/Proposal 哈希均匹配的 `VERIFIED FINAL` 交付。
 历史交付在读取时归一化为 `identity.status: "LEGACY_UNVERIFIED"`，不会伪造旧记录中不存在的页集或哈希证据。
 当前合同不产出 DRAFT；未审核页面不得冒充 FINAL。
+
+当质量模型未通过但返修被禁用或已达到上限时，`qualityStatus` 为 `OVERRIDDEN_INTERNAL`，
+`qualityOverrideAudit` 保存系统质量策略主体、原因、被接受的 Issue 和时间。该状态表示“按非阻断策略交付当前版本”，
+不表示模型审查通过。完整接受清单保留在 `issue.resolved(ACCEPTED)` 事件中；超过交付合同 50 项枚举上限时，
+Delivery 只保留有界代表项和一个汇总 Issue，不丢失事件级审计事实。
 
 V4 的 `ACCEPT_WITH_OVERRIDE` 仅供已认证的 `ADMIN` 内部治理使用，必须保存操作者、原因、Issue 列表和时间；
 普通用户不能借此取得 FINAL 交付。质量审查或技术错误尚未完成时，宿主应按 Run 状态显示可恢复进度，

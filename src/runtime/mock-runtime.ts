@@ -600,6 +600,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const runs = new RunService({
     repository: input.repository,
     clock,
+    artifacts: input.artifacts,
     buildIdentity: runtimeBuildIdentity,
     ...(input.defaultAccountingProtocol ? { defaultAccountingProtocol: input.defaultAccountingProtocol } : {}),
     ...(input.providerBillingCatalog ? { providerBillingCatalog: input.providerBillingCatalog } : {}),

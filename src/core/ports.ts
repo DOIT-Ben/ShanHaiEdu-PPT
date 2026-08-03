@@ -467,6 +467,14 @@ export interface ArtifactPort {
     bytes: Uint8Array
     sha256: string
   }> | null>
+
+  verifyIntegrity(input: Readonly<{
+    tenantId: string
+    artifactId: string
+    mimeType: string
+    byteLength: number
+    sha256: string
+  }>): boolean
 }
 
 export interface PresentationRendererPort {
@@ -613,6 +621,7 @@ export type EventPage = Readonly<{
   nextAfter: number
   hasMore: boolean
   byteLength: number
+  terminalSequence: number | null
 }>
 
 export type TerminalAgentEvent = Extract<AgentEvent, {

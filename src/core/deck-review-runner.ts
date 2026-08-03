@@ -34,10 +34,13 @@ import { transitionRun } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import {
   allPageNumbers,
+  appendAcceptedQualityIssueResolutions,
   appendFixedIssueResolutions,
   appendV4LifecycleEvent,
+  ensureAutomatedQualityAcceptanceIssue,
   failVisualDeckV4Transaction,
   isVisualDeckV4,
+  markAutomatedQualityAcceptance,
 } from './v4-lifecycle'
 
 export const DECK_QUALITY_THRESHOLD = 80
@@ -225,9 +228,41 @@ export class DeckReviewRunner {
         }
         if (existing.status === 'COMPLETED') {
           const review = deckReviewSchema.parse(existing.output)
-          const passed = passesDeckQuality(review) && !hasOpenBlockingIssues(transaction.listEvents())
-          if (!passed && passesDeckQuality(review) && isVisualDeckV4(transaction.run)
-            && transaction.run.status === 'DECK_REVIEW') {
+          const initiallyPassed = passesDeckQuality(review) && !hasOpenBlockingIssues(transaction.listEvents())
+          const remediationExhausted = isVisualDeckV4(transaction.run)
+            && transaction.run.revisionRound >= transaction.run.maxRevisionRounds
+          const disposition = remediationExhausted
+            ? appendAcceptedQualityIssueResolutions(transaction)
+            : { acceptedIssueIds: [] as string[], blockingIssueIds: [] as string[] }
+          const passed = initiallyPassed && disposition.acceptedIssueIds.length === 0
+          const acceptedForDelivery = remediationExhausted && !passed && disposition.blockingIssueIds.length === 0
+          if (acceptedForDelivery && transaction.run.status === 'DECK_REVIEW') {
+            const now = this.dependencies.clock.now().toISOString()
+            const policy = transitionRun(transaction.run, 'DELIVERING')
+            const acceptedIssueIds = ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
+            transaction.putRun({
+              ...markAutomatedQualityAcceptance({ ...transaction.run, ...policy }, acceptedIssueIds, now),
+              qualityScore: review.qualityScore,
+              updatedAt: now,
+            })
+            appendV4LifecycleEvent(transaction, 'deck_review.completed', {
+              completed: 1, total: 1, pageNumbers: allPageNumbers(transaction.run),
+              reason: 'DECK_REVIEW_REJECTED', retryable: false,
+            })
+            transaction.appendEvent({
+              schemaVersion: CONTRACT_VERSION,
+              type: 'phase.changed',
+              payload: { from: 'DECK_REVIEW', to: 'DELIVERING', reason: 'QUALITY_POLICY_ACCEPTED' },
+            })
+            appendV4LifecycleEvent(transaction, 'delivery.started', {
+              completed: 0, total: 1, pageNumbers: allPageNumbers(transaction.run),
+            })
+          }
+          const replayHasHardBlocker = disposition.blockingIssueIds.length > 0
+          const replayHasInconsistentPassingReview = passesDeckQuality(review) && !initiallyPassed
+          if (!passed && isVisualDeckV4(transaction.run)
+            && transaction.run.status === 'DECK_REVIEW' && !acceptedForDelivery
+            && (replayHasHardBlocker || replayHasInconsistentPassingReview)) {
             failVisualDeckV4Transaction({
               transaction,
               clock: this.dependencies.clock,
@@ -324,23 +359,37 @@ export class DeckReviewRunner {
       }
       const currentReviewPassed = passesDeckQuality(review)
       const hasHistoricalBlocker = hasOpenBlockingIssues(transaction.listEvents())
-      const passed = currentReviewPassed && !hasHistoricalBlocker
-      const requiresHuman = currentReviewPassed && hasHistoricalBlocker
-      const requiresInternalFailure = requiresHuman && isVisualDeckV4(transaction.run)
-      const policy = passed
+      const remediationExhausted = isVisualDeckV4(transaction.run)
+        && transaction.run.revisionRound >= transaction.run.maxRevisionRounds
+      const disposition = remediationExhausted
+        ? appendAcceptedQualityIssueResolutions(transaction)
+        : { acceptedIssueIds: [] as string[], blockingIssueIds: [] as string[] }
+      const passed = currentReviewPassed && !hasHistoricalBlocker && disposition.acceptedIssueIds.length === 0
+      const acceptedForDelivery = remediationExhausted && !passed && disposition.blockingIssueIds.length === 0
+      const shouldDeliver = passed || acceptedForDelivery
+      const requiresHuman = currentReviewPassed && hasHistoricalBlocker && !remediationExhausted
+      const requiresInternalFailure = isVisualDeckV4(transaction.run)
+        && (disposition.blockingIssueIds.length > 0 || (requiresHuman && !acceptedForDelivery))
+      const policy = shouldDeliver
         ? transitionRun(transaction.run, 'DELIVERING')
         : requiresHuman && !requiresInternalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
-      transaction.putRun({ ...transaction.run, ...policy, qualityScore: review.qualityScore, updatedAt: now })
+      const acceptedIssueIds = acceptedForDelivery
+        ? ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
+        : []
+      const qualityRun = acceptedForDelivery
+        ? markAutomatedQualityAcceptance({ ...transaction.run, ...policy }, acceptedIssueIds, now)
+        : { ...transaction.run, ...policy }
+      transaction.putRun({ ...qualityRun, qualityScore: review.qualityScore, updatedAt: now })
       appendV4LifecycleEvent(transaction, 'deck_review.completed', {
         completed: 1,
         total: 1,
         pageNumbers: allPageNumbers(transaction.run),
         reason: passed ? null : 'DECK_REVIEW_REJECTED',
-        retryable: passed ? null : !requiresHuman,
+        retryable: passed ? null : acceptedForDelivery ? false : !requiresHuman,
         requiresUserAction: requiresHuman && !requiresInternalFailure,
         nextAction: requiresHuman && !requiresInternalFailure ? 'REVIEW_RESULT' : null,
       })
-      if (passed) {
+      if (shouldDeliver) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',

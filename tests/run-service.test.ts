@@ -1,15 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { FixedClock } from '../src/adapters/mock-ports'
+import { FixedClock, MockArtifactPort } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
 import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { deliveryStepKey } from '../src/core/delivery-runner'
 import { planningStepKey } from '../src/core/planning-runner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { RunService, RunServiceError } from '../src/core/run-service'
-import { appendV4LifecycleEvent } from '../src/core/v4-lifecycle'
+import { appendV4LifecycleEvent, v4LifecyclePayload } from '../src/core/v4-lifecycle'
 import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
+import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
+import type { UsageRunBill } from '../src/usage-accounting-contracts'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 const request = {
@@ -58,9 +61,188 @@ function blueprint() {
   }
 }
 
+function visualDeckV4Blueprint(runId: string) {
+  const source = {
+    kind: 'TEXT' as const,
+    name: '教材.txt',
+    text: '把五只小鸟分成两个非空组，记录每一种分法，并检查两组合起来仍然是五只。'.repeat(8),
+  }
+  return createVisualDeckV4Blueprint({
+    runId,
+    inputHash: 'v4-quality-recovery-plan-hash',
+    source,
+    document: {
+      name: source.name,
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+      isComplete: true,
+      missingRanges: [],
+    },
+    config: {
+      instruction: '制作两页讲解五以内数的分与合的课堂视觉 PPT',
+      sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: {
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+        audience: '幼儿园大班学生', focus: '理解 5 的分与合', styleHint: '明亮清晰的儿童课堂信息图',
+      },
+    },
+    slideCount: 2,
+    visualDirection: '明亮清晰的儿童课堂信息图',
+    createdAt: '2026-08-03T00:00:00.000Z',
+  })
+}
+
 function fixture() {
   const repository = new InMemoryAgentRepository()
-  return { repository, service: new RunService({ repository, clock: new FixedClock() }) }
+  const artifacts = new MockArtifactPort()
+  const clock = new FixedClock()
+  return { repository, artifacts, clock, service: new RunService({ repository, artifacts, clock }) }
+}
+
+type QualityRecoveryImageFault =
+  | 'NULL_OUTPUT' | 'CROSS_PAGE' | 'WRONG_VERSION' | 'MISSING_ARTIFACT' | 'DUPLICATE_ARTIFACT'
+  | 'NON_IMAGE' | 'EMPTY_ARTIFACT' | 'SHA_MISMATCH'
+
+async function failedV4QualityRecoveryFixture(input: Readonly<{
+  imageFault?: QualityRecoveryImageFault
+  usageFinalization?: 'ACKNOWLEDGED' | 'REVIEW_REQUIRED'
+}> = {}) {
+  const { repository, artifacts, clock, service } = fixture()
+  const created = await service.create({
+    ...request,
+    presentationMode: 'VISUAL_DECK_V4',
+    automationLevel: 'BOUNDED_AUTO',
+    maxRevisionRounds: 0,
+    budgetUnits: 2,
+    visualDeckV4: {
+      instruction: '根据教材自动制作完整课堂演示文稿',
+      sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+    },
+  }, `frameflow-v4-quality-recovery-${input.imageFault ?? 'valid'}-${input.usageFinalization ?? 'v1'}`)
+  const planned = visualDeckV4Blueprint(created.run.id)
+  const imageArtifacts = await Promise.all([1, 2].map((pageNumber) => artifacts.put({
+    tenantId: 'frameflow',
+    runId: created.run.id,
+    name: `quality-recovery-${pageNumber}.png`,
+    mimeType: 'image/png',
+    bytes: new TextEncoder().encode(`quality-recovery-image-${pageNumber}`),
+    idempotencyKey: `${created.run.id}:quality-recovery-artifact:${pageNumber}`,
+  })))
+  const firstStoredArtifact = artifacts.artifacts.get(imageArtifacts[0]!.artifactId)!
+  if (input.imageFault === 'NON_IMAGE') firstStoredArtifact.mimeType = 'text/plain'
+  if (input.imageFault === 'EMPTY_ARTIFACT') firstStoredArtifact.bytes = new Uint8Array()
+  if (input.imageFault === 'SHA_MISMATCH') firstStoredArtifact.sha256 = '0'.repeat(64)
+  const terminalAccounting = {
+    authorizedUnits: 2, submittedUnits: 2, settledUnits: 2,
+    releasedUnits: 0, reconciliationUnits: 0, accountingStatus: 'FINAL' as const,
+  }
+  await repository.transact(created.run.id, (transaction) => {
+    transaction.putStep({
+      id: 'step-v4-quality-recovery-plan', runId: created.run.id,
+      idempotencyKey: planningStepKey(created.run.id), inputHash: 'v4-quality-recovery-plan-hash',
+      tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+      externalOperationId: null, errorCode: null, output: planned,
+      createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+    })
+    for (const pageNumber of [1, 2]) {
+      const validOutput = {
+        slideId: `${created.run.id}:slide:${pageNumber}`,
+        versionId: `${created.run.id}:slide:${pageNumber}:r0:v1`,
+        artifactId: imageArtifacts[pageNumber - 1]!.artifactId,
+      }
+      const output = pageNumber !== 1 ? validOutput
+        : input.imageFault === 'NULL_OUTPUT' ? null
+          : input.imageFault === 'CROSS_PAGE' ? { ...validOutput, slideId: `${created.run.id}:slide:2` }
+            : input.imageFault === 'WRONG_VERSION' ? { ...validOutput, versionId: `${created.run.id}:slide:1:r1:v1` }
+              : input.imageFault === 'MISSING_ARTIFACT' ? { ...validOutput, artifactId: 'artifact-missing' }
+                : input.imageFault === 'DUPLICATE_ARTIFACT'
+                  ? { ...validOutput, artifactId: imageArtifacts[1]!.artifactId }
+                : validOutput
+      transaction.putStep({
+        id: `step-v4-quality-recovery-image-${pageNumber}`, runId: created.run.id,
+        idempotencyKey: `${created.run.id}:slide:${pageNumber}:image:r0:v1`,
+        inputHash: `v4-quality-recovery-image-${pageNumber}`, tool: 'generate_slide_image',
+        status: 'COMPLETED', budgetUnits: 1, budgetReservationId: 'reservation-v4-quality-recovery',
+        externalOperationId: `operation-v4-quality-recovery-${pageNumber}`, errorCode: null, output,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    }
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'issue.detected',
+      payload: {
+        id: 'v4-quality-recovery-page-issue', category: 'IMAGE_QUALITY', severity: 'WARNING',
+        summary: '第二页构图仍有可优化空间。', slideIds: [`${created.run.id}:slide:2`],
+        sourceChunkIds: [], status: 'OPEN',
+      },
+    })
+    const failed = {
+      ...transaction.run,
+      ...(input.usageFinalization ? { accountingProtocol: 'FRAMEFLOW_USAGE_V2' as const } : {}),
+      status: 'FAILED' as const,
+      version: 7,
+      committedBudgetUnits: 2,
+      terminalAccounting,
+    }
+    transaction.putRun(failed)
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'run.failed',
+      payload: {
+        ...v4LifecyclePayload(failed, 'RUN', {
+          completed: 0, total: 1, pageNumbers: [1, 2], reason: 'REVISION_LIMIT_REACHED', retryable: false,
+        }),
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        terminalAccounting,
+      },
+    })
+    if (input.usageFinalization) {
+      const finalization = enqueueUsageV2RunFinalization(transaction, clock)!
+      const acknowledged = input.usageFinalization === 'ACKNOWLEDGED'
+      transaction.putStep({
+        ...finalization,
+        status: acknowledged ? 'COMPLETED' : 'FAILED',
+        errorCode: acknowledged ? null : 'HOST_USAGE_V2_REVIEW_REQUIRED',
+        output: {
+          ...(finalization.output as Record<string, unknown>),
+          deliveryState: acknowledged ? 'ACKNOWLEDGED' : 'REVIEW_REQUIRED',
+          ...(acknowledged ? { bill: settledUsageV2Bill(created.run.id) } : {}),
+        },
+      })
+    }
+  })
+  return { repository, artifacts, clock, service, runId: created.run.id, expectedVersion: 7 }
+}
+
+function settledUsageV2Bill(runId: string): UsageRunBill {
+  return {
+    pptRunId: runId,
+    authorizationReservationId: 'authorization-quality-recovery',
+    accountingMode: 'USAGE_V2',
+    status: 'SETTLED',
+    authorizationCapMilli: 20_000,
+    authorizedModel: 'image-2',
+    authorizedUnits: 2,
+    pricingVersion: 'ppt-image-v1',
+    unitPriceMilli: 10_000,
+    providerSpendSafetyCapOperations: 2,
+    generatedOperations: 2,
+    chargedOperations: 2,
+    notChargedOperations: 0,
+    unknownOperations: 0,
+    chargeableMilli: 20_000,
+    settledMilli: 20_000,
+    releasedMilli: 0,
+    providerCosts: [],
+    lastEventSequence: 2,
+    lastEventAt: '2026-08-03T00:00:00.000Z',
+    settledAt: '2026-08-03T00:00:00.000Z',
+    firstUnknownAt: null,
+    reconciliationAttempts: 0,
+    nextReconcileAt: null,
+    reconciliationDeadlineAt: null,
+    reconciliationLastError: null,
+  }
 }
 
 describe('run service', () => {
@@ -779,6 +961,309 @@ describe('run service', () => {
     }, 'retry-delivery-0001')
 
     expect(retried).toMatchObject({ status: 'DELIVERING', version: 2 })
+  })
+
+  test('resumes one failed v4 quality gate without creating media or changing settled units', async () => {
+    const { repository, artifacts, service } = fixture()
+    const created = await service.create({
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      maxRevisionRounds: 0,
+      budgetUnits: 2,
+      visualDeckV4: {
+        instruction: '根据教材自动制作完整课堂演示文稿',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+      },
+    }, 'frameflow-v4-quality-recovery-create-0001')
+    const planned = visualDeckV4Blueprint(created.run.id)
+    const terminalAccounting = {
+      authorizedUnits: 2, submittedUnits: 2, settledUnits: 2,
+      releasedUnits: 0, reconciliationUnits: 0, accountingStatus: 'FINAL' as const,
+    }
+    const recoveryArtifacts = await Promise.all([1, 2].map((pageNumber) => artifacts.put({
+      tenantId: 'frameflow', runId: created.run.id, name: `quality-recovery-${pageNumber}.png`,
+      mimeType: 'image/png', bytes: new TextEncoder().encode(`quality-recovery-image-${pageNumber}`),
+      idempotencyKey: `${created.run.id}:quality-recovery-artifact:${pageNumber}`,
+    })))
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putStep({
+        id: 'step-v4-quality-recovery-plan', runId: created.run.id,
+        idempotencyKey: planningStepKey(created.run.id), inputHash: 'v4-quality-recovery-plan-hash',
+        tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null, output: planned,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      for (const pageNumber of [1, 2]) {
+        transaction.putStep({
+          id: `step-v4-quality-recovery-image-${pageNumber}`, runId: created.run.id,
+          idempotencyKey: `${created.run.id}:slide:${pageNumber}:image:r0:v1`,
+          inputHash: `v4-quality-recovery-image-${pageNumber}`, tool: 'generate_slide_image',
+          status: 'COMPLETED', budgetUnits: 1, budgetReservationId: 'reservation-v4-quality-recovery',
+          externalOperationId: `operation-v4-quality-recovery-${pageNumber}`, errorCode: null,
+          output: {
+            slideId: `${created.run.id}:slide:${pageNumber}`,
+            versionId: `${created.run.id}:slide:${pageNumber}:r0:v1`,
+            artifactId: recoveryArtifacts[pageNumber - 1]!.artifactId,
+          },
+          createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+        })
+      }
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'v4-quality-recovery-page-issue', category: 'IMAGE_QUALITY', severity: 'WARNING',
+          summary: '第二页构图仍有可优化空间。', slideIds: [`${created.run.id}:slide:2`],
+          sourceChunkIds: [], status: 'OPEN',
+        },
+      })
+      const failed = {
+        ...transaction.run,
+        status: 'FAILED' as const,
+        version: 7,
+        committedBudgetUnits: 2,
+        terminalAccounting,
+      }
+      transaction.putRun(failed)
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.failed',
+        payload: {
+          ...v4LifecyclePayload(failed, 'RUN', {
+            completed: 0, total: 1, pageNumbers: [1, 2], reason: 'REVISION_LIMIT_REACHED', retryable: false,
+          }),
+          errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+          terminalAccounting,
+        },
+      })
+    })
+
+    const beforeSteps = await repository.listSteps(created.run.id)
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putStep({
+        id: 'step-v4-quality-recovery-pending-orphan', runId: created.run.id,
+        idempotencyKey: `${created.run.id}:slide:99:image:r0:v1`, inputHash: 'pending-orphan',
+        tool: 'generate_slide_image', status: 'WAITING', budgetUnits: 0, budgetReservationId: 'pending-orphan',
+        externalOperationId: 'pending-orphan-operation', errorCode: null, output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+    await expect(service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 7,
+    }, 'retry-v4-quality-accounting-not-final')).rejects.toMatchObject({
+      status: 409,
+      code: 'QUALITY_FAILURE_ACCOUNTING_NOT_FINAL',
+    })
+    await repository.transact(created.run.id, (transaction) => {
+      const pending = transaction.getStep(`${created.run.id}:slide:99:image:r0:v1`)!
+      transaction.putStep({ ...pending, status: 'FAILED_NOT_CHARGED', externalOperationId: null })
+    })
+    const recovered = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 7,
+    }, 'retry-v4-quality-delivery-0001')
+    const replayed = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: 7,
+    }, 'retry-v4-quality-delivery-0001')
+
+    expect(recovered).toMatchObject({ status: 'DECK_REVIEW', version: 8, committedBudgetUnits: 2 })
+    expect(replayed).toEqual(recovered)
+    const afterSteps = await repository.listSteps(created.run.id)
+    expect(afterSteps.filter((step) => step.tool === 'generate_slide_image'))
+      .toEqual([
+        ...beforeSteps.filter((step) => step.tool === 'generate_slide_image'),
+        expect.objectContaining({ id: 'step-v4-quality-recovery-pending-orphan', status: 'FAILED_NOT_CHARGED' }),
+      ])
+    expect(afterSteps.some((step) => step.tool === 'deliver_presentation')).toBe(false)
+    expect(await repository.getTerminalEvent(created.run.id)).toBeNull()
+    const events = await repository.listEvents(created.run.id)
+    expect(events.filter((event) => event.type === 'run.resumed')).toHaveLength(1)
+    expect(events.filter((event) => event.type === 'deck_review.started')).toHaveLength(1)
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+  })
+
+  test('rejects quality recovery before state mutation when Usage V2 finalization requires review', async () => {
+    const seeded = await failedV4QualityRecoveryFixture({ usageFinalization: 'REVIEW_REQUIRED' })
+
+    await expect(seeded.service.act(seeded.runId, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: seeded.expectedVersion,
+    }, 'retry-v4-quality-v2-review-required')).rejects.toMatchObject({
+      status: 409,
+      code: 'QUALITY_FAILURE_USAGE_FINALIZATION_NOT_ACKNOWLEDGED',
+    })
+
+    expect(await seeded.repository.getRun(seeded.runId)).toMatchObject({ status: 'FAILED', version: 7 })
+    expect((await seeded.repository.listEvents(seeded.runId)).some((event) => event.type === 'run.resumed')).toBe(false)
+  })
+
+  test('allows quality recovery after Usage V2 finalization is acknowledged', async () => {
+    const seeded = await failedV4QualityRecoveryFixture({ usageFinalization: 'ACKNOWLEDGED' })
+
+    await expect(seeded.service.act(seeded.runId, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: seeded.expectedVersion,
+    }, 'retry-v4-quality-v2-acknowledged')).resolves.toMatchObject({
+      status: 'DECK_REVIEW', version: 8,
+    })
+  })
+
+  test('rejects invalid or missing controlled page artifacts before quality recovery', async () => {
+    for (const imageFault of [
+      'NULL_OUTPUT', 'CROSS_PAGE', 'WRONG_VERSION', 'MISSING_ARTIFACT', 'DUPLICATE_ARTIFACT',
+      'NON_IMAGE', 'EMPTY_ARTIFACT', 'SHA_MISMATCH',
+    ] as const) {
+      const seeded = await failedV4QualityRecoveryFixture({ imageFault })
+
+      await expect(seeded.service.act(seeded.runId, host, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'RETRY_DELIVERY',
+        expectedVersion: seeded.expectedVersion,
+      }, `retry-v4-quality-invalid-artifact-${imageFault.toLowerCase()}`)).rejects.toMatchObject({
+        status: 409,
+        code: 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE',
+      })
+
+      expect(await seeded.repository.getRun(seeded.runId)).toMatchObject({ status: 'FAILED', version: 7 })
+      expect((await seeded.repository.listEvents(seeded.runId)).some((event) => event.type === 'run.resumed')).toBe(false)
+    }
+  })
+
+  test('rejects a page Step that changes after artifact preflight but before the recovery transaction', async () => {
+    const seeded = await failedV4QualityRecoveryFixture()
+    const replacement = await seeded.artifacts.put({
+      tenantId: 'frameflow', runId: seeded.runId, name: 'replacement.png', mimeType: 'image/png',
+      bytes: new TextEncoder().encode('replacement-image'),
+      idempotencyKey: `${seeded.runId}:quality-recovery-race-replacement`,
+    })
+    let artifactReads = 0
+    const racingArtifacts = {
+      put: seeded.artifacts.put.bind(seeded.artifacts),
+      getByIdempotencyKey: seeded.artifacts.getByIdempotencyKey.bind(seeded.artifacts),
+      verifyIntegrity: seeded.artifacts.verifyIntegrity.bind(seeded.artifacts),
+      get: async (input: Parameters<typeof seeded.artifacts.get>[0]) => {
+        const artifact = await seeded.artifacts.get(input)
+        artifactReads += 1
+        if (artifactReads === 2) {
+          await seeded.repository.transact(seeded.runId, (transaction) => {
+            const key = `${seeded.runId}:slide:1:image:r0:v1`
+            const step = transaction.getStep(key)!
+            transaction.putStep({
+              ...step,
+              output: {
+                slideId: `${seeded.runId}:slide:1`,
+                versionId: `${seeded.runId}:slide:1:r0:v1`,
+                artifactId: replacement.artifactId,
+              },
+            })
+          })
+        }
+        return artifact
+      },
+    }
+    const racingService = new RunService({
+      repository: seeded.repository, artifacts: racingArtifacts, clock: seeded.clock,
+    })
+
+    await expect(racingService.act(seeded.runId, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: seeded.expectedVersion,
+    }, 'retry-v4-quality-artifact-race')).rejects.toMatchObject({
+      status: 409,
+      code: 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE',
+    })
+    expect(await seeded.repository.getRun(seeded.runId)).toMatchObject({ status: 'FAILED', version: 7 })
+  })
+
+  test('rejects an artifact whose content changes after preflight but before recovery state mutation', async () => {
+    const seeded = await failedV4QualityRecoveryFixture()
+    const firstImage = (await seeded.repository.listSteps(seeded.runId))
+      .find((step) => step.idempotencyKey === `${seeded.runId}:slide:1:image:r0:v1`)!
+    const firstArtifactId = (firstImage.output as { artifactId: string }).artifactId
+    let artifactReads = 0
+    const racingArtifacts = {
+      put: seeded.artifacts.put.bind(seeded.artifacts),
+      getByIdempotencyKey: seeded.artifacts.getByIdempotencyKey.bind(seeded.artifacts),
+      verifyIntegrity: seeded.artifacts.verifyIntegrity.bind(seeded.artifacts),
+      get: async (input: Parameters<typeof seeded.artifacts.get>[0]) => {
+        const artifact = await seeded.artifacts.get(input)
+        artifactReads += 1
+        if (artifactReads === 2) {
+          seeded.artifacts.artifacts.set(firstArtifactId, {
+            mimeType: 'text/plain',
+            bytes: new Uint8Array(),
+            sha256: '0'.repeat(64),
+          })
+        }
+        return artifact
+      },
+    }
+    const racingService = new RunService({
+      repository: seeded.repository, artifacts: racingArtifacts, clock: seeded.clock,
+    })
+
+    await expect(racingService.act(seeded.runId, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: seeded.expectedVersion,
+    }, 'retry-v4-quality-artifact-content-race')).rejects.toMatchObject({
+      status: 409,
+      code: 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE',
+    })
+    expect(await seeded.repository.getRun(seeded.runId)).toMatchObject({ status: 'FAILED', version: 7 })
+    expect((await seeded.repository.listEvents(seeded.runId)).some((event) => event.type === 'run.resumed')).toBe(false)
+  })
+
+  test('rejects a pre-revision image for a page targeted by the adopted revision plan', async () => {
+    const seeded = await failedV4QualityRecoveryFixture()
+    await seeded.repository.transact(seeded.runId, (transaction) => {
+      const revisedBlueprint = visualDeckV4Blueprint(seeded.runId)
+      transaction.putStep({
+        id: 'step-v4-quality-recovery-revision-plan-r1', runId: seeded.runId,
+        idempotencyKey: revisionPlanStepKey(seeded.runId, 1), inputHash: 'quality-recovery-revision-plan-r1',
+        tool: 'plan_revision', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null,
+        output: {
+          id: `${seeded.runId}:revision-plan:r1`, reviewId: `${seeded.runId}:deck-review:r0`, revisionRound: 1,
+          createdAt: transaction.run.createdAt, summary: '第一轮规划明确要求更新第二页并重新生成该页图片。',
+          operations: [{
+            id: `${seeded.runId}:revision:r1:p2`, slideId: `${seeded.runId}:slide:2`, kind: 'UPDATE_CONTENT',
+            issueIds: ['v4-quality-recovery-page-issue'], instruction: '依据来源修正第二页内容并重新生成完整页面图片。',
+            sourceChunkIds: ['chunk-1'],
+          }],
+        },
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: 'step-v4-quality-recovery-revision-blueprint-r1', runId: seeded.runId,
+        idempotencyKey: revisionBlueprintStepKey(seeded.runId, 1), inputHash: 'quality-recovery-blueprint-r1',
+        tool: 'apply_revision', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null, output: revisedBlueprint,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putRun({ ...transaction.run, revisionRound: 1 })
+    })
+
+    await expect(seeded.service.act(seeded.runId, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'RETRY_DELIVERY',
+      expectedVersion: seeded.expectedVersion,
+    }, 'retry-v4-quality-stale-targeted-page')).rejects.toMatchObject({
+      status: 409,
+      code: 'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE',
+    })
+    expect(await seeded.repository.getRun(seeded.runId)).toMatchObject({ status: 'FAILED', version: 7 })
+    expect((await seeded.repository.listEvents(seeded.runId)).some((event) => event.type === 'run.resumed')).toBe(false)
   })
 
   test('replays the same user action without duplicate events', async () => {

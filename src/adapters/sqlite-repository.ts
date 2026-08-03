@@ -303,10 +303,20 @@ export class SqliteAgentRepository implements AgentRepository {
   }
 
   async getTerminalEvent(runId: string) {
-    const row = this.#database.query<JsonRow, [string]>(`
+    const row = this.#terminalEventRow(runId)
+    return row ? parseAgentEvent(row.data) as Awaited<ReturnType<AgentRepository['getTerminalEvent']>> : null
+  }
+
+  #terminalEventRow(runId: string) {
+    return this.#database.query<JsonRow, [string, string]>(`
       SELECT data
       FROM agent_events
       WHERE run_id = ?
+        AND sequence > COALESCE((
+          SELECT MAX(sequence)
+          FROM agent_events
+          WHERE run_id = ? AND json_extract(data, '$.type') = 'run.resumed'
+        ), 0)
         AND (
           json_extract(data, '$.type') IN ('run.completed', 'run.cancelled', 'run.accounting.finalized')
           OR (
@@ -319,14 +329,17 @@ export class SqliteAgentRepository implements AgentRepository {
         )
       ORDER BY sequence ASC
       LIMIT 1
-    `).get(runId)
-    return row ? parseAgentEvent(row.data) as Awaited<ReturnType<AgentRepository['getTerminalEvent']>> : null
+    `).get(runId, runId)
   }
 
   async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
-    const rows = this.#database.query<JsonRow, [string, number, number]>(
-      'SELECT data FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?',
-    ).all(runId, input.afterSequence, input.limit + 1)
+    const snapshot = this.#database.transaction(() => ({
+      terminal: this.#terminalEventRow(runId),
+      rows: this.#database.query<JsonRow, [string, number, number]>(
+        'SELECT data FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?',
+      ).all(runId, input.afterSequence, input.limit + 1),
+    }))()
+    const rows = snapshot.rows
     const events: AgentEvent[] = []
     let byteLength = 0
     for (const row of rows.slice(0, input.limit)) {
@@ -340,6 +353,7 @@ export class SqliteAgentRepository implements AgentRepository {
       nextAfter: events.at(-1)?.sequence ?? input.afterSequence,
       hasMore: rows.length > events.length,
       byteLength,
+      terminalSequence: snapshot.terminal ? parseAgentEvent(snapshot.terminal.data).sequence : null,
     }
   }
 

@@ -81,6 +81,14 @@ export function recoverMediaRevision(state: RunPolicyState): RunPolicyState {
   return { ...state, status: 'REVISING', resumeState: null, version: state.version + 1 }
 }
 
+/** Only RunService may use this after validating a persisted V4 quality-only terminal failure. */
+export function recoverV4QualityFailure(state: RunPolicyState): RunPolicyState {
+  if (state.status !== 'FAILED' || state.presentationMode !== 'VISUAL_DECK_V4') {
+    throw new PolicyError('QUALITY_FAILURE_RECOVERY_NOT_ALLOWED', 'quality recovery requires a failed V4 run')
+  }
+  return { ...state, status: 'DECK_REVIEW', resumeState: null, version: state.version + 1 }
+}
+
 export function applyRunAction(
   state: RunPolicyState,
   action: RunAction,

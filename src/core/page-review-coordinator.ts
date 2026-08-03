@@ -13,9 +13,12 @@ import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { VisualReviewRunner, type ReviewSlideResult } from './visual-review-runner'
 import {
   allPageNumbers,
+  appendAcceptedQualityIssueResolutions,
   appendFixedIssueResolutions,
   appendV4LifecycleEvent,
   failVisualDeckV4Transaction,
+  ensureAutomatedQualityAcceptanceIssue,
+  markAutomatedQualityAcceptance,
   revisionDetails,
 } from './v4-lifecycle'
 
@@ -157,11 +160,21 @@ export class PageReviewCoordinator {
         && await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
       if (!autoRevisionStarted) {
         const problemPageNumbers = this.problemPageNumbers(blueprint, imageSteps, reviews)
-        await this.moveToHuman(runId, executionFailed ? 'PAGE_REVIEW_FAILED' : 'PAGE_REVIEW_REJECTED', {
-          completed: reviews.filter((result) => result.review !== null).length,
-          total,
-          pageNumbers: problemPageNumbers,
-        })
+        if (fullPageRaster && !executionFailed && rejected > 0) {
+          await this.moveToDeckReview(runId, total, {
+            reason: 'PAGE_REVIEW_REJECTED',
+            pageNumbers: problemPageNumbers,
+            acceptedIssueIds: reviews
+              .filter((result) => result.review && !result.review.approved)
+              .map((result) => `${result.step.id}:visual-review`),
+          })
+        } else {
+          await this.moveToHuman(runId, executionFailed ? 'PAGE_REVIEW_FAILED' : 'PAGE_REVIEW_REJECTED', {
+            completed: reviews.filter((result) => result.review !== null).length,
+            total,
+            pageNumbers: problemPageNumbers,
+          })
+        }
       }
     } else if (approved === total) {
       await this.moveToDeckReview(runId, total)
@@ -324,16 +337,51 @@ export class PageReviewCoordinator {
     }
   }
 
-  private async moveToDeckReview(runId: string, total: number) {
+  private async moveToDeckReview(
+    runId: string,
+    total: number,
+    accepted?: Readonly<{
+      reason: 'PAGE_REVIEW_REJECTED'
+      pageNumbers: readonly number[]
+      acceptedIssueIds: readonly string[]
+    }>,
+  ) {
     await this.dependencies.repository.transact(runId, (transaction) => {
       if (transaction.run.status === 'DECK_REVIEW') return
       const now = this.dependencies.clock.now().toISOString()
+      const disposition = accepted
+        ? appendAcceptedQualityIssueResolutions(transaction, accepted.acceptedIssueIds)
+        : { acceptedIssueIds: [] as string[], blockingIssueIds: [] as string[] }
+      if (disposition.blockingIssueIds.length > 0) {
+        appendV4LifecycleEvent(transaction, 'page_review.completed', {
+          completed: total,
+          total,
+          pageNumbers: accepted?.pageNumbers ?? allPageNumbers(transaction.run),
+          reason: accepted?.reason ?? 'PAGE_REVIEW_REJECTED',
+          retryable: false,
+        })
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+          reason: 'PAGE_REVIEW_REJECTED',
+        })
+        return
+      }
       const policy = transitionRun(transaction.run, 'DECK_REVIEW')
-      transaction.putRun({ ...transaction.run, ...policy, updatedAt: now })
+      const acceptedIssueIds = accepted
+        ? ensureAutomatedQualityAcceptanceIssue(transaction, disposition.acceptedIssueIds)
+        : []
+      const next = accepted
+        ? markAutomatedQualityAcceptance({ ...transaction.run, ...policy }, acceptedIssueIds, now)
+        : { ...transaction.run, ...policy }
+      transaction.putRun({ ...next, updatedAt: now })
       appendV4LifecycleEvent(transaction, 'page_review.completed', {
         completed: total,
         total,
-        pageNumbers: allPageNumbers(transaction.run),
+        pageNumbers: accepted?.pageNumbers ?? allPageNumbers(transaction.run),
+        reason: accepted?.reason ?? null,
+        retryable: accepted ? false : null,
       })
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,

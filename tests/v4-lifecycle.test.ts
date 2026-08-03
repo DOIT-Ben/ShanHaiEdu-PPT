@@ -4,6 +4,7 @@ import { FixedClock } from '../src/adapters/mock-ports'
 import { agentEventSchema, CONTRACT_VERSION } from '../src/contracts'
 import type { RunRecord } from '../src/core/ports'
 import {
+  appendAcceptedQualityIssueResolutions,
   appendFixedIssueResolutions,
   appendV4LifecycleEvent,
   failVisualDeckV4Run,
@@ -64,6 +65,36 @@ describe('visual deck v4 lifecycle', () => {
     const resolved = (await repository.listEvents('run-v4')).filter((event) => event.type === 'issue.resolved')
     expect(resolved).toHaveLength(1)
     expect(resolved[0]).toMatchObject({ payload: { issueId: 'issue-fixed', resolution: 'FIXED' } })
+  })
+
+  test('accepts only allowlisted quality issues and reports every hard blocker', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run('DECK_REVIEW'))
+
+    const disposition = await repository.transact('run-v4', (transaction) => {
+      for (const issue of [{
+        id: 'quality-issue', category: 'IMAGE_QUALITY' as const, severity: 'WARNING' as const,
+        summary: '第二页构图仍有可优化空间。', slideIds: ['run-v4:slide:2'], sourceChunkIds: [], status: 'OPEN' as const,
+      }, {
+        id: 'source-issue', category: 'SOURCE_INCOMPLETE' as const, severity: 'CRITICAL' as const,
+        summary: '来源材料不完整。', slideIds: [], sourceChunkIds: [], status: 'OPEN' as const,
+      }, {
+        id: 'billing-issue', category: 'BUDGET_RESERVATION_UNKNOWN' as const, severity: 'CRITICAL' as const,
+        summary: '账务预授权状态未知。', slideIds: [], sourceChunkIds: [], status: 'OPEN' as const,
+      }]) {
+        transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'issue.detected', payload: issue })
+      }
+      return appendAcceptedQualityIssueResolutions(transaction)
+    })
+
+    expect(disposition).toEqual({
+      acceptedIssueIds: ['quality-issue'],
+      blockingIssueIds: ['source-issue', 'billing-issue'],
+    })
+    expect((await repository.listEvents('run-v4')).filter((event) => event.type === 'issue.resolved'))
+      .toEqual([expect.objectContaining({
+        payload: { issueId: 'quality-issue', resolution: 'ACCEPTED' },
+      })])
   })
 
   test('deduplicates one active stage but preserves a later retry attempt', async () => {

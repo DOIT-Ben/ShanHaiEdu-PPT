@@ -25,6 +25,20 @@ function clone<T>(value: T): T {
   return structuredClone(value)
 }
 
+function effectiveTerminalEvent(events: readonly AgentEvent[]): TerminalAgentEvent | null {
+  const lastResumeSequence = [...events].reverse()
+    .find((candidate) => candidate.type === 'run.resumed')?.sequence ?? 0
+  return events.find((candidate): candidate is TerminalAgentEvent => {
+    if (candidate.sequence <= lastResumeSequence) return false
+    if (candidate.type === 'run.accounting.finalized') return true
+    if (candidate.type === 'run.failed') {
+      return !('terminalAccounting' in candidate.payload)
+        || candidate.payload.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
+    }
+    return candidate.type === 'run.completed' || candidate.type === 'run.cancelled'
+  }) ?? null
+}
+
 export class InMemoryAgentRepository implements AgentRepository {
   readonly #runs = new Map<string, StoredRun>()
   readonly #gates = new Map<string, Promise<void>>()
@@ -129,19 +143,14 @@ export class InMemoryAgentRepository implements AgentRepository {
 
   async getTerminalEvent(runId: string) {
     const stored = this.#runs.get(runId)
-    const event = stored?.events.find((candidate): candidate is TerminalAgentEvent => {
-      if (candidate.type === 'run.accounting.finalized') return true
-      if (candidate.type === 'run.failed') {
-        return !('terminalAccounting' in candidate.payload)
-          || candidate.payload.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
-      }
-      return candidate.type === 'run.completed' || candidate.type === 'run.cancelled'
-    })
+    const event = effectiveTerminalEvent(stored?.events ?? [])
     return event ? clone(event) : null
   }
 
   async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
-    const candidates = (await this.listEvents(runId, input.afterSequence)).slice(0, input.limit + 1)
+    const snapshot = (this.#runs.get(runId)?.events ?? []).map(clone)
+    const terminal = effectiveTerminalEvent(snapshot)
+    const candidates = snapshot.filter((event) => event.sequence > input.afterSequence).slice(0, input.limit + 1)
     const events: AgentEvent[] = []
     let byteLength = 0
     for (const event of candidates.slice(0, input.limit)) {
@@ -155,6 +164,7 @@ export class InMemoryAgentRepository implements AgentRepository {
       nextAfter: events.at(-1)?.sequence ?? input.afterSequence,
       hasMore: candidates.length > events.length,
       byteLength,
+      terminalSequence: terminal?.sequence ?? null,
     }
   }
 

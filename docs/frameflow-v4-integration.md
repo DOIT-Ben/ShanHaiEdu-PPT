@@ -14,7 +14,7 @@
 
 | 字段 | 语义 |
 | --- | --- |
-| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.3.0` |
+| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.3.1` |
 | `presentationMode` | 本次 Run 的能力模式，V4 固定为 `VISUAL_DECK_V4` |
 | `compilerVersion` | V4 链式规划与整页图片编译器版本 |
 | `contractVersion` | HTTP/SSE 数据合同版本，当前为 `"1"` |
@@ -298,7 +298,7 @@ Run 详情在出图开始后会返回：
 | `PAUSE` / `RESUME` | 暂停或恢复 | 运行中 / `PAUSED` |
 | `CANCEL` | 停止新提交 | 所有非终态 |
 | `RETRY_PLANNING` | 规划失败后重试 | `NEEDS_HUMAN` |
-| `RETRY_DELIVERY` | 交付失败后重试 | `NEEDS_HUMAN` |
+| `RETRY_DELIVERY` | 交付失败后重试；或恢复 4.3.0 遗留的 V4 质量耗尽 Run | `NEEDS_HUMAN`；以及满足下述硬门禁的 `FAILED(QUALITY_REMEDIATION_EXHAUSTED)` |
 | `APPROVE_REVISION` | 确认 Agent 生成的修订计划 | `AWAITING_REVISION_APPROVAL` |
 | `SUBMIT_LIMITED_REVISION` | 用户指定单页局部修订 | `NEEDS_HUMAN` |
 | `ACCEPT_WITH_OVERRIDE` | 接受仍有质量问题的结果 | `NEEDS_HUMAN`，必须确认全部开放 issue |
@@ -402,7 +402,7 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 | `COMPLETED` | 展示交付下载入口 |
 | `PAUSED` | 按 `resumeState` 显示可恢复状态，用户确认后发送 `RESUME` |
 | `NEEDS_HUMAN` | 仅处理合同明确保留的人工业务动作；标准 V4 质量耗尽或技术故障不得依赖普通用户放行 |
-| `FAILED` / `CANCELLED` | 保留稳定错误/取消原因、终态账务和已有审计记录；`FAILED` 的账务仍为 `RECONCILIATION_REQUIRED` 时继续监听 |
+| `FAILED` / `CANCELLED` | 保留稳定错误/取消原因、终态账务和已有审计记录；`FAILED` 的账务仍为 `RECONCILIATION_REQUIRED` 时继续监听。仅 4.3.0 遗留的 `FAILED(QUALITY_REMEDIATION_EXHAUSTED)` 可在硬门禁通过后用稳定动作键发送 `RETRY_DELIVERY` |
 
 超时、限流、网关波动、已知任务的查询失败和审查服务暂时不可用，会进入 `RECOVERING`，由 Agent 在
 有界退避后恢复原阶段；同一恢复阶段累计第五次失败会明确进入
@@ -412,10 +412,19 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 质量反射的非法 JSON、Schema 不匹配或局部 Patch 无效不会阻断主链，而是记录跳过并沿用已经通过硬合同
 校验的候选。只有提交结果未知时才允许用原反射键恢复一次，不从 Source 阶段重新提交，也不创建新 Run。
 未知计费或提交状态时，Agent 会保留原幂等键等待恢复；FrameFlow 不得通过换键强制重新扣费。
-质量返修耗尽但账务未确定时，Run 以 `pendingTerminalFailure` 留在内部 `RECOVERING`，不会重新进入页审、
+`maxRevisionRounds=0` 表示不返修，不表示发现质量建议后失败。4.3.1 对非阻断质量问题保留当前图片，记录
+`*_REJECTED` 和 `issue.resolved(ACCEPTED)`，继续套审与交付；来源、蓝图、图片素材、Provider、账务、
+安全和文件合法性等硬问题仍然阻断。
+
+质量处理期间账务未确定时，Run 以 `pendingTerminalFailure` 留在内部 `RECOVERING`，不会重新进入页审、
 套审或用户审批。若 `run.failed` 已发出但其中 `terminalAccounting.accountingStatus` 为
 `RECONCILIATION_REQUIRED`，该事件不是 SSE 关闭点；FrameFlow 必须继续监听，直到收到
 `run.accounting.finalized`，并以该事件和最新 Run 详情中的 `terminalAccounting` 为最终费用事实。
+
+恢复 4.3.0 遗留质量失败时，Agent 仅在以下条件全部成立后执行 `FAILED -> DECK_REVIEW`：最近失败码确为
+`QUALITY_REMEDIATION_EXHAUSTED`，本地终态账务重新归约为 `FINAL`，Usage V2（如启用）已完成且宿主确认，
+活动 V4 Blueprint 合法，每页 Step 身份与受控图片 Artifact 完整一致，并且尚未创建 Delivery。条件不满足
+返回 `409`，不得换动作键、新建 Run、重提图片或重复计费。
 
 ## 9. 交付下载
 

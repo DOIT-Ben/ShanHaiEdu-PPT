@@ -68,6 +68,18 @@ export function usageV2FinalizeStepKey(runId: string) {
   return `${runId}:usage-v2:finalize`
 }
 
+export function isUsageV2RunFinalizationAcknowledged(step: StepRecord | null | undefined) {
+  if (!step || step.tool !== 'finalize_usage_v2' || step.status !== 'COMPLETED') return false
+  try {
+    const output = finalizeStepOutput(step)
+    return output.deliveryState === 'ACKNOWLEDGED'
+      && output.bill !== null
+      && ['SETTLED', 'CAP_EXCEEDED'].includes(output.bill.status)
+  } catch {
+    return false
+  }
+}
+
 function finalizeRequestKey(runId: string) {
   return `finalize:${runId}`
 }
