@@ -60,6 +60,78 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
 }
 
 describe('media step runner', () => {
+  test('reconciles an accepted image edit after response loss without a second POST', async () => {
+    const { repository, images, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    })
+    const editRequest = {
+      ...request,
+      idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
+      model: 'image-2',
+      operationMode: 'IMAGE_EDIT' as const,
+      repairContractHash: 'b'.repeat(64),
+      referenceImage: {
+        mimeType: 'image/png' as const,
+        bytes: new Uint8Array([1, 2, 3]),
+        sha256: 'c'.repeat(64),
+      },
+    }
+    const first = await runner.submitSlideImage(editRequest)
+    const operationId = first.step.externalOperationId!
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(editRequest.idempotencyKey)!
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    const recovered = await runner.submitSlideImage(editRequest)
+
+    expect(recovered.step).toMatchObject({ status: 'WAITING', externalOperationId: operationId })
+    expect(images.submitCalls).toBe(1)
+    expect(images.lookupRequests).toEqual([{
+      tenantId: 'frameflow',
+      idempotencyKey: editRequest.idempotencyKey,
+      operationMode: 'IMAGE_EDIT',
+    }])
+  })
+
+  test('keeps an unknown image edit unresolved without changing model, key or POST count', async () => {
+    const { repository, images, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    })
+    const editRequest = {
+      ...request,
+      idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'d'.repeat(24)}`,
+      model: 'image-2',
+      operationMode: 'IMAGE_EDIT' as const,
+      repairContractHash: 'e'.repeat(64),
+      referenceImage: {
+        mimeType: 'image/png' as const,
+        bytes: new Uint8Array([4, 5, 6]),
+        sha256: 'f'.repeat(64),
+      },
+    }
+    await runner.submitSlideImage(editRequest)
+    images.lookupByIdempotency = async (input) => {
+      images.lookupRequests.push(structuredClone(input))
+      return { state: 'UNKNOWN' as const }
+    }
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(editRequest.idempotencyKey)!
+      transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
+    })
+
+    const unknown = await runner.submitSlideImage(editRequest)
+    const replay = await runner.submitSlideImage(editRequest)
+
+    expect(unknown.step).toMatchObject({
+      status: 'SUBMISSION_UNKNOWN',
+      output: { model: 'image-2', operationMode: 'IMAGE_EDIT', repairContractHash: 'e'.repeat(64) },
+    })
+    expect(replay.step.status).toBe('SUBMISSION_UNKNOWN')
+    expect(images.submitCalls).toBe(1)
+    expect(images.lookupRequests).toHaveLength(1)
+  })
+
   test('persists budget and a stable step before one provider submission', async () => {
     const { repository, budget, images, runner } = await fixture()
     const result = await runner.submitSlideImage(request)
@@ -103,7 +175,7 @@ describe('media step runner', () => {
     expect(budget.released.size).toBe(1)
   })
 
-  test('recovers an unknown V4 submission with the original key and no duplicate budget hold', async () => {
+  test('releases an unknown V4 submission only after lookup proves it was not submitted', async () => {
     const { repository, budget, images, clock, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')
     const result = await runner.submitSlideImage(request)
@@ -122,10 +194,11 @@ describe('media step runner', () => {
     await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
     const recovered = await runner.submitSlideImage(request)
 
-    expect(recovered.step).toMatchObject({ status: 'WAITING', budgetReservationId: expect.any(String) })
-    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10, status: 'EXECUTING' })
-    expect(images.operations.size).toBe(1)
+    expect(recovered.step).toMatchObject({ status: 'FAILED', errorCode: 'PROVIDER_SUBMISSION_NOT_FOUND' })
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0, status: 'RECOVERING' })
+    expect(images.operations.size).toBe(0)
     expect(budget.reservations.size).toBe(1)
+    expect(budget.released.size).toBe(1)
   })
 
   test('backs off interrupted submission reconciliation when the Provider lookup remains unknown', async () => {
@@ -256,6 +329,8 @@ describe('media step runner', () => {
       slideId: request.slideId,
       versionId: request.versionId,
       backgroundMode: 'OPAQUE',
+      model: 'image-2',
+      operationMode: 'TEXT_TO_IMAGE',
       artifactId: 'artifact-slide-1-v1',
     })
     expect(replay).toMatchObject({ changed: false, step: { status: 'COMPLETED' } })

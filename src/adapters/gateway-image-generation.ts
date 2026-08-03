@@ -189,7 +189,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
   }
 
   async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
-    const operation = await this.lookupImageTask(input.idempotencyKey)
+    const operation = await this.lookupImageTask(input.idempotencyKey, input.operationMode ?? 'TEXT_TO_IMAGE')
     if (!operation || operation.submission_state === 'UNKNOWN') return { state: 'UNKNOWN' as const }
     if (operation.submission_state === 'NOT_SUBMITTED') return { state: 'NOT_SUBMITTED' as const }
     return { state: 'SUBMITTED' as const, operationId: operation.id }
@@ -283,19 +283,23 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       return { operationId: operation.data.id, state: operationState(operation.data.status) }
     } catch (error) {
       if (error instanceof MediaSubmissionError) throw error
-      const recovered = await this.lookupImageTask(input.idempotencyKey)
+      const recovered = await this.lookupImageTask(input.idempotencyKey, 'TEXT_TO_IMAGE')
       if (recovered) return { operationId: recovered.id, state: operationState(recovered.status) }
       throw new MediaSubmissionError('GATEWAY_SUBMISSION_UNKNOWN', 'UNKNOWN', 'gateway submission status is unknown')
     }
   }
 
-  private async lookupImageTask(idempotencyKey: string) {
+  private async lookupImageTask(
+    idempotencyKey: string,
+    operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT' = 'TEXT_TO_IMAGE',
+  ) {
     try {
       const response = await this.fetchImpl(`${this.baseUrl}/image-tasks/by-idempotency`, {
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${this.dependencies.apiKey}`,
           'Idempotency-Key': idempotencyKey,
+          'X-Image-Operation-Mode': operationMode,
         },
         signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 30_000),
       })

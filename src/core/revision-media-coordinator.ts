@@ -1,4 +1,7 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { storedGenerationBatchSchema } from '../generation-batch-contracts'
+import { createHash } from 'node:crypto'
+import sharp from 'sharp'
 import { revisionPlanSchema } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
 import {
@@ -6,6 +9,7 @@ import {
   blueprintImageRequirements,
   completeVisualDeckV4RevisionPrompt,
   latestCompletedAssetStep,
+  visualDeckPageImageIdentity,
   VISUAL_DECK_V4_NEGATIVE_PROMPT,
 } from './blueprint-assets'
 import { mapWithConcurrency } from './concurrency'
@@ -20,11 +24,19 @@ import {
 } from './generation-batch'
 import { hashInput } from './hash'
 import { isMediaFailureStepStatus, MediaStepRunner } from './media-step-runner'
-import type { AgentRepository, BatchBudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
+import type { AgentRepository, ArtifactPort, BatchBudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import { revisionPlanStepKey } from './revision-planning-runner'
+import {
+  compileV4RepairContract,
+  compileV4RepairPrompt,
+  type V4RepairContract,
+  v4RepairContractHash,
+  v4RepairContractSchema,
+  v4RepairImageKey,
+} from './v4-repair-contract'
 import {
   allPageNumbers,
   appendV4LifecycleEvent,
@@ -52,6 +64,15 @@ type RevisionTarget = Readonly<{
   negativePrompt: string | null
   aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
   backgroundMode: 'OPAQUE' | 'TRANSPARENT'
+  model: string
+  operationMode?: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+  repairContract?: V4RepairContract
+  repairContractHash?: string
+  referenceImage?: Readonly<{
+    mimeType: 'image/png' | 'image/jpeg' | 'image/webp'
+    bytes: Uint8Array
+    sha256: string
+  }>
 }>
 
 export class RevisionMediaCoordinator {
@@ -61,12 +82,17 @@ export class RevisionMediaCoordinator {
     repository: AgentRepository
     media: MediaStepRunner
     batchBudget: BatchBudgetPort
+    artifacts: ArtifactPort
     clock: ClockPort
+    revisionImageModel: string
     imageConcurrency?: number
   }>) {
     this.imageConcurrency = dependencies.imageConcurrency ?? 50
     if (!Number.isSafeInteger(this.imageConcurrency) || this.imageConcurrency < 1 || this.imageConcurrency > 50) {
       throw new Error('IMAGE_CONCURRENCY_INVALID')
+    }
+    if (!dependencies.revisionImageModel.trim() || dependencies.revisionImageModel.length > 120) {
+      throw new Error('REVISION_IMAGE_MODEL_INVALID')
     }
   }
 
@@ -98,6 +124,8 @@ export class RevisionMediaCoordinator {
         blueprint,
         requirements: this.batchRequirements(targets),
         unitBudgetUnits,
+        accountingModel: targets[0]!.model,
+        operationMode: targets[0]!.operationMode ?? 'TEXT_TO_IMAGE',
         identity: { revisionRound: run.revisionRound, scope: 'REVISION' },
       })
       const batchKey = generationBatchStepKeyFor(runId, { revisionRound: run.revisionRound, scope: 'REVISION' })
@@ -134,7 +162,6 @@ export class RevisionMediaCoordinator {
         clock: this.dependencies.clock,
         runId,
         revisionRound: run.revisionRound,
-        model: run.imageModel,
         scope: 'REVISION',
       })
       if (!reservation) return this.summary(await this.requireRun(runId))
@@ -306,6 +333,9 @@ export class RevisionMediaCoordinator {
         && candidate.status === 'COMPLETED')
     if (!step) throw new Error('REVISION_PLAN_NOT_READY')
     const plan = revisionPlanSchema.parse(step.output)
+    const revisionRoute = blueprint.renderMode === 'VISUAL_DECK_V4'
+      ? this.persistedRevisionRoute(run, steps)
+      : { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
     if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
       const requirements = blueprintImageRequirements(run, blueprint)
       const targets = plan.operations.filter((operation) => operation.kind === 'REGENERATE_IMAGE').map((operation) => {
@@ -330,6 +360,7 @@ export class RevisionMediaCoordinator {
           negativePrompt: element.negativePrompt,
           aspectRatio: element.aspectRatio,
           backgroundMode: element.backgroundMode,
+          model: run.imageModel,
         }
       })
       return [...new Map(targets.map((target) => [target.idempotencyKey, target])).values()]
@@ -345,7 +376,7 @@ export class RevisionMediaCoordinator {
         operation.instruction,
       ])
     }
-    return [...byPage].map(([pageNumber, instructions]) => {
+    return Promise.all([...byPage].map(async ([pageNumber, instructions]) => {
       const slide = blueprint.slides[pageNumber - 1]
       if (!slide) throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
       const revisionInstructions = blueprint.renderMode === 'VISUAL_DECK_V4'
@@ -357,6 +388,82 @@ export class RevisionMediaCoordinator {
             currentInstructions: instructions,
           })
         : instructions
+      if (blueprint.renderMode === 'VISUAL_DECK_V4') {
+        const proposal = blueprint.visualDeckV4Proposal
+        if (!proposal) throw new Error('VISUAL_DECK_V4_BRIEF_MISSING')
+        if (revisionRoute.operationMode === 'TEXT_TO_IMAGE') {
+          return {
+            pageNumber,
+            elementId: null,
+            assetReuseKey: null,
+            idempotencyKey: this.imageKey(run, pageNumber),
+            stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
+            slideId: `${run.id}:slide:${pageNumber}`,
+            versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
+            prompt: completeVisualDeckV4RevisionPrompt(blueprint, slide, revisionInstructions),
+            negativePrompt: VISUAL_DECK_V4_NEGATIVE_PROMPT,
+            aspectRatio: '16:9' as const,
+            backgroundMode: 'OPAQUE' as const,
+            model: revisionRoute.model,
+            operationMode: 'TEXT_TO_IMAGE' as const,
+          }
+        }
+        const requirement = blueprintImageRequirements(run, blueprint)
+          .find((candidate) => candidate.pageNumber === pageNumber && candidate.elementId === null)
+        if (!requirement) throw new Error('V4_REPAIR_SOURCE_REQUIREMENT_MISSING')
+        const sourceStep = latestCompletedAssetStep(steps, requirement, run.revisionRound - 1)
+        const sourceArtifactId = sourceStep ? this.artifactId(sourceStep) : null
+        if (!sourceArtifactId) throw new Error('V4_REPAIR_SOURCE_ARTIFACT_MISSING')
+        const source = await this.controlledSource(run, sourceArtifactId)
+        const existing = steps.filter((candidate) => {
+          const identity = visualDeckPageImageIdentity(candidate.idempotencyKey)
+          return candidate.tool === 'generate_slide_image'
+            && candidate.idempotencyKey.includes(':edit:')
+            && identity?.runId === run.id
+            && identity.pageNumber === pageNumber
+            && identity.revisionRound === run.revisionRound
+        })
+        if (existing.length > 1) throw new Error('V4_REPAIR_STEP_IDENTITY_CONFLICT')
+        const persistedOutput = existing[0]?.output && typeof existing[0].output === 'object'
+          ? existing[0].output as Record<string, unknown>
+          : null
+        const persistedContract = v4RepairContractSchema.safeParse(persistedOutput?.repairContract)
+        if (existing[0] && !persistedContract.success) throw new Error('V4_REPAIR_CONTRACT_MISSING')
+        if (persistedContract.success) {
+          const repairContract = persistedContract.data
+          const repairContractHash = v4RepairContractHash(repairContract)
+          if (persistedOutput?.repairContractHash !== repairContractHash
+            || v4RepairImageKey(repairContract, repairContractHash) !== existing[0]!.idempotencyKey
+            || repairContract.editModel !== revisionRoute.model
+            || repairContract.sourceArtifact.artifactId !== sourceArtifactId
+            || repairContract.sourceArtifact.sha256 !== source.sha256
+            || repairContract.sourceArtifact.mimeType !== source.mimeType
+            || repairContract.sourceArtifact.width !== source.width
+            || repairContract.sourceArtifact.height !== source.height) {
+            throw new Error('V4_REPAIR_PERSISTED_IDENTITY_CONFLICT')
+          }
+          return this.v4Target(run, pageNumber, repairContract, repairContractHash, source)
+        }
+        const pageOperations = plan.operations.filter((operation) => operation.slideId === `${run.id}:slide:${pageNumber}`)
+        const repairContract = compileV4RepairContract({
+          runId: run.id,
+          pageNumber,
+          revisionRound: run.revisionRound,
+          issueIds: pageOperations.flatMap((operation) => operation.issueIds),
+          requiredChanges: revisionInstructions,
+          proposal,
+          sourceArtifact: {
+            artifactId: sourceArtifactId,
+            sha256: source.sha256,
+            mimeType: source.mimeType,
+            width: source.width,
+            height: source.height,
+          },
+          editModel: revisionRoute.model,
+        })
+        const repairContractHash = v4RepairContractHash(repairContract)
+        return this.v4Target(run, pageNumber, repairContract, repairContractHash, source)
+      }
       return {
         pageNumber,
         elementId: null,
@@ -365,14 +472,103 @@ export class RevisionMediaCoordinator {
         stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
         slideId: `${run.id}:slide:${pageNumber}`,
         versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
-        prompt: blueprint.renderMode === 'VISUAL_DECK_V4'
-          ? completeVisualDeckV4RevisionPrompt(blueprint, slide, revisionInstructions)
-          : `Quality correction for this page only: ${instructions.join(' ')} Preserve the approved page brief and all allowed copy exactly. ${slide.visualPrompt}`.slice(0, 3_000),
-        negativePrompt: blueprint.renderMode === 'VISUAL_DECK_V4' ? VISUAL_DECK_V4_NEGATIVE_PROMPT : null,
+        prompt: `Quality correction for this page only: ${instructions.join(' ')} Preserve the approved page brief and all allowed copy exactly. ${slide.visualPrompt}`.slice(0, 3_000),
+        negativePrompt: null,
         aspectRatio: '16:9' as const,
         backgroundMode: 'OPAQUE' as const,
+        model: run.imageModel,
       }
+    }))
+  }
+
+  private persistedRevisionRoute(run: RunRecord, steps: readonly StepRecord[]) {
+    const currentPageSteps = steps.filter((step) => {
+      const identity = visualDeckPageImageIdentity(step.idempotencyKey)
+      return step.tool === 'generate_slide_image'
+        && identity?.runId === run.id
+        && identity.revisionRound === run.revisionRound
     })
+    const editSteps = currentPageSteps.filter((step) => step.idempotencyKey.includes(':edit:'))
+    const legacySteps = currentPageSteps.filter((step) => !step.idempotencyKey.includes(':edit:'))
+    if (editSteps.length > 0 && legacySteps.length > 0) throw new Error('V4_REVISION_ROUTE_CONFLICT')
+    if (editSteps.length > 0) {
+      const routes = new Set(editSteps.map((step) => {
+        const output = step.output && typeof step.output === 'object'
+          ? step.output as { model?: unknown; operationMode?: unknown }
+          : null
+        if (typeof output?.model !== 'string' || output.operationMode !== 'IMAGE_EDIT') {
+          throw new Error('MEDIA_STEP_ROUTING_METADATA_MISSING')
+        }
+        return output.model
+      }))
+      if (routes.size !== 1) throw new Error('V4_REVISION_ROUTE_CONFLICT')
+      return { model: [...routes][0]!, operationMode: 'IMAGE_EDIT' as const }
+    }
+    if (legacySteps.length > 0) return { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+
+    const batchStep = steps.find((step) => step.idempotencyKey === generationBatchStepKeyFor(run.id, {
+      revisionRound: run.revisionRound,
+      scope: 'REVISION',
+    }))
+    if (batchStep) {
+      const batch = storedGenerationBatchSchema.parse(batchStep.output)
+      if (batch.accountingModel && batch.operationMode) {
+        return { model: batch.accountingModel, operationMode: batch.operationMode }
+      }
+      return { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+    }
+    return { model: this.dependencies.revisionImageModel, operationMode: 'IMAGE_EDIT' as const }
+  }
+
+  private async controlledSource(run: RunRecord, artifactId: string) {
+    const source = await this.dependencies.artifacts.get({ tenantId: run.host.tenantId, artifactId })
+    if (!source) throw new Error('V4_REPAIR_SOURCE_ARTIFACT_MISSING')
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(source.mimeType)) {
+      throw new Error('V4_REPAIR_SOURCE_MIME_UNSUPPORTED')
+    }
+    const sha256 = createHash('sha256').update(source.bytes).digest('hex')
+    if (sha256 !== source.sha256) throw new Error('V4_REPAIR_SOURCE_SHA_MISMATCH')
+    const metadata = await sharp(source.bytes).metadata().catch(() => null)
+    if (!metadata?.width || !metadata.height) throw new Error('V4_REPAIR_SOURCE_IMAGE_INVALID')
+    const aspectError = Math.min(
+      Math.abs(metadata.width - metadata.height * 16 / 9),
+      Math.abs(metadata.height - metadata.width * 9 / 16),
+    )
+    if (aspectError > 1) throw new Error('V4_REPAIR_SOURCE_ASPECT_RATIO_INVALID')
+    return {
+      mimeType: source.mimeType as 'image/png' | 'image/jpeg' | 'image/webp',
+      bytes: source.bytes,
+      sha256,
+      width: metadata.width,
+      height: metadata.height,
+    }
+  }
+
+  private v4Target(
+    run: RunRecord,
+    pageNumber: number,
+    repairContract: V4RepairContract,
+    repairContractHash: string,
+    source: Awaited<ReturnType<RevisionMediaCoordinator['controlledSource']>>,
+  ): RevisionTarget {
+    return {
+      pageNumber,
+      elementId: null,
+      assetReuseKey: null,
+      idempotencyKey: v4RepairImageKey(repairContract, repairContractHash),
+      stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
+      slideId: `${run.id}:slide:${pageNumber}`,
+      versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
+      prompt: compileV4RepairPrompt(repairContract),
+      negativePrompt: VISUAL_DECK_V4_NEGATIVE_PROMPT,
+      aspectRatio: '16:9',
+      backgroundMode: 'OPAQUE',
+      model: repairContract.editModel,
+      operationMode: 'IMAGE_EDIT',
+      repairContract,
+      repairContractHash,
+      referenceImage: { mimeType: source.mimeType, bytes: source.bytes, sha256: source.sha256 },
+    }
   }
 
   private async hasCompleteDeckArtifacts(run: RunRecord) {
@@ -419,10 +615,14 @@ export class RevisionMediaCoordinator {
       versionId: target.versionId,
       prompt: target.prompt,
       ...(target.negativePrompt ? { negativePrompt: target.negativePrompt } : {}),
-      model: run.imageModel,
+      model: target.model,
       budgetUnits: unitBudgetUnits,
       aspectRatio: target.aspectRatio,
       backgroundMode: target.backgroundMode,
+      ...(target.operationMode ? { operationMode: target.operationMode } : {}),
+      ...(target.repairContract ? { repairContract: target.repairContract } : {}),
+      ...(target.repairContractHash ? { repairContractHash: target.repairContractHash } : {}),
+      ...(target.referenceImage ? { referenceImage: target.referenceImage } : {}),
       ...(target.elementId ? { elementId: target.elementId } : {}),
       ...(target.assetReuseKey ? { assetReuseKey: target.assetReuseKey } : {}),
     })

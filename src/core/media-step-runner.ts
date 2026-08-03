@@ -17,6 +17,7 @@ import { releaseBudget, reserveBudget, transitionRun } from './policy'
 import { appendFixedIssueResolutions } from './v4-lifecycle'
 import { recoverV4AfterMediaRecovery } from './v4-media-recovery'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import type { V4RepairContract } from './v4-repair-contract'
 
 const MEDIA_FAILURE_STEP_STATUSES = new Set<StepStatus>([
   'FAILED',
@@ -51,6 +52,9 @@ export type SubmitSlideImageInput = Readonly<{
   budgetUnits: number
   aspectRatio?: '16:9' | '4:3' | '1:1' | '3:4'
   backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
+  operationMode?: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+  repairContract?: V4RepairContract
+  repairContractHash?: string
   referenceImage?: Readonly<{
     mimeType: 'image/png' | 'image/jpeg' | 'image/webp'
     bytes: Uint8Array
@@ -100,6 +104,10 @@ export class MediaStepRunner {
 
   async submitSlideImage(input: SubmitSlideImageInput): Promise<SubmitSlideImageResult> {
     const prepared = await this.prepare(input)
+    if (['SUBMITTING', 'SUBMISSION_UNKNOWN'].includes(prepared.step.status)) {
+      const reconciled = await this.refreshSlideImage(input.runId, input.idempotencyKey)
+      return { step: reconciled.step, replayed: true }
+    }
     if (prepared.replayed) return prepared
 
     if (prepared.step.status === 'RELEASING') {
@@ -288,6 +296,8 @@ export class MediaStepRunner {
       aspectRatio: input.aspectRatio ?? '16:9',
       ...(input.negativePrompt ? { negativePrompt: input.negativePrompt } : {}),
       ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
+      ...(input.operationMode ? { operationMode: input.operationMode } : {}),
+      ...(input.repairContractHash ? { repairContractHash: input.repairContractHash } : {}),
       ...(input.elementId ? { elementId: input.elementId } : {}),
       ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
       ...(input.referenceImage ? { referenceImageSha256: input.referenceImage.sha256 } : {}),
@@ -366,6 +376,11 @@ export class MediaStepRunner {
           slideId: input.slideId,
           versionId: input.versionId,
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
+          model: input.model,
+          operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
+          ...(input.referenceImage ? { referenceImageSha256: input.referenceImage.sha256 } : {}),
+          ...(input.repairContractHash ? { repairContractHash: input.repairContractHash } : {}),
+          ...(input.repairContract ? { repairContract: input.repairContract } : {}),
           ...(input.budgetReservationKey ? { budgetReservationKey: input.budgetReservationKey } : {}),
           ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
           ...(input.elementId ? { elementId: input.elementId } : {}),
@@ -411,6 +426,9 @@ export class MediaStepRunner {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'WAITING' && step.externalOperationId === operationId) return step
+      const persistedOutput = step.output && typeof step.output === 'object'
+        ? step.output as Record<string, unknown>
+        : {}
       const updated: StepRecord = {
         ...step,
         status: 'WAITING',
@@ -418,9 +436,15 @@ export class MediaStepRunner {
         externalOperationId: operationId,
         errorCode: null,
         output: {
+          ...persistedOutput,
           slideId: input.slideId,
           versionId: input.versionId,
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
+          model: input.model,
+          operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
+          ...(input.referenceImage ? { referenceImageSha256: input.referenceImage.sha256 } : {}),
+          ...(input.repairContractHash ? { repairContractHash: input.repairContractHash } : {}),
+          ...(input.repairContract ? { repairContract: input.repairContract } : {}),
           ...(input.budgetReservationKey ? { budgetReservationKey: input.budgetReservationKey } : {}),
           ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
           ...(input.elementId ? { elementId: input.elementId } : {}),
@@ -448,7 +472,11 @@ export class MediaStepRunner {
       return { step, changed: false }
     }
     const input = this.reconstructInput(step, run.imageModel)
-    const lookup = await this.lookupSubmission(run.host.tenantId, step.idempotencyKey)
+    const lookup = await this.lookupSubmission(
+      run.host.tenantId,
+      step.idempotencyKey,
+      input.operationMode ?? 'TEXT_TO_IMAGE',
+    )
     if (lookup.state === 'SUBMITTED') {
       if (!step.budgetReservationId) throw new Error('BUDGET_RESERVATION_ID_MISSING')
       await this.markWaiting(input, step.budgetReservationId, lookup.operationId)
@@ -480,10 +508,14 @@ export class MediaStepRunner {
     }
   }
 
-  private async lookupSubmission(tenantId: string, idempotencyKey: string) {
+  private async lookupSubmission(
+    tenantId: string,
+    idempotencyKey: string,
+    operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT',
+  ) {
     if (!this.dependencies.images.lookupByIdempotency) return { state: 'UNKNOWN' as const }
     try {
-      return await this.dependencies.images.lookupByIdempotency({ tenantId, idempotencyKey })
+      return await this.dependencies.images.lookupByIdempotency({ tenantId, idempotencyKey, operationMode })
     } catch {
       return { state: 'UNKNOWN' as const }
     }
@@ -494,6 +526,9 @@ export class MediaStepRunner {
       slideId?: unknown
       versionId?: unknown
       backgroundMode?: unknown
+      model?: unknown
+      operationMode?: unknown
+      repairContractHash?: unknown
       budgetReservationKey?: unknown
       batchId?: unknown
     } | null
@@ -507,7 +542,7 @@ export class MediaStepRunner {
       slideId: output.slideId,
       versionId: output.versionId,
       prompt: '',
-      model,
+      model: persistedMediaStepModel(step, model),
       budgetUnits: step.budgetUnits,
       ...(typeof output.budgetReservationKey === 'string' ? { budgetReservationKey: output.budgetReservationKey } : {}),
       ...(typeof output.batchId === 'string' && typeof step.budgetReservationId === 'string'
@@ -516,6 +551,10 @@ export class MediaStepRunner {
       ...(output.backgroundMode === 'TRANSPARENT' || output.backgroundMode === 'OPAQUE'
         ? { backgroundMode: output.backgroundMode }
         : {}),
+      ...(output.operationMode === 'TEXT_TO_IMAGE' || output.operationMode === 'IMAGE_EDIT'
+        ? { operationMode: output.operationMode }
+        : {}),
+      ...(typeof output.repairContractHash === 'string' ? { repairContractHash: output.repairContractHash } : {}),
     }
   }
 
@@ -789,4 +828,18 @@ export class MediaStepRunner {
       return updated
     })
   }
+}
+
+export function persistedMediaStepModel(step: StepRecord, legacyModel: string) {
+  const output = step.output && typeof step.output === 'object'
+    ? step.output as { model?: unknown; operationMode?: unknown }
+    : null
+  if (typeof output?.model === 'string' && output.model.trim()) {
+    if (step.idempotencyKey.includes(':edit:') && output.operationMode !== 'IMAGE_EDIT') {
+      throw new Error('MEDIA_STEP_ROUTING_METADATA_MISSING')
+    }
+    return output.model
+  }
+  if (step.idempotencyKey.includes(':edit:')) throw new Error('MEDIA_STEP_ROUTING_METADATA_MISSING')
+  return legacyModel
 }

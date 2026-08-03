@@ -1,4 +1,4 @@
-import { generationBatchSchema } from '../generation-batch-contracts'
+import { storedGenerationBatchSchema } from '../generation-batch-contracts'
 import {
   terminalAccountingSchema,
   type TerminalAccounting,
@@ -19,7 +19,7 @@ const LEGACY_SETTLED_PAGE_STATUSES = new Set<StepRecord['status']>([
   'COMPLETED', 'COMPLETED_AFTER_CANCEL', 'FAILED_CHARGED',
 ])
 
-function isDefinitivePreflightRejection(step: StepRecord, batch: ReturnType<typeof generationBatchSchema.parse>) {
+function isDefinitivePreflightRejection(step: StepRecord, batch: ReturnType<typeof storedGenerationBatchSchema.parse>) {
   return step.status === 'FAILED'
     && step.budgetReservationId === null
     && step.externalOperationId === null
@@ -50,7 +50,7 @@ export function deriveV4TerminalAccounting(
 
   const batchSteps = steps.filter((step) => step.runId === run.id && step.tool === 'generate_image_batch')
   for (const batchStep of batchSteps) {
-    const parsed = generationBatchSchema.safeParse(batchStep.output)
+    const parsed = storedGenerationBatchSchema.safeParse(batchStep.output)
     if (!parsed.success) {
       final = false
       reconciliationUnits += batchStep.budgetUnits

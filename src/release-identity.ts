@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const PPT_AGENT_SOFTWARE_VERSION = '4.1.1'
+export const PPT_AGENT_SOFTWARE_VERSION = '4.2.0'
 export const PPT_AGENT_CONTRACT_VERSION = '1'
 export const LEGACY_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-1'
 export const CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-2'

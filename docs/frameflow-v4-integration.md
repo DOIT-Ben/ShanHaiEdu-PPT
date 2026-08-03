@@ -14,7 +14,7 @@
 
 | 字段 | 语义 |
 | --- | --- |
-| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.1.1` |
+| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.2.0` |
 | `presentationMode` | 本次 Run 的能力模式，V4 固定为 `VISUAL_DECK_V4` |
 | `compilerVersion` | V4 链式规划与整页图片编译器版本 |
 | `contractVersion` | HTTP/SSE 数据合同版本，当前为 `"1"` |

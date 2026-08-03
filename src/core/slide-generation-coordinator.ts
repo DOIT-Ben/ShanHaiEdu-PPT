@@ -104,6 +104,8 @@ export class SlideGenerationCoordinator {
         blueprint,
         requirements,
         unitBudgetUnits,
+        accountingModel: run.imageModel,
+        operationMode: 'TEXT_TO_IMAGE',
       })
       const batchStep = (await this.dependencies.repository.listSteps(runId))
         .find((step) => step.idempotencyKey === `${runId}:generation-batch:r${run.revisionRound}`)
@@ -144,7 +146,6 @@ export class SlideGenerationCoordinator {
         clock: this.dependencies.clock,
         runId,
         revisionRound: run.revisionRound,
-        model: run.imageModel,
       })
       if (!reservation) {
         const latest = await this.dependencies.repository.getRun(runId)

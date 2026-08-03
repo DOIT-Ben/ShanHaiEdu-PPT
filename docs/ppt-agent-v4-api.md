@@ -8,7 +8,7 @@ PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资�
 
 | 字段 | 固定值 | 用途 |
 | --- | --- | --- |
-| 软件版本 | `4.1.1` | 部署与故障定位 |
+| 软件版本 | `4.2.0` | 部署与故障定位 |
 | 演示模式 | `VISUAL_DECK_V4` | NotebookLM 风格整页视觉链路 |
 | HTTP/SSE 合同 | `"1"` | 公共 API 数据格式 |
 | V4 编译器 | `visual-deck-v4-chain-3` | 一轮 Critic/Optimizer 规划身份；旧 `chain-1/chain-2` Run 仍按持久化身份恢复 |
@@ -70,6 +70,26 @@ V4 规划完成后自动进入 `EXECUTING`。详情中的 `generationPlan` 是�
 
 Agent 冻结规划，并自行向视觉 Provider 受控并发提交页面。宿主不得自行提交页面图片任务，
 也不得从事件文案推断状态；应使用详情的状态字段和 SSE 的结构化 payload。
+
+## 图片生成与自动返修
+
+V4 初始页面仍使用 Run 请求中的图片模型（生产默认 Nano Banana）整页生成。页审或套审确认需要返修时，
+Agent 读取该页最新一版受控 16:9 图片，并使用服务端配置
+`PPT_AGENT_V4_REVISION_IMAGE_MODEL=image-2` 调用 `/images/edits` 做局部编辑；规划模型不能指定或改写
+Provider 模型。该配置在 gateway 模式为必填，修改只影响尚未创建返修批次的新 Run。
+
+每个返修页在冻结预算前生成严格 Repair Contract，绑定问题 ID、局部修改、冻结文案、事实/数量/公式、
+原图 Artifact/SHA、返修模型和模式。内部图片 Key 固定为
+`<runId>:slide:<page>:image:r<round>:v1:edit:<24hex>`；旧 `:rN:v1` Key 继续可读。Repair Contract、
+图片 Key、原图字节和模型任一变化都会触发幂等冲突，不会静默整页重生或切回 Nano。
+
+初稿与返修都按一张图片一个 Agent 图片单位计量，宿主仍负责把图片单位换算为积分。10 页 Run 在管理员
+允许 2 轮返修时，理论最大值是 `10 + 10 + 10 = 30` 图片单位；按宿主当前 10 积分/图即为 300 积分
+冻结上限。实际完成后仍按 GenerationBatch 原子结算，未使用部分释放，PPT Agent 不硬编码积分价格。
+
+若 `/images/edits` 响应丢失，`SUBMITTING/SUBMISSION_UNKNOWN` 只允许用原 Key 和持久化
+`IMAGE_EDIT` 模式查询。只有网关权威返回 `NOT_SUBMITTED` 才能在后续恢复轮次用同一 Key 重提；
+`SUBMITTED` 继续查询原任务，`UNKNOWN` 保持待恢复，禁止换模型、换 Key 或再次 POST。
 
 ## 批次预算端口
 

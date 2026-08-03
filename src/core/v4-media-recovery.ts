@@ -4,6 +4,7 @@ import { recoverMediaExecution, recoverMediaRevision } from './policy'
 import type { AgentTransaction, ClockPort, RunRecord } from './ports'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import { allPageNumbers, appendV4LifecycleEvent, isVisualDeckV4, revisionDetails } from './v4-lifecycle'
+import { visualDeckPageImageIdentity } from './blueprint-assets'
 
 /** Restores the correct V4 stage only after the affected raster batch is fully recovered. */
 export function recoverV4AfterMediaRecovery(transaction: AgentTransaction, clock: ClockPort): RunRecord {
@@ -13,9 +14,9 @@ export function recoverV4AfterMediaRecovery(transaction: AgentTransaction, clock
   const revision = recoverV4RevisionAfterMediaRecovery(transaction, clock)
   if (revision) return revision
 
-  const currentRoundSuffix = `:image:r${run.revisionRound}:v1`
   const imageSteps = transaction.listSteps().filter((step) =>
-    step.tool === 'generate_slide_image' && step.idempotencyKey.endsWith(currentRoundSuffix))
+    step.tool === 'generate_slide_image'
+      && isPageImageFor(step.idempotencyKey, run.id, run.revisionRound))
   if (imageSteps.length !== run.slideCount || imageSteps.some((step) => step.status !== 'COMPLETED')) return run
 
   const pageNumbers = new Set<number>()
@@ -65,8 +66,14 @@ function recoverV4RevisionAfterMediaRecovery(transaction: AgentTransaction, cloc
     .sort((left, right) => left - right)
   if (pageNumbers.length === 0) return null
 
-  const expectedKeys = pageNumbers.map((pageNumber) => `${run.id}:slide:${pageNumber}:image:r${run.revisionRound}:v1`)
-  const steps = expectedKeys.map((key) => transaction.getStep(key))
+  const allSteps = transaction.listSteps()
+  const steps = pageNumbers.map((pageNumber) => allSteps.find((step) => {
+    const identity = visualDeckPageImageIdentity(step.idempotencyKey)
+    return step.tool === 'generate_slide_image'
+      && identity?.runId === run.id
+      && identity.pageNumber === pageNumber
+      && identity.revisionRound === run.revisionRound
+  }))
   if (steps.some((step) => step?.status !== 'COMPLETED' || !hasControlledArtifact(step))) return null
   if (hasOpenMediaIssue(transaction, steps.filter((step): step is NonNullable<typeof step> => step !== null))) return null
 
@@ -94,6 +101,11 @@ function recoverV4RevisionAfterMediaRecovery(transaction: AgentTransaction, cloc
     ...details,
   })
   return recovered
+}
+
+function isPageImageFor(idempotencyKey: string, runId: string, revisionRound: number) {
+  const identity = visualDeckPageImageIdentity(idempotencyKey)
+  return identity?.runId === runId && identity.revisionRound === revisionRound
 }
 
 function hasControlledArtifact(step: ReturnType<AgentTransaction['getStep']>) {

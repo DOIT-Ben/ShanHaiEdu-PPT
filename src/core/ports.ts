@@ -187,6 +187,7 @@ export interface ImageGenerationPort {
   lookupByIdempotency?(input: Readonly<{
     tenantId: string
     idempotencyKey: string
+    operationMode?: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
   }>): Promise<
     | Readonly<{ state: 'SUBMITTED'; operationId: string }>
     | Readonly<{ state: 'NOT_SUBMITTED' | 'UNKNOWN' }>

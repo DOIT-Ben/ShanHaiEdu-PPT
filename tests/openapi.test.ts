@@ -23,7 +23,7 @@ describe('OpenAPI v1 contract', () => {
     }
 
     expect(document.openapi).toBe('3.1.0')
-    expect(document.info.version).toBe('4.1.1')
+    expect(document.info.version).toBe('4.2.0')
     expect(document.security).toEqual([{ bearerAuth: [] }])
     expect(Object.keys(document.paths).sort()).toEqual([
       '/health/live',

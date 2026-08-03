@@ -499,6 +499,7 @@ type RuntimeInput = Readonly<{
   workerId?: string
   workerConcurrency?: number
   imageConcurrency?: number
+  revisionImageModel?: string
   reviewConcurrency?: number
   runLeaseTtlMs?: number
   createRunRateLimitPerMinute?: number
@@ -512,6 +513,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const workerId = input.workerId?.trim() || `worker-${randomUUID()}`
   const workerConcurrency = input.workerConcurrency ?? 2
   const imageConcurrency = input.imageConcurrency ?? 50
+  const revisionImageModel = input.revisionImageModel?.trim() || 'image-2'
   const runLeaseTtlMs = input.runLeaseTtlMs ?? 60_000
   if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency < 1 || workerConcurrency > 8) {
     throw new Error('WORKER_CONCURRENCY_INVALID')
@@ -649,7 +651,9 @@ export function createAgentRuntime(input: RuntimeInput) {
     repository: input.repository,
     media,
     batchBudget: budget,
+    artifacts: input.artifacts,
     clock,
+    revisionImageModel,
     imageConcurrency,
   })
 

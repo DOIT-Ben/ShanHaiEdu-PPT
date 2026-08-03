@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "PPT Agent API",
-    "version": "4.1.1",
+    "version": "4.2.0",
     "description": "Host-independent API for durable PPT Agent runs. Bearer credentials are tenant-bound; user and administrator credentials are distinct, and host identity headers are canonicalized by the service."
   },
   "servers": [{ "url": "/" }],
