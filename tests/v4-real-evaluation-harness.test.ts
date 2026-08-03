@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   evaluationInputContentHash,
+  deliveryAvailabilityWaitState,
   normalizeEvaluationRequest,
   presentationSlideEntries,
   referencedSlideImageEntry,
@@ -117,6 +118,42 @@ describe('V4 real evaluation harness', () => {
       ...run,
       deliveryAvailability: { ...run.deliveryAvailability, deliveryId: 'delivery-other' },
     })).toThrow('DELIVERY_PUBLIC_IDENTITY_MISMATCH')
+  })
+
+  test('waits for AVAILABLE instead of treating any non-accounting state as downloadable', () => {
+    const run = {
+      schemaVersion: '1' as const,
+      id: 'run-1',
+      status: 'COMPLETED',
+      version: 8,
+      slideCount: 2,
+      revisionRound: 0,
+      committedBudgetUnits: 2,
+      qualityScore: 90,
+      qualityOverride: false,
+      issues: [],
+      deliveries: [],
+    }
+
+    expect(deliveryAvailabilityWaitState({
+      ...run,
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_PENDING' },
+    })).toEqual({ state: 'WAIT', reason: 'ACCOUNTING_PENDING' })
+    expect(deliveryAvailabilityWaitState({
+      ...run,
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'DELIVERY_CONTRACT_INVALID' },
+    })).toEqual({ state: 'WAIT', reason: 'DELIVERY_CONTRACT_INVALID' })
+    expect(deliveryAvailabilityWaitState({
+      ...run,
+      deliveryAvailability: {
+        state: 'AVAILABLE', deliveryId: 'run-1:delivery:r0', disposition: 'FINAL', identityStatus: 'VERIFIED',
+      },
+    })).toEqual({ state: 'AVAILABLE', reason: null })
+    expect(deliveryAvailabilityWaitState({
+      ...run,
+      status: 'FAILED',
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_NOT_COMPLETED' },
+    })).toEqual({ state: 'TERMINAL', reason: 'RUN_FAILED' })
   })
 
   test('executes an already matching V4 request without editing it', () => {

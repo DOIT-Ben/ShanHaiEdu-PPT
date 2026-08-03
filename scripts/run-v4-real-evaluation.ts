@@ -570,6 +570,7 @@ async function waitFor(
   predicate: (run: RunDetail) => boolean,
   timeoutMs: number,
   timeline: Array<Record<string, unknown>>,
+  timeoutMessage: () => string = () => `RUN_WAIT_TIMEOUT:${runId}`,
 ) {
   const startedAt = Date.now()
   let previous = ''
@@ -591,15 +592,21 @@ async function waitFor(
     if (predicate(run)) return run
     await Bun.sleep(config.pollMs)
   }
-  throw new Error(`RUN_WAIT_TIMEOUT:${runId}`)
+  throw new Error(timeoutMessage())
 }
 
-function isAccountingPending(run: RunDetail) {
+export function deliveryAvailabilityWaitState(run: RunDetail) {
+  if (run.status !== 'COMPLETED') {
+    return { state: 'TERMINAL' as const, reason: `RUN_${run.status}` }
+  }
   const availability = deliveryAvailabilitySchema.safeParse(run.deliveryAvailability)
-  return run.status === 'COMPLETED'
-    && availability.success
-    && availability.data.state === 'UNAVAILABLE'
-    && availability.data.reason === 'ACCOUNTING_PENDING'
+  if (!availability.success) {
+    return { state: 'WAIT' as const, reason: 'DELIVERY_AVAILABILITY_CONTRACT_INVALID' }
+  }
+  if (availability.data.state === 'AVAILABLE') {
+    return { state: 'AVAILABLE' as const, reason: null }
+  }
+  return { state: 'WAIT' as const, reason: availability.data.reason }
 }
 
 export function requireAvailableDelivery(run: RunDetail) {
@@ -847,14 +854,19 @@ async function runCase(config: EvaluationConfig, caseId: string) {
   let finalRun = TERMINAL_STATUSES.has(planned.status)
     ? planned
     : await waitFor(config, request, runId, (run) => TERMINAL_STATUSES.has(run.status), config.runTimeoutMs, timeline)
-  if (isAccountingPending(finalRun)) {
+  let deliveryWaitState = deliveryAvailabilityWaitState(finalRun)
+  if (deliveryWaitState.state === 'WAIT') {
     finalRun = await waitFor(
       config,
       request,
       runId,
-      (run) => !isAccountingPending(run),
+      (run) => {
+        deliveryWaitState = deliveryAvailabilityWaitState(run)
+        return deliveryWaitState.state !== 'WAIT'
+      },
       config.runTimeoutMs,
       timeline,
+      () => `DELIVERY_AVAILABILITY_WAIT_TIMEOUT:${runId}:${deliveryWaitState.reason}`,
     )
   }
   const events = await readEventHistory(config, request, runId)
