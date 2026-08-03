@@ -3,8 +3,10 @@ import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { AdminOperationsService } from '../src/core/admin-operations'
+import { generationBatchStepKeyFor } from '../src/core/generation-batch'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import type { RunRecord, StepRecord } from '../src/core/ports'
+import { storedGenerationBatchSchema } from '../src/generation-batch-contracts'
 
 function run(): RunRecord {
   return {
@@ -45,6 +47,78 @@ async function fixture(status: StepRecord['status'], overrides: Partial<StepReco
     idempotencyKey: 'admin-action-1', reason: '已核对供应商后台工单 20260721。',
   }
   return { repository, budget, images, service, base }
+}
+
+async function attachRevisionBatch(
+  repository: InMemoryAgentRepository,
+  status: StepRecord['status'],
+  childReservationId: string | null,
+) {
+  const page = (await repository.listSteps('run-1')).find((step) => step.id === 'step-image-1')!
+  const pageKey = page.idempotencyKey
+  const batchKey = generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })
+  const batchId = `genbatch_${'b'.repeat(32)}`
+  const reservationId = 'batch-reservation-1'
+  await repository.transact('run-1', (transaction) => {
+    const currentPage = transaction.getStep(pageKey)!
+    transaction.putRun({
+      ...transaction.run,
+      presentationMode: 'VISUAL_DECK_V4',
+      imageModel: 'nano-banana-pro',
+      revisionRound: 1,
+    })
+    transaction.putStep({
+      ...currentPage,
+      status,
+      budgetReservationId: childReservationId,
+      output: {
+        slideId: 'run-1:slide:1',
+        versionId: 'run-1:slide:1:r1:v1',
+        model: 'image-2',
+        operationMode: 'IMAGE_EDIT',
+        repairContractHash: 'c'.repeat(64),
+        batchId,
+      },
+    })
+    transaction.putStep({
+      id: 'step-run-1-revision-generation-batch-r1',
+      runId: 'run-1',
+      idempotencyKey: batchKey,
+      inputHash: 'batch-input-hash',
+      tool: 'generate_image_batch',
+      status: 'RUNNING',
+      budgetUnits: 4,
+      budgetReservationId: reservationId,
+      externalOperationId: null,
+      errorCode: null,
+      output: storedGenerationBatchSchema.parse({
+        batchId,
+        proposalHash: 'd'.repeat(64),
+        revisionRound: 1,
+        submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS',
+        accountingModel: 'image-2',
+        operationMode: 'IMAGE_EDIT',
+        pageCount: 1,
+        pages: [{ pageNumber: 1, idempotencyKey: pageKey, promptHash: 'e'.repeat(64) }],
+        accounting: {
+          estimatedUnits: 4,
+          committedUnits: 4,
+          settledUnits: 0,
+          releasedUnits: 0,
+          reconciliationUnits: 4,
+          authorization: 'RESERVED',
+          settlement: 'PENDING',
+        },
+        progress: { submitted: 1, completed: 0, failed: 0 },
+        status: 'RECONCILIATION_REQUIRED',
+        createdAt: '2026-07-21T00:00:00.000Z',
+        updatedAt: '2026-07-21T00:00:00.000Z',
+      }),
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z',
+    })
+  })
+  return { pageKey, batchId, batchKey, reservationId }
 }
 
 describe('admin operations service', () => {
@@ -116,6 +190,117 @@ describe('admin operations service', () => {
     expect(result.step).toMatchObject({ status: 'FAILED_NOT_CHARGED', budgetReservationId: recovered.reservationId })
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
     expect(budget.released).toEqual(new Set([recovered.reservationId]))
+  })
+
+  test('uses the persisted GPT edit model for administrator accounting after configuration drift', async () => {
+    const { repository, budget, service, base } = await fixture('RESERVATION_UNKNOWN', {
+      idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
+      budgetReservationId: null,
+      output: {
+        slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r1:v1',
+        model: 'image-2', operationMode: 'IMAGE_EDIT', repairContractHash: 'b'.repeat(64),
+      },
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, imageModel: 'nano-banana-pro' })
+    })
+
+    await service.act({ ...base, action: 'MARK_NOT_CHARGED' })
+
+    expect(budget.reservationRequests.at(-1)).toMatchObject({ model: 'image-2' })
+  })
+
+  test('classifies an uncharged batch page without creating or releasing a page reservation', async () => {
+    const { repository, budget, service, base } = await fixture('SUBMISSION_UNKNOWN', {
+      idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
+      budgetReservationId: null,
+    })
+    const batch = await attachRevisionBatch(repository, 'SUBMISSION_UNKNOWN', null)
+
+    const result = await service.act({ ...base, action: 'MARK_NOT_CHARGED' })
+
+    expect(result.step).toMatchObject({
+      status: 'FAILED_NOT_CHARGED',
+      budgetReservationId: batch.reservationId,
+    })
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      reservationId: batch.reservationId,
+      batchId: batch.batchId,
+      settledUnits: 0,
+      releasedUnits: 4,
+    })])
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 0 })
+  })
+
+  test('classifies a charged batch page only through atomic batch finalization', async () => {
+    const { repository, budget, service, base } = await fixture('BILLING_UNKNOWN', {
+      idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
+    })
+    const batch = await attachRevisionBatch(repository, 'BILLING_UNKNOWN', 'batch-reservation-1')
+
+    const result = await service.act({ ...base, action: 'MARK_CHARGED' })
+
+    expect(result.step).toMatchObject({ status: 'FAILED_CHARGED', budgetReservationId: batch.reservationId })
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({
+      reservationId: batch.reservationId,
+      batchId: batch.batchId,
+      settledUnits: 4,
+      releasedUnits: 0,
+    })])
+  })
+
+  test.each([
+    ['missing batch', 'BATCH_ACCOUNTING_CONTEXT_INVALID', async (repository: InMemoryAgentRepository) => {
+      const step = (await repository.listSteps('run-1')).find((candidate) => candidate.id === 'step-image-1')!
+      await repository.transact('run-1', (transaction) => transaction.putStep({
+        ...step,
+        output: { ...step.output as object, batchId: `genbatch_${'f'.repeat(32)}` },
+      }))
+    }],
+    ['page membership mismatch', 'BATCH_PAGE_MEMBERSHIP_INVALID', async (repository: InMemoryAgentRepository) => {
+      const batchKey = generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })
+      await repository.transact('run-1', (transaction) => {
+        const batchStep = transaction.getStep(batchKey)!
+        const batch = storedGenerationBatchSchema.parse(batchStep.output)
+        transaction.putStep({
+          ...batchStep,
+          output: storedGenerationBatchSchema.parse({
+            ...batch,
+            pages: [{ ...batch.pages[0]!, idempotencyKey: 'run-1:another-page' }],
+          }),
+        })
+      })
+    }],
+    ['missing batch reservation', 'BATCH_RESERVATION_UNRESOLVED', async (repository: InMemoryAgentRepository) => {
+      const batchKey = generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })
+      await repository.transact('run-1', (transaction) => {
+        const batchStep = transaction.getStep(batchKey)!
+        transaction.putStep({ ...batchStep, budgetReservationId: null })
+      })
+    }],
+    ['reservation mismatch', 'BATCH_RESERVATION_ID_CONFLICT', async (repository: InMemoryAgentRepository) => {
+      const page = (await repository.listSteps('run-1')).find((candidate) => candidate.id === 'step-image-1')!
+      await repository.transact('run-1', (transaction) => transaction.putStep({
+        ...page,
+        budgetReservationId: 'different-reservation',
+      }))
+    }],
+  ] as const)('fails closed for a %s without calling any budget operation', async (_label, code, mutate) => {
+    const { repository, budget, service, base } = await fixture('SUBMISSION_UNKNOWN', {
+      idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
+      budgetReservationId: null,
+    })
+    if (code !== 'BATCH_ACCOUNTING_CONTEXT_INVALID') {
+      await attachRevisionBatch(repository, 'SUBMISSION_UNKNOWN', null)
+    }
+    await mutate(repository)
+
+    await expect(service.act({ ...base, action: 'MARK_NOT_CHARGED' })).rejects.toMatchObject({ status: 409, code })
+    expect(budget.reservationRequests).toHaveLength(0)
+    expect(budget.batchFinalizations).toHaveLength(0)
+    expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'admin_reconciliation')).toHaveLength(0)
   })
 
   test('reinspects a late Provider result and records an audited completion', async () => {

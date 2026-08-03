@@ -37,6 +37,7 @@ import {
 import {
   activeRevisionLifecycle,
   appendV4LifecycleEvent,
+  failVisualDeckV4Transaction,
   revisionDetails,
 } from './v4-lifecycle'
 
@@ -412,7 +413,10 @@ export class RevisionPlanningRunner {
       const now = this.dependencies.clock.now().toISOString()
       const fromStatus = transaction.run.status
       const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
-      const policy = v4TechnicalFailure ? transaction.run : transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && !v4TechnicalFailure
+      const policy = v4TechnicalFailure || v4InternalFailure
+        ? transaction.run
+        : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedStep: StepRecord = {
         ...step,
         status: v4TechnicalFailure ? 'RUNNING' : 'FAILED',
@@ -422,7 +426,7 @@ export class RevisionPlanningRunner {
       }
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       transaction.putStep(updatedStep)
-      if (!v4TechnicalFailure) transaction.putRun(updatedRun)
+      if (!v4TechnicalFailure && !v4InternalFailure) transaction.putRun(updatedRun)
       const technicalRecovery = v4TechnicalFailure
         ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
         : null
@@ -441,6 +445,15 @@ export class RevisionPlanningRunner {
           revisionRound: started.payload.revisionRound,
           reason: 'REVISION_FAILED',
           retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
+        })
+        return { status: transaction.run.status, step: updatedStep, plan: null, replayed: false }
+      }
+      if (v4InternalFailure) {
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+          reason: 'REVISION_FAILED',
         })
         return { status: transaction.run.status, step: updatedStep, plan: null, replayed: false }
       }
@@ -473,6 +486,26 @@ export class RevisionPlanningRunner {
   }
 
   private async requireHuman(run: RunRecord, reason: string): Promise<RevisionPlanningResult> {
+    const terminalErrorCode = run.presentationMode === 'VISUAL_DECK_V4'
+      ? reason === 'MAX_REVISION_ROUNDS_REACHED'
+        ? 'QUALITY_REMEDIATION_EXHAUSTED' as const
+        : ['REVISION_PLAN_HAS_NO_ISSUES', 'REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES'].includes(reason)
+          ? 'QUALITY_ISSUE_STATE_INCONSISTENT' as const
+          : null
+      : null
+    if (terminalErrorCode) {
+      const failed = await this.dependencies.repository.transact(run.id, (transaction) =>
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: terminalErrorCode,
+          reason: terminalErrorCode === 'QUALITY_REMEDIATION_EXHAUSTED'
+            ? 'REVISION_LIMIT_REACHED'
+            : 'DECK_REVIEW_REJECTED',
+        }))
+      const latest = await this.requireRun(run.id)
+      return { status: latest.status, step: null, plan: null, replayed: !failed }
+    }
     if (run.status === 'NEEDS_HUMAN') return { status: run.status, step: null, plan: null, replayed: true }
     const updated = await this.dependencies.repository.transact(run.id, (transaction) => {
       const now = this.dependencies.clock.now().toISOString()

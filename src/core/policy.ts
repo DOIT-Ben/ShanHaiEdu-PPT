@@ -1,4 +1,4 @@
-import type { RunAction, RunStatus } from '../contracts'
+import type { PresentationMode, RunAction, RunStatus } from '../contracts'
 
 const TERMINAL_STATES = new Set<RunStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
 const PAUSABLE_STATES = new Set<RunStatus>([
@@ -39,7 +39,10 @@ export type RunPolicyState = Readonly<{
   budgetUnits: number
   committedBudgetUnits: number
   qualityOverride: boolean
+  presentationMode?: PresentationMode
 }>
+
+export type RunActionPolicyContext = Readonly<{ actorRole: 'USER' | 'ADMIN' }>
 
 export function isTerminalStatus(status: RunStatus) {
   return TERMINAL_STATES.has(status)
@@ -78,7 +81,11 @@ export function recoverMediaRevision(state: RunPolicyState): RunPolicyState {
   return { ...state, status: 'REVISING', resumeState: null, version: state.version + 1 }
 }
 
-export function applyRunAction(state: RunPolicyState, action: RunAction): RunPolicyState {
+export function applyRunAction(
+  state: RunPolicyState,
+  action: RunAction,
+  context: RunActionPolicyContext = { actorRole: 'USER' },
+): RunPolicyState {
   if (action.expectedVersion !== state.version) {
     throw new PolicyError('RUN_VERSION_CONFLICT', 'run version does not match expectedVersion')
   }
@@ -125,6 +132,9 @@ export function applyRunAction(state: RunPolicyState, action: RunAction): RunPol
     case 'ACCEPT_WITH_OVERRIDE': {
       if (state.status !== 'NEEDS_HUMAN') {
         throw new PolicyError('QUALITY_OVERRIDE_NOT_ALLOWED', 'quality override requires human-review state')
+      }
+      if (state.presentationMode === 'VISUAL_DECK_V4' && context.actorRole !== 'ADMIN') {
+        throw new PolicyError('QUALITY_OVERRIDE_ADMIN_REQUIRED', 'v4 quality override requires administrator context')
       }
       const delivering = transitionRun(state, 'DELIVERING')
       return { ...delivering, qualityOverride: true }

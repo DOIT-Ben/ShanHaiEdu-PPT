@@ -10,6 +10,7 @@ import { RevisionApplicationRunner } from '../src/core/revision-application-runn
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { revisionPlanSchema } from '../src/presentation-contracts'
+import { LEGACY_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
 
 function run(): RunRecord {
   return {
@@ -107,15 +108,15 @@ function layeredDraft() {
   return structuredClone(value)
 }
 
-function visualDeckV4Blueprint() {
-  const { source, document, config } = visualDeckV4Input()
+function visualDeckV4Blueprint(slideCount = 2) {
+  const { source, document, config } = visualDeckV4Input(slideCount)
   return createVisualDeckV4Blueprint({
     runId: 'run-1', inputHash: 'plan-hash', source, document, config,
-    slideCount: 2, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
+    slideCount, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
   })
 }
 
-function visualDeckV4Input() {
+function visualDeckV4Input(slideCount = 2) {
   const source = {
     kind: 'SOURCE_PACKAGE' as const,
     name: '光合作用教材',
@@ -140,11 +141,78 @@ function visualDeckV4Input() {
     config: {
       instruction: '制作两页光合作用视觉演示', sourceMode: 'SOURCE_GROUNDED',
       deckOptions: {
-        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount }, aspectRatio: '16:9',
         audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
       },
     },
   } as const
+}
+
+function v4LayoutPatch(
+  brief: NonNullable<ReturnType<typeof visualDeckV4Blueprint>['visualDeckV4Proposal']>['slideBriefs'][number],
+  label: string,
+) {
+  return {
+    pageNumber: brief.pageNumber,
+    visualMetaphor: `${brief.visualMetaphor}；${label}`,
+    composition: `${brief.composition}；${label}`,
+    informationHierarchy: [...brief.informationHierarchy, label],
+    previousSlideRelation: brief.previousSlideRelation,
+    nextSlideRelation: brief.nextSlideRelation,
+  }
+}
+
+function v4ContentPatch(
+  brief: NonNullable<ReturnType<typeof visualDeckV4Blueprint>['visualDeckV4Proposal']>['slideBriefs'][number],
+) {
+  return {
+    pageNumber: brief.pageNumber,
+    title: brief.title,
+    keyClaim: brief.keyClaim,
+    audienceTakeaway: brief.audienceTakeaway,
+    lockedCopy: brief.lockedCopy,
+    facts: brief.facts,
+    numbers: brief.numbers,
+    formulas: brief.formulas,
+    sourceChunkIds: brief.sourceChunkIds,
+    visualMetaphor: brief.visualMetaphor,
+    composition: brief.composition,
+    informationHierarchy: brief.informationHierarchy,
+    previousSlideRelation: brief.previousSlideRelation,
+    nextSlideRelation: brief.nextSlideRelation,
+  }
+}
+
+function realMixedV4RevisionPlan() {
+  const operation = (
+    pageNumber: number,
+    kind: 'UPDATE_CONTENT' | 'REGENERATE_IMAGE' | 'RELAYOUT',
+    issueId: string,
+    sourceChunkIds: string[] = [],
+  ) => ({
+    id: `operation-${pageNumber}-${kind.toLowerCase()}`,
+    slideId: `run-1:slide:${pageNumber}`,
+    kind,
+    issueIds: [issueId],
+    instruction: `只修订第 ${pageNumber} 页的 ${kind} 问题，不改变其他页面。`,
+    sourceChunkIds,
+  })
+  return {
+    id: 'revision-plan-r1', reviewId: 'deck-review-r0', revisionRound: 1,
+    createdAt: '2026-07-21T00:00:00.000Z',
+    summary: '复现真实九项操作：两页规划不变重绘、两页布局补丁和四页纯素材重绘。',
+    operations: [
+      operation(3, 'REGENERATE_IMAGE', 'issue-1'),
+      operation(9, 'UPDATE_CONTENT', 'issue-2', ['chunk-1']),
+      operation(8, 'RELAYOUT', 'issue-3'),
+      operation(10, 'RELAYOUT', 'issue-4'),
+      operation(5, 'REGENERATE_IMAGE', 'issue-5'),
+      operation(6, 'REGENERATE_IMAGE', 'issue-5'),
+      operation(7, 'REGENERATE_IMAGE', 'issue-5'),
+      operation(8, 'REGENERATE_IMAGE', 'issue-5'),
+      operation(1, 'UPDATE_CONTENT', 'issue-6', ['chunk-1']),
+    ],
+  }
 }
 
 class StaticDocumentPort implements DocumentPort {
@@ -286,6 +354,264 @@ describe('revision application runner', () => {
     expect(application.requests.size).toBe(0)
   })
 
+  test('applies the real mixed V4 revision shape with scoped patches and redraw-only pages', async () => {
+    const slideCount = 12
+    const base = visualDeckV4Blueprint(slideCount)
+    const input = visualDeckV4Input(slideCount)
+    const beforeProposal = structuredClone(base.visualDeckV4Proposal!)
+    const response = {
+      contentPatches: [],
+      layoutPatches: [
+        v4LayoutPatch(beforeProposal.slideBriefs[7]!, '修正第8页操作方向'),
+        v4LayoutPatch(beforeProposal.slideBriefs[9]!, '澄清第10页填写任务'),
+      ],
+      redrawOnlyPageNumbers: [1, 9],
+    }
+    const { application, runner } = await fixture(response, realMixedV4RevisionPlan(), base, {
+      runOverrides: {
+        source: input.source,
+        slideCount,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true, replayed: false })
+    expect(application.requests.size).toBe(1)
+    const after = result.blueprint?.visualDeckV4Proposal
+    expect(after).toBeDefined()
+    for (const field of ['sourceUnderstanding', 'presentationSpec', 'deckPlan', 'visualContract'] as const) {
+      expect(after?.[field]).toEqual(beforeProposal[field])
+    }
+    expect(after?.slideBriefs[0]).toEqual(beforeProposal.slideBriefs[0])
+    expect(after?.slideBriefs[8]).toEqual(beforeProposal.slideBriefs[8])
+    expect(after?.slideBriefs[1]).toEqual(beforeProposal.slideBriefs[1])
+    expect(after?.slideBriefs[7]?.composition).toContain('修正第8页操作方向')
+    expect(after?.slideBriefs[9]?.composition).toContain('澄清第10页填写任务')
+  })
+
+  test('keeps chain-1 full-draft revision parsing, persistence and replay', async () => {
+    const base = visualDeckV4Blueprint()
+    base.visualDeckV4Proposal!.compilerVersion = LEGACY_VISUAL_DECK_V4_COMPILER_VERSION
+    const { compilerVersion: _compilerVersion, ...legacyDraft } = structuredClone(base.visualDeckV4Proposal!)
+    legacyDraft.slideBriefs[1]!.keyClaim = '绿色植物在光照下制造有机物并释放氧气。'
+    legacyDraft.slideBriefs[1]!.facts = ['绿色植物在光照下制造有机物并释放氧气。']
+    const input = visualDeckV4Input()
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const { application, runner } = await fixture(legacyDraft, revisionPlan, base, {
+      runOverrides: {
+        source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    const completed = await runner.apply('run-1')
+    const replayed = await runner.apply('run-1')
+
+    expect(completed.blueprint?.renderMode).toBe('VISUAL_DECK_V4')
+    expect(completed.blueprint?.visualDeckV4Proposal?.compilerVersion)
+      .toBe(LEGACY_VISUAL_DECK_V4_COMPILER_VERSION)
+    expect(completed).toMatchObject({ status: 'REVISING', replayed: false, blueprint: expect.any(Object) })
+    expect(replayed).toMatchObject({ status: 'REVISING', replayed: true })
+    expect(replayed.blueprint).toEqual(completed.blueprint)
+    expect(application.applications.size).toBe(1)
+  })
+
+  test('repairs an invalid chain-2 patch with one deterministic contract key', async () => {
+    const base = visualDeckV4Blueprint()
+    const input = visualDeckV4Input()
+    const brief = base.visualDeckV4Proposal!.slideBriefs[1]!
+    const valid = {
+      contentPatches: [],
+      layoutPatches: [v4LayoutPatch(brief, '修正布局')],
+      redrawOnlyPageNumbers: [],
+    }
+    const revisionPlan = plan('RELAYOUT')
+    const { application, runner } = await fixture(valid, revisionPlan, base, {
+      runOverrides: {
+        source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+    const applyOnce = application.apply.bind(application)
+    const keys: string[] = []
+    application.apply = async (modelInput) => {
+      keys.push(modelInput.idempotencyKey)
+      if (keys.length === 1) return { ...valid, layoutPatches: [] }
+      return applyOnce(modelInput)
+    }
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', blueprint: expect.any(Object) })
+    expect(keys).toEqual([
+      'run-1:revision-blueprint:r1',
+      `revision-contract-repair-${hashInput({ idempotencyKey: 'run-1:revision-blueprint:r1', attempt: 1 })}`,
+    ])
+    expect([...application.requests.values()][0]?.contractRepairIssues).toContainEqual({
+      path: '$', message: 'REVISION_PATCH_SCOPE_INVALID',
+    })
+  })
+
+  test('keeps the chain-2 revision key across ambiguous provider retries', async () => {
+    const base = visualDeckV4Blueprint()
+    const input = visualDeckV4Input()
+    const valid = {
+      contentPatches: [],
+      layoutPatches: [v4LayoutPatch(base.visualDeckV4Proposal!.slideBriefs[1]!, '修正布局')],
+      redrawOnlyPageNumbers: [],
+    }
+    const { application, runner } = await fixture(valid, plan('RELAYOUT'), base, {
+      runOverrides: {
+        source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+    const applyOnce = application.apply.bind(application)
+    const keys: string[] = []
+    application.apply = async (modelInput) => {
+      keys.push(modelInput.idempotencyKey)
+      if (keys.length < 3) {
+        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', `request-${keys.length}`)
+      }
+      return applyOnce(modelInput)
+    }
+
+    expect(await runner.apply('run-1')).toMatchObject({ status: 'REVISING', blueprint: expect.any(Object) })
+    expect(keys).toHaveLength(3)
+    expect(new Set(keys)).toEqual(new Set(['run-1:revision-blueprint:r1']))
+  })
+
+  test('rejects missing, unplanned, no-op and source-escaping chain-2 patches', async () => {
+    const cases = [
+      {
+        name: 'missing',
+        response: () => ({ contentPatches: [], layoutPatches: [], redrawOnlyPageNumbers: [] }),
+        diagnosticCode: 'REVISION_PATCH_SCOPE_INVALID',
+      },
+      {
+        name: 'unplanned',
+        response: (base: ReturnType<typeof visualDeckV4Blueprint>) => ({
+          contentPatches: [],
+          layoutPatches: [v4LayoutPatch(base.visualDeckV4Proposal!.slideBriefs[0]!, '越权')],
+          redrawOnlyPageNumbers: [2],
+        }),
+        diagnosticCode: 'REVISION_PATCH_SCOPE_INVALID',
+      },
+      {
+        name: 'no-op',
+        response: (base: ReturnType<typeof visualDeckV4Blueprint>) => {
+          const brief = base.visualDeckV4Proposal!.slideBriefs[1]!
+          return {
+            contentPatches: [],
+            layoutPatches: [{
+              pageNumber: brief.pageNumber,
+              visualMetaphor: brief.visualMetaphor,
+              composition: brief.composition,
+              informationHierarchy: brief.informationHierarchy,
+              previousSlideRelation: brief.previousSlideRelation,
+              nextSlideRelation: brief.nextSlideRelation,
+            }],
+            redrawOnlyPageNumbers: [],
+          }
+        },
+        diagnosticCode: 'REVISION_PATCH_NOOP',
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      const base = visualDeckV4Blueprint()
+      const input = visualDeckV4Input()
+      const { runner } = await fixture(testCase.response(base), plan('RELAYOUT'), base, {
+        runOverrides: {
+          source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config,
+          committedBudgetUnits: 0,
+        },
+        documents: new StaticDocumentPort(input.document),
+      })
+      const result = await runner.apply('run-1')
+      expect(result, testCase.name).toMatchObject({
+        status: 'FAILED',
+        step: { output: { diagnostic: { diagnosticCode: testCase.diagnosticCode } } },
+      })
+    }
+
+    const base = visualDeckV4Blueprint()
+    const input = visualDeckV4Input()
+    const brief = base.visualDeckV4Proposal!.slideBriefs[1]!
+    const contentPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const escaping = {
+      contentPatches: [{
+        pageNumber: brief.pageNumber,
+        title: brief.title,
+        keyClaim: '越权引用来源的内容修改',
+        audienceTakeaway: brief.audienceTakeaway,
+        lockedCopy: brief.lockedCopy,
+        facts: brief.facts,
+        numbers: brief.numbers,
+        formulas: brief.formulas,
+        sourceChunkIds: ['chunk-1'],
+        visualMetaphor: brief.visualMetaphor,
+        composition: brief.composition,
+        informationHierarchy: brief.informationHierarchy,
+        previousSlideRelation: brief.previousSlideRelation,
+        nextSlideRelation: brief.nextSlideRelation,
+      }],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [],
+    }
+    const { runner } = await fixture(escaping, contentPlan, base, {
+      runOverrides: {
+        source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config,
+        committedBudgetUnits: 0,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+    expect(await runner.apply('run-1')).toMatchObject({
+      status: 'FAILED',
+      step: { output: { diagnostic: { diagnosticCode: 'REVISION_SOURCE_REFERENCE_INVALID' } } },
+    })
+  })
+
+  test('rejects a chain-2 content patch that only reorders source lineage', async () => {
+    const base = visualDeckV4Blueprint()
+    const input = visualDeckV4Input()
+    const brief = base.visualDeckV4Proposal!.slideBriefs[1]!
+    brief.sourceChunkIds = ['chunk-1', 'chunk-2']
+    base.slides[1]!.sourceChunkIds = ['chunk-1', 'chunk-2']
+    const response = {
+      contentPatches: [{
+        ...v4ContentPatch(brief),
+        sourceChunkIds: ['chunk-2', 'chunk-1'],
+      }],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [],
+    }
+    const { runner } = await fixture(response, plan('UPDATE_CONTENT'), base, {
+      runOverrides: {
+        source: input.source,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+        committedBudgetUnits: 0,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    expect(await runner.apply('run-1')).toMatchObject({
+      status: 'FAILED',
+      step: { output: { diagnostic: { diagnosticCode: 'REVISION_PATCH_NOOP' } } },
+    })
+  })
+
   test('applies a source-grounded v4 content correction and requires a full-page redraw', async () => {
     const base = visualDeckV4Blueprint()
     const { compilerVersion: _compilerVersion, ...revisedProposal } = structuredClone(base.visualDeckV4Proposal!)
@@ -305,7 +631,12 @@ describe('revision application runner', () => {
         sourceChunkIds: ['chunk-2'],
       }],
     }
-    const { application, runner } = await fixture(revisedProposal, revisionPlan, base, {
+    const response = {
+      contentPatches: [v4ContentPatch(revisedProposal.slideBriefs[1]!)],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [],
+    }
+    const { application, runner } = await fixture(response, revisionPlan, base, {
       runOverrides: {
         source: input.source,
         presentationMode: 'VISUAL_DECK_V4',
@@ -334,12 +665,33 @@ describe('revision application runner', () => {
         source: input.source,
         presentationMode: 'VISUAL_DECK_V4',
         visualDeckV4: input.config,
+        committedBudgetUnits: 0,
       },
       documents: new StaticDocumentPort(input.document),
     })
 
     expect(await runner.apply('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN', blueprint: null, step: { errorCode: 'REVISION_APPLICATION_FAILED' },
+      status: 'FAILED', blueprint: null,
+    })
+    expect(application.requests.size).toBe(0)
+  })
+
+  test('stops before a v4 redraw-only revision when the compiler is unsupported', async () => {
+    const base = visualDeckV4Blueprint()
+    base.visualDeckV4Proposal!.compilerVersion = 'visual-deck-v4-chain-0'
+    const input = visualDeckV4Input()
+    const { application, runner } = await fixture({}, plan('REGENERATE_IMAGE'), base, {
+      runOverrides: {
+        source: input.source,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+        committedBudgetUnits: 0,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    expect(await runner.apply('run-1')).toMatchObject({
+      status: 'FAILED', blueprint: null, requiresMedia: false,
     })
     expect(application.requests.size).toBe(0)
   })
@@ -351,7 +703,19 @@ describe('revision application runner', () => {
     revisedProposal.slideBriefs[1]!.composition = '叶片居中，关系箭头沿单一路径从左向右展开'
     revisedProposal.slideBriefs[1]!.informationHierarchy = ['中心叶片', '光能来源', '产物关系']
     const input = visualDeckV4Input()
-    const { application, runner } = await fixture(revisedProposal, plan('RELAYOUT'), base, {
+    const response = {
+      contentPatches: [],
+      layoutPatches: [{
+        pageNumber: revisedProposal.slideBriefs[1]!.pageNumber,
+        visualMetaphor: revisedProposal.slideBriefs[1]!.visualMetaphor,
+        composition: revisedProposal.slideBriefs[1]!.composition,
+        informationHierarchy: revisedProposal.slideBriefs[1]!.informationHierarchy,
+        previousSlideRelation: revisedProposal.slideBriefs[1]!.previousSlideRelation,
+        nextSlideRelation: revisedProposal.slideBriefs[1]!.nextSlideRelation,
+      }],
+      redrawOnlyPageNumbers: [],
+    }
+    const { application, runner } = await fixture(response, plan('RELAYOUT'), base, {
       runOverrides: {
         source: input.source,
         presentationMode: 'VISUAL_DECK_V4',
@@ -377,19 +741,26 @@ describe('revision application runner', () => {
       ...plan('UPDATE_CONTENT'),
       operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
     }
-    const { application, runner } = await fixture(revisedProposal, revisionPlan, base, {
+    const response = {
+      contentPatches: [v4ContentPatch(revisedProposal.slideBriefs[1]!)],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [],
+    }
+    const { repository, application, runner } = await fixture(response, revisionPlan, base, {
       runOverrides: {
         source: input.source,
         presentationMode: 'VISUAL_DECK_V4',
         visualDeckV4: input.config,
+        committedBudgetUnits: 0,
       },
       documents: new StaticDocumentPort(input.document),
     })
 
     expect(await runner.apply('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN', blueprint: null, step: { errorCode: 'REVISION_APPLICATION_FAILED' },
+      status: 'FAILED', blueprint: null,
     })
     expect(application.requests.size).toBe(2)
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
     expect([...application.requests.values()][1]?.contractRepairIssues).toContainEqual({
       path: '$', message: 'REVISION_SOURCE_REFERENCE_INVALID',
     })
@@ -406,7 +777,12 @@ describe('revision application runner', () => {
       ...plan('UPDATE_CONTENT'),
       operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
     }
-    const { runner } = await fixture(revisedProposal, revisionPlan, base, {
+    const response = {
+      contentPatches: [v4ContentPatch(revisedProposal.slideBriefs[1]!)],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [],
+    }
+    const { runner } = await fixture(response, revisionPlan, base, {
       runOverrides: {
         source: input.source,
         presentationMode: 'VISUAL_DECK_V4',
@@ -435,17 +811,23 @@ describe('revision application runner', () => {
       ...plan('UPDATE_CONTENT'),
       operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
     }
-    const { application, runner } = await fixture(revisedProposal, revisionPlan, base, {
+    const response = {
+      contentPatches: [v4ContentPatch(revisedProposal.slideBriefs[1]!)],
+      layoutPatches: [],
+      redrawOnlyPageNumbers: [],
+    }
+    const { application, runner } = await fixture(response, revisionPlan, base, {
       runOverrides: {
         source: input.source,
         presentationMode: 'VISUAL_DECK_V4',
         visualDeckV4: input.config,
+        committedBudgetUnits: 0,
       },
       documents: new StaticDocumentPort(input.document),
     })
 
     expect(await runner.apply('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN', blueprint: null, step: { errorCode: 'REVISION_APPLICATION_FAILED' },
+      status: 'FAILED', blueprint: null, step: { errorCode: 'REVISION_APPLICATION_FAILED' },
     })
     expect(application.requests.size).toBe(2)
   })
@@ -627,5 +1009,46 @@ describe('revision application runner', () => {
     expect(application.applications.size).toBe(1)
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'apply_revision'))
       .toMatchObject({ status: 'COMPLETED' })
+  })
+
+  test('resumes a persisted chain-2 patch application with the original model key', async () => {
+    const base = visualDeckV4Blueprint()
+    const input = visualDeckV4Input()
+    const revisionPlan = revisionPlanSchema.parse(plan('RELAYOUT'))
+    const response = {
+      contentPatches: [],
+      layoutPatches: [v4LayoutPatch(base.visualDeckV4Proposal!.slideBriefs[1]!, '恢复布局修订')],
+      redrawOnlyPageNumbers: [],
+    }
+    const { repository, application, runner } = await fixture(response, revisionPlan, base, {
+      runOverrides: {
+        source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+    const sourceChunks = input.document.chunks.map(({ id, sha256 }) => ({ id, sha256 }))
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-run-1-apply-revision-r1',
+        runId: 'run-1',
+        idempotencyKey: 'run-1:revision-blueprint:r1',
+        inputHash: hashInput({ tool: 'apply_revision', base, plan: revisionPlan, sourceChunks }),
+        tool: 'apply_revision',
+        status: 'RUNNING',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: null,
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    expect(await runner.apply('run-1')).toMatchObject({
+      status: 'REVISING', replayed: false, blueprint: expect.any(Object),
+    })
+    expect([...application.requests.values()]).toHaveLength(1)
+    expect([...application.requests.values()][0]?.idempotencyKey).toBe('run-1:revision-blueprint:r1')
   })
 })

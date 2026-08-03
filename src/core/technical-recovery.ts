@@ -1,6 +1,7 @@
 import { CONTRACT_VERSION, type RunStatus, type TechnicalRecovery } from '../contracts'
 import type { AgentTransaction, ClockPort, RunRecord } from './ports'
 import { transitionRun } from './policy'
+import { failVisualDeckV4Transaction, reconcileVisualDeckV4TerminalState } from './v4-lifecycle'
 
 const MAX_TECHNICAL_RECOVERY_ATTEMPTS = 5
 const RECOVERABLE_STATES = new Set<RunStatus>([
@@ -18,7 +19,7 @@ export function technicalFailureDisposition(errorCode: string): TechnicalFailure
   if (/(^|_)(401|403|404)(_|$)|AUTH|PERMISSION|MODEL_(FORBIDDEN|NOT_FOUND)|CONTENT_POLICY|UNSUPPORTED/.test(normalized)) {
     return 'NON_RETRYABLE'
   }
-  return /TIMEOUT|RATE_LIMIT|429|408|425|5\d\d|UNAVAILABLE|TEMPORARY|GATEWAY|NETWORK|UNKNOWN|NO_HEALTHY_ROUTE|SUBMISSION_NOT_FOUND|VISUAL_REVIEW_FAILED|PAGE_REVIEW_FAILED|DECK_REVIEW_FAILED|DELIVERY_FAILED/.test(normalized)
+  return /TIMEOUT|RATE_LIMIT|429|408|425|5\d\d|UNAVAILABLE|TEMPORARY|GATEWAY|NETWORK|UNKNOWN|NO_HEALTHY_ROUTE|MODEL_JSON_INVALID|SUBMISSION_NOT_FOUND|VISUAL_REVIEW_FAILED|PAGE_REVIEW_FAILED|DECK_REVIEW_FAILED|DELIVERY_FAILED|V4_PLANNING_STAGE_FAILED/.test(normalized)
     ? 'RETRYABLE'
     : null
 }
@@ -55,8 +56,20 @@ export function beginTechnicalRecovery(transaction: AgentTransaction, clock: Clo
   const resumeState = run.status as TechnicalRecovery['resumeState']
   const recovery = recoveryState(run, resumeState, reason, now)
   if (!recovery.retryable) {
-    const policy = transitionRun(run, 'NEEDS_HUMAN')
     const exhausted: TechnicalRecovery = { ...recovery, active: false, nextAttemptAt: null }
+    if (run.presentationMode === 'VISUAL_DECK_V4') {
+      transaction.putRun({ ...run, technicalRecovery: exhausted, updatedAt: now.toISOString() })
+      transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'technical.recovery.completed', payload: exhausted })
+      failVisualDeckV4Transaction({
+        transaction,
+        clock,
+        errorCode: recovery.attempt >= MAX_TECHNICAL_RECOVERY_ATTEMPTS
+          ? 'TECHNICAL_RECOVERY_EXHAUSTED'
+          : 'TECHNICAL_CONFIGURATION_REQUIRED',
+      })
+      return transaction.run
+    }
+    const policy = transitionRun(run, 'NEEDS_HUMAN')
     const updated: RunRecord = {
       ...run,
       ...policy,
@@ -101,6 +114,9 @@ export function resumeTechnicalRecovery(transaction: AgentTransaction, clock: Cl
   const recovery = run.technicalRecovery
   if (run.status !== 'RECOVERING' || !recovery || !recovery.active || !recovery.retryable) return null
   if (!recovery.nextAttemptAt || Date.parse(recovery.nextAttemptAt) > clock.now().getTime()) return null
+  if (recovery.reason === 'TERMINAL_ACCOUNTING_PENDING' && run.pendingTerminalFailure) {
+    return reconcileVisualDeckV4TerminalState(transaction, clock)
+  }
   const policy = transitionRun(run, recovery.resumeState)
   const completed: TechnicalRecovery = { ...recovery, active: false, nextAttemptAt: null }
   const updated: RunRecord = {

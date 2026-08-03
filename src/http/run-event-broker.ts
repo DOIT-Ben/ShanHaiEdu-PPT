@@ -125,7 +125,9 @@ export class RunEventBroker {
       }
       if (!terminal && page.events.length === 0) {
         const run = await this.input.repository.getRun(runId)
-        terminal = Boolean(run && isTerminalStatus(run.status))
+        terminal = Boolean(run && isTerminalStatus(run.status)
+          && !(run.status === 'FAILED'
+            && run.terminalAccounting?.accountingStatus === 'RECONCILIATION_REQUIRED'))
       }
       if (terminal) {
         for (const subscriber of [...channel.subscribers]) subscriber.onClose()
@@ -153,7 +155,12 @@ export class RunEventBroker {
   }
 
   private isTerminalEvent(event: AgentEvent) {
-    return event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
+    if (event.type === 'run.accounting.finalized') return true
+    if (event.type === 'run.failed') {
+      return !('terminalAccounting' in event.payload)
+        || event.payload.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
+    }
+    return event.type === 'run.completed' || event.type === 'run.cancelled'
   }
 
   private remove(runId: string, channel: RunChannel, subscriber: Subscriber) {

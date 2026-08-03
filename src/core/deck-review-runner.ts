@@ -32,7 +32,13 @@ import { revisionContractRepairIssues } from './revision-contract-repair'
 import { compileVisualDeckV4RevisionIssueGroups } from './revision-plan-representability'
 import { transitionRun } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
-import { allPageNumbers, appendFixedIssueResolutions, appendV4LifecycleEvent, isVisualDeckV4 } from './v4-lifecycle'
+import {
+  allPageNumbers,
+  appendFixedIssueResolutions,
+  appendV4LifecycleEvent,
+  failVisualDeckV4Transaction,
+  isVisualDeckV4,
+} from './v4-lifecycle'
 
 export const DECK_QUALITY_THRESHOLD = 80
 const MAX_DECK_REVIEW_ATTEMPTS = 5
@@ -220,6 +226,15 @@ export class DeckReviewRunner {
         if (existing.status === 'COMPLETED') {
           const review = deckReviewSchema.parse(existing.output)
           const passed = passesDeckQuality(review) && !hasOpenBlockingIssues(transaction.listEvents())
+          if (!passed && passesDeckQuality(review) && isVisualDeckV4(transaction.run)
+            && transaction.run.status === 'DECK_REVIEW') {
+            failVisualDeckV4Transaction({
+              transaction,
+              clock: this.dependencies.clock,
+              errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+              reason: 'DECK_REVIEW_REJECTED',
+            })
+          }
           return { step: existing, review, passed, replayed: true }
         }
         if (existing.status === 'FAILED') {
@@ -311,9 +326,10 @@ export class DeckReviewRunner {
       const hasHistoricalBlocker = hasOpenBlockingIssues(transaction.listEvents())
       const passed = currentReviewPassed && !hasHistoricalBlocker
       const requiresHuman = currentReviewPassed && hasHistoricalBlocker
+      const requiresInternalFailure = requiresHuman && isVisualDeckV4(transaction.run)
       const policy = passed
         ? transitionRun(transaction.run, 'DELIVERING')
-        : requiresHuman ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
+        : requiresHuman && !requiresInternalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
       transaction.putRun({ ...transaction.run, ...policy, qualityScore: review.qualityScore, updatedAt: now })
       appendV4LifecycleEvent(transaction, 'deck_review.completed', {
         completed: 1,
@@ -321,8 +337,8 @@ export class DeckReviewRunner {
         pageNumbers: allPageNumbers(transaction.run),
         reason: passed ? null : 'DECK_REVIEW_REJECTED',
         retryable: passed ? null : !requiresHuman,
-        requiresUserAction: requiresHuman,
-        nextAction: requiresHuman ? 'REVIEW_RESULT' : null,
+        requiresUserAction: requiresHuman && !requiresInternalFailure,
+        nextAction: requiresHuman && !requiresInternalFailure ? 'REVIEW_RESULT' : null,
       })
       if (passed) {
         transaction.appendEvent({
@@ -334,6 +350,13 @@ export class DeckReviewRunner {
           completed: 0,
           total: 1,
           pageNumbers: allPageNumbers(transaction.run),
+        })
+      } else if (requiresInternalFailure) {
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+          reason: 'DECK_REVIEW_REJECTED',
         })
       } else if (requiresHuman) {
         transaction.appendEvent({

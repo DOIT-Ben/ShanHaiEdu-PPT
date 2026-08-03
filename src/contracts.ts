@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { visualDeckV4ConfigSchema, visualDeckV4SourceRoleSchema } from './visual-deck-v4-contracts'
 import { releaseIdentitySchema } from './release-identity'
 import { generationBatchSchema } from './generation-batch-contracts'
+import { terminalAccountingSchema } from './terminal-accounting-contracts'
 
 export const CONTRACT_VERSION = '1' as const
 export const MAX_PLANNING_RETRIES = 2
@@ -52,6 +53,38 @@ export const presentationModeSchema = z.enum([
 ])
 export const coverDesignModeSchema = z.enum(['INDEPENDENT', 'FOLLOW_TEMPLATE'])
 export const assetAcquisitionPolicySchema = z.enum(['AI_FIRST', 'SEARCH_FIRST'])
+
+export const v4LifecycleReasonSchema = z.enum([
+  'BUDGET_INSUFFICIENT',
+  'PROVIDER_TEMPORARILY_UNAVAILABLE',
+  'REVISION_LIMIT_REACHED',
+  'USER_CONFIRMATION_REQUIRED',
+  'PLANNING_FAILED',
+  'PAGE_REVIEW_REJECTED',
+  'PAGE_REVIEW_FAILED',
+  'DECK_REVIEW_REJECTED',
+  'DECK_REVIEW_FAILED',
+  'REVISION_FAILED',
+  'REVISION_REJECTED_BY_USER',
+  'DELIVERY_FAILED',
+  'INTERNAL_FAILURE',
+  'PAUSED_BY_USER',
+  'CANCELLED_BY_USER',
+])
+
+export const v4RunFailureCodeSchema = z.enum([
+  'WORKER_FATAL',
+  'QUALITY_REMEDIATION_EXHAUSTED',
+  'QUALITY_ISSUE_STATE_INCONSISTENT',
+  'TECHNICAL_RECOVERY_EXHAUSTED',
+  'TECHNICAL_CONFIGURATION_REQUIRED',
+])
+
+export const pendingTerminalFailureSchema = z.object({
+  errorCode: v4RunFailureCodeSchema,
+  reason: v4LifecycleReasonSchema,
+  requestedAt: z.string().datetime(),
+}).strict()
 
 const approvedEvidenceSchema = z.object({
   type: z.enum(['FACT', 'INFERENCE', 'SUGGESTION']),
@@ -334,6 +367,8 @@ export const runSnapshotSchema = z.object({
   maxVisualAssetsPerSlide: z.number().int().min(1).max(4).default(4),
   release: releaseIdentitySchema.optional(),
   generationBatch: generationBatchSchema.optional(),
+  pendingTerminalFailure: pendingTerminalFailureSchema.optional(),
+  terminalAccounting: terminalAccountingSchema.optional(),
   issues: z.array(issueSummarySchema),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -376,24 +411,6 @@ export const v4LifecycleStageSchema = z.enum([
 
 export const v4RevisionKindSchema = z.enum(['PAGE_VISUAL', 'DECK_CONTENT', 'DECK_VISUAL'])
 
-export const v4LifecycleReasonSchema = z.enum([
-  'BUDGET_INSUFFICIENT',
-  'PROVIDER_TEMPORARILY_UNAVAILABLE',
-  'REVISION_LIMIT_REACHED',
-  'USER_CONFIRMATION_REQUIRED',
-  'PLANNING_FAILED',
-  'PAGE_REVIEW_REJECTED',
-  'PAGE_REVIEW_FAILED',
-  'DECK_REVIEW_REJECTED',
-  'DECK_REVIEW_FAILED',
-  'REVISION_FAILED',
-  'REVISION_REJECTED_BY_USER',
-  'DELIVERY_FAILED',
-  'INTERNAL_FAILURE',
-  'PAUSED_BY_USER',
-  'CANCELLED_BY_USER',
-])
-
 export const v4LifecycleNextActionSchema = z.enum([
   'APPROVE_BLUEPRINT',
   'ADD_BUDGET',
@@ -402,8 +419,6 @@ export const v4LifecycleNextActionSchema = z.enum([
   'REVIEW_RESULT',
   'CONTACT_SUPPORT',
 ])
-
-export const v4RunFailureCodeSchema = z.enum(['WORKER_FATAL'])
 
 function v4LifecyclePayloadSchema<T extends z.ZodRawShape = Record<never, never>>(
   stage: z.infer<typeof v4LifecycleStageSchema>,
@@ -511,8 +526,14 @@ const knownAgentEventSchema = z.discriminatedUnion('type', [
   ]) }).strict(),
   z.object({ ...eventBase, type: z.literal('run.failed'), payload: z.union([
     legacyRunFailedPayloadSchema,
-    v4LifecyclePayloadSchema('RUN', { errorCode: v4RunFailureCodeSchema }),
+    v4LifecyclePayloadSchema('RUN', {
+      errorCode: v4RunFailureCodeSchema,
+      terminalAccounting: terminalAccountingSchema.optional(),
+    }),
   ]) }).strict(),
+  z.object({ ...eventBase, type: z.literal('run.accounting.finalized'), payload: v4LifecyclePayloadSchema('RUN', {
+    terminalAccounting: terminalAccountingSchema,
+  }) }).strict(),
 ])
 
 const knownAgentEventTypes = new Set<string>(knownAgentEventSchema.options.map((option) => option.shape.type.value))
@@ -539,6 +560,7 @@ export const apiErrorSchema = z.object({
 export type HostContext = z.infer<typeof hostContextSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
 export type TechnicalRecovery = z.infer<typeof technicalRecoverySchema>
+export type PendingTerminalFailure = z.infer<typeof pendingTerminalFailureSchema>
 export type PresentationMode = z.infer<typeof presentationModeSchema>
 export type CoverDesignMode = z.infer<typeof coverDesignModeSchema>
 export type AssetAcquisitionPolicy = z.infer<typeof assetAcquisitionPolicySchema>

@@ -6,14 +6,24 @@ import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import type { FrameFlowBackendClient } from '../src/adapters/frameflow-host'
 import {
   MockArtifactPort,
+  MockDeckReviewPort,
   MockPresentationRendererPort,
+  MockRevisionApplicationPort,
+  MockRevisionPlanningPort,
   MockVisualReviewPort,
   FixedClock,
 } from '../src/adapters/mock-ports'
-import type { DeckReviewPort, RevisionApplicationPort, RevisionPlanningPort } from '../src/core/ports'
+import {
+  StructuredModelError,
+  type DeckReviewPort,
+  type RevisionApplicationPort,
+  type RevisionPlanningPort,
+} from '../src/core/ports'
 import { createAgentRuntime, createMockRuntime } from '../src/runtime/mock-runtime'
 import { PPT_AGENT_CONTRACT_VERSION, PPT_AGENT_SOFTWARE_VERSION } from '../src/release-identity'
 import { validateLifecycle } from '../scripts/run-v4-real-evaluation'
+import { getActiveBlueprint } from '../src/core/active-blueprint'
+import { hashInput } from '../src/core/hash'
 
 const token = 'test-runtime-token-0001'
 
@@ -26,6 +36,103 @@ function request(path: string, init: RequestInit = {}, user = 'user-1') {
 }
 
 describe('mock runtime', () => {
+  test('forwards structured-model metrics into a failed V4 stage audit without raw content', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    let metricsTaken = 0
+    const model = {
+      modelName: 'gpt-5.6',
+      async preflightStructuredGeneration() {
+        return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
+      },
+      async execute() {
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-runtime-metrics', 200)
+      },
+      takeExecutionMetrics() {
+        metricsTaken += 1
+        return {
+          outcome: 'FAILED' as const,
+          errorCode: 'MODEL_JSON_INVALID',
+          requestId: 'request-runtime-metrics',
+          status: 200,
+          responseAccepted: true,
+          sseEventCount: 4_219,
+          lastActivityAt: '2026-08-03T00:00:01.000Z',
+          durationMs: 12_345,
+          inputTokens: 17_996,
+          outputTokens: 4_781,
+          totalTokens: 22_777,
+        }
+      },
+    }
+    const runtime = createAgentRuntime({
+      repository,
+      artifacts,
+      apiToken: token,
+      clock,
+      model,
+      visualReviewer: new MockVisualReviewPort({}),
+      deckReviewer: new MockDeckReviewPort({}),
+      revisionPlanner: new MockRevisionPlanningPort({}),
+      revisionApplication: new MockRevisionApplicationPort({}),
+    })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'runtime-v4-metrics-0001' },
+      body: JSON.stringify({
+        schemaVersion: '1',
+        host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: {
+          kind: 'TEXT', name: '分与合教材.txt', roleHint: 'CONTENT_SOURCE',
+          text: '把五个圆片分成两个非空部分，可以分成一和四，也可以分成二和三。'.repeat(4),
+        },
+        slideCount: 2,
+        visualDirection: '清晰活泼的儿童课堂信息图',
+        imageModel: 'nanobanana',
+        automationLevel: 'BOUNDED_AUTO',
+        budgetUnits: 2,
+        maxRevisionRounds: 2,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '为一年级学生制作五以内数的分与合视觉演示',
+          sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+            audience: '小学一年级学生', focus: '五以内数的分与合',
+          },
+        },
+      }),
+    }))
+    const runId = (await created.json() as { data: { id: string } }).data.id
+
+    await runtime.tick()
+
+    const audit = (await repository.listSteps(runId)).find((step) =>
+      step.tool === 'audit_v4_planning_stage' && step.idempotencyKey.includes(':v4:source-spec:'))
+    expect(metricsTaken).toBe(1)
+    expect(audit).toMatchObject({
+      output: {
+        attempts: [expect.objectContaining({
+          outcome: 'FAILED',
+          requestId: 'request-runtime-metrics',
+          status: 200,
+          responseAccepted: true,
+          sseEventCount: 4_219,
+          lastActivityAt: '2026-08-03T00:00:01.000Z',
+          durationMs: 12_345,
+          inputTokens: 17_996,
+          outputTokens: 4_781,
+          totalTokens: 22_777,
+        })],
+      },
+    })
+    const serialized = JSON.stringify(audit?.output)
+    for (const forbidden of ['prompt', 'source text', 'rawResponse', 'credential']) {
+      expect(serialized).not.toContain(forbidden)
+    }
+  })
+
   test('recovers a V4 source-port outage through the worker without creating a new Run', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
@@ -154,10 +261,12 @@ describe('mock runtime', () => {
     })).toThrow('IMAGE_CONCURRENCY_INVALID')
   })
 
-  test('runs a notebooklm-style v4 request directly to a raster-only pptx', async () => {
+  test('delivers a notebooklm-style v4 pptx after an invalid quality reflection is skipped', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
-    const runtime = createMockRuntime({ repository, artifacts, apiToken: token })
+    const runtime = createMockRuntime({
+      repository, artifacts, apiToken: token, reflectionFailureMode: 'INVALID_SLIDE_CRITIC',
+    })
     const created = await runtime.handler(request('/v1/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-create-v4-chain-0001' },
@@ -201,7 +310,7 @@ describe('mock runtime', () => {
     expect(createdPayload.data.release).toEqual({
       softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
       presentationMode: 'VISUAL_DECK_V4',
-      compilerVersion: 'visual-deck-v4-chain-1',
+      compilerVersion: 'visual-deck-v4-chain-3',
       contractVersion: PPT_AGENT_CONTRACT_VERSION,
       gitSha: 'development',
       releaseId: 'development',
@@ -230,6 +339,11 @@ describe('mock runtime', () => {
     expect(planned.data.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(3)
     expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
     expect(planned.data.generationPlan?.pages).toHaveLength(3)
+    expect((await repository.listSteps(runId)).find((step) =>
+      step.tool === 'record_v4_slide_briefs_reflection')?.output).toMatchObject({
+        status: 'REFLECTION_SKIPPED', reason: 'CONTRACT_INVALID',
+        criticCallCount: 1, optimizerCallCount: 0,
+      })
 
     for (let index = 0; index < 4; index += 1) await runtime.tick()
 
@@ -283,7 +397,27 @@ describe('mock runtime', () => {
     expect(new Set(streamed.map((event) => event.sequence)).size).toBe(streamed.length)
     const reviewSteps = (await repository.listSteps(runId)).filter((step) => step.tool === 'review_slide_image')
     expect(reviewSteps).toHaveLength(3)
+    const completedSteps = await repository.listSteps(runId)
+    expect(completedSteps.filter((step) => step.tool === 'generate_image_batch')).toEqual([
+      expect.objectContaining({ status: 'COMPLETED', budgetUnits: 3 }),
+    ])
+    const imageSteps = completedSteps.filter((step) => step.tool === 'generate_slide_image')
+    expect(imageSteps).toHaveLength(3)
+    expect(new Set(imageSteps.map((step) => step.idempotencyKey)).size).toBe(3)
     const delivery = (await repository.listDeliveries(runId))[0]!
+    const deliveredBlueprint = await getActiveBlueprint(repository, runId, completedRun.revisionRound)
+    expect(delivery).toMatchObject({
+      disposition: 'FINAL',
+      qualityStatus: 'APPROVED',
+      openIssueIds: [],
+      identity: {
+        status: 'VERIFIED',
+        slideCount: 3,
+        pageNumbers: [1, 2, 3],
+        blueprintHash: hashInput(deliveredBlueprint),
+        proposalHash: hashInput(deliveredBlueprint.visualDeckV4Proposal),
+      },
+    })
     const artifact = artifacts.artifacts.get(delivery.pptx.artifactId)
     expect(artifact?.bytes.length).toBeGreaterThan(10_000)
 

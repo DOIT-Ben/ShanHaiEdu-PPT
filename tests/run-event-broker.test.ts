@@ -3,6 +3,7 @@ import { CONTRACT_VERSION, type KnownAgentEvent as AgentEvent } from '../src/con
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import type { RunRecord } from '../src/core/ports'
 import { RunEventBroker } from '../src/http/run-event-broker'
+import { v4LifecyclePayload } from '../src/core/v4-lifecycle'
 
 class CountingRepository extends InMemoryAgentRepository {
   readCount = 0
@@ -240,5 +241,56 @@ describe('RunEventBroker', () => {
     await waitFor(() => closed)
 
     expect(sequences).toEqual([3, 4])
+  })
+
+  test('keeps a failed v4 stream open until reconciliation publishes final accounting', async () => {
+    const repository = new CountingRepository()
+    await repository.createRun({
+      ...run('EXECUTING'), presentationMode: 'VISUAL_DECK_V4', budgetUnits: 10, committedBudgetUnits: 4,
+    })
+    await repository.transact('run-1', (transaction) => {
+      const pendingAccounting = {
+        authorizedUnits: 10, submittedUnits: 4, settledUnits: 0, releasedUnits: 10,
+        reconciliationUnits: 4, accountingStatus: 'RECONCILIATION_REQUIRED' as const,
+      }
+      const finalAccounting = {
+        authorizedUnits: 10, submittedUnits: 4, settledUnits: 4, releasedUnits: 6,
+        reconciliationUnits: 0, accountingStatus: 'FINAL' as const,
+      }
+      const failedRun = { ...transaction.run, status: 'FAILED' as const, terminalAccounting: pendingAccounting }
+      transaction.putRun({ ...failedRun, terminalAccounting: finalAccounting })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.failed',
+        payload: {
+          ...v4LifecyclePayload(failedRun, 'RUN', {
+            completed: 0, total: 1, pageNumbers: [1, 2], reason: 'INTERNAL_FAILURE', retryable: false,
+          }),
+          errorCode: 'TECHNICAL_RECOVERY_EXHAUSTED', terminalAccounting: pendingAccounting,
+        },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.accounting.finalized',
+        payload: {
+          ...v4LifecyclePayload(failedRun, 'RUN', {
+            completed: 1, total: 1, pageNumbers: [1, 2], reason: 'INTERNAL_FAILURE', retryable: false,
+          }),
+          terminalAccounting: finalAccounting,
+        },
+      })
+    })
+    const broker = new RunEventBroker({ repository, pollMs: 5 })
+    const types: string[] = []
+    let closed = false
+
+    await broker.subscribe({
+      runId: 'run-1', after: 0,
+      onEvent: (event) => Boolean(types.push(event.type)),
+      onClose: () => { closed = true },
+    })
+    await waitFor(() => closed)
+
+    expect(types).toEqual(['run.failed', 'run.accounting.finalized'])
   })
 })

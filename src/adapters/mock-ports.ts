@@ -23,17 +23,20 @@ export class FixedClock implements ClockPort {
 
 export class MockBudgetPort implements BudgetPort, BatchBudgetPort {
   readonly reservations = new Map<string, string>()
+  readonly reservationRequests: Parameters<BudgetPort['reserve']>[0][] = []
   readonly batchReservations = new Map<string, string>()
   readonly settled = new Set<string>()
   readonly released = new Set<string>()
   readonly batchFinalizations: Parameters<BatchBudgetPort['finalizeBatch']>[0][] = []
   readonly batchFinalizationAttempts: Parameters<BatchBudgetPort['finalizeBatch']>[0][] = []
+  readonly batchReservationRequests: Parameters<BatchBudgetPort['reserveBatch']>[0][] = []
   nextFailure: BudgetReservationError | null = null
   nextBatchFinalizationPreflightFailure: Error | null = null
   nextSettlementFailure: Error | null = null
   nextReleaseFailure: Error | null = null
 
   async reserve(input: Parameters<BudgetPort['reserve']>[0]) {
+    this.reservationRequests.push(structuredClone(input))
     const existing = this.reservations.get(input.idempotencyKey)
     if (existing) return { reservationId: existing }
     if (this.nextFailure) {
@@ -54,6 +57,7 @@ export class MockBudgetPort implements BudgetPort, BatchBudgetPort {
   }
 
   async reserveBatch(input: Parameters<BatchBudgetPort['reserveBatch']>[0]) {
+    this.batchReservationRequests.push(structuredClone(input))
     const existing = this.batchReservations.get(input.idempotencyKey)
     if (existing) return { reservationId: existing }
     if (this.nextFailure) {
@@ -122,8 +126,11 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   activeInspections = 0
   maxConcurrentInspections = 0
   inspectCalls = 0
+  submitCalls = 0
+  readonly lookupRequests: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0][] = []
 
   async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+    this.submitCalls += 1
     this.activeSubmissions += 1
     this.maxConcurrentSubmissions = Math.max(this.maxConcurrentSubmissions, this.activeSubmissions)
     try {
@@ -148,6 +155,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   async lookupByIdempotency(
     input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0],
   ): ReturnType<NonNullable<ImageGenerationPort['lookupByIdempotency']>> {
+    this.lookupRequests.push(structuredClone(input))
     const operationId = this.operations.get(input.idempotencyKey)
     return operationId
       ? { state: 'SUBMITTED' as const, operationId }
@@ -291,6 +299,7 @@ export class MockRevisionApplicationPort implements RevisionApplicationPort {
 export class MockArtifactPort implements ArtifactPort {
   readonly artifacts = new Map<string, { mimeType: string; bytes: Uint8Array; sha256: string }>()
   readonly keys = new Map<string, string>()
+  readonly owners = new Map<string, string>()
 
   async put(input: Parameters<ArtifactPort['put']>[0]) {
     const existingId = this.keys.get(input.idempotencyKey)
@@ -302,11 +311,14 @@ export class MockArtifactPort implements ArtifactPort {
     }
     const artifactId = `artifact:${input.tenantId}:${input.idempotencyKey}`
     this.keys.set(input.idempotencyKey, artifactId)
+    this.owners.set(artifactId, input.tenantId)
     this.artifacts.set(artifactId, { mimeType: input.mimeType, bytes: new Uint8Array(input.bytes), sha256 })
     return { artifactId, sha256 }
   }
 
   async get(input: Parameters<ArtifactPort['get']>[0]) {
+    const owner = this.owners.get(input.artifactId)
+    if (owner !== undefined && owner !== input.tenantId) return null
     const value = this.artifacts.get(input.artifactId)
     return value ? structuredClone(value) : null
   }

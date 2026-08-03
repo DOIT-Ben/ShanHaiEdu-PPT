@@ -7,7 +7,12 @@ import {
   type PresentationBlueprint,
   type RevisionPlan,
 } from '../presentation-contracts'
-import { visualDeckV4ProposalDraftSchema, type VisualDeckV4ProposalDraft } from '../visual-deck-v4-contracts'
+import {
+  visualDeckV4ProposalDraftSchema,
+  visualDeckV4RevisionApplicationResultSchema,
+  type VisualDeckV4ProposalDraft,
+  type VisualDeckV4RevisionApplicationResult,
+} from '../visual-deck-v4-contracts'
 import { getActiveBlueprint, revisionBlueprintStepKey } from './active-blueprint'
 import { hashInput } from './hash'
 import type {
@@ -31,11 +36,15 @@ import {
 import { revisionPlanStepKey } from './revision-planning-runner'
 import {
   createVisualDeckV4BlueprintFromProposal,
-  VISUAL_DECK_V4_COMPILER_VERSION,
 } from './visual-deck-v4-planner'
+import {
+  isSupportedVisualDeckV4CompilerVersion,
+  usesPatchRevisionContract,
+} from '../release-identity'
 import {
   allPageNumbers,
   appendV4LifecycleEvent,
+  failVisualDeckV4Transaction,
   revisionDetails,
 } from './v4-lifecycle'
 
@@ -114,6 +123,10 @@ export class RevisionApplicationRunner {
 
     try {
       if (base.renderMode === 'VISUAL_DECK_V4'
+        && !isSupportedVisualDeckV4CompilerVersion(base.visualDeckV4Proposal?.compilerVersion ?? '')) {
+        throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
+      }
+      if (base.renderMode === 'VISUAL_DECK_V4'
         && plan.operations.every((operation) => operation.kind === 'REGENERATE_IMAGE')) {
         const slideIds = new Set(base.slides.map((slide) => `${run.id}:slide:${slide.pageNumber}`))
         if (plan.operations.some((operation) => !slideIds.has(operation.slideId))) {
@@ -149,10 +162,6 @@ export class RevisionApplicationRunner {
     document: Awaited<ReturnType<DocumentPort['resolve']>>
     idempotencyKey: string
   }>) {
-    if (input.base.renderMode === 'VISUAL_DECK_V4'
-      && input.base.visualDeckV4Proposal?.compilerVersion !== VISUAL_DECK_V4_COMPILER_VERSION) {
-      throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
-    }
     let contractRepairIssues: readonly ContractRepairIssue[] | undefined
     let lastError: unknown = new Error('REVISION_APPLICATION_FAILED')
     for (let contractAttempt = 0; contractAttempt < MAX_REVISION_CONTRACT_ATTEMPTS; contractAttempt += 1) {
@@ -170,7 +179,15 @@ export class RevisionApplicationRunner {
             ...(input.run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: input.run.v4StructuredGenerationProtocol } : {}),
           })
           if (input.base.renderMode === 'VISUAL_DECK_V4') {
-            const draft = visualDeckV4ProposalDraftSchema.parse(raw)
+            const compilerVersion = input.base.visualDeckV4Proposal?.compilerVersion
+            const draft = usesPatchRevisionContract(compilerVersion ?? '')
+              ? this.mergeV4RevisionPatches(
+                  input.run.id,
+                  input.base,
+                  input.plan,
+                  visualDeckV4RevisionApplicationResultSchema.parse(raw),
+                )
+              : visualDeckV4ProposalDraftSchema.parse(raw)
             const blueprint = this.compileV4Revision(input.run, input.base, input.plan, input.document, draft)
             this.validateV4Revision(input.run.id, input.base, blueprint, input.plan)
             return blueprint
@@ -387,7 +404,10 @@ export class RevisionApplicationRunner {
       if (step.status !== 'RUNNING') throw new Error('REVISION_APPLICATION_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
       const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
-      const policy = v4TechnicalFailure ? transaction.run : transitionRun(transaction.run, 'NEEDS_HUMAN')
+      const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && !v4TechnicalFailure
+      const policy = v4TechnicalFailure || v4InternalFailure
+        ? transaction.run
+        : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const updatedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updatedStep: StepRecord = {
         ...step,
@@ -397,7 +417,7 @@ export class RevisionApplicationRunner {
         updatedAt: now,
       }
       transaction.putStep(updatedStep)
-      if (!v4TechnicalFailure) transaction.putRun(updatedRun)
+      if (!v4TechnicalFailure && !v4InternalFailure) transaction.putRun(updatedRun)
       const technicalRecovery = v4TechnicalFailure
         ? beginTechnicalRecovery(transaction, this.dependencies.clock, diagnostic.errorCode)
         : null
@@ -416,6 +436,21 @@ export class RevisionApplicationRunner {
           retryable: technicalRecovery.technicalRecovery?.retryable ?? false,
         })
         return { status: transaction.run.status, step: updatedStep, blueprint: null, requiresMedia: requiresRevisionMedia(plan), replayed: false }
+      }
+      if (v4InternalFailure) {
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+          reason: 'REVISION_FAILED',
+        })
+        return {
+          status: transaction.run.status,
+          step: updatedStep,
+          blueprint: null,
+          requiresMedia: false,
+          replayed: false,
+        }
       }
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
@@ -498,6 +533,63 @@ export class RevisionApplicationRunner {
     }
   }
 
+  private mergeV4RevisionPatches(
+    runId: string,
+    base: PresentationBlueprint,
+    plan: RevisionPlan,
+    result: VisualDeckV4RevisionApplicationResult,
+  ): VisualDeckV4ProposalDraft {
+    const proposal = base.visualDeckV4Proposal
+    if (!proposal) throw new Error('VISUAL_DECK_V4_PROPOSAL_MISSING')
+    const briefBySlideId = new Map(proposal.slideBriefs.map((brief) => [
+      `${runId}:slide:${brief.pageNumber}`,
+      brief,
+    ]))
+    const operationsByPage = new Map<number, RevisionPlan['operations'][number][]>()
+    for (const operation of plan.operations) {
+      const brief = briefBySlideId.get(operation.slideId)
+      if (!brief) throw new Error('REVISION_PATCH_SCOPE_INVALID')
+      const operations = operationsByPage.get(brief.pageNumber) ?? []
+      operations.push(operation)
+      operationsByPage.set(brief.pageNumber, operations)
+    }
+
+    const expectedOwner = new Map<number, 'CONTENT' | 'LAYOUT'>()
+    for (const [pageNumber, operations] of operationsByPage) {
+      const kinds = new Set(operations.map((operation) => operation.kind))
+      if (kinds.has('UPDATE_CONTENT')) expectedOwner.set(pageNumber, 'CONTENT')
+      else if (kinds.has('RELAYOUT')) expectedOwner.set(pageNumber, 'LAYOUT')
+    }
+    const contentByPage = new Map(result.contentPatches.map((patch) => [patch.pageNumber, patch]))
+    const layoutByPage = new Map(result.layoutPatches.map((patch) => [patch.pageNumber, patch]))
+    const redrawOnly = new Set(result.redrawOnlyPageNumbers)
+    const returnedPages = new Set([...contentByPage.keys(), ...layoutByPage.keys(), ...redrawOnly])
+    if (returnedPages.size !== expectedOwner.size) throw new Error('REVISION_PATCH_SCOPE_INVALID')
+    for (const [pageNumber, owner] of expectedOwner) {
+      const matches = Number(contentByPage.has(pageNumber))
+        + Number(layoutByPage.has(pageNumber))
+        + Number(redrawOnly.has(pageNumber))
+      if (matches !== 1
+        || (owner === 'CONTENT' && layoutByPage.has(pageNumber))
+        || (owner === 'LAYOUT' && contentByPage.has(pageNumber))) {
+        throw new Error('REVISION_PATCH_SCOPE_INVALID')
+      }
+    }
+    if ([...returnedPages].some((pageNumber) => !expectedOwner.has(pageNumber))) {
+      throw new Error('REVISION_PATCH_SCOPE_INVALID')
+    }
+
+    const slideBriefs = proposal.slideBriefs.map((brief) => {
+      const patch = contentByPage.get(brief.pageNumber) ?? layoutByPage.get(brief.pageNumber)
+      if (!patch) return structuredClone(brief)
+      const revised = { ...structuredClone(brief), ...structuredClone(patch) }
+      if (sameV4RevisionBrief(revised, brief)) throw new Error('REVISION_PATCH_NOOP')
+      return revised
+    })
+    const { compilerVersion: _compilerVersion, ...draft } = structuredClone(proposal)
+    return visualDeckV4ProposalDraftSchema.parse({ ...draft, slideBriefs })
+  }
+
   private validateV4Revision(
     runId: string,
     base: PresentationBlueprint,
@@ -556,6 +648,17 @@ export class RevisionApplicationRunner {
       }
     }
   }
+}
+
+function sameV4RevisionBrief(
+  left: VisualDeckV4ProposalDraft['slideBriefs'][number],
+  right: VisualDeckV4ProposalDraft['slideBriefs'][number],
+) {
+  const normalized = (brief: VisualDeckV4ProposalDraft['slideBriefs'][number]) => ({
+    ...brief,
+    sourceChunkIds: [...brief.sourceChunkIds].sort(),
+  })
+  return JSON.stringify(normalized(left)) === JSON.stringify(normalized(right))
 }
 
 function revisionApplicationFailure(

@@ -1,5 +1,11 @@
 import { CONTRACT_VERSION } from '../contracts'
-import { generationBatchSchema, type GenerationBatch } from '../generation-batch-contracts'
+import {
+  generationBatchSchema,
+  publicGenerationBatch,
+  storedGenerationBatchSchema,
+  type GenerationBatch,
+  type StoredGenerationBatch,
+} from '../generation-batch-contracts'
 import type { PresentationBlueprint } from '../presentation-contracts'
 import { hashInput } from './hash'
 import {
@@ -49,11 +55,37 @@ function proposalHash(blueprint: PresentationBlueprint) {
   return hashInput(blueprint.visualDeckV4Proposal ?? blueprint)
 }
 
-function batchId(run: Pick<RunRecord, 'id'>, identity: GenerationBatchIdentity, proposal: string) {
+function batchId(
+  run: Pick<RunRecord, 'id'>,
+  identity: GenerationBatchIdentity,
+  proposal: string,
+  accountingModel: string,
+  operationMode: StoredGenerationBatch['operationMode'],
+) {
   const input = identity.scope === 'INITIAL'
-    ? { runId: run.id, revisionRound: identity.revisionRound, proposal }
-    : { runId: run.id, ...identity, proposal }
+    ? { runId: run.id, revisionRound: identity.revisionRound, proposal, accountingModel, operationMode }
+    : { runId: run.id, ...identity, proposal, accountingModel, operationMode }
   return `genbatch_${hashInput(input).slice(0, 32)}`
+}
+
+function batchInputHash(input: Readonly<{
+  proposalHash: string
+  unitBudgetUnits: number
+  requirements: readonly Requirement[]
+  accountingModel?: string
+  operationMode?: StoredGenerationBatch['operationMode']
+}>) {
+  return hashInput({
+    proposalHash: input.proposalHash,
+    unitBudgetUnits: input.unitBudgetUnits,
+    pages: input.requirements.map((item) => ({
+      pageNumber: item.pageNumber,
+      key: item.idempotencyKey,
+      promptHash: hashInput(item.prompt),
+    })),
+    ...(input.accountingModel ? { accountingModel: input.accountingModel } : {}),
+    ...(input.operationMode ? { operationMode: input.operationMode } : {}),
+  })
 }
 
 function initialBatch(
@@ -62,14 +94,18 @@ function initialBatch(
   blueprint: PresentationBlueprint,
   requirements: readonly Requirement[],
   unitBudgetUnits: number,
+  accountingModel: string,
+  operationMode: NonNullable<StoredGenerationBatch['operationMode']>,
   now: string,
 ) {
   const proposal = proposalHash(blueprint)
-  return generationBatchSchema.parse({
-    batchId: batchId(run, identity, proposal),
+  return storedGenerationBatchSchema.parse({
+    batchId: batchId(run, identity, proposal, accountingModel, operationMode),
     proposalHash: proposal,
     revisionRound: identity.revisionRound,
     submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS',
+    accountingModel,
+    operationMode,
     pageCount: requirements.length,
     pages: requirements.map((requirement) => ({
       pageNumber: requirement.pageNumber,
@@ -99,32 +135,64 @@ export async function ensureGenerationBatch(input: Readonly<{
   blueprint: PresentationBlueprint
   requirements: readonly Requirement[]
   unitBudgetUnits: number
+  accountingModel: string
+  operationMode: NonNullable<StoredGenerationBatch['operationMode']>
   identity?: GenerationBatchIdentity
 }>) {
   const identity = input.identity ?? { revisionRound: input.run.revisionRound, scope: 'INITIAL' as const }
   const key = generationBatchStepKeyFor(input.run.id, identity)
   const proposal = proposalHash(input.blueprint)
+  const currentInputHash = batchInputHash({
+    proposalHash: proposal,
+    unitBudgetUnits: input.unitBudgetUnits,
+    requirements: input.requirements,
+    accountingModel: input.accountingModel,
+    operationMode: input.operationMode,
+  })
+  const legacyInputHash = batchInputHash({
+    proposalHash: proposal,
+    unitBudgetUnits: input.unitBudgetUnits,
+    requirements: input.requirements,
+  })
   return input.repository.transact(input.run.id, (transaction) => {
     const existing = transaction.getStep(key)
     if (existing) {
-      if (existing.tool !== 'generate_image_batch' || existing.inputHash !== hashInput({
-        proposalHash: proposal,
-        unitBudgetUnits: input.unitBudgetUnits,
-        pages: input.requirements.map((item) => ({ pageNumber: item.pageNumber, key: item.idempotencyKey, promptHash: hashInput(item.prompt) })),
-      })) throw new Error('GENERATION_BATCH_IDEMPOTENCY_CONFLICT')
-      return generationBatchSchema.parse(existing.output)
+      if (existing.tool !== 'generate_image_batch'
+        || (existing.inputHash !== currentInputHash && existing.inputHash !== legacyInputHash)) {
+        throw new Error('GENERATION_BATCH_IDEMPOTENCY_CONFLICT')
+      }
+      const stored = storedGenerationBatchSchema.parse(existing.output)
+      if (stored.accountingModel && stored.accountingModel !== input.accountingModel) {
+        throw new Error('GENERATION_BATCH_ACCOUNTING_MODEL_CONFLICT')
+      }
+      if (stored.operationMode && stored.operationMode !== input.operationMode) {
+        throw new Error('GENERATION_BATCH_OPERATION_MODE_CONFLICT')
+      }
+      if (stored.accountingModel && stored.operationMode) return stored
+      const upgraded = storedGenerationBatchSchema.parse({
+        ...stored,
+        accountingModel: input.accountingModel,
+        operationMode: input.operationMode,
+      })
+      transaction.putStep({ ...existing, inputHash: currentInputHash, output: upgraded })
+      return upgraded
     }
     const now = input.clock.now().toISOString()
-    const batch = initialBatch(input.run, identity, input.blueprint, input.requirements, input.unitBudgetUnits, now)
+    const batch = initialBatch(
+      input.run,
+      identity,
+      input.blueprint,
+      input.requirements,
+      input.unitBudgetUnits,
+      input.accountingModel,
+      input.operationMode,
+      now,
+    )
     transaction.putStep({
       id: `step-${input.run.id}-${identity.scope === 'INITIAL' ? 'generation-batch' : 'revision-generation-batch'}-r${identity.revisionRound}`,
       runId: input.run.id,
       idempotencyKey: key,
-      inputHash: hashInput({
-        proposalHash: proposal,
-        unitBudgetUnits: input.unitBudgetUnits,
-        pages: input.requirements.map((item) => ({ pageNumber: item.pageNumber, key: item.idempotencyKey, promptHash: hashInput(item.prompt) })),
-      }),
+      inputHash: currentInputHash,
       tool: 'generate_image_batch',
       status: 'RUNNING',
       budgetUnits: batch.accounting.estimatedUnits,
@@ -144,7 +212,7 @@ function terminalFailure(status: StepRecord['status']) {
   return ['FAILED', 'FAILED_NOT_CHARGED', 'FAILED_CHARGED', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN', 'BILLING_UNKNOWN'].includes(status)
 }
 
-function batchFromSteps(batch: GenerationBatch, steps: readonly StepRecord[], now: string) {
+function batchFromSteps(batch: StoredGenerationBatch, steps: readonly StepRecord[], now: string) {
   const byKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
   let submitted = 0
   let completed = 0
@@ -174,7 +242,7 @@ function batchFromSteps(batch: GenerationBatch, steps: readonly StepRecord[], no
   const allTerminal = completed + failed === batch.pageCount
   const settlementFinished = ['SETTLED', 'RELEASED'].includes(batch.accounting.settlement)
   const hasUnknown = reconciliationUnits > 0 || (allTerminal && failed > 0 && !settlementFinished)
-  return generationBatchSchema.parse({
+  return storedGenerationBatchSchema.parse({
     ...batch,
     accounting: {
       ...batch.accounting,
@@ -213,7 +281,7 @@ export function refreshGenerationBatchInTransaction(
 ) {
   const step = transaction.getStep(key)
   if (!step || step.tool !== 'generate_image_batch') return null
-  const before = generationBatchSchema.parse(step.output)
+  const before = storedGenerationBatchSchema.parse(step.output)
   const next = batchFromSteps(before, transaction.listSteps(), clock.now().toISOString())
   if (JSON.stringify(before) === JSON.stringify(next)) return next
   const status = next.status === 'COMPLETED'
@@ -239,7 +307,7 @@ export type GenerationBatchReservation = Readonly<{
 }>
 
 type BatchFinalization = Readonly<{
-  batch: GenerationBatch
+  batch: StoredGenerationBatch
   settledUnits: number
   releasedUnits: number
 }>
@@ -251,12 +319,12 @@ function requireBatchStep(transaction: AgentTransaction, key: string) {
 }
 
 function updatedBatch(
-  batch: GenerationBatch,
-  accounting: GenerationBatch['accounting'],
+  batch: StoredGenerationBatch,
+  accounting: StoredGenerationBatch['accounting'],
   updatedAt: string,
   status = batch.status,
 ) {
-  return generationBatchSchema.parse({ ...batch, accounting, status, updatedAt })
+  return storedGenerationBatchSchema.parse({ ...batch, accounting, status, updatedAt })
 }
 
 /**
@@ -269,7 +337,6 @@ export async function reserveGenerationBatch(input: Readonly<{
   clock: ClockPort
   runId: string
   revisionRound: number
-  model: string
   scope?: GenerationBatchScope
 }>): Promise<GenerationBatchReservation | null> {
   const key = generationBatchStepKeyFor(input.runId, {
@@ -278,7 +345,7 @@ export async function reserveGenerationBatch(input: Readonly<{
   })
   const prepared = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
-    const batch = generationBatchSchema.parse(step.output)
+    const batch = storedGenerationBatchSchema.parse(step.output)
     if (step.budgetReservationId) {
       return { host: transaction.run.host, batch, reservationId: step.budgetReservationId }
     }
@@ -311,14 +378,14 @@ export async function reserveGenerationBatch(input: Readonly<{
   try {
     const reserved = await input.budget.reserveBatch({
       host: prepared.host,
-      model: input.model,
+      model: requireAccountingModel(prepared.batch),
       units: prepared.batch.accounting.estimatedUnits,
       batchId: prepared.batch.batchId,
       idempotencyKey: key,
     })
     return input.repository.transact(input.runId, (transaction) => {
       const step = requireBatchStep(transaction, key)
-      const batch = generationBatchSchema.parse(step.output)
+      const batch = storedGenerationBatchSchema.parse(step.output)
       const now = input.clock.now().toISOString()
       const next = updatedBatch(batch, {
         ...batch.accounting,
@@ -341,7 +408,7 @@ export async function reserveGenerationBatch(input: Readonly<{
     const definitelyNotReserved = error instanceof BudgetReservationError && error.reservationState === 'NOT_RESERVED'
     await input.repository.transact(input.runId, (transaction) => {
       const step = requireBatchStep(transaction, key)
-      const batch = generationBatchSchema.parse(step.output)
+      const batch = storedGenerationBatchSchema.parse(step.output)
       const now = input.clock.now().toISOString()
       if (definitelyNotReserved) {
         const policy = releaseBudget(transaction.run, step.budgetUnits)
@@ -406,13 +473,21 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
         revisionRound: input.revisionRound,
         scope: input.scope ?? 'INITIAL',
       }))
-      const batch = generationBatchSchema.parse(step.output)
+      const batch = storedGenerationBatchSchema.parse(step.output)
       const now = input.clock.now().toISOString()
-      const next = updatedBatch(batch, {
-        ...batch.accounting,
-        authorization: 'REJECTED',
-        settlement: 'NOT_READY',
-      }, now)
+      const definitiveRejection = errorCode !== 'BATCH_BUDGET_FINALIZATION_UNKNOWN'
+      const next = storedGenerationBatchSchema.parse({
+        ...updatedBatch(batch, {
+          ...batch.accounting,
+          authorization: 'REJECTED',
+          settlement: definitiveRejection ? 'RELEASED' : 'NOT_READY',
+          releasedUnits: definitiveRejection ? batch.accounting.estimatedUnits : 0,
+          reconciliationUnits: 0,
+        }, now, definitiveRejection ? 'COMPLETED' : batch.status),
+        progress: definitiveRejection
+          ? { submitted: 0, completed: 0, failed: batch.pageCount }
+          : batch.progress,
+      })
       transaction.putStep({ ...step, status: 'FAILED', errorCode, output: next, updatedAt: now })
       const recovery = beginTechnicalRecovery(transaction, input.clock, errorCode)
       transaction.appendEvent({
@@ -426,7 +501,7 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
   }
 }
 
-function batchFinalization(batch: GenerationBatch, steps: readonly StepRecord[], run: RunRecord): BatchFinalization | null {
+function batchFinalization(batch: StoredGenerationBatch, steps: readonly StepRecord[], run: RunRecord): BatchFinalization | null {
   const byKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
   let settledUnits = 0
   let releasedUnits = 0
@@ -475,7 +550,7 @@ export async function finalizeGenerationBatch(input: Readonly<{
   })
   const pending = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
-    const batch = generationBatchSchema.parse(step.output)
+    const batch = storedGenerationBatchSchema.parse(step.output)
     if (!step.budgetReservationId || ['SETTLED', 'RELEASED'].includes(batch.accounting.settlement)) return null
     const finalization = batchFinalization(batch, transaction.listSteps(), transaction.run)
     return finalization ? {
@@ -504,7 +579,7 @@ export async function finalizeGenerationBatch(input: Readonly<{
   } catch {
     await input.repository.transact(input.runId, (transaction) => {
       const step = requireBatchStep(transaction, key)
-      const batch = generationBatchSchema.parse(step.output)
+      const batch = storedGenerationBatchSchema.parse(step.output)
       const now = input.clock.now().toISOString()
       const next = updatedBatch(batch, {
         ...batch.accounting,
@@ -534,7 +609,7 @@ export async function finalizeGenerationBatch(input: Readonly<{
   }
   await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
-    const batch = generationBatchSchema.parse(step.output)
+    const batch = storedGenerationBatchSchema.parse(step.output)
     const now = input.clock.now().toISOString()
     const fullyReleased = pending.settledUnits === 0
     const next = updatedBatch(batch, {
@@ -570,7 +645,9 @@ export async function getGenerationBatch(
   const step = (await repository.listSteps(run.id)).find((candidate) => identity
     ? candidate.idempotencyKey === generationBatchStepKeyFor(run.id, identity)
     : candidate.idempotencyKey.startsWith(`${run.id}:generation-batch:r`))
-  return step?.tool === 'generate_image_batch' ? generationBatchSchema.parse(step.output) : null
+  return step?.tool === 'generate_image_batch'
+    ? publicGenerationBatch(storedGenerationBatchSchema.parse(step.output))
+    : null
 }
 
 function escapeRegExp(value: string) {
@@ -580,11 +657,16 @@ function escapeRegExp(value: string) {
 function appendGenerationBatchEvent(
   transaction: AgentTransaction,
   type: 'generation.batch.created' | 'generation.batch.updated',
-  batch: GenerationBatch,
+  batch: StoredGenerationBatch,
   publish: boolean,
 ) {
   if (!publish) return
-  transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type, payload: batch })
+  transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type, payload: publicGenerationBatch(batch) })
+}
+
+function requireAccountingModel(batch: StoredGenerationBatch) {
+  if (!batch.accountingModel || !batch.operationMode) throw new Error('GENERATION_BATCH_ROUTING_METADATA_MISSING')
+  return batch.accountingModel
 }
 
 export { generationBatchSchema, type GenerationBatch }

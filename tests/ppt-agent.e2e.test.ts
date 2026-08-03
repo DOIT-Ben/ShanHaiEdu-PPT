@@ -332,7 +332,9 @@ describe('PPT Agent mock end-to-end', () => {
     })
     expect(await revisionApplication.apply(runId)).toMatchObject({ status: 'REVISING', requiresMedia: true })
 
-    const revisionMedia = new RevisionMediaCoordinator({ repository, media, batchBudget: budget, clock })
+    const revisionMedia = new RevisionMediaCoordinator({
+      repository, media, batchBudget: budget, artifacts, clock, revisionImageModel: 'image-2',
+    })
     expect(await revisionMedia.submit(runId, 2)).toMatchObject({ submitted: 1, total: 1 })
     const revisedImageKey = `${runId}:slide:8:image:r1:v1`
     const revisedSourceArtifact = await artifacts.put({

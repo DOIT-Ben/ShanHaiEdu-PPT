@@ -1,6 +1,21 @@
 import { CONTRACT_VERSION, type HostContext } from '../contracts'
-import { BudgetReservationError, type AgentRepository, type BudgetPort, type ClockPort, type RunRecord, type StepRecord } from './ports'
-import type { MediaStepRunner } from './media-step-runner'
+import { storedGenerationBatchSchema } from '../generation-batch-contracts'
+import {
+  finalizeGenerationBatch,
+  generationBatchIdentityFromStepKey,
+  refreshGenerationBatch,
+  type GenerationBatchIdentity,
+} from './generation-batch'
+import {
+  BudgetReservationError,
+  type AgentRepository,
+  type BatchBudgetPort,
+  type BudgetPort,
+  type ClockPort,
+  type RunRecord,
+  type StepRecord,
+} from './ports'
+import { persistedMediaStepModel, type MediaStepRunner } from './media-step-runner'
 import { hashInput } from './hash'
 import { releaseBudget } from './policy'
 
@@ -11,6 +26,43 @@ export class AdminOperationsError extends Error {
     super(message)
     this.name = 'AdminOperationsError'
   }
+}
+
+type BatchAccountingContext = Readonly<{
+  batchId: string
+  reservationId: string
+  identity: GenerationBatchIdentity
+}>
+
+function batchAccountingContext(
+  runId: string,
+  pageStep: StepRecord,
+  steps: readonly StepRecord[],
+): BatchAccountingContext | null {
+  const output = pageStep.output && typeof pageStep.output === 'object'
+    ? pageStep.output as { batchId?: unknown }
+    : null
+  if (typeof output?.batchId !== 'string') return null
+  const matches = steps.flatMap((step) => {
+    if (step.tool !== 'generate_image_batch') return []
+    const batch = storedGenerationBatchSchema.safeParse(step.output)
+    return batch.success && batch.data.batchId === output.batchId ? [{ step, batch: batch.data }] : []
+  })
+  if (matches.length !== 1) {
+    throw new AdminOperationsError(409, 'BATCH_ACCOUNTING_CONTEXT_INVALID', 'batch accounting context is unavailable')
+  }
+  const match = matches[0]!
+  if (!match.batch.pages.some((page) => page.idempotencyKey === pageStep.idempotencyKey)) {
+    throw new AdminOperationsError(409, 'BATCH_PAGE_MEMBERSHIP_INVALID', 'page is not a member of its accounting batch')
+  }
+  const identity = generationBatchIdentityFromStepKey(runId, match.step.idempotencyKey)
+  if (!identity || !match.step.budgetReservationId) {
+    throw new AdminOperationsError(409, 'BATCH_RESERVATION_UNRESOLVED', 'batch reservation is unavailable')
+  }
+  if (pageStep.budgetReservationId && pageStep.budgetReservationId !== match.step.budgetReservationId) {
+    throw new AdminOperationsError(409, 'BATCH_RESERVATION_ID_CONFLICT', 'page reservation does not match its batch')
+  }
+  return { batchId: match.batch.batchId, reservationId: match.step.budgetReservationId, identity }
 }
 
 export interface AdminOperationsPort {
@@ -39,7 +91,7 @@ function canResolveAccounting(status: StepRecord['status'], charged: boolean) {
 export class AdminOperationsService implements AdminOperationsPort {
   constructor(private readonly dependencies: Readonly<{
     repository: AgentRepository
-    budget: BudgetPort
+    budget: BudgetPort & BatchBudgetPort
     media: MediaStepRunner
     clock: ClockPort
   }>) {}
@@ -88,6 +140,9 @@ export class AdminOperationsService implements AdminOperationsPort {
       if (input.action !== 'REINSPECT'
         && !canResolveAccounting(currentTarget.status, input.action === 'MARK_CHARGED')) {
         throw new AdminOperationsError(409, 'STEP_NOT_RECONCILABLE', 'step cannot be manually reconciled')
+      }
+      if (input.action !== 'REINSPECT') {
+        batchAccountingContext(input.runId, currentTarget, transaction.listSteps())
       }
       const actionStep: StepRecord = {
         id: `${input.runId}:admin:${hashInput(actionKey).slice(0, 24)}`,
@@ -152,9 +207,12 @@ export class AdminOperationsService implements AdminOperationsPort {
 
   private async resolveAccounting(runId: string, stepKey: string, charged: boolean) {
     const run = await this.dependencies.repository.getRun(runId)
-    const step = (await this.dependencies.repository.listSteps(runId)).find((candidate) => candidate.idempotencyKey === stepKey)
+    const steps = await this.dependencies.repository.listSteps(runId)
+    const step = steps.find((candidate) => candidate.idempotencyKey === stepKey)
     if (!run || !step) throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
     const desiredStatus = charged ? 'FAILED_CHARGED' : 'FAILED_NOT_CHARGED'
+    const batch = batchAccountingContext(runId, step, steps)
+    if (batch) return this.resolveBatchAccounting(runId, stepKey, desiredStatus, charged, batch)
     if (step.status === desiredStatus) return step
     if (!canResolveAccounting(step.status, charged)) {
       throw new AdminOperationsError(409, 'STEP_NOT_RECONCILABLE', 'step cannot be manually reconciled')
@@ -167,7 +225,7 @@ export class AdminOperationsService implements AdminOperationsPort {
       try {
         reservationId = (await this.dependencies.budget.reserve({
           host: run.host,
-          model: run.imageModel,
+          model: persistedMediaStepModel(step, run.imageModel),
           units: step.budgetUnits,
           idempotencyKey: step.idempotencyKey,
         })).reservationId
@@ -218,5 +276,69 @@ export class AdminOperationsService implements AdminOperationsPort {
       }
       return updated
     })
+  }
+
+  private async resolveBatchAccounting(
+    runId: string,
+    stepKey: string,
+    desiredStatus: 'FAILED_CHARGED' | 'FAILED_NOT_CHARGED',
+    charged: boolean,
+    expectedBatch: BatchAccountingContext,
+  ) {
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      const current = transaction.getStep(stepKey)
+      if (!current) throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
+      const batch = batchAccountingContext(runId, current, transaction.listSteps())
+      if (!batch || batch.batchId !== expectedBatch.batchId
+        || batch.reservationId !== expectedBatch.reservationId
+        || batch.identity.revisionRound !== expectedBatch.identity.revisionRound
+        || batch.identity.scope !== expectedBatch.identity.scope) {
+        throw new AdminOperationsError(409, 'BATCH_ACCOUNTING_CONTEXT_CHANGED', 'batch accounting context changed')
+      }
+      if (current.status === desiredStatus) return
+      if (!canResolveAccounting(current.status, charged)) {
+        throw new AdminOperationsError(409, 'STEP_NOT_RECONCILABLE', 'step cannot be manually reconciled')
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      const updated: StepRecord = {
+        ...current,
+        status: desiredStatus,
+        budgetReservationId: batch.reservationId,
+        updatedAt: now,
+      }
+      transaction.putStep(updated)
+      if (charged) {
+        transaction.putRun({ ...transaction.run, version: transaction.run.version + 1, updatedAt: now })
+      }
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.resolved',
+        payload: { issueId: `${current.id}:submission-unknown`, resolution: 'FIXED' },
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.resolved',
+        payload: { issueId: `${current.id}:provider-result`, resolution: 'FIXED' },
+      })
+    })
+    await refreshGenerationBatch({
+      repository: this.dependencies.repository,
+      clock: this.dependencies.clock,
+      runId,
+      revisionRound: expectedBatch.identity.revisionRound,
+      scope: expectedBatch.identity.scope,
+    })
+    await finalizeGenerationBatch({
+      repository: this.dependencies.repository,
+      budget: this.dependencies.budget,
+      clock: this.dependencies.clock,
+      runId,
+      revisionRound: expectedBatch.identity.revisionRound,
+      scope: expectedBatch.identity.scope,
+    })
+    const updated = (await this.dependencies.repository.listSteps(runId))
+      .find((candidate) => candidate.idempotencyKey === stepKey)
+    if (!updated) throw new AdminOperationsError(404, 'STEP_NOT_FOUND', 'step was not found')
+    return updated
   }
 }

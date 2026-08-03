@@ -623,7 +623,7 @@ describe('planning runner', () => {
     expect(calls).toBe(1)
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'MODEL_FORBIDDEN' })
     expect(await repository.getRun('run-1')).toMatchObject({
-      status: 'NEEDS_HUMAN',
+      status: 'FAILED',
       technicalRecovery: { resumeState: 'PLANNING', reason: 'MODEL_FORBIDDEN', retryable: false, active: false },
     })
     const events = await repository.listEvents('run-1')
@@ -747,7 +747,7 @@ describe('planning runner', () => {
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'MODEL_JSON_INVALID' })
     expect(diagnostics).toMatchObject({
       errorCode: 'MODEL_JSON_INVALID', terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
-      retryable: true, attempt: 5, maxAttempts: 5, fieldPaths: ['blueprint'],
+      retryable: false, suggestedAction: 'CONTACT_ADMIN', attempt: 5, maxAttempts: 5, fieldPaths: ['blueprint'],
       requestId: 'request-invalid-json-final', model: 'gpt-5.6',
     })
   })
@@ -802,6 +802,8 @@ describe('planning runner', () => {
     expect(diagnostics).toMatchObject({
       errorCode,
       terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
+      retryable: false,
+      suggestedAction: 'CONTACT_ADMIN',
       attempt: 5,
       maxAttempts: 5,
       diagnosticCode: errorCode,

@@ -198,6 +198,32 @@ describe('gateway image generation adapter', () => {
     expect((form.get('image') as Blob).size).toBe(reference.length)
   })
 
+  test('looks up an image edit with its persisted operation mode and original key', async () => {
+    let captured: { url: string; headers: Headers } | null = null
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), headers: new Headers(init?.headers) }
+        return Response.json({
+          id: 'imgop_0123456789abcdef0123456789abcdef',
+          status: 'PROCESSING',
+          submission_state: 'SUBMITTED',
+        })
+      },
+    })
+    const key = `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`
+
+    await adapter.lookupByIdempotency!({
+      tenantId: 'frameflow', idempotencyKey: key, operationMode: 'IMAGE_EDIT',
+    })
+
+    const request = captured as unknown as { url: string; headers: Headers }
+    expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/image-tasks/by-idempotency')
+    expect(request.headers.get('Idempotency-Key')).toBe(key)
+    expect(request.headers.get('X-Image-Operation-Mode')).toBe('IMAGE_EDIT')
+  })
+
   test('rejects non-loopback plaintext gateway endpoints', () => {
     expect(() => new GatewayImageGenerationPort({
       baseUrl: 'http://example.com/v1', apiKey: 'test-image-key-0001', artifacts: new MockArtifactPort(),

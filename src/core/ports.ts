@@ -1,6 +1,21 @@
-import type { KnownAgentEvent as AgentEvent, CreateRunRequest, HostContext, RunStatus, TechnicalRecovery } from '../contracts'
-import type { AssetIntent, DeckReview, DeliveryRecord, PresentationBlueprint, RevisionPlan } from '../presentation-contracts'
+import type {
+  KnownAgentEvent as AgentEvent,
+  CreateRunRequest,
+  HostContext,
+  PendingTerminalFailure,
+  RunStatus,
+  TechnicalRecovery,
+} from '../contracts'
+import type {
+  AssetIntent,
+  DeckReview,
+  DeliveryRecord,
+  DeliveryRecordInput,
+  PresentationBlueprint,
+  RevisionPlan,
+} from '../presentation-contracts'
 import type { ReleaseIdentity } from '../release-identity'
+import type { TerminalAccounting } from '../terminal-accounting-contracts'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -67,6 +82,25 @@ export interface StructuredModelPort {
   }>): Promise<unknown>
 }
 
+export type StructuredModelExecutionMetrics = Readonly<{
+  outcome: 'SUCCEEDED' | 'FAILED'
+  errorCode: string | null
+  requestId: string | null
+  status: number | null
+  responseAccepted: boolean
+  sseEventCount: number
+  lastActivityAt: string | null
+  durationMs: number
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
+  submissionState?: StructuredSubmissionState
+}>
+
+export interface StructuredModelMetricsPort {
+  takeExecutionMetrics(idempotencyKey: string): StructuredModelExecutionMetrics | null
+}
+
 /** The protocol is selected once during V4 preflight and remains fixed for a run. */
 export type StructuredGenerationProtocol =
   | 'RESPONSES_JSON_SCHEMA'
@@ -80,6 +114,18 @@ export interface StructuredGenerationPreflightPort {
   }>): Promise<Readonly<{ protocol: StructuredGenerationProtocol }>>
 }
 
+export type StructuredSubmissionState = 'NOT_ACCEPTED' | 'ACCEPTED' | 'UNKNOWN'
+
+export type StructuredContractFailure = Readonly<{
+  layer: 'JSON_PARSE' | 'JSON_SCHEMA'
+  safeIssues: readonly Readonly<{
+    issueCode: string
+    path: readonly (string | number)[]
+  }>[]
+  responseHash: string
+  byteLength: number
+}>
+
 export class StructuredModelError extends Error {
   constructor(
     readonly code: 'PROVIDER_TIMEOUT' | 'PROVIDER_RATE_LIMIT' | 'PROVIDER_UNAVAILABLE'
@@ -88,6 +134,8 @@ export class StructuredModelError extends Error {
     readonly model: string,
     readonly requestId: string | null,
     readonly status: number | null = null,
+    readonly submissionState: StructuredSubmissionState = 'ACCEPTED',
+    readonly contractFailure: StructuredContractFailure | null = null,
   ) {
     super(code)
     this.name = 'StructuredModelError'
@@ -139,6 +187,7 @@ export interface ImageGenerationPort {
   lookupByIdempotency?(input: Readonly<{
     tenantId: string
     idempotencyKey: string
+    operationMode?: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
   }>): Promise<
     | Readonly<{ state: 'SUBMITTED'; operationId: string }>
     | Readonly<{ state: 'NOT_SUBMITTED' | 'UNKNOWN' }>
@@ -433,6 +482,8 @@ export type RunRecord = Readonly<{
   status: RunStatus
   resumeState: RunStatus | null
   technicalRecovery?: TechnicalRecovery
+  pendingTerminalFailure?: PendingTerminalFailure
+  terminalAccounting?: TerminalAccounting
   version: number
   budgetUnits: number
   committedBudgetUnits: number
@@ -510,7 +561,7 @@ export type EventPage = Readonly<{
 }>
 
 export type TerminalAgentEvent = Extract<AgentEvent, {
-  type: 'run.completed' | 'run.failed' | 'run.cancelled'
+  type: 'run.completed' | 'run.failed' | 'run.cancelled' | 'run.accounting.finalized'
 }>
 
 export type RunEventSnapshot = Readonly<{
@@ -576,7 +627,7 @@ export interface AgentTransaction {
   getDelivery(deliveryId: string): DeliveryRecord | null
   putRun(run: RunRecord): void
   putStep(step: StepRecord): void
-  putDelivery(delivery: DeliveryRecord): void
+  putDelivery(delivery: DeliveryRecordInput): void
   appendEvent(event: NewAgentEvent): AgentEvent
 }
 

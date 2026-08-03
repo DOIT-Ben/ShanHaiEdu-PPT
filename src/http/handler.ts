@@ -46,6 +46,8 @@ function publicRun(run: RunRecord) {
     status: run.status,
     resumeState: run.resumeState,
     ...(run.technicalRecovery ? { technicalRecovery: run.technicalRecovery } : {}),
+    ...(run.pendingTerminalFailure ? { pendingTerminalFailure: run.pendingTerminalFailure } : {}),
+    ...(run.terminalAccounting ? { terminalAccounting: run.terminalAccounting } : {}),
     version: run.version,
     slideCount: run.slideCount,
     visualDirection: run.visualDirection,

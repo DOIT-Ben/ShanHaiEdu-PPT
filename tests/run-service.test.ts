@@ -266,6 +266,56 @@ describe('run service', () => {
       .rejects.toMatchObject({ status: 409, code: 'RUN_VERSION_CONFLICT' })
   })
 
+  test('reserves every v4 quality override for audited administrators', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create(request, 'frameflow-create-v4-override-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        status: 'NEEDS_HUMAN',
+        version: 1,
+      })
+      transaction.putStep({
+        id: 'step-plan-v4-override', runId: created.run.id, idempotencyKey: planningStepKey(created.run.id),
+        inputHash: 'plan-v4-override-hash', tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null, errorCode: null, output: blueprint(),
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-v4-visual-1', category: 'VISUAL_CONSISTENCY', severity: 'WARNING',
+          summary: '第二页插画风格与封面略有差异。', slideIds: [`${created.run.id}:slide:2`],
+          sourceChunkIds: [], status: 'OPEN', repairDomain: 'ASSET',
+        },
+      })
+    })
+    const action = {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'ACCEPT_WITH_OVERRIDE',
+      expectedVersion: 1,
+      reason: '内部管理员已复核全部页面并记录本次质量放行依据。',
+      issueIds: ['issue-v4-visual-1'],
+    } as const
+
+    await expect(service.act(created.run.id, host, action, 'v4-override-user-0001'))
+      .rejects.toMatchObject({ status: 403, code: 'QUALITY_OVERRIDE_ADMIN_REQUIRED' })
+    expect(await repository.getRun(created.run.id)).toMatchObject({ status: 'NEEDS_HUMAN', qualityOverride: false, version: 1 })
+
+    const accepted = await service.act(
+      created.run.id,
+      { ...host, role: 'ADMIN' },
+      action,
+      'v4-override-admin-0001',
+    )
+    expect(accepted).toMatchObject({
+      status: 'DELIVERING', qualityOverride: true, qualityOverrideRole: 'ADMIN',
+      qualityOverrideIssueIds: ['issue-v4-visual-1'],
+    })
+  })
+
   test('requires a persisted revision plan and advances its round on approval', async () => {
     const { repository, service } = fixture()
     const created = await service.create(request, 'frameflow-create-0001')

@@ -23,7 +23,7 @@ describe('OpenAPI v1 contract', () => {
     }
 
     expect(document.openapi).toBe('3.1.0')
-    expect(document.info.version).toBe('4.0.0')
+    expect(document.info.version).toBe('4.2.0')
     expect(document.security).toEqual([{ bearerAuth: [] }])
     expect(Object.keys(document.paths).sort()).toEqual([
       '/health/live',
@@ -71,6 +71,8 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.PublicRun?.properties?.progress).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.technicalRecovery).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.generationBatch).toBeDefined()
+    expect(document.components.schemas.PublicRun?.properties?.pendingTerminalFailure).toBeDefined()
+    expect(document.components.schemas.PublicRun?.properties?.terminalAccounting).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.release).toBeDefined()
     expect(document.components.schemas.TechnicalRecovery).toBeDefined()
     expect(document.components.schemas.TechnicalRecovery?.properties?.resumeState?.enum)
@@ -112,7 +114,31 @@ describe('OpenAPI v1 contract', () => {
       .toEqual(['PAGE_VISUAL', 'DECK_CONTENT', 'DECK_VISUAL', null])
     expect(document.components.schemas.V4LifecycleEvent).toBeDefined()
     expect(JSON.stringify(document.components.schemas.V4LifecycleEvent)).toContain('"stage":{"const":"REVISION"}')
-    expect(JSON.stringify(document.components.schemas.V4LifecycleEvent)).toContain('"errorCode":{"const":"WORKER_FATAL"}')
+    const v4LifecycleEvent = JSON.stringify(document.components.schemas.V4LifecycleEvent)
+    for (const errorCode of [
+      'WORKER_FATAL',
+      'QUALITY_REMEDIATION_EXHAUSTED',
+      'QUALITY_ISSUE_STATE_INCONSISTENT',
+      'TECHNICAL_RECOVERY_EXHAUSTED',
+      'TECHNICAL_CONFIGURATION_REQUIRED',
+    ]) {
+      expect(v4LifecycleEvent).toContain(errorCode)
+    }
+    expect(v4LifecycleEvent).toContain('#/components/schemas/TerminalAccounting')
+    expect(v4LifecycleEvent).toContain('run.accounting.finalized')
+    expect(document.components.schemas.TerminalAccounting).toBeDefined()
+    expect(JSON.stringify(document.components.schemas.TerminalAccounting)).toContain('RECONCILIATION_REQUIRED')
+    expect(document.components.schemas.DeliveryRecord).toBeDefined()
+    const deliveryRecord = JSON.stringify(document.components.schemas.DeliveryRecord)
+    expect(deliveryRecord).toContain('"disposition":{"const":"FINAL"}')
+    expect(deliveryRecord).toContain('OVERRIDDEN_INTERNAL')
+    expect(deliveryRecord).toContain('#/components/schemas/DeliveryIdentity')
+    const deliveryIdentity = JSON.stringify(document.components.schemas.DeliveryIdentity)
+    expect(deliveryIdentity).toContain('LEGACY_UNVERIFIED')
+    expect(deliveryIdentity).toContain('blueprintHash')
+    expect(deliveryIdentity).toContain('proposalHash')
+    expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
+      .toContain('#/components/schemas/DeliveryRecord')
     expect(JSON.stringify(document.paths['/v1/runs/{runId}']?.get))
       .toContain('#/components/schemas/RunDetailEnvelope')
     expect(document.components.schemas.CreateRunRequest?.properties?.targetAudience).toBeDefined()

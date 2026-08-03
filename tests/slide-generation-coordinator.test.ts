@@ -285,9 +285,18 @@ describe('slide generation coordinator', () => {
     expect(budget.reservations.size).toBe(3)
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 30 })
     expect(result.steps.map((step) => step.output)).toEqual([
-      { slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1', backgroundMode: 'OPAQUE' },
-      { slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1', backgroundMode: 'OPAQUE' },
-      { slideId: 'run-1:slide:3', versionId: 'run-1:slide:3:r0:v1', backgroundMode: 'OPAQUE' },
+      {
+        slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1', backgroundMode: 'OPAQUE',
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE',
+      },
+      {
+        slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1', backgroundMode: 'OPAQUE',
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE',
+      },
+      {
+        slideId: 'run-1:slide:3', versionId: 'run-1:slide:3:r0:v1', backgroundMode: 'OPAQUE',
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE',
+      },
     ])
   })
 
@@ -464,10 +473,20 @@ describe('slide generation coordinator', () => {
     })
     budget.nextBatchFinalizationPreflightFailure = new Error('HOST_BATCH_FINALIZATION_UNSUPPORTED')
 
-    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'NEEDS_HUMAN', submitted: 0 })
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ status: 'FAILED', submitted: 0 })
     expect(images.operations.size).toBe(0)
     expect(budget.batchReservations.size).toBe(0)
-    expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED',
+      terminalAccounting: {
+        accountingStatus: 'FINAL', submittedUnits: 0, settledUnits: 0, reconciliationUnits: 0,
+      },
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.find((event) => event.type === 'run.failed')).toMatchObject({
+      payload: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'generate_image_batch'))
       .toMatchObject({ status: 'FAILED', errorCode: 'BATCH_BUDGET_FINALIZATION_UNSUPPORTED' })
   })

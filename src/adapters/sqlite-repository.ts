@@ -10,7 +10,7 @@ import type {
   StepRecord,
   TenantRevisionRoundsSettings,
 } from '../core/ports'
-import type { DeliveryRecord } from '../presentation-contracts'
+import { deliveryRecordSchema, type DeliveryRecord } from '../presentation-contracts'
 import { buildOperationsReport, type OperationalRun, type OperationalStep } from '../core/operations'
 
 type JsonRow = { data: string }
@@ -304,7 +304,16 @@ export class SqliteAgentRepository implements AgentRepository {
       SELECT data
       FROM agent_events
       WHERE run_id = ?
-        AND json_extract(data, '$.type') IN ('run.completed', 'run.failed', 'run.cancelled')
+        AND (
+          json_extract(data, '$.type') IN ('run.completed', 'run.cancelled', 'run.accounting.finalized')
+          OR (
+            json_extract(data, '$.type') = 'run.failed'
+            AND COALESCE(
+              json_extract(data, '$.payload.terminalAccounting.accountingStatus'),
+              'FINAL'
+            ) <> 'RECONCILIATION_REQUIRED'
+          )
+        )
       ORDER BY sequence ASC
       LIMIT 1
     `).get(runId)
@@ -392,7 +401,7 @@ export class SqliteAgentRepository implements AgentRepository {
   async listDeliveries(runId: string) {
     return this.#database.query<JsonRow, [string]>(
       'SELECT data FROM agent_deliveries WHERE run_id = ? ORDER BY rowid ASC',
-    ).all(runId).map((row) => JSON.parse(row.data) as DeliveryRecord)
+    ).all(runId).map((row) => deliveryRecordSchema.parse(JSON.parse(row.data)))
   }
 
   async aggregatePlanningFailures(filters: PlanningFailureFilters) {
@@ -479,11 +488,15 @@ export class SqliteAgentRepository implements AgentRepository {
           const row = this.#database.query<JsonRow, [string, string]>(
             'SELECT data FROM agent_deliveries WHERE run_id = ? AND id = ?',
           ).get(runId, deliveryId)
-          return parseJson<DeliveryRecord>(row)
+          const value = parseJson<unknown>(row)
+          return value === null ? null : deliveryRecordSchema.parse(value)
         },
         putRun(run) { nextRun = structuredClone(run) },
         putStep(step) { touchedSteps.set(step.idempotencyKey, structuredClone(step)) },
-        putDelivery(delivery) { touchedDeliveries.set(delivery.id, structuredClone(delivery)) },
+        putDelivery(delivery) {
+          const parsed = deliveryRecordSchema.parse(delivery)
+          touchedDeliveries.set(parsed.id, structuredClone(parsed))
+        },
         appendEvent: (event: NewAgentEvent) => {
           nextSequence += 1
           const eventId = `${runId}:event:${nextSequence}`

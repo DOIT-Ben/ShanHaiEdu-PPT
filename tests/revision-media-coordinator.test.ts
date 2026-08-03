@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
+import sharp from 'sharp'
 import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import {
@@ -13,6 +15,7 @@ import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { V4_REVISION_PROMPT_MAX_LENGTH } from '../src/core/blueprint-assets'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
+import { generationBatchStepKeyFor, getGenerationBatch } from '../src/core/generation-batch'
 import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
@@ -140,12 +143,22 @@ function visualDeckV4Blueprint() {
   })
 }
 
+async function revisionImageKey(repository: InMemoryAgentRepository, pageNumber: number, revisionRound = 1) {
+  const prefix = `run-1:slide:${pageNumber}:image:r${revisionRound}:v1`
+  const key = (await repository.listSteps('run-1'))
+    .find((step) => step.tool === 'generate_slide_image' && step.idempotencyKey.startsWith(prefix))
+    ?.idempotencyKey
+  if (!key) throw new Error(`revision image key not found for page ${pageNumber}`)
+  return key
+}
+
 async function fixture(
   overrides: Partial<RunRecord> = {},
   inputs: Readonly<{
     blueprint?: unknown
     plan?: ReturnType<typeof revisionPlan>
     imageConcurrency?: number
+    revisionImageModel?: string
   }> = {},
 ) {
   const repository = new InMemoryAgentRepository()
@@ -174,9 +187,13 @@ async function fixture(
     )
   })
   const media = new MediaStepRunner({ repository, budget, images, clock })
+  const sourceBytes = new Uint8Array(await sharp({
+    create: { width: 160, height: 90, channels: 3, background: '#EAF7FF' },
+  }).png().toBuffer())
+  const sourceSha256 = createHash('sha256').update(sourceBytes).digest('hex')
   for (const artifactId of ['artifact-r0-1', 'artifact-r0-2', 'artifact-r1-2']) {
     artifacts.artifacts.set(artifactId, {
-      mimeType: 'image/png', bytes: new TextEncoder().encode(artifactId), sha256: artifactId.padEnd(64, '0').slice(0, 64),
+      mimeType: 'image/png', bytes: sourceBytes, sha256: sourceSha256,
     })
   }
   return {
@@ -191,7 +208,9 @@ async function fixture(
       repository,
       media,
       batchBudget: budget,
+      artifacts,
       clock,
+      revisionImageModel: inputs.revisionImageModel ?? 'image-2',
       ...(inputs.imageConcurrency === undefined ? {} : { imageConcurrency: inputs.imageConcurrency }),
     }),
     generation: new SlideGenerationCoordinator({
@@ -206,10 +225,125 @@ async function fixture(
       artifacts,
       clock,
     }),
+    sourceBytes,
+    sourceSha256,
   }
 }
 
 describe('revision media coordinator', () => {
+  test('edits the latest controlled V4 page with the configured GPT model before review', async () => {
+    const { repository, budget, images, sourceBytes, sourceSha256, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+      revisionImageModel: 'image-2',
+    })
+
+    const submitted = await coordinator.submit('run-1', 5)
+    const [key, request] = [...images.requests.entries()][0]!
+    const step = (await repository.listSteps('run-1')).find((candidate) => candidate.idempotencyKey === key)
+
+    expect(submitted).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(key).toMatch(/^run-1:slide:2:image:r1:v1:edit:[a-f0-9]{24}$/)
+    expect(request.model).toBe('image-2')
+    expect(request.referenceImage).toEqual({
+      mimeType: 'image/png', bytes: sourceBytes, sha256: sourceSha256,
+    })
+    expect(request.prompt).toContain('Edit the attached source slide in place')
+    expect(request.prompt).toContain('Remove the inconsistent object')
+    expect(step?.output).toMatchObject({
+      model: 'image-2',
+      operationMode: 'IMAGE_EDIT',
+      referenceImageSha256: sourceSha256,
+      repairContractHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      repairContract: {
+        mode: 'IMAGE_EDIT', editModel: 'image-2', issueIds: ['issue-1'],
+        sourceArtifact: { artifactId: 'artifact-r0-2', sha256: sourceSha256, width: 160, height: 90 },
+      },
+    })
+    expect(budget.batchReservationRequests).toHaveLength(1)
+    expect(budget.batchReservationRequests[0]).toMatchObject({ model: 'image-2', units: 5 })
+    const batchStep = (await repository.listSteps('run-1')).find((candidate) =>
+      candidate.idempotencyKey === generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' }))
+    expect(batchStep?.output).toMatchObject({ accountingModel: 'image-2', operationMode: 'IMAGE_EDIT' })
+    const publicBatch = await getGenerationBatch(repository, (await repository.getRun('run-1'))!, {
+      revisionRound: 1,
+      scope: 'REVISION',
+    })
+    expect(publicBatch).not.toHaveProperty('accountingModel')
+    expect(publicBatch).not.toHaveProperty('operationMode')
+  })
+
+  test('keeps the persisted edit model, contract and key after runtime configuration drift', async () => {
+    const { repository, budget, images, artifacts, media, clock, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+      revisionImageModel: 'image-2',
+    })
+    await coordinator.submit('run-1', 5)
+    const originalKey = await revisionImageKey(repository, 2)
+    const drifted = new RevisionMediaCoordinator({
+      repository,
+      media,
+      batchBudget: budget,
+      artifacts,
+      clock,
+      revisionImageModel: 'image-3-new-default',
+    })
+
+    await expect(drifted.submit('run-1', 5)).resolves.toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+
+    expect(await revisionImageKey(repository, 2)).toBe(originalKey)
+    expect(images.submitCalls).toBe(1)
+    expect(images.requests.get(originalKey)?.model).toBe('image-2')
+    expect(budget.batchReservationRequests).toHaveLength(1)
+    expect(budget.batchReservationRequests[0]?.model).toBe('image-2')
+  })
+
+  test.each([
+    ['missing', async (artifacts: MockArtifactPort) => { artifacts.artifacts.delete('artifact-r0-2') }, 'V4_REPAIR_SOURCE_ARTIFACT_MISSING'],
+    ['cross-tenant', async (artifacts: MockArtifactPort) => { artifacts.owners.set('artifact-r0-2', 'another-tenant') }, 'V4_REPAIR_SOURCE_ARTIFACT_MISSING'],
+    ['sha mismatch', async (artifacts: MockArtifactPort) => {
+      const artifact = artifacts.artifacts.get('artifact-r0-2')!
+      artifacts.artifacts.set('artifact-r0-2', { ...artifact, sha256: 'b'.repeat(64) })
+    }, 'V4_REPAIR_SOURCE_SHA_MISMATCH'],
+    ['unsupported mime', async (artifacts: MockArtifactPort) => {
+      const artifact = artifacts.artifacts.get('artifact-r0-2')!
+      artifacts.artifacts.set('artifact-r0-2', { ...artifact, mimeType: 'image/gif' })
+    }, 'V4_REPAIR_SOURCE_MIME_UNSUPPORTED'],
+    ['corrupt raster', async (artifacts: MockArtifactPort) => {
+      const bytes = new TextEncoder().encode('not an image')
+      artifacts.artifacts.set('artifact-r0-2', {
+        mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
+      })
+    }, 'V4_REPAIR_SOURCE_IMAGE_INVALID'],
+    ['wrong aspect ratio', async (artifacts: MockArtifactPort) => {
+      const bytes = new Uint8Array(await sharp({
+        create: { width: 100, height: 100, channels: 3, background: '#FFFFFF' },
+      }).png().toBuffer())
+      artifacts.artifacts.set('artifact-r0-2', {
+        mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
+      })
+    }, 'V4_REPAIR_SOURCE_ASPECT_RATIO_INVALID'],
+  ] as const)('rejects a %s controlled source before budget reservation or Provider submission', async (_label, mutate, errorCode) => {
+    const { repository, budget, images, artifacts, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+      revisionImageModel: 'image-2',
+    })
+    await mutate(artifacts)
+
+    await expect(coordinator.submit('run-1', 5)).rejects.toThrow(errorCode)
+    expect(images.requests.size).toBe(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+    expect((await repository.listSteps('run-1')).some((step) => step.tool === 'generate_image_batch')).toBe(false)
+  })
+
   test('redraws only planned pages and returns the revised deck to page review', async () => {
     const { repository, images, artifacts, renderer, clock, coordinator } = await fixture()
     const submitted = await coordinator.submit('run-1', 5)
@@ -251,7 +385,7 @@ describe('revision media coordinator', () => {
     })
 
     await coordinator.submit('run-1', 5)
-    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
 
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 1, total: 1 })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', revisionRound: 1 })
@@ -269,7 +403,7 @@ describe('revision media coordinator', () => {
   test('recovers a revision image left in submitting without double-reserving budget', async () => {
     const { repository, images, coordinator } = await fixture()
     await coordinator.submit('run-1', 5)
-    const key = 'run-1:slide:2:image:r1:v1'
+    const key = await revisionImageKey(repository, 2)
     await repository.transact('run-1', (transaction) => {
       const step = transaction.getStep(key)!
       transaction.putStep({ ...step, status: 'SUBMITTING', externalOperationId: null })
@@ -289,7 +423,7 @@ describe('revision media coordinator', () => {
       blueprint: visualDeckV4Blueprint(),
     })
     await coordinator.submit('run-1', 5)
-    const key = 'run-1:slide:2:image:r1:v1'
+    const key = await revisionImageKey(repository, 2)
     const target = (await repository.listSteps('run-1')).find((step) => step.idempotencyKey === key)!
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: transaction.run.version + 1 })
@@ -350,8 +484,8 @@ describe('revision media coordinator', () => {
       step.idempotencyKey === 'run-1:revision-generation-batch:r1'))
       .toMatchObject({ status: 'RUNNING', budgetUnits: 10, budgetReservationId: expect.any(String) })
 
-    images.complete('run-1:slide:1:image:r1:v1', 'artifact-r1-1')
-    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    images.complete(await revisionImageKey(repository, 1), 'artifact-r1-1')
+    images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
     images.inspectionDelayMs = 10
 
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 2, total: 2 })
@@ -372,7 +506,7 @@ describe('revision media coordinator', () => {
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({ ...transaction.run, status: 'CANCELLED' })
     })
-    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
 
     await media.reconcilePendingRun('run-1')
     expect(await generation.reconcileTerminalGenerationBatch('run-1')).toBe(true)
@@ -388,7 +522,7 @@ describe('revision media coordinator', () => {
       blueprint: visualDeckV4Blueprint(),
     })
     await coordinator.submit('run-1', 5)
-    const key = 'run-1:slide:2:image:r1:v1'
+    const key = await revisionImageKey(repository, 2)
     const operationId = images.operations.get(key)!
     images.operations.delete(key)
     images.requests.delete(key)
@@ -413,7 +547,7 @@ describe('revision media coordinator', () => {
       blueprint: visualDeckV4Blueprint(),
     })
     await coordinator.submit('run-1', 5)
-    const key = 'run-1:slide:2:image:r1:v1'
+    const key = await revisionImageKey(repository, 2)
     const operationId = images.operations.get(key)!
     images.operations.delete(key)
     images.requests.delete(key)
@@ -439,7 +573,7 @@ describe('revision media coordinator', () => {
       blueprint: visualDeckV4Blueprint(),
     })
     await coordinator.submit('run-1', 5)
-    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
     budget.failNextSettlement('HOST_FINALIZE_UNAVAILABLE')
 
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'RECOVERING', completed: 1, total: 1 })
@@ -509,19 +643,19 @@ describe('revision media coordinator', () => {
     await coordinator.submit('run-1', 5)
 
     const request = [...images.requests.values()][0]
-    expect(request?.prompt).toContain('Create one finished, full-bleed 16:9 presentation slide')
+    expect(request?.prompt).toContain('Edit the attached source slide in place')
     expect(request?.prompt).toContain(base.visualDeckV4Proposal!.slideBriefs[1]!.title)
     expect(request?.prompt).toContain('Correction 1')
     expect(request?.prompt).toContain('Correction 50')
     expect(request?.prompt).toContain('最后一条权威对象总数事实：12')
-    expect(request?.prompt).toContain('Numbers that must appear exactly: 12')
-    expect(request?.prompt).toContain('Formulas that must appear exactly: 6+6=12')
+    expect(request?.prompt).toContain('Numbers that must remain exact: 12')
+    expect(request?.prompt).toContain('Formulas that must remain exact: 6+6=12')
     expect(request?.prompt).toContain('COUNTABLE OBJECT SAFETY')
     expect(request?.prompt).toContain('Do not invent any additional labels')
-    expect(request?.prompt).toContain('closed visible-text allowlist')
+    expect(request?.prompt).toContain('Visible text that must remain exact')
     expect(request?.negativePrompt).toContain('facts-field prose')
     expect(request?.prompt.length).toBeLessThanOrEqual(V4_REVISION_PROMPT_MAX_LENGTH)
-    images.complete('run-1:slide:2:image:r1:v1', 'artifact-r1-2')
+    images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
     const lifecycle = (await repository.listEvents('run-1'))
       .filter((event) => event.type === 'revision.progress' || event.type === 'revision.completed'
@@ -742,10 +876,10 @@ describe('revision media coordinator', () => {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
     })
-    const key = 'run-1:slide:2:image:r1:v1'
     images.failNext('NO_HEALTHY_ROUTE_BEFORE_SUBMIT', 'NOT_SUBMITTED')
 
     expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'RECOVERING', submitted: 1, total: 1 })
+    const key = await revisionImageKey(repository, 2)
     expect(images.operations.size).toBe(0)
     clock.advance(2_000)
     await repository.transact('run-1', (transaction) => resumeTechnicalRecovery(transaction, clock))
@@ -761,7 +895,7 @@ describe('revision media coordinator', () => {
       plan: revisionPlan(),
     })
     await coordinator.submit('run-1', 5)
-    images.fail('run-1:slide:2:image:r1:v1', 'PROVIDER_REJECTED', 'UNKNOWN')
+    images.fail(await revisionImageKey(repository, 2), 'PROVIDER_REJECTED', 'UNKNOWN')
 
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'NEEDS_HUMAN', completed: 0 })
     expect(await repository.getRun('run-1')).toMatchObject({

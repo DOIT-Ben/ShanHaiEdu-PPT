@@ -106,7 +106,7 @@ export const visualDeckV4SlideRoleSchema = z.enum([
   'SUMMARY',
 ])
 
-export const visualDeckV4SlideBriefSchema = z.object({
+const visualDeckV4SlideBriefShape = {
   pageNumber: z.number().int().min(1).max(50),
   role: visualDeckV4SlideRoleSchema,
   title: boundedText(120),
@@ -122,7 +122,9 @@ export const visualDeckV4SlideBriefSchema = z.object({
   informationHierarchy: z.array(boundedText(300)).min(1).max(12),
   previousSlideRelation: boundedText(500).nullable(),
   nextSlideRelation: boundedText(500).nullable(),
-}).strict().superRefine((value, context) => {
+} as const
+
+export const visualDeckV4SlideBriefSchema = z.object(visualDeckV4SlideBriefShape).strict().superRefine((value, context) => {
   const criticalContentLength = [
     value.title,
     ...value.lockedCopy,
@@ -136,6 +138,65 @@ export const visualDeckV4SlideBriefSchema = z.object({
       path: ['facts'],
       message: 'v4 critical slide content exceeds the lossless image prompt budget',
     })
+  }
+})
+
+export const visualDeckV4SlideBriefRevisionPatchSchema = z.object({
+  pageNumber: visualDeckV4SlideBriefShape.pageNumber,
+  role: visualDeckV4SlideBriefShape.role,
+  visualMetaphor: visualDeckV4SlideBriefShape.visualMetaphor,
+  composition: visualDeckV4SlideBriefShape.composition,
+  informationHierarchy: visualDeckV4SlideBriefShape.informationHierarchy,
+  previousSlideRelation: visualDeckV4SlideBriefShape.previousSlideRelation,
+  nextSlideRelation: visualDeckV4SlideBriefShape.nextSlideRelation,
+}).strict()
+
+export const visualDeckV4ContentRevisionPatchSchema = z.object({
+  pageNumber: visualDeckV4SlideBriefShape.pageNumber,
+  title: visualDeckV4SlideBriefShape.title,
+  keyClaim: visualDeckV4SlideBriefShape.keyClaim,
+  audienceTakeaway: visualDeckV4SlideBriefShape.audienceTakeaway,
+  lockedCopy: visualDeckV4SlideBriefShape.lockedCopy,
+  facts: visualDeckV4SlideBriefShape.facts,
+  numbers: visualDeckV4SlideBriefShape.numbers,
+  formulas: visualDeckV4SlideBriefShape.formulas,
+  sourceChunkIds: visualDeckV4SlideBriefShape.sourceChunkIds,
+  visualMetaphor: visualDeckV4SlideBriefShape.visualMetaphor,
+  composition: visualDeckV4SlideBriefShape.composition,
+  informationHierarchy: visualDeckV4SlideBriefShape.informationHierarchy,
+  previousSlideRelation: visualDeckV4SlideBriefShape.previousSlideRelation,
+  nextSlideRelation: visualDeckV4SlideBriefShape.nextSlideRelation,
+}).strict()
+
+export const visualDeckV4LayoutRevisionPatchSchema = z.object({
+  pageNumber: visualDeckV4SlideBriefShape.pageNumber,
+  visualMetaphor: visualDeckV4SlideBriefShape.visualMetaphor,
+  composition: visualDeckV4SlideBriefShape.composition,
+  informationHierarchy: visualDeckV4SlideBriefShape.informationHierarchy,
+  previousSlideRelation: visualDeckV4SlideBriefShape.previousSlideRelation,
+  nextSlideRelation: visualDeckV4SlideBriefShape.nextSlideRelation,
+}).strict()
+
+export const visualDeckV4RevisionApplicationResultSchema = z.object({
+  contentPatches: z.array(visualDeckV4ContentRevisionPatchSchema).max(50),
+  layoutPatches: z.array(visualDeckV4LayoutRevisionPatchSchema).max(50),
+  redrawOnlyPageNumbers: z.array(visualDeckV4SlideBriefShape.pageNumber).max(50),
+}).strict().superRefine((value, context) => {
+  const owners = [
+    ...value.contentPatches.map((patch, index) => ({ pageNumber: patch.pageNumber, path: ['contentPatches', index, 'pageNumber'] })),
+    ...value.layoutPatches.map((patch, index) => ({ pageNumber: patch.pageNumber, path: ['layoutPatches', index, 'pageNumber'] })),
+    ...value.redrawOnlyPageNumbers.map((pageNumber, index) => ({ pageNumber, path: ['redrawOnlyPageNumbers', index] })),
+  ]
+  const seen = new Set<number>()
+  for (const owner of owners) {
+    if (seen.has(owner.pageNumber)) {
+      context.addIssue({
+        code: 'custom',
+        path: owner.path,
+        message: 'v4 revision pages must have exactly one patch or redraw-only disposition',
+      })
+    }
+    seen.add(owner.pageNumber)
   }
 })
 
@@ -218,6 +279,260 @@ export const visualDeckV4FinalCoherenceReviewSchema = z.object({
   }
 })
 
+export const VISUAL_DECK_V4_REFLECTION_RUBRIC_VERSION = 'v4-reflection-1' as const
+
+export const VISUAL_DECK_V4_REFLECTION_DIMENSIONS = [
+  'REQUEST_BINDING',
+  'SOURCE_GROUNDING',
+  'NARRATIVE_COHERENCE',
+  'SLIDE_COVERAGE',
+  'VISUAL_COHERENCE',
+  'IMAGE_MODEL_EXECUTABILITY',
+  'COUNTABILITY_RISK',
+  'UNAUTHORIZED_TEXT_RISK',
+  'VISUAL_DENSITY_RISK',
+  'CROSS_SLIDE_REPETITION',
+  'SOURCE_ROLE_INTEGRITY',
+  'PEDAGOGICAL_SEQUENCE',
+] as const
+
+export const visualDeckV4ReflectionDimensionSchema = z.enum(VISUAL_DECK_V4_REFLECTION_DIMENSIONS)
+
+const reflectionCheckSchema = z.object({
+  dimension: visualDeckV4ReflectionDimensionSchema,
+  passed: z.boolean(),
+  evidence: boundedText(1_000),
+}).strict()
+
+const reflectionFindingBase = {
+  id: identifierSchema,
+  dimension: visualDeckV4ReflectionDimensionSchema,
+  severity: z.enum(['WARNING', 'BLOCKER']),
+  impact: z.literal('PAGES'),
+  evidence: boundedText(1_000),
+  risk: boundedText(1_000),
+  revisionInstruction: boundedText(1_000),
+}
+
+export const visualDeckV4DeckVisualFindingSchema = z.object({
+  ...reflectionFindingBase,
+  scope: z.literal('DECK_VISUAL'),
+  pageNumbers: z.array(z.number().int().min(1).max(50)).min(1).max(50)
+    .refine((value) => new Set(value).size === value.length, 'reflection page numbers must be unique'),
+  fieldPaths: z.array(z.enum([
+    'deckPlan.title',
+    'deckPlan.narrativeArc',
+    'deckPlan.chapters',
+    'visualContract.artDirection',
+    'visualContract.palette',
+    'visualContract.typography',
+    'visualContract.medium',
+    'visualContract.visualDensity',
+    'visualContract.compositionRules',
+    'visualContract.continuityRules',
+    'visualContract.forbidden',
+  ])).min(1).max(12)
+    .refine((value) => new Set(value).size === value.length, 'reflection field paths must be unique'),
+}).strict()
+
+export const visualDeckV4SlideBriefFindingSchema = z.object({
+  ...reflectionFindingBase,
+  scope: z.literal('SLIDE_BRIEF'),
+  pageNumbers: z.array(z.number().int().min(1).max(50)).min(1).max(50)
+    .refine((value) => new Set(value).size === value.length, 'reflection page numbers must be unique'),
+  fieldPaths: z.array(z.enum([
+    'role',
+    'visualMetaphor',
+    'composition',
+    'informationHierarchy',
+    'previousSlideRelation',
+    'nextSlideRelation',
+  ])).min(1).max(6)
+    .refine((value) => new Set(value).size === value.length, 'reflection field paths must be unique'),
+}).strict()
+
+type ReflectionDecision = Readonly<{
+  decision: 'UNCHANGED' | 'REVISED'
+  checks: readonly z.infer<typeof reflectionCheckSchema>[]
+  findings: readonly { id: string; dimension: z.infer<typeof visualDeckV4ReflectionDimensionSchema> }[]
+  appliedFindingIds: readonly string[]
+}>
+
+function validateReflectionDecision(value: ReflectionDecision, context: z.RefinementCtx) {
+  const dimensions = value.checks.map((check) => check.dimension)
+  if (new Set(dimensions).size !== VISUAL_DECK_V4_REFLECTION_DIMENSIONS.length
+    || VISUAL_DECK_V4_REFLECTION_DIMENSIONS.some((dimension) => !dimensions.includes(dimension))) {
+    context.addIssue({ code: 'custom', path: ['checks'], message: 'every reflection rubric dimension is required exactly once' })
+  }
+  const findingIds = value.findings.map((finding) => finding.id)
+  if (new Set(findingIds).size !== findingIds.length) {
+    context.addIssue({ code: 'custom', path: ['findings'], message: 'reflection finding ids must be unique' })
+  }
+  if (new Set(value.appliedFindingIds).size !== value.appliedFindingIds.length) {
+    context.addIssue({ code: 'custom', path: ['appliedFindingIds'], message: 'applied reflection finding ids must be unique' })
+  }
+  if (value.decision === 'UNCHANGED') {
+    if (value.checks.some((check) => !check.passed)) {
+      context.addIssue({ code: 'custom', path: ['checks'], message: 'unchanged reflection requires every rubric check to pass' })
+    }
+    if (value.findings.length > 0) {
+      context.addIssue({ code: 'custom', path: ['findings'], message: 'unchanged reflection cannot report findings' })
+    }
+    if (value.appliedFindingIds.length > 0) {
+      context.addIssue({ code: 'custom', path: ['appliedFindingIds'], message: 'unchanged reflection cannot apply findings' })
+    }
+    return
+  }
+  if (value.findings.length === 0) {
+    context.addIssue({ code: 'custom', path: ['findings'], message: 'revised reflection requires at least one finding' })
+  }
+  const applied = new Set(value.appliedFindingIds)
+  if (applied.size !== findingIds.length || findingIds.some((id) => !applied.has(id))) {
+    context.addIssue({ code: 'custom', path: ['appliedFindingIds'], message: 'revised reflection must apply every reported finding exactly once' })
+  }
+  const failedDimensions = new Set(value.checks.filter((check) => !check.passed).map((check) => check.dimension))
+  if (failedDimensions.size === 0
+    || value.findings.some((finding) => !failedDimensions.has(finding.dimension))
+    || [...failedDimensions].some((dimension) => !value.findings.some((finding) => finding.dimension === dimension))) {
+    context.addIssue({ code: 'custom', path: ['findings'], message: 'revised reflection findings must exactly explain failed rubric dimensions' })
+  }
+}
+
+const reflectionResultBase = {
+  checks: z.array(reflectionCheckSchema).length(VISUAL_DECK_V4_REFLECTION_DIMENSIONS.length),
+  baseArtifactHash: z.string().regex(/^[a-f0-9]{64}$/),
+  reviewContextHash: z.string().regex(/^[a-f0-9]{64}$/),
+}
+
+export const visualDeckV4DeckVisualReflectionResultSchema = z.object({
+  decision: z.enum(['UNCHANGED', 'REVISED']),
+  ...reflectionResultBase,
+  findings: z.array(visualDeckV4DeckVisualFindingSchema).max(50),
+  appliedFindingIds: z.array(identifierSchema).max(50),
+  revisedArtifact: visualDeckV4DeckVisualStageSchema,
+}).strict().superRefine(validateReflectionDecision)
+
+export const visualDeckV4SlideBriefsReflectionResultSchema = z.object({
+  decision: z.enum(['UNCHANGED', 'REVISED']),
+  ...reflectionResultBase,
+  findings: z.array(visualDeckV4SlideBriefFindingSchema).max(50),
+  appliedFindingIds: z.array(identifierSchema).max(50),
+  revisedSlides: z.array(visualDeckV4SlideBriefRevisionPatchSchema).max(50)
+    .refine((value) => new Set(value.map((slide) => slide.pageNumber)).size === value.length, 'revised slide pages must be unique'),
+}).strict().superRefine((value, context) => {
+  validateReflectionDecision(value, context)
+  if (value.decision === 'UNCHANGED' && value.revisedSlides.length > 0) {
+    context.addIssue({ code: 'custom', path: ['revisedSlides'], message: 'unchanged reflection cannot return revised slides' })
+  }
+  if (value.decision === 'REVISED' && value.revisedSlides.length === 0) {
+    context.addIssue({ code: 'custom', path: ['revisedSlides'], message: 'revised reflection requires revised slides' })
+  }
+})
+
+export const visualDeckV4DeckVisualReflectionStageOutputSchema = z.object({
+  reflection: visualDeckV4DeckVisualReflectionResultSchema,
+  artifact: visualDeckV4DeckVisualStageSchema,
+  audit: z.object({
+    rubricVersion: z.literal(VISUAL_DECK_V4_REFLECTION_RUBRIC_VERSION),
+    decision: z.enum(['UNCHANGED', 'REVISED']),
+    findingCount: z.number().int().nonnegative().max(50),
+    modelCallCount: z.number().int().min(1).max(5),
+    durationMs: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative().nullable(),
+    outputTokens: z.number().int().nonnegative().nullable(),
+    totalTokens: z.number().int().nonnegative().nullable(),
+    requestId: identifierSchema.nullable(),
+    promptBeforeHash: z.string().regex(/^[a-f0-9]{64}$/),
+    promptAfterHash: z.string().regex(/^[a-f0-9]{64}$/),
+    highRiskEscalation: z.literal(false),
+  }).strict().optional(),
+}).strict()
+
+export const visualDeckV4SlideBriefsReflectionStageOutputSchema = z.object({
+  reflection: visualDeckV4SlideBriefsReflectionResultSchema,
+  artifact: visualDeckV4SlideBriefsStageSchema,
+  audit: visualDeckV4DeckVisualReflectionStageOutputSchema.shape.audit,
+}).strict()
+
+const reflectionOriginalRequestSchema = z.object({
+  instruction: boundedText(4_000),
+  targetAudience: boundedText(500).nullable(),
+  presentationGoal: boundedText(1_000).nullable(),
+  visualDirection: boundedText(1_000),
+}).strict()
+
+const reflectionTrustedEvidenceSchema = z.object({
+  sourceManifest: z.array(z.object({
+    sourceId: identifierSchema,
+    name: boundedText(300),
+    role: visualDeckV4SourceRoleSchema.exclude(['AUTO']),
+    status: z.enum(['READY', 'FAILED']),
+    sourceChunkIds: z.array(identifierSchema).max(200),
+  }).strict()).max(7),
+  sourceChunks: z.array(z.object({
+    id: identifierSchema,
+    sourceId: identifierSchema.nullable(),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    text: boundedText(20_000),
+    pageStart: z.number().int().positive().nullable(),
+    pageEnd: z.number().int().positive().nullable(),
+    region: z.object({
+      x: z.number().finite(),
+      y: z.number().finite(),
+      width: z.number().finite().positive(),
+      height: z.number().finite().positive(),
+    }).strict().nullable(),
+  }).strict()).min(1).max(200),
+}).strict()
+
+const reflectionFrozenConstraintsSchema = z.object({
+  slideCount: z.number().int().min(2).max(50),
+  language: boundedText(40),
+  sourceMode: visualDeckV4SourceModeSchema,
+  presentationMode: z.literal('VISUAL_DECK_V4'),
+  deckType: z.enum(['DETAILED_DECK', 'PRESENTER_SLIDES']),
+  audience: boundedText(500),
+  goal: boundedText(1_000),
+  aspectRatio: z.literal('16:9'),
+  forbidden: z.array(boundedText(300)).max(40),
+}).strict()
+
+const reflectionProviderCapabilitiesSchema = z.object({
+  deliveryModel: z.literal('RASTER_SLIDES_IN_PPTX'),
+}).strict()
+
+const deckVisualGovernanceContextSchema = z.object({
+  presentationSpec: visualDeckV4PresentationSpecSchema,
+}).strict()
+
+const slideBriefsGovernanceContextSchema = z.object({
+  presentationSpec: visualDeckV4PresentationSpecSchema,
+  deckPlan: visualDeckV4DeckPlanSchema,
+  visualContract: visualDeckV4VisualContractSchema,
+}).strict()
+
+const reflectionInputBase = {
+  originalRequest: reflectionOriginalRequestSchema,
+  trustedEvidence: reflectionTrustedEvidenceSchema,
+  frozenConstraints: reflectionFrozenConstraintsSchema,
+  candidateArtifactHash: z.string().regex(/^[a-f0-9]{64}$/),
+  reviewContextHash: z.string().regex(/^[a-f0-9]{64}$/),
+  rubricVersion: z.literal(VISUAL_DECK_V4_REFLECTION_RUBRIC_VERSION),
+  providerCapabilities: reflectionProviderCapabilitiesSchema,
+}
+
+export const visualDeckV4DeckVisualReflectionInputSchema = z.object({
+  ...reflectionInputBase,
+  governanceContext: deckVisualGovernanceContextSchema,
+  candidateArtifact: visualDeckV4DeckVisualStageSchema,
+}).strict()
+
+export const visualDeckV4SlideBriefsReflectionInputSchema = z.object({
+  ...reflectionInputBase,
+  governanceContext: slideBriefsGovernanceContextSchema,
+  candidateArtifact: visualDeckV4SlideBriefsStageSchema,
+}).strict()
+
 export const visualDeckV4ProposalDraftSchema = z.object({
   sourceUnderstanding: visualDeckV4SourceUnderstandingSchema,
   presentationSpec: visualDeckV4PresentationSpecSchema,
@@ -299,6 +614,15 @@ export type VisualDeckV4SourceSpecStage = z.infer<typeof visualDeckV4SourceSpecS
 export type VisualDeckV4DeckVisualStage = z.infer<typeof visualDeckV4DeckVisualStageSchema>
 export type VisualDeckV4SlideBriefsStage = z.infer<typeof visualDeckV4SlideBriefsStageSchema>
 export type VisualDeckV4FinalCoherenceReview = z.infer<typeof visualDeckV4FinalCoherenceReviewSchema>
+export type VisualDeckV4DeckVisualReflectionInput = z.infer<typeof visualDeckV4DeckVisualReflectionInputSchema>
+export type VisualDeckV4SlideBriefsReflectionInput = z.infer<typeof visualDeckV4SlideBriefsReflectionInputSchema>
+export type VisualDeckV4DeckVisualReflectionResult = z.infer<typeof visualDeckV4DeckVisualReflectionResultSchema>
+export type VisualDeckV4SlideBriefsReflectionResult = z.infer<typeof visualDeckV4SlideBriefsReflectionResultSchema>
+export type VisualDeckV4DeckVisualReflectionStageOutput = z.infer<typeof visualDeckV4DeckVisualReflectionStageOutputSchema>
+export type VisualDeckV4SlideBriefsReflectionStageOutput = z.infer<typeof visualDeckV4SlideBriefsReflectionStageOutputSchema>
+export type VisualDeckV4ContentRevisionPatch = z.infer<typeof visualDeckV4ContentRevisionPatchSchema>
+export type VisualDeckV4LayoutRevisionPatch = z.infer<typeof visualDeckV4LayoutRevisionPatchSchema>
+export type VisualDeckV4RevisionApplicationResult = z.infer<typeof visualDeckV4RevisionApplicationResultSchema>
 export type VisualDeckV4ProposalDraft = z.infer<typeof visualDeckV4ProposalDraftSchema>
 export type VisualDeckV4Proposal = z.infer<typeof visualDeckV4ProposalSchema>
 export type VisualDeckV4RenderedSlide = z.infer<typeof visualDeckV4RenderedSlideSchema>

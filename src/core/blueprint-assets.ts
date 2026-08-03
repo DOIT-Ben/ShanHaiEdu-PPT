@@ -251,14 +251,28 @@ export function latestCompletedAssetStep(
   requirement: BlueprintImageRequirement,
   maxRevisionRound: number,
 ) {
-  const match = /^(.*):r\d+:v1$/.exec(requirement.idempotencyKey)
+  const match = /^(.*):r\d+:v1(?:\:edit\:[a-f0-9]{24})?$/.exec(requirement.idempotencyKey)
   if (!match) return null
   const prefix = `${match[1]}:r`
   return steps
     .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
-    .map((step) => ({ step, round: Number(new RegExp(`^${escapeRegExp(prefix)}(\\d+):v1$`).exec(step.idempotencyKey)?.[1] ?? -1) }))
+    .map((step) => ({
+      step,
+      round: Number(new RegExp(`^${escapeRegExp(prefix)}(\\d+):v1(?:\\:edit\\:[a-f0-9]{24})?$`)
+        .exec(step.idempotencyKey)?.[1] ?? -1),
+    }))
     .filter((candidate) => candidate.round >= 0 && candidate.round <= maxRevisionRound)
     .sort((left, right) => right.round - left.round)[0]?.step ?? null
+}
+
+export function visualDeckPageImageIdentity(idempotencyKey: string) {
+  const match = /^(.*):slide:(\d+):image:r(\d+):v1(?:\:edit\:[a-f0-9]{24})?$/.exec(idempotencyKey)
+  if (!match) return null
+  const pageNumber = Number(match[2])
+  const revisionRound = Number(match[3])
+  if (!Number.isSafeInteger(pageNumber) || pageNumber < 1
+    || !Number.isSafeInteger(revisionRound) || revisionRound < 0) return null
+  return { runId: match[1]!, pageNumber, revisionRound }
 }
 
 function escapeRegExp(value: string) {

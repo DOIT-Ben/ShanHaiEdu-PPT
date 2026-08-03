@@ -46,6 +46,8 @@ await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
+const revisionImageModel = process.env.PPT_AGENT_V4_REVISION_IMAGE_MODEL?.trim()
+if (runtimeMode === 'gateway' && !revisionImageModel) throw new Error('PPT_AGENT_V4_REVISION_IMAGE_MODEL_REQUIRED')
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const fallbackModelValue = process.env.PPT_AGENT_FALLBACK_MODEL_ENABLED?.trim()
 if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !== 'false') {
@@ -151,6 +153,7 @@ const runtime = runtimeMode === 'gateway'
         stepSlaMs,
         workerConcurrency,
         imageConcurrency,
+        revisionImageModel: revisionImageModel!,
         reviewConcurrency,
         runLeaseTtlMs,
         createRunRateLimitPerMinute,
@@ -160,6 +163,7 @@ const runtime = runtimeMode === 'gateway'
   : createMockRuntime({
       repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
+      revisionImageModel: revisionImageModel || 'image-2',
     })
 let ticking = false
 const timer = setInterval(async () => {

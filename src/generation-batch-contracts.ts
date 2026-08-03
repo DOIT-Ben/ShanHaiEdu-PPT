@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const generationBatchSchema = z.object({
+const generationBatchShape = {
   batchId: z.string().regex(/^genbatch_[a-f0-9]{32}$/),
   proposalHash: z.string().regex(/^[a-f0-9]{64}$/),
   revisionRound: z.number().int().min(0).max(4),
@@ -28,7 +28,11 @@ export const generationBatchSchema = z.object({
   status: z.enum(['PREPARED', 'PROCESSING', 'RECONCILIATION_REQUIRED', 'COMPLETED']),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
-}).strict().superRefine((value, context) => {
+} as const
+
+const generationBatchObjectSchema = z.object(generationBatchShape).strict()
+
+function validateGenerationBatch(value: z.infer<typeof generationBatchObjectSchema>, context: z.RefinementCtx) {
   if (value.pages.length !== value.pageCount) {
     context.addIssue({ code: 'custom', path: ['pages'], message: 'generation batch must include every page exactly once' })
   }
@@ -39,6 +43,20 @@ export const generationBatchSchema = z.object({
   if (value.progress.completed + value.progress.failed > value.pageCount) {
     context.addIssue({ code: 'custom', path: ['progress'], message: 'completed and failed pages exceed batch size' })
   }
-})
+}
+
+export const generationBatchSchema = generationBatchObjectSchema.superRefine(validateGenerationBatch)
+
+export const storedGenerationBatchSchema = z.object({
+  ...generationBatchShape,
+  accountingModel: z.string().trim().min(1).max(120).optional(),
+  operationMode: z.enum(['TEXT_TO_IMAGE', 'IMAGE_EDIT']).optional(),
+}).strict().superRefine(validateGenerationBatch)
 
 export type GenerationBatch = z.infer<typeof generationBatchSchema>
+export type StoredGenerationBatch = z.infer<typeof storedGenerationBatchSchema>
+
+export function publicGenerationBatch(batch: StoredGenerationBatch): GenerationBatch {
+  const { accountingModel: _accountingModel, operationMode: _operationMode, ...publicBatch } = batch
+  return generationBatchSchema.parse(publicBatch)
+}

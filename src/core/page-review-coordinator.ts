@@ -15,6 +15,7 @@ import {
   allPageNumbers,
   appendFixedIssueResolutions,
   appendV4LifecycleEvent,
+  failVisualDeckV4Transaction,
   revisionDetails,
 } from './v4-lifecycle'
 
@@ -369,6 +370,22 @@ export class PageReviewCoordinator {
           pageNumbers: progress?.pageNumbers ?? allPageNumbers(transaction.run),
           reason: 'PAGE_REVIEW_FAILED',
           retryable: technical?.technicalRecovery?.retryable ?? false,
+        })
+        return
+      }
+      if (transaction.run.presentationMode === 'VISUAL_DECK_V4' && reason.includes('REJECTED')) {
+        appendV4LifecycleEvent(transaction, 'page_review.completed', {
+          completed: progress?.completed ?? 0,
+          total: progress?.total ?? transaction.run.slideCount,
+          pageNumbers: progress?.pageNumbers ?? allPageNumbers(transaction.run),
+          reason: 'PAGE_REVIEW_REJECTED',
+          retryable: false,
+        })
+        failVisualDeckV4Transaction({
+          transaction,
+          clock: this.dependencies.clock,
+          errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+          reason: 'REVISION_LIMIT_REACHED',
         })
         return
       }

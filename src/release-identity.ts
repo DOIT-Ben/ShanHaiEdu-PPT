@@ -1,8 +1,24 @@
 import { z } from 'zod'
 
-export const PPT_AGENT_SOFTWARE_VERSION = '4.0.0'
+export const PPT_AGENT_SOFTWARE_VERSION = '4.2.0'
 export const PPT_AGENT_CONTRACT_VERSION = '1'
-export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-1'
+export const LEGACY_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-1'
+export const CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-2'
+export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-3'
+export const SUPPORTED_VISUAL_DECK_V4_COMPILER_VERSIONS = [
+  LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+  CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+] as const
+
+export function isSupportedVisualDeckV4CompilerVersion(value: string) {
+  return (SUPPORTED_VISUAL_DECK_V4_COMPILER_VERSIONS as readonly string[]).includes(value)
+}
+
+export function usesPatchRevisionContract(value: string) {
+  return value === CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION
+    || value === VISUAL_DECK_V4_COMPILER_VERSION
+}
 
 const identifierSchema = z.string().trim().min(1).max(160)
 

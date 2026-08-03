@@ -6,10 +6,12 @@ import {
   type V4LifecycleStage,
   type V4RevisionKind,
   type V4RunFailureCode,
+  type TechnicalRecovery,
 } from '../contracts'
 import type { RevisionPlan } from '../presentation-contracts'
 import type { AgentRepository, AgentTransaction, ClockPort, NewAgentEvent, RunRecord } from './ports'
 import { isTerminalStatus, transitionRun } from './policy'
+import { deriveV4TerminalAccounting } from './v4-terminal-accounting'
 
 export type V4LifecycleEventType =
   | 'planning.started' | 'planning.completed'
@@ -192,36 +194,188 @@ export async function failVisualDeckV4Run(input: Readonly<{
   runId: string
   errorCode: V4RunFailureCode
 }>) {
-  return input.repository.transact(input.runId, (transaction) => {
-    if (!isVisualDeckV4(transaction.run) || isTerminalStatus(transaction.run.status)
-      || ['PAUSED', 'NEEDS_HUMAN', 'AWAITING_BLUEPRINT_APPROVAL', 'AWAITING_REVISION_APPROVAL'].includes(transaction.run.status)) {
-      return false
-    }
+  return input.repository.transact(input.runId, (transaction) => failVisualDeckV4Transaction({
+    transaction,
+    clock: input.clock,
+    errorCode: input.errorCode,
+  }))
+}
+
+export function failVisualDeckV4Transaction(input: Readonly<{
+  transaction: AgentTransaction
+  clock: ClockPort
+  errorCode: V4RunFailureCode
+  reason?: V4LifecycleReason
+}>) {
+  const { transaction } = input
+  if (transaction.run.status === 'RECOVERING' && transaction.run.pendingTerminalFailure) {
+    return transaction.run.pendingTerminalFailure.errorCode === input.errorCode
+  }
+  if (!isVisualDeckV4(transaction.run) || isTerminalStatus(transaction.run.status)
+    || ['PAUSED', 'NEEDS_HUMAN', 'AWAITING_BLUEPRINT_APPROVAL', 'AWAITING_REVISION_APPROVAL'].includes(transaction.run.status)) {
+    return false
+  }
+  const terminalAccounting = deriveV4TerminalAccounting(transaction.run, transaction.listSteps())
+  if (terminalAccounting.accountingStatus !== 'FINAL') {
     const fromStatus = transaction.run.status
-    const now = input.clock.now().toISOString()
+    const now = input.clock.now()
     closeActiveV4LifecycleStages(transaction, 'INTERNAL_FAILURE')
-    const policy = transitionRun(transaction.run, 'FAILED')
-    const failedRun = { ...transaction.run, ...policy, updatedAt: now }
-    transaction.putRun(failedRun)
+    const recovery: TechnicalRecovery = {
+      resumeState: fromStatus as TechnicalRecovery['resumeState'],
+      reason: 'TERMINAL_ACCOUNTING_PENDING',
+      retryable: true,
+      attempt: 1,
+      maxAttempts: 5,
+      nextAttemptAt: new Date(now.getTime() + 2_000).toISOString(),
+      active: true,
+    }
+    const policy = transitionRun(transaction.run, 'RECOVERING')
+    const recovering: RunRecord = {
+      ...transaction.run,
+      ...policy,
+      technicalRecovery: recovery,
+      pendingTerminalFailure: {
+        errorCode: input.errorCode,
+        reason: input.reason ?? 'INTERNAL_FAILURE',
+        requestedAt: now.toISOString(),
+      },
+      terminalAccounting,
+      updatedAt: now.toISOString(),
+    }
+    transaction.putRun(recovering)
     transaction.appendEvent({
       schemaVersion: CONTRACT_VERSION,
       type: 'phase.changed',
-      payload: { from: fromStatus, to: 'FAILED', reason: input.errorCode },
+      payload: { from: fromStatus, to: 'RECOVERING', reason: 'TERMINAL_ACCOUNTING_PENDING' },
     })
     transaction.appendEvent({
       schemaVersion: CONTRACT_VERSION,
-      type: 'run.failed',
-      payload: {
-        ...v4LifecyclePayload(failedRun, 'RUN', {
-          completed: 0,
-          total: 1,
-          pageNumbers: allPageNumbers(failedRun),
-          reason: 'INTERNAL_FAILURE',
-          retryable: false,
-        }),
-        errorCode: input.errorCode,
-      },
+      type: 'technical.recovery.started',
+      payload: recovery,
     })
     return true
+  }
+  return completeVisualDeckV4Failure({
+    transaction,
+    clock: input.clock,
+    errorCode: input.errorCode,
+    reason: input.reason ?? 'INTERNAL_FAILURE',
+    terminalAccounting,
   })
+}
+
+function completeVisualDeckV4Failure(input: Readonly<{
+  transaction: AgentTransaction
+  clock: ClockPort
+  errorCode: V4RunFailureCode
+  reason: V4LifecycleReason
+  terminalAccounting: ReturnType<typeof deriveV4TerminalAccounting>
+}>) {
+  const { transaction } = input
+  const fromStatus = transaction.run.status
+  const now = input.clock.now().toISOString()
+  closeActiveV4LifecycleStages(transaction, 'INTERNAL_FAILURE')
+  const policy = transitionRun(transaction.run, 'FAILED')
+  const transitionedRun = { ...transaction.run, ...policy }
+  const { pendingTerminalFailure: _pendingTerminalFailure, ...runWithoutPendingFailure } = transitionedRun
+  const completedRecovery = transaction.run.technicalRecovery?.reason === 'TERMINAL_ACCOUNTING_PENDING'
+    ? { ...transaction.run.technicalRecovery, active: false, nextAttemptAt: null }
+    : transaction.run.technicalRecovery
+  const failedRun: RunRecord = {
+    ...runWithoutPendingFailure,
+    ...(completedRecovery ? { technicalRecovery: completedRecovery } : {}),
+    terminalAccounting: input.terminalAccounting,
+    updatedAt: now,
+  }
+  transaction.putRun(failedRun)
+  if (completedRecovery) {
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'technical.recovery.completed',
+      payload: completedRecovery,
+    })
+  }
+  transaction.appendEvent({
+    schemaVersion: CONTRACT_VERSION,
+    type: 'phase.changed',
+    payload: { from: fromStatus, to: 'FAILED', reason: input.errorCode },
+  })
+  transaction.appendEvent({
+    schemaVersion: CONTRACT_VERSION,
+    type: 'run.failed',
+    payload: {
+      ...v4LifecyclePayload(failedRun, 'RUN', {
+        completed: 0,
+        total: 1,
+        pageNumbers: allPageNumbers(failedRun),
+        reason: input.reason,
+        retryable: false,
+      }),
+      errorCode: input.errorCode,
+      terminalAccounting: input.terminalAccounting,
+    },
+  })
+  return true
+}
+
+/** Completes a pending quality failure or publishes post-failure FINAL accounting exactly once. */
+export function reconcileVisualDeckV4TerminalState(transaction: AgentTransaction, clock: ClockPort) {
+  if (!isVisualDeckV4(transaction.run)) return false
+  const terminalAccounting = deriveV4TerminalAccounting(transaction.run, transaction.listSteps())
+  const pending = transaction.run.pendingTerminalFailure
+  if (pending) {
+    if (terminalAccounting.accountingStatus !== 'FINAL') {
+      const recovery = transaction.run.technicalRecovery
+      if (transaction.run.status !== 'RECOVERING' || !recovery || recovery.reason !== 'TERMINAL_ACCOUNTING_PENDING') {
+        return false
+      }
+      transaction.putRun({
+        ...transaction.run,
+        terminalAccounting,
+        technicalRecovery: {
+          ...recovery,
+          active: true,
+          retryable: true,
+          nextAttemptAt: new Date(clock.now().getTime() + 2_000).toISOString(),
+        },
+        updatedAt: clock.now().toISOString(),
+      })
+      return false
+    }
+    return completeVisualDeckV4Failure({
+      transaction,
+      clock,
+      errorCode: pending.errorCode,
+      reason: pending.reason,
+      terminalAccounting,
+    })
+  }
+  if (transaction.run.status !== 'FAILED'
+    || transaction.run.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
+    || terminalAccounting.accountingStatus !== 'FINAL'
+    || transaction.listEvents().some((event) => event.type === 'run.accounting.finalized')) {
+    return false
+  }
+  const updated: RunRecord = {
+    ...transaction.run,
+    terminalAccounting,
+    version: transaction.run.version + 1,
+    updatedAt: clock.now().toISOString(),
+  }
+  transaction.putRun(updated)
+  transaction.appendEvent({
+    schemaVersion: CONTRACT_VERSION,
+    type: 'run.accounting.finalized',
+    payload: {
+      ...v4LifecyclePayload(updated, 'RUN', {
+        completed: 1,
+        total: 1,
+        pageNumbers: allPageNumbers(updated),
+        reason: 'INTERNAL_FAILURE',
+        retryable: false,
+      }),
+      terminalAccounting,
+    },
+  })
+  return true
 }

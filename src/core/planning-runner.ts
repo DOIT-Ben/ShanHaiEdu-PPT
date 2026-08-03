@@ -1,6 +1,6 @@
 import type { CreateRunRequest, PlanningFailure } from '../contracts'
 import { CONTRACT_VERSION } from '../contracts'
-import { ZodError } from 'zod'
+import { z, ZodError } from 'zod'
 import {
   blueprintDraftSchema,
   blueprintReflectionSchema,
@@ -17,32 +17,107 @@ import type {
   DocumentResult,
   RunRecord,
   StepRecord,
+  StructuredModelExecutionMetrics,
+  StructuredModelMetricsPort,
   StructuredModelPort,
 } from './ports'
 import { transitionRun } from './policy'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import { beginTechnicalRecovery, isTechnicalFailureCode, technicalFailureDisposition } from './technical-recovery'
 import {
   createVisualDeckV4BlueprintFromProposal,
+  normalizeVisualDeckV4SourceSpecRequestBinding,
+  V4_ALL_PLANNING_STAGES,
+  V4_PLANNING_STAGE_COUNT,
+  V4_PLANNING_STAGES,
   type VisualDeckV4PlanningStage,
+  visualDeckV4PlanningStagesForCompiler,
   visualDeckV4PlanningStageStepKey,
 } from './visual-deck-v4-planner'
 import {
+  createVisualDeckV4DeckVisualReflectionInput,
+  createVisualDeckV4SlideBriefsReflectionInput,
+  resolveVisualDeckV4DeckVisualReflection,
+  resolveVisualDeckV4SlideBriefsReflection,
+} from './visual-deck-v4-reflection'
+import {
   normalizeVisualDeckV4RequestFocus,
   normalizeVisualDeckV4VisibleReferences,
+  VISUAL_DECK_V4_REFLECTION_RUBRIC_VERSION,
+  visualDeckV4DeckVisualReflectionStageOutputSchema,
   visualDeckV4DeckVisualStageSchema,
   visualDeckV4FinalCoherenceReviewSchema,
   visualDeckV4ProposalDraftSchema,
+  visualDeckV4SlideBriefsReflectionStageOutputSchema,
   visualDeckV4SlideBriefsStageSchema,
   visualDeckV4SourceSpecStageSchema,
 } from '../visual-deck-v4-contracts'
 import type { StructuredGenerationPreflightPort, StructuredGenerationProtocol } from './ports'
 import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
+import {
+  CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+  isSupportedVisualDeckV4CompilerVersion,
+  LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+} from '../release-identity'
+import { V4ReflectionCoordinator } from './v4-reflection/coordinator'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 5
 const MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS = 2
 const PROVIDER_RETRY_DELAYS_MS = [5_000, 30_000, 60_000, 120_000] as const
+const V4_REFLECTION_DIAGNOSTIC_PATHS: Readonly<Record<string, readonly string[]>> = {
+  V4_REFLECTION_APPLIED_FINDING_NO_CHANGE: ['findings', 'revisedSlides'],
+  V4_REFLECTION_BASE_HASH_MISMATCH: ['baseArtifactHash'],
+  V4_REFLECTION_CHANGE_OUT_OF_SCOPE: ['findings.fieldPaths', 'revisedSlides'],
+  V4_REFLECTION_CONTEXT_HASH_MISMATCH: ['reviewContextHash'],
+  V4_REFLECTION_FINDING_PAGE_OUT_OF_RANGE: ['findings.pageNumbers'],
+  V4_REFLECTION_FINDING_PAGE_SCOPE_MISMATCH: ['findings.pageNumbers'],
+  V4_REFLECTION_FROZEN_FIELD_MUTATION: ['revisedArtifact'],
+  V4_REFLECTION_GOVERNANCE_CONTEXT_REQUIRED: ['governanceContext'],
+  V4_REFLECTION_PERSISTED_ARTIFACT_MISMATCH: ['artifact'],
+  V4_REFLECTION_UNCHANGED_ARTIFACT_MUTATED: ['revisedArtifact'],
+  V4_REFLECTION_UNREPORTED_PAGE_MUTATION: ['revisedSlides.pageNumber'],
+}
+
+const v4PlanningStageAttemptSchema = z.object({
+  attempt: z.number().int().min(1).max(MAX_PROVIDER_ATTEMPTS),
+  outcome: z.enum(['STARTED', 'SUCCEEDED', 'FAILED']),
+  requestKeyHash: z.string().regex(/^[a-f0-9]{64}$/),
+  durationMs: z.number().int().nonnegative(),
+  requestId: z.string().regex(/^[A-Za-z0-9._:-]{1,160}$/).nullable(),
+  errorCode: z.string().regex(/^[A-Z0-9_]{1,160}$/).nullable(),
+  status: z.number().int().min(100).max(599).nullable(),
+  responseAccepted: z.boolean(),
+  sseEventCount: z.number().int().nonnegative(),
+  lastActivityAt: z.string().datetime().nullable(),
+  inputTokens: z.number().int().nonnegative().nullable().default(null),
+  outputTokens: z.number().int().nonnegative().nullable().default(null),
+  totalTokens: z.number().int().nonnegative().nullable().default(null),
+}).strict().superRefine((value, context) => {
+  if (value.outcome === 'STARTED' && (value.durationMs !== 0 || value.requestId !== null
+    || value.errorCode !== null || value.status !== null || value.responseAccepted
+    || value.sseEventCount !== 0 || value.lastActivityAt !== null
+    || value.inputTokens !== null || value.outputTokens !== null || value.totalTokens !== null)) {
+    context.addIssue({ code: 'custom', message: 'started planning attempt cannot contain response evidence' })
+  }
+  if (value.outcome === 'SUCCEEDED' && value.errorCode !== null) {
+    context.addIssue({ code: 'custom', path: ['errorCode'], message: 'successful planning attempt cannot contain an error' })
+  }
+  if (value.outcome === 'FAILED' && value.errorCode === null) {
+    context.addIssue({ code: 'custom', path: ['errorCode'], message: 'failed planning attempt requires an error' })
+  }
+})
+
+const v4PlanningStageAuditSchema = z.object({
+  schemaVersion: z.literal('1'),
+  stage: z.enum(V4_ALL_PLANNING_STAGES),
+  stageKeyHash: z.string().regex(/^[a-f0-9]{64}$/),
+  totalDurationMs: z.number().int().nonnegative(),
+  attempts: z.array(v4PlanningStageAttemptSchema).max(MAX_PROVIDER_ATTEMPTS),
+}).strict()
+
+type V4PlanningStageAttempt = z.infer<typeof v4PlanningStageAttemptSchema>
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
@@ -198,15 +273,36 @@ export class PlanningRunner {
       throw error
     }
     await this.completeTechnicalSourceResolution(effectiveInput, document)
-    const prepared = await this.prepare(effectiveInput, document)
+    let compilerVersion: string | null = null
+    let compilerIdentityError: unknown = null
+    if (strategy.planningKind === 'VISUAL_DECK_COMPILER') {
+      try {
+        compilerVersion = await this.v4CompilerVersion(run)
+      } catch (error) {
+        compilerIdentityError = error
+      }
+    }
+    const planningStageCount = compilerVersion
+      ? visualDeckV4PlanningStagesForCompiler(compilerVersion).length
+      : strategy.planningKind === 'VISUAL_DECK_COMPILER'
+        ? visualDeckV4PlanningStagesForCompiler(LEGACY_VISUAL_DECK_V4_COMPILER_VERSION).length
+        : 1
+    const prepared = await this.prepare(effectiveInput, document, planningStageCount)
     if (prepared.replayed) return prepared
 
     if (!document.isComplete || document.chunks.length === 0) {
-      const step = await this.fail(effectiveInput, this.sourceFailure(effectiveInput), 'SOURCE_INCOMPLETE', document)
+      const step = await this.fail(
+        effectiveInput,
+        this.sourceFailure(effectiveInput),
+        'SOURCE_INCOMPLETE',
+        document,
+        compilerVersion,
+      )
       return { step, blueprint: null, replayed: false }
     }
 
     try {
+      if (compilerIdentityError) throw compilerIdentityError
       const blueprint = strategy.planningKind === 'VISUAL_DECK_COMPILER'
         ? await this.createVisualDeckV4Blueprint(
             effectiveInput,
@@ -214,6 +310,7 @@ export class PlanningRunner {
             prepared.step.inputHash,
             run.host.tenantId,
             visualDeckV4!,
+            compilerVersion!,
           )
         : effectiveInput.source.kind === 'APPROVED_PAGE_DESIGN'
           ? this.createApprovedBlueprint(effectiveInput, document, prepared.step.inputHash)
@@ -224,7 +321,7 @@ export class PlanningRunner {
       const failure = error instanceof PlanningFailureError
         ? error.failure
         : this.contractFailure(effectiveInput, error, 1, 1, false)
-      const step = await this.fail(effectiveInput, failure, 'PLANNING_FAILED', document)
+      const step = await this.fail(effectiveInput, failure, 'PLANNING_FAILED', document, compilerVersion)
       return { step, blueprint: null, replayed: false }
     }
   }
@@ -235,6 +332,7 @@ export class PlanningRunner {
     inputHash: string,
     tenantId: string,
     config: NonNullable<CreateRunRequest['visualDeckV4']>,
+    compilerVersion: string,
   ) {
     const basePayload = {
       presentationMode: 'VISUAL_DECK_V4' as const,
@@ -272,11 +370,11 @@ export class PlanningRunner {
       visualDirection: input.visualDirection,
       ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
       ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+      compilerVersion,
       createdAt: this.dependencies.clock.now().toISOString(),
     }
     const protocol = await this.resolveV4StructuredGenerationProtocol(input, tenantId)
-    const sourceSpec = normalizeVisualDeckV4RequestFocus(
-      visualDeckV4SourceSpecStageSchema.parse(await this.runV4PlanningStage(input, {
+    const sourceSpec = visualDeckV4SourceSpecStageSchema.parse(await this.runV4PlanningStage(input, {
         stage: 'source-spec',
         tool: 'compile_v4_source_spec',
         operation: 'create_visual_deck_v4_source_spec',
@@ -284,19 +382,60 @@ export class PlanningRunner {
         payload: basePayload,
         sourceAssets: document.assets ?? [],
         protocol,
-        parse: visualDeckV4SourceSpecStageSchema.parse,
-      })),
-      config.deckOptions.focus,
-    )
-    const deckVisual = visualDeckV4DeckVisualStageSchema.parse(await this.runV4PlanningStage(input, {
+        compilerVersion,
+        parse: (value) => normalizeVisualDeckV4RequestFocus(
+          normalizeVisualDeckV4SourceSpecRequestBinding(
+            compilerInput,
+            visualDeckV4SourceSpecStageSchema.parse(value),
+          ),
+          config.deckOptions.focus,
+        ),
+      }))
+    const deckVisualDraft = visualDeckV4DeckVisualStageSchema.parse(await this.runV4PlanningStage(input, {
       stage: 'deck-visual',
       tool: 'compile_v4_deck_visual',
       operation: 'create_visual_deck_v4_deck_visual',
       schemaName: 'ppt_agent_v4_deck_visual_v1',
       payload: { ...basePayload, ...sourceSpec },
       protocol,
+      compilerVersion,
       parse: visualDeckV4DeckVisualStageSchema.parse,
     }))
+    const reflectionContext = {
+      config,
+      sourceSpec,
+      document,
+      visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      ...(input.presentationGoal ? { presentationGoal: input.presentationGoal } : {}),
+    }
+    const reflectionCoordinator = new V4ReflectionCoordinator({
+      repository: this.dependencies.repository,
+      model: this.dependencies.model,
+      clock: this.dependencies.clock,
+    })
+    const reflectionCommon = {
+      runId: input.runId,
+      tenantId,
+      planningAttempt: input.attempt ?? 0,
+      compilerVersion,
+      protocol,
+      sourceSummary: document.chunks.map((chunk) => chunk.text).join('\n').slice(0, 16_000),
+    }
+    let deckVisual
+    if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+      const enhanced = await reflectionCoordinator.enhanceDeck({
+        ...reflectionCommon,
+        presentationSpec: sourceSpec.presentationSpec,
+        candidate: deckVisualDraft,
+      })
+      deckVisual = enhanced.artifact
+      await this.recordV4ReflectionProgress(input, 'reflect-deck-visual', enhanced.disposition.status)
+    } else if (compilerVersion === CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION) {
+      deckVisual = await this.legacyDeckReflection(input, protocol, reflectionContext, deckVisualDraft, sourceSpec)
+    } else {
+      deckVisual = deckVisualDraft
+    }
     const createSlideBriefs = async (
       repairAttempt: number,
       contractRepairIssues: readonly { path: string; message: string }[] = [],
@@ -313,15 +452,17 @@ export class PlanningRunner {
           ...(contractRepairIssues.length > 0 ? { contractRepairIssues } : {}),
         },
         protocol,
+        compilerVersion,
         repairAttempt,
         parse: visualDeckV4SlideBriefsStageSchema.parse,
       })),
     )
     let slideBriefs = await createSlideBriefs(0)
-    let proposalDraft: ReturnType<typeof visualDeckV4ProposalDraftSchema.parse> | null = null
+    let candidateValidated = false
     for (let repairAttempt = 0; repairAttempt < MAX_V4_SLIDE_BRIEF_CONTRACT_ATTEMPTS; repairAttempt += 1) {
       try {
-        proposalDraft = visualDeckV4ProposalDraftSchema.parse({ ...sourceSpec, ...deckVisual, ...slideBriefs })
+        visualDeckV4ProposalDraftSchema.parse({ ...sourceSpec, ...deckVisual, ...slideBriefs })
+        candidateValidated = true
         break
       } catch (error) {
         const repairIssues = this.v4SlideBriefContractIssues(error)
@@ -333,17 +474,154 @@ export class PlanningRunner {
         slideBriefs = await createSlideBriefs(repairAttempt + 1, repairIssues)
       }
     }
-    if (!proposalDraft) throw new Error('V4_SLIDE_BRIEF_CONTRACT_REPAIR_EXHAUSTED')
-    await this.runV4PlanningStage(input, {
-      stage: 'final-coherence',
-      tool: 'review_v4_final_coherence',
-      operation: 'review_visual_deck_v4_coherence',
-      schemaName: 'ppt_agent_v4_final_coherence_v1',
-      payload: proposalDraft,
-      protocol,
-      parse: visualDeckV4FinalCoherenceReviewSchema.parse,
+    if (!candidateValidated) throw new Error('V4_SLIDE_BRIEF_CONTRACT_REPAIR_EXHAUSTED')
+    let reflectedSlides
+    if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+      const enhanced = await reflectionCoordinator.enhanceSlides({
+        ...reflectionCommon,
+        sourceSpec,
+        deckVisual,
+        candidate: slideBriefs,
+      })
+      reflectedSlides = enhanced.artifact
+      await this.recordV4ReflectionProgress(input, 'reflect-slide-briefs', enhanced.disposition.status)
+    } else if (compilerVersion === CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION) {
+      reflectedSlides = await this.legacySlideReflection(
+        input, protocol, reflectionContext, deckVisual, slideBriefs, sourceSpec,
+      )
+    } else {
+      reflectedSlides = slideBriefs
+    }
+    const proposalDraft = visualDeckV4ProposalDraftSchema.parse({
+      ...sourceSpec,
+      ...deckVisual,
+      ...reflectedSlides,
     })
+    if (compilerVersion === LEGACY_VISUAL_DECK_V4_COMPILER_VERSION) {
+      await this.runV4PlanningStage(input, {
+        stage: 'final-coherence',
+        tool: 'review_v4_final_coherence',
+        operation: 'review_visual_deck_v4_coherence',
+        schemaName: 'ppt_agent_v4_final_coherence_v1',
+        payload: proposalDraft,
+        protocol,
+        compilerVersion,
+        parse: visualDeckV4FinalCoherenceReviewSchema.parse,
+      })
+    }
     return createVisualDeckV4BlueprintFromProposal(compilerInput, proposalDraft)
+  }
+
+  private async legacyDeckReflection(
+    input: PlanPresentationInput,
+    protocol: StructuredGenerationProtocol,
+    reflectionContext: Parameters<typeof createVisualDeckV4DeckVisualReflectionInput>[0],
+    deckVisualDraft: Parameters<typeof createVisualDeckV4DeckVisualReflectionInput>[1],
+    sourceSpec: ReturnType<typeof visualDeckV4SourceSpecStageSchema.parse>,
+  ) {
+    const deckReflectionInput = createVisualDeckV4DeckVisualReflectionInput(reflectionContext, deckVisualDraft)
+    return resolveVisualDeckV4DeckVisualReflection(
+      deckVisualDraft,
+      await this.runV4PlanningStage(input, {
+        stage: 'reflect-deck-visual', tool: 'reflect_v4_deck_visual',
+        operation: 'reflect_and_revise_deck_visual', schemaName: 'ppt_agent_v4_deck_visual_reflection_v1',
+        payload: deckReflectionInput, protocol,
+        compilerVersion: CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+        parse: (value) => {
+          const resolved = resolveVisualDeckV4DeckVisualReflection(
+            deckVisualDraft, value, deckReflectionInput.reviewContextHash,
+          )
+          if (resolved.artifact.deckPlan.slideCount !== sourceSpec.presentationSpec.slideCount) {
+            throw new Error('VISUAL_DECK_V4_REQUEST_MISMATCH')
+          }
+          return resolved
+        },
+      }),
+      deckReflectionInput.reviewContextHash,
+    ).artifact
+  }
+
+  private async legacySlideReflection(
+    input: PlanPresentationInput,
+    protocol: StructuredGenerationProtocol,
+    reflectionContext: Parameters<typeof createVisualDeckV4SlideBriefsReflectionInput>[0],
+    deckVisual: Parameters<typeof createVisualDeckV4SlideBriefsReflectionInput>[0]['deckVisual'] & {},
+    slideBriefs: Parameters<typeof createVisualDeckV4SlideBriefsReflectionInput>[1],
+    sourceSpec: ReturnType<typeof visualDeckV4SourceSpecStageSchema.parse>,
+  ) {
+    const slideReflectionInput = createVisualDeckV4SlideBriefsReflectionInput(
+      { ...reflectionContext, deckVisual }, slideBriefs,
+    )
+    return resolveVisualDeckV4SlideBriefsReflection(
+      slideBriefs,
+      await this.runV4PlanningStage(input, {
+        stage: 'reflect-slide-briefs', tool: 'reflect_v4_slide_briefs',
+        operation: 'reflect_and_revise_slide_briefs', schemaName: 'ppt_agent_v4_slide_briefs_reflection_v1',
+        payload: slideReflectionInput, protocol,
+        compilerVersion: CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+        parse: (value) => {
+          const resolved = resolveVisualDeckV4SlideBriefsReflection(
+            slideBriefs, value, slideReflectionInput.reviewContextHash,
+          )
+          visualDeckV4ProposalDraftSchema.parse({ ...sourceSpec, ...deckVisual, ...resolved.artifact })
+          return resolved
+        },
+      }),
+      slideReflectionInput.reviewContextHash,
+    ).artifact
+  }
+
+  private async v4CompilerVersion(run: RunRecord) {
+    const evidence = new Set<string>()
+    const addEvidence = (version: string) => {
+      if (!isSupportedVisualDeckV4CompilerVersion(version)) {
+        throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
+      }
+      evidence.add(version)
+    }
+
+    if (run.release?.compilerVersion) addEvidence(run.release.compilerVersion)
+    for (const step of await this.dependencies.repository.listSteps(run.id)) {
+      const output = step.output && typeof step.output === 'object'
+        ? step.output as { visualDeckV4Proposal?: { compilerVersion?: unknown } }
+        : null
+      const proposalVersion = output?.visualDeckV4Proposal?.compilerVersion
+      if (typeof proposalVersion === 'string') addEvidence(proposalVersion)
+
+      if (step.tool === 'review_v4_final_coherence'
+        || step.idempotencyKey.includes(':v4:final-coherence:planning:')) {
+        addEvidence(LEGACY_VISUAL_DECK_V4_COMPILER_VERSION)
+      }
+      if (step.tool === 'reflect_v4_deck_visual' || step.tool === 'reflect_v4_slide_briefs'
+        || step.idempotencyKey.includes(':v4:reflect:deck-visual:')
+        || step.idempotencyKey.includes(':v4:reflect:slide-briefs:')) {
+        addEvidence(CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION)
+      }
+      if (step.idempotencyKey.includes(':v4:chain-3:')) {
+        addEvidence(VISUAL_DECK_V4_COMPILER_VERSION)
+      }
+    }
+    if (evidence.size > 1) throw new Error('V4_COMPILER_IDENTITY_CONFLICT')
+    return evidence.values().next().value ?? LEGACY_VISUAL_DECK_V4_COMPILER_VERSION
+  }
+
+  private async recordV4ReflectionProgress(
+    input: PlanPresentationInput,
+    stage: Extract<VisualDeckV4PlanningStage, 'reflect-deck-visual' | 'reflect-slide-briefs'>,
+    status: 'NO_ISSUES' | 'APPLIED' | 'REFLECTION_SKIPPED',
+  ) {
+    const completed = V4_PLANNING_STAGES.indexOf(stage) + 1
+    const label = stage === 'reflect-deck-visual' ? '整套叙事与视觉方案' : '逐页视觉施工单'
+    const summary = status === 'REFLECTION_SKIPPED'
+      ? `${label}已检查，沿用已验证方案继续`
+      : `${label}质量检查已完成`
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.progress',
+        payload: { stepId: input.stepId, completed, total: V4_PLANNING_STAGE_COUNT, summary },
+      })
+    })
   }
 
   private async resolveV4StructuredGenerationProtocol(input: PlanPresentationInput, tenantId: string) {
@@ -365,8 +643,9 @@ export class PlanningRunner {
     if (existing) {
       const persisted = this.parseV4StructuredGenerationProtocol(existing)
       await this.dependencies.repository.transact(input.runId, (transaction) => {
-        if (transaction.run.v4StructuredGenerationProtocol === persisted.protocol) return
-        transaction.putRun({ ...transaction.run, v4StructuredGenerationProtocol: persisted.protocol, updatedAt: this.dependencies.clock.now().toISOString() })
+        if (transaction.run.v4StructuredGenerationProtocol !== persisted.protocol) {
+          transaction.putRun({ ...transaction.run, v4StructuredGenerationProtocol: persisted.protocol, updatedAt: this.dependencies.clock.now().toISOString() })
+        }
       })
       return persisted.protocol
     }
@@ -402,6 +681,7 @@ export class PlanningRunner {
         const now = this.dependencies.clock.now().toISOString()
         transaction.putStep({ ...step, status: 'COMPLETED', output: result, errorCode: null, updatedAt: now })
         transaction.putRun({ ...transaction.run, v4StructuredGenerationProtocol: result.protocol, updatedAt: now })
+        this.clearCompletedPlanningRecovery(transaction)
       })
       return result.protocol
     } catch (error) {
@@ -437,11 +717,15 @@ export class PlanningRunner {
     payload: unknown
     sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
     protocol: StructuredGenerationProtocol
+    compilerVersion: string
     repairAttempt?: number
     parse: (value: unknown) => unknown
   }>) {
     const key = visualDeckV4PlanningStageStepKey(
       input.runId, request.stage, input.attempt ?? 0, request.repairAttempt ?? 0,
+    )
+    const auditStageKey = visualDeckV4PlanningStageStepKey(
+      input.runId, request.stage, input.attempt ?? 0,
     )
     const inputHash = hashInput({ tool: request.tool, operation: request.operation, schemaName: request.schemaName, payload: request.payload, protocol: request.protocol })
     const existing = await this.dependencies.repository.transact(input.runId, (transaction) => {
@@ -455,7 +739,7 @@ export class PlanningRunner {
       }
       return null
     })
-    if (existing) return existing
+    if (existing) return request.parse(existing)
     await this.dependencies.repository.transact(input.runId, (transaction) => {
       if (transaction.getStep(key)) return
       const now = this.dependencies.clock.now().toISOString()
@@ -481,8 +765,21 @@ export class PlanningRunner {
         payload: { stepId: step.id, tool: step.tool, label: `V4 规划阶段：${request.stage}` },
       })
     })
+    const providerAttempt = await this.beginV4PlanningStageAttempt(
+      input.runId, auditStageKey, key, request.stage,
+    )
+    const startedAt = Date.now()
+    let executionMetrics: StructuredModelExecutionMetrics | null = null
+    let executionMetricsConsumed = false
+    const consumeExecutionMetrics = () => {
+      if (!executionMetricsConsumed) {
+        executionMetricsConsumed = true
+        executionMetrics = this.takeStructuredModelExecutionMetrics(key)
+      }
+      return executionMetrics
+    }
     try {
-      const raw = await this.executeWithProviderRetry(input, {
+      const raw = await this.dependencies.model.execute({
         tenantId: (await this.requireRun(input.runId)).host.tenantId,
         operation: request.operation,
         schemaName: request.schemaName,
@@ -491,31 +788,291 @@ export class PlanningRunner {
         idempotencyKey: key,
         structuredGenerationProtocol: request.protocol,
       })
-      const output = request.parse(raw)
+      executionMetrics = consumeExecutionMetrics()
+      const parsed = request.parse(raw)
+      const output = this.withV4ReflectionAudit(
+        request.stage,
+        parsed,
+        executionMetrics,
+        Math.max(0, Date.now() - startedAt),
+      )
+      const attemptRecord = this.v4PlanningStageAttemptRecord({
+        attempt: providerAttempt,
+        outcome: 'SUCCEEDED',
+        requestKey: key,
+        metrics: executionMetrics,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      })
       return await this.dependencies.repository.transact(input.runId, (transaction) => {
         const step = transaction.getStep(key)
         if (!step) throw new Error('STEP_NOT_FOUND')
         const completed: StepRecord = { ...step, status: 'COMPLETED', output, errorCode: null, updatedAt: this.dependencies.clock.now().toISOString() }
         transaction.putStep(completed)
+        this.recordV4PlanningStageAttempt(transaction, auditStageKey, key, request.stage, attemptRecord, true)
+        this.clearCompletedPlanningRecovery(transaction)
         transaction.appendEvent({ schemaVersion: CONTRACT_VERSION, type: 'tool.completed', payload: { stepId: step.id, summary: `V4 规划阶段已完成：${request.stage}` } })
+        const stages = visualDeckV4PlanningStagesForCompiler(request.compilerVersion)
+        const progressCompleted = stages.indexOf(request.stage) + 1
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'tool.progress',
+          payload: {
+            stepId: input.stepId,
+            completed: progressCompleted,
+            total: stages.length,
+            summary: `V4 规划已完成 ${progressCompleted}/${stages.length} 阶段`,
+          },
+        })
         return output
       })
     } catch (error) {
-      const failure = error instanceof PlanningFailureError
-        ? error.failure
-        : this.contractFailure(input, error, 1, 1, false)
+      executionMetrics = consumeExecutionMetrics()
+      const reflectionStage = request.stage === 'reflect-deck-visual' || request.stage === 'reflect-slide-briefs'
+      const exhausted = providerAttempt === MAX_PROVIDER_ATTEMPTS
+      const reflectionFailure = reflectionStage
+        ? this.reflectionContractFailure(input, error, providerAttempt, exhausted)
+        : null
+      const failure = reflectionFailure
+        ?? (error instanceof PlanningFailureError
+          ? error.failure
+          : this.providerFailure(input, error, providerAttempt)
+          ?? this.contractFailure(
+            input,
+            error,
+            providerAttempt,
+            MAX_PROVIDER_ATTEMPTS,
+            exhausted,
+          ))
+      const attemptRecord = this.v4PlanningStageAttemptRecord({
+        attempt: providerAttempt,
+        outcome: 'FAILED',
+        requestKey: key,
+        metrics: executionMetrics,
+        error,
+        errorCode: failure.errorCode,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      })
       await this.dependencies.repository.transact(input.runId, (transaction) => {
         const step = transaction.getStep(key)
-        if (!step || step.status === 'FAILED') return
-        transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
-        transaction.appendEvent({
-          schemaVersion: CONTRACT_VERSION,
-          type: 'tool.failed',
-          payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
-        })
+        if (!step) throw new Error('STEP_NOT_FOUND')
+        if (step.status !== 'FAILED') {
+          transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'tool.failed',
+            payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
+          })
+        }
+        const terminalAudit = providerAttempt === MAX_PROVIDER_ATTEMPTS
+          || technicalFailureDisposition(failure.errorCode) === 'NON_RETRYABLE'
+        this.recordV4PlanningStageAttempt(
+          transaction, auditStageKey, key, request.stage, attemptRecord, terminalAudit,
+        )
       })
       throw new PlanningFailureError(failure)
     }
+  }
+
+  private async beginV4PlanningStageAttempt(
+    runId: string,
+    auditStageKey: string,
+    requestKey: string,
+    stage: VisualDeckV4PlanningStage,
+  ) {
+    return this.dependencies.repository.transact(runId, (transaction) => {
+      const auditKey = `${auditStageKey}:attempt-audit`
+      const stageKeyHash = hashInput(auditStageKey)
+      const requestKeyHash = hashInput(requestKey)
+      const inputHash = hashInput({ tool: 'audit_v4_planning_stage', stage, stageKeyHash })
+      const existing = transaction.getStep(auditKey)
+      if (existing && (existing.inputHash !== inputHash || existing.tool !== 'audit_v4_planning_stage')) {
+        throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      }
+      const output = existing
+        ? v4PlanningStageAuditSchema.parse(existing.output)
+        : v4PlanningStageAuditSchema.parse({
+            schemaVersion: '1', stage, stageKeyHash, totalDurationMs: 0, attempts: [],
+          })
+      if (output.stage !== stage || output.stageKeyHash !== stageKeyHash) {
+        throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      }
+      const inFlight = output.attempts.at(-1)
+      if (inFlight?.outcome === 'STARTED') {
+        if (inFlight.requestKeyHash !== requestKeyHash) throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+        return inFlight.attempt
+      }
+      if (output.attempts.length >= MAX_PROVIDER_ATTEMPTS) {
+        throw new Error('V4_PLANNING_STAGE_ATTEMPTS_EXHAUSTED')
+      }
+      const attempt = v4PlanningStageAttemptSchema.parse({
+        attempt: output.attempts.length + 1,
+        outcome: 'STARTED',
+        requestKeyHash,
+        durationMs: 0,
+        requestId: null,
+        errorCode: null,
+        status: null,
+        responseAccepted: false,
+        sseEventCount: 0,
+        lastActivityAt: null,
+      })
+      const now = this.dependencies.clock.now().toISOString()
+      const updatedOutput = v4PlanningStageAuditSchema.parse({
+        ...output,
+        attempts: [...output.attempts, attempt],
+      })
+      transaction.putStep(existing
+        ? {
+            ...existing,
+            status: 'RUNNING',
+            errorCode: null,
+            output: updatedOutput,
+            updatedAt: now,
+          }
+        : {
+          id: `step-${hashInput({ auditKey }).slice(0, 28)}`,
+          runId,
+          idempotencyKey: auditKey,
+          inputHash,
+          tool: 'audit_v4_planning_stage',
+          status: 'RUNNING',
+          budgetUnits: 0,
+          budgetReservationId: null,
+          externalOperationId: null,
+          errorCode: null,
+          output: updatedOutput,
+          createdAt: now,
+          updatedAt: now,
+        })
+      return attempt.attempt
+    })
+  }
+
+  private recordV4PlanningStageAttempt(
+    transaction: AgentTransaction,
+    auditStageKey: string,
+    requestKey: string,
+    stage: VisualDeckV4PlanningStage,
+    attempt: V4PlanningStageAttempt,
+    completed: boolean,
+  ) {
+    const auditKey = `${auditStageKey}:attempt-audit`
+    const audit = transaction.getStep(auditKey)
+    if (!audit || audit.tool !== 'audit_v4_planning_stage') throw new Error('STEP_NOT_FOUND')
+    const output = v4PlanningStageAuditSchema.parse(audit.output)
+    const started = output.attempts.at(-1)
+    if (output.stage !== stage || output.stageKeyHash !== hashInput(auditStageKey)
+      || started?.outcome !== 'STARTED' || started.attempt !== attempt.attempt
+      || started.requestKeyHash !== hashInput(requestKey)
+      || attempt.requestKeyHash !== started.requestKeyHash) {
+      throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+    }
+    const updatedOutput = v4PlanningStageAuditSchema.parse({
+      ...output,
+      totalDurationMs: output.totalDurationMs + attempt.durationMs,
+      attempts: [...output.attempts.slice(0, -1), attempt],
+    })
+    transaction.putStep({
+      ...audit,
+      status: completed ? 'COMPLETED' : 'RUNNING',
+      errorCode: completed && attempt.outcome === 'FAILED' ? attempt.errorCode : null,
+      output: updatedOutput,
+      updatedAt: this.dependencies.clock.now().toISOString(),
+    })
+  }
+
+  private v4PlanningStageAttemptRecord(input: Readonly<{
+    attempt: number
+    outcome: V4PlanningStageAttempt['outcome']
+    requestKey: string
+    metrics: StructuredModelExecutionMetrics | null
+    error?: unknown
+    errorCode?: string
+    durationMs: number
+  }>): V4PlanningStageAttempt {
+    const requestIdCandidate = input.metrics?.requestId
+      ?? (input.error instanceof StructuredModelError ? input.error.requestId : null)
+    const requestId = requestIdCandidate && /^[A-Za-z0-9._:-]{1,160}$/.test(requestIdCandidate)
+      ? requestIdCandidate
+      : null
+    const statusCandidate = input.metrics?.status
+      ?? (input.error instanceof StructuredModelError ? input.error.status : null)
+    const status = Number.isSafeInteger(statusCandidate) && statusCandidate! >= 100 && statusCandidate! <= 599
+      ? statusCandidate as number
+      : null
+    const lastActivityCandidate = input.metrics?.lastActivityAt
+    const lastActivityAt = lastActivityCandidate && !Number.isNaN(Date.parse(lastActivityCandidate))
+      ? new Date(lastActivityCandidate).toISOString()
+      : null
+    return v4PlanningStageAttemptSchema.parse({
+      attempt: input.attempt,
+      outcome: input.outcome,
+      requestKeyHash: hashInput(input.requestKey),
+      durationMs: Math.max(0, Math.floor(input.metrics?.durationMs ?? input.durationMs)),
+      requestId,
+      errorCode: input.outcome === 'FAILED' ? input.errorCode ?? 'PROVIDER_UNAVAILABLE' : null,
+      status,
+      responseAccepted: input.metrics?.responseAccepted ?? input.outcome === 'SUCCEEDED',
+      sseEventCount: Number.isSafeInteger(input.metrics?.sseEventCount) && input.metrics!.sseEventCount >= 0
+        ? input.metrics!.sseEventCount
+        : 0,
+      lastActivityAt,
+      inputTokens: input.metrics?.inputTokens ?? null,
+      outputTokens: input.metrics?.outputTokens ?? null,
+      totalTokens: input.metrics?.totalTokens ?? null,
+    })
+  }
+
+  private clearCompletedPlanningRecovery(transaction: AgentTransaction) {
+    const recovery = transaction.run.technicalRecovery
+    if (transaction.run.status !== 'PLANNING' || !recovery
+      || recovery.resumeState !== 'PLANNING' || recovery.active) return
+    const { technicalRecovery: _technicalRecovery, ...run } = transaction.run
+    transaction.putRun({ ...run, updatedAt: this.dependencies.clock.now().toISOString() })
+  }
+
+  private takeStructuredModelExecutionMetrics(idempotencyKey: string) {
+    const model = this.dependencies.model as StructuredModelPort & Partial<StructuredModelMetricsPort>
+    return model.takeExecutionMetrics?.(idempotencyKey) ?? null
+  }
+
+  private withV4ReflectionAudit(
+    stage: VisualDeckV4PlanningStage,
+    value: unknown,
+    metrics: StructuredModelExecutionMetrics | null,
+    durationMs: number,
+  ) {
+    if (stage !== 'reflect-deck-visual' && stage !== 'reflect-slide-briefs') return value
+    const output = stage === 'reflect-deck-visual'
+      ? visualDeckV4DeckVisualReflectionStageOutputSchema.parse(value)
+      : visualDeckV4SlideBriefsReflectionStageOutputSchema.parse(value)
+    const token = (candidate: number | null | undefined) => Number.isSafeInteger(candidate) && candidate! >= 0
+      ? candidate as number
+      : null
+    const inputTokens = token(metrics?.inputTokens)
+    const outputTokens = token(metrics?.outputTokens)
+    const totalTokens = token(metrics?.totalTokens)
+      ?? (inputTokens !== null && outputTokens !== null ? inputTokens + outputTokens : null)
+    const requestId = metrics?.requestId && /^[A-Za-z0-9._:-]{1,160}$/.test(metrics.requestId)
+      ? metrics.requestId
+      : null
+    const audit = {
+      rubricVersion: VISUAL_DECK_V4_REFLECTION_RUBRIC_VERSION,
+      decision: output.reflection.decision,
+      findingCount: output.reflection.findings.length,
+      modelCallCount: 1,
+      durationMs: Math.max(0, Math.floor(metrics?.durationMs ?? durationMs)),
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      requestId,
+      promptBeforeHash: output.reflection.baseArtifactHash,
+      promptAfterHash: hashInput(output.artifact),
+      highRiskEscalation: false as const,
+    }
+    return stage === 'reflect-deck-visual'
+      ? visualDeckV4DeckVisualReflectionStageOutputSchema.parse({ ...output, audit })
+      : visualDeckV4SlideBriefsReflectionStageOutputSchema.parse({ ...output, audit })
   }
 
   private createApprovedBlueprint(
@@ -704,9 +1261,11 @@ export class PlanningRunner {
   private async executeWithProviderRetry(
     input: PlanPresentationInput,
     request: Parameters<StructuredModelPort['execute']>[0],
+    onAttempt?: () => void,
   ) {
     for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt++) {
       try {
+        onAttempt?.()
         return await this.dependencies.model.execute(request)
       } catch (error) {
         const failure = this.providerFailure(input, error, attempt)
@@ -754,6 +1313,48 @@ export class PlanningRunner {
     }
   }
 
+  private reflectionContractFailure(
+    input: PlanPresentationInput,
+    error: unknown,
+    attempt: number,
+    exhausted: boolean,
+  ): PlanningFailure | null {
+    let diagnosticCode: string
+    let fieldPaths: string[]
+    if (error instanceof ZodError) {
+      diagnosticCode = 'V4_REFLECTION_SCHEMA_INVALID'
+      fieldPaths = [...new Set(error.issues.map((issue) => issue.path.join('.') || 'reflection'))].slice(0, 20)
+    } else if (error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID') {
+      diagnosticCode = 'MODEL_JSON_INVALID'
+      fieldPaths = ['reflection']
+    } else {
+      const message = error instanceof Error ? error.message : ''
+      const mapped = V4_REFLECTION_DIAGNOSTIC_PATHS[message]
+      if (!mapped) return null
+      diagnosticCode = message
+      fieldPaths = [...mapped]
+    }
+    const retryable = !exhausted
+    return {
+      errorCode: 'MODEL_JSON_INVALID',
+      ...(exhausted ? { terminalCode: 'CONTRACT_REPAIR_EXHAUSTED' as const } : {}),
+      retryable,
+      attempt,
+      maxAttempts: MAX_PROVIDER_ATTEMPTS,
+      suggestedAction: retryable ? 'RETRY' : 'CONTACT_ADMIN',
+      diagnosticCode,
+      fieldPaths,
+      correlationId: this.correlationId(input),
+      requestId: error instanceof StructuredModelError
+        ? error.requestId ?? this.traceRequestId(input)
+        : this.traceRequestId(input),
+      model: error instanceof StructuredModelError
+        ? error.model
+        : this.dependencies.model.modelName ?? null,
+      contractVersion: CONTRACT_VERSION,
+    }
+  }
+
   private contractFailure(
     input: PlanPresentationInput,
     error: unknown,
@@ -795,13 +1396,14 @@ export class PlanningRunner {
       'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE',
     ]
       .includes(errorCode)
+    const effectiveRetryable = retryable && !exhausted
     return {
       errorCode,
       ...(exhausted ? { terminalCode: 'CONTRACT_REPAIR_EXHAUSTED' as const } : {}),
-      retryable,
+      retryable: effectiveRetryable,
       attempt,
       maxAttempts,
-      suggestedAction: retryable ? 'RETRY' : 'CONTACT_ADMIN',
+      suggestedAction: effectiveRetryable ? 'RETRY' : 'CONTACT_ADMIN',
       diagnosticCode: errorCode,
       fieldPaths,
       correlationId: this.correlationId(input),
@@ -871,7 +1473,11 @@ export class PlanningRunner {
     return run
   }
 
-  private async prepare(input: PlanPresentationInput, document: DocumentResult): Promise<PlanPresentationResult & { run: RunRecord }> {
+  private async prepare(
+    input: PlanPresentationInput,
+    document: DocumentResult,
+    planningStageCount: number,
+  ): Promise<PlanPresentationResult & { run: RunRecord }> {
     const inputHash = hashInput({
       tool: 'create_blueprint',
       slideCount: input.slideCount,
@@ -955,7 +1561,7 @@ export class PlanningRunner {
       })
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: transaction.run.presentationMode === 'VISUAL_DECK_V4' ? 4 : 1,
+        total: transaction.run.presentationMode === 'VISUAL_DECK_V4' ? planningStageCount : 1,
         pageNumbers: allPageNumbers(transaction.run),
       })
       return { run: updatedRun, step, blueprint: null, replayed: false }
@@ -1029,9 +1635,12 @@ export class PlanningRunner {
             : `已生成 ${blueprint.slides.length} 页教学蓝图`,
         },
       })
+      const completedPlanningStageCount = blueprint.visualDeckV4Proposal
+        ? visualDeckV4PlanningStagesForCompiler(blueprint.visualDeckV4Proposal.compilerVersion).length
+        : 1
       appendV4LifecycleEvent(transaction, 'planning.completed', {
-        completed: blueprint.visualDeckV4Proposal ? 4 : 1,
-        total: blueprint.visualDeckV4Proposal ? 4 : 1,
+        completed: completedPlanningStageCount,
+        total: completedPlanningStageCount,
         pageNumbers: allPageNumbers(transaction.run),
         reason: startsExecution ? null : 'USER_CONFIRMATION_REQUIRED',
         requiresUserAction: !startsExecution,
@@ -1097,15 +1706,20 @@ export class PlanningRunner {
     failure: PlanningFailure,
     issueCategory: 'SOURCE_INCOMPLETE' | 'PLANNING_FAILED',
     document: DocumentResult,
+    compilerVersion: string | null = null,
   ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'FAILED') return step
       const now = this.dependencies.clock.now().toISOString()
+      const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && issueCategory === 'PLANNING_FAILED'
+        && !isTechnicalFailureCode(failure.errorCode)
+      const recoveryReason = v4InternalFailure ? 'V4_PLANNING_STAGE_FAILED' : failure.errorCode
       const technicalRecovery = transaction.run.presentationMode === 'VISUAL_DECK_V4'
-        && isTechnicalFailureCode(failure.errorCode)
-        ? beginTechnicalRecovery(transaction, this.dependencies.clock, failure.errorCode)
+        && isTechnicalFailureCode(recoveryReason)
+        ? beginTechnicalRecovery(transaction, this.dependencies.clock, recoveryReason)
         : null
       const policy = technicalRecovery ? null : transitionRun(transaction.run, 'NEEDS_HUMAN')
       const run: RunRecord = policy
@@ -1142,16 +1756,26 @@ export class PlanningRunner {
           payload: { from: 'PLANNING', to: 'NEEDS_HUMAN', reason: failure.errorCode },
         })
       }
-      appendV4LifecycleEvent(transaction, 'planning.completed', {
-        completed: 0,
-        total: 1,
-        reason: ['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'PROVIDER_UNAVAILABLE'].includes(failure.errorCode)
-          ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
-          : 'PLANNING_FAILED',
-        retryable: technicalRecovery?.technicalRecovery?.retryable ?? failure.retryable,
-        requiresUserAction: !technicalRecovery,
-        nextAction: technicalRecovery ? null : failure.retryable ? 'RETRY' : 'REVIEW_RESULT',
-      })
+      const planningStages = compilerVersion
+        ? visualDeckV4PlanningStagesForCompiler(compilerVersion)
+        : V4_PLANNING_STAGES
+      const completedStages = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        ? planningStages.filter((stage) => transaction.getStep(visualDeckV4PlanningStageStepKey(
+            input.runId, stage, input.attempt ?? 0,
+          ))?.status === 'COMPLETED').length
+        : 0
+      if (!technicalRecovery) {
+        appendV4LifecycleEvent(transaction, 'planning.completed', {
+          completed: completedStages,
+          total: transaction.run.presentationMode === 'VISUAL_DECK_V4' ? planningStages.length : 1,
+          reason: ['PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMIT', 'PROVIDER_UNAVAILABLE'].includes(failure.errorCode)
+            ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
+            : 'PLANNING_FAILED',
+          retryable: failure.retryable,
+          requiresUserAction: true,
+          nextAction: failure.retryable ? 'RETRY' : 'REVIEW_RESULT',
+        })
+      }
       return updated
     })
   }
@@ -1184,18 +1808,17 @@ export class PlanningRunner {
             updatedAt: now,
           }
       transaction.putStep(step)
+      appendV4LifecycleEvent(transaction, 'planning.started', {
+        completed: 0,
+        total: V4_PLANNING_STAGE_COUNT,
+        pageNumbers: allPageNumbers(transaction.run),
+      })
       const recovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)
       if (!recovery) throw new Error('TECHNICAL_SOURCE_RECOVERY_NOT_ALLOWED')
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.failed',
         payload: { stepId: step.id, errorCode, retryable: recovery.technicalRecovery?.retryable ?? false },
-      })
-      appendV4LifecycleEvent(transaction, 'planning.completed', {
-        completed: 0,
-        total: 1,
-        reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
-        retryable: recovery.technicalRecovery?.retryable ?? false,
       })
       return step
     })
@@ -1229,6 +1852,7 @@ export class PlanningRunner {
         type: 'tool.completed',
         payload: { stepId: updated.id, summary: '来源资料已恢复可访问，继续执行原规划任务' },
       })
+      this.clearCompletedPlanningRecovery(transaction)
     })
   }
 

@@ -41,7 +41,7 @@ export function visualDeckV4RevisionInstructions(input: Readonly<{
 }
 
 function reviewImageRound(idempotencyKey: string) {
-  const match = /:image:r(\d+):v\d+:review(?:$|:)/.exec(idempotencyKey)
+  const match = /:image:r(\d+):v\d+(?:\:edit\:[a-f0-9]{24})?:review(?:$|:)/.exec(idempotencyKey)
   if (!match) return null
   const round = Number(match[1])
   return Number.isSafeInteger(round) && round >= 0 ? round : null

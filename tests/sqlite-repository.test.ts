@@ -112,7 +112,7 @@ describe('SQLite repository', () => {
         runId: 'run-1',
         revisionRound: 0,
         qualityScore: 90,
-        qualityOverride: false,
+        qualityOverride: true,
         preview: { artifactId: 'preview-1', name: 'preview.png', mimeType: 'image/png', sha256: 'a'.repeat(64), byteLength: 10 },
         pptx: {
           artifactId: 'pptx-1',
@@ -141,7 +141,13 @@ describe('SQLite repository', () => {
     const reopened = new SqliteAgentRepository(filename)
     expect(await reopened.getRun('run-1')).toMatchObject({ status: 'AWAITING_BLUEPRINT_APPROVAL', version: 1 })
     expect(await reopened.listSteps('run-1')).toHaveLength(1)
-    expect(await reopened.listDeliveries('run-1')).toHaveLength(1)
+    expect(await reopened.listDeliveries('run-1')).toEqual([expect.objectContaining({
+      id: 'delivery-1',
+      disposition: 'FINAL',
+      qualityStatus: 'OVERRIDDEN_INTERNAL',
+      openIssueIds: [],
+      identity: { status: 'LEGACY_UNVERIFIED' },
+    })])
     expect((await reopened.listEvents('run-1')).map((event) => ({ sequence: event.sequence, eventId: event.eventId })))
       .toEqual([{ sequence: 1, eventId: 'run-1:event:1' }])
     await reopened.transact('run-1', (transaction) => {
