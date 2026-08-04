@@ -14,7 +14,7 @@
 ## 使用规则
 
 1. 本文用于集中审核和检索，运行时仍以源码为准；只修改本文不会改变线上行为。
-2. 修改提示词时，必须同时修改源码、对应测试和本台账。
+2. 修改提示词时，通常必须同时修改源码、对应测试和本台账。经明确批准的台账先行变更必须标注“待运行时同步”；同步前不得宣称已经改变运行时行为。
 3. `{{...}}` 表示运行时注入的受控数据，不是固定提示词正文。
 4. `ACTIVE` 表示新任务当前使用；`COMPATIBILITY` 表示历史 Run 恢复时仍可能使用；`SHARED` 表示多个模式共用。
 5. 规划提示词由文本模型执行；视觉审查提示词由视觉模型执行；图片提示词直接交给图片 Provider。
@@ -432,23 +432,26 @@ Quality correction for this page only: {{累计去重后的局部修复指令}} 
 
 ### `IMG-06` V4 GPT 局部图片编辑提示词
 
+> 中文规范文本已确认，待后续同步到 `src/core/v4-repair-contract.ts` 及其测试；同步前运行时行为仍以源码为准。
+
 ```text
-Edit the attached source slide in place. Apply only the explicitly requested changes.
-Required changes: {{requiredChanges}}.
+在附带的源幻灯片上原位编辑。仅执行明确列出的修改。
+必须执行的修改：{{requiredChanges}}。
 {{preserve.unaffectedAreas}}
-Visible text that must remain exact: {{allowedCopy}}.
-Teaching facts that must remain visually true: {{facts}}.
-Numbers that must remain exact: {{numbers}}.
-Formulas that must remain exact: {{formulas}}.
-Visual continuity rules: {{continuityRules}}.
-Forbidden changes: {{forbiddenChanges}}.
+必须原样保留的可见文字：{{allowedCopy}}。
+必须在画面中保持真实的教学事实：{{facts}}。
+必须原样保留的数字：{{numbers}}。
+必须原样保留的公式：{{formulas}}。
+视觉连续性规则：{{continuityRules}}。
+禁止的修改：{{forbiddenChanges}}。
 视觉元素独立性要求：编辑后仍须让每个主要视觉元素保持完整轮廓、清晰边界和可见间隔，不得绑定、粘合、嵌套或合成为不可分割的组合主体。
 即使元素存在语义关系，也只能通过位置、方向、箭头、间距和大小关系表达；除非用户明确要求物理接触，否则不得新增接触、遮挡、交叠、穿插、融合或共用轮廓。
-COUNTABLE OBJECT SAFETY: keep exactly one authoritative set of every countable teaching object and preserve the required total cardinality.
-Do not invent any additional labels, captions, page numbers, decorative words, watermarks, logos, or content from another slide.
-Target a finished, full-bleed landscape slide at approximately 16:9. Minor pixel-dimension variance is acceptable; do not intentionally return a 3:2, 4:3, or square image. Do not add explanations, borders, watermarks, or content from another slide.
+可计数对象安全要求：每一种可计数教学对象只能保留一个权威集合，并保持规定的总数量不变。
+不得虚构任何额外标签、说明文字、页码、装饰性文字、水印、标志或其他幻灯片的内容。
+输出一张完成的满版横向幻灯片，目标比例约为 16:9。允许轻微的像素尺寸偏差，但不得有意输出 3:2、4:3 或方形图片。不得输出解释、边框、水印或其他幻灯片的内容。
 ```
 
+- 本段固定指令统一使用中文；动态占位符在后续运行时同步时也必须统一输出中文。
 - 空数组对应的分段在运行时省略；`{{preserve.unaffectedAreas}}` 是后端冻结并持久化的原样保护指令。
 - 此提示词与上一版受控页面图片一起提交到图片编辑接口，随后仍经过 `IMG-08` 包装。
 
