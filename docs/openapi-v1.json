@@ -18,7 +18,8 @@
             "description": "HTTP process is alive",
             "headers": {
               "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
-              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } },
+              "X-Request-ID": { "description": "Validated caller request id or a server-generated request id", "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
             },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Liveness" } } }
           }
@@ -35,7 +36,8 @@
             "description": "Worker is ready",
             "headers": {
               "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
-              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } },
+              "X-Request-ID": { "description": "Validated caller request id or a server-generated request id", "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
             },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } }
           },
@@ -43,7 +45,8 @@
             "description": "HTTP is alive but worker is not ready",
             "headers": {
               "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
-              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } },
+              "X-Request-ID": { "description": "Validated caller request id or a server-generated request id", "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
             },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Readiness" } } }
           }
@@ -60,7 +63,8 @@
             "description": "PPT Agent OpenAPI v1 document",
             "headers": {
               "Link": { "description": "Versioned contract discovery link with rel=service-desc", "schema": { "type": "string" } },
-              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } }
+              "X-PPT-Agent-Contract-Version": { "description": "HTTP and SSE contract version", "schema": { "const": "1" } },
+              "X-Request-ID": { "description": "Validated caller request id or a server-generated request id", "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
             },
             "content": {
               "application/vnd.oai.openapi+json": { "schema": { "type": "object" } }
@@ -203,8 +207,24 @@
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRunRequest" } } }
         },
         "responses": {
-          "201": { "description": "Run created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } } },
-          "200": { "description": "Idempotent replay", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } } },
+          "201": {
+            "description": "Run created",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRunEnvelope" } } }
+          },
+          "200": {
+            "description": "Idempotent replay",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRunEnvelope" } } }
+          },
           "429": { "$ref": "#/components/responses/RateLimited" },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
@@ -236,6 +256,11 @@
         "responses": {
           "200": {
             "description": "Run snapshot, approved public artifacts, and a user-facing generation plan when V4 planning is complete",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunDetailEnvelope" } } }
           },
           "404": { "$ref": "#/components/responses/Error" },
@@ -284,6 +309,11 @@
         "responses": {
           "200": {
             "description": "Bounded persistent replay followed by shared live polling; closes at the Run terminal event",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
             "content": { "text/event-stream": { "schema": { "type": "string" } } }
           },
           "4XX": { "$ref": "#/components/responses/Error" },
@@ -307,12 +337,20 @@
         "responses": {
           "200": {
             "description": "Bounded persistent event history page",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["data", "pagination"],
+                  "additionalProperties": false,
+                  "required": ["schemaVersion", "requestId", "data", "pagination"],
                   "properties": {
+                    "schemaVersion": { "const": "1" },
+                    "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
                     "data": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/AgentEvent" } },
                     "pagination": {
                       "type": "object",
@@ -350,6 +388,9 @@
           "200": {
             "description": "Integrity-checked owned PNG preview, image-based PPTX, or JSON asset source manifest",
             "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
               "X-PPT-Agent-Schema-Version": { "required": true, "schema": { "const": "1" } },
               "X-PPT-Agent-Delivery-ID": { "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
               "X-PPT-Agent-Content-SHA256": { "required": true, "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
@@ -363,6 +404,11 @@
           },
           "409": {
             "description": "Delivery is not consumable. error.code is DELIVERY_NOT_AVAILABLE and error.details.reason is a DeliveryUnavailableReason.",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeliveryUnavailableError" } } }
           },
           "4XX": { "$ref": "#/components/responses/Error" },
@@ -386,14 +432,39 @@
       "ExternalUserId": { "name": "X-PPT-Agent-User", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
       "ExternalProjectId": { "name": "X-PPT-Agent-Project", "in": "header", "required": false, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
     },
+    "headers": {
+      "ContractLink": {
+        "required": true,
+        "description": "Versioned contract discovery link with rel=service-desc.",
+        "schema": { "type": "string" }
+      },
+      "ContractVersion": {
+        "required": true,
+        "description": "HTTP and SSE contract version.",
+        "schema": { "const": "1" }
+      },
+      "RequestId": {
+        "required": true,
+        "description": "Validated caller request id or a server-generated request id.",
+        "schema": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
     "responses": {
       "Error": {
         "description": "Structured error",
+        "headers": {
+          "Link": { "$ref": "#/components/headers/ContractLink" },
+          "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+        },
         "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
       },
       "RateLimited": {
         "description": "The authenticated tenant/user write quota is exhausted for the current fixed window.",
         "headers": {
+          "Link": { "$ref": "#/components/headers/ContractLink" },
+          "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
           "Retry-After": {
             "required": true,
             "description": "Whole seconds until the principal can retry.",
@@ -767,7 +838,7 @@
                 "properties": {
                   "type": { "const": "run.failed" },
                   "payload": {
-                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] }, "error": { "$ref": "#/components/schemas/PublicError" }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
                     "unevaluatedProperties": false
                   }
                 }
@@ -1187,7 +1258,7 @@
       },
       "PublicRun": {
         "type": "object",
-        "required": ["schemaVersion", "id", "host", "status", "resumeState", "visualDirection", "targetAudience", "presentationGoal", "imageModel", "automationLevel", "version", "slideCount", "revisionRound", "maxRevisionRounds", "planningAttempt", "maxPlanningRetries", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityScore", "qualityOverride", "qualityDisposition", "qualityPolicyAudit", "qualityOverrideAudit", "createdAt", "updatedAt"],
+        "required": ["schemaVersion", "id", "host", "status", "resumeState", "visualDirection", "targetAudience", "presentationGoal", "imageModel", "automationLevel", "version", "slideCount", "revisionRound", "maxRevisionRounds", "planningAttempt", "maxPlanningRetries", "presentationMode", "coverDesignMode", "assetAcquisitionPolicy", "maxVisualAssetsPerSlide", "budgetUnits", "committedBudgetUnits", "qualityScore", "qualityOverride", "qualityDisposition", "qualityPolicyAudit", "qualityOverrideAudit", "error", "createdAt", "updatedAt"],
         "properties": {
           "schemaVersion": { "const": "1" },
           "id": { "type": "string" },
@@ -1234,6 +1305,13 @@
             "description": "Real human override provenance. V4 FINAL delivery requires actorRole ADMIN.",
             "oneOf": [
               { "$ref": "#/components/schemas/QualityOverrideAudit" },
+              { "type": "null" }
+            ]
+          },
+          "error": {
+            "description": "Stable machine-readable interruption or terminal failure. It is null for normally progressing and completed Runs.",
+            "oneOf": [
+              { "$ref": "#/components/schemas/PublicError" },
               { "type": "null" }
             ]
           },
@@ -1325,6 +1403,22 @@
                 "qualityOverrideAudit": { "type": "null" }
               }
             }
+          },
+          {
+            "if": {
+              "properties": { "status": { "enum": ["RECOVERING", "FAILED"] } },
+              "required": ["status"]
+            },
+            "then": { "properties": { "error": { "$ref": "#/components/schemas/PublicError" } } }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": { "not": { "enum": ["PAUSED", "RECOVERING", "FAILED"] } }
+              },
+              "required": ["status"]
+            },
+            "then": { "properties": { "error": { "type": "null" } } }
           }
         ]
       },
@@ -1335,6 +1429,7 @@
         "properties": {
           "resumeState": { "enum": ["PLANNING", "EXECUTING", "PAGE_REVIEW", "DECK_REVIEW", "REVISING", "DELIVERING"] },
           "reason": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "category": { "$ref": "#/components/schemas/PublicErrorCategory" },
           "retryable": { "type": "boolean" },
           "attempt": { "type": "integer", "minimum": 1, "maximum": 5 },
           "maxAttempts": { "const": 5 },
@@ -1349,6 +1444,7 @@
         "properties": {
           "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] },
           "reason": { "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "REVISION_REJECTED_BY_USER", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER"] },
+          "category": { "$ref": "#/components/schemas/PublicErrorCategory" },
           "requestedAt": { "type": "string", "format": "date-time" }
         }
       },
@@ -1620,9 +1716,22 @@
       },
       "RunEnvelope": {
         "type": "object",
-        "required": ["data", "replayed"],
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data"],
         "properties": {
-          "data": { "$ref": "#/components/schemas/PublicRun" },
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/PublicRun" }
+        }
+      },
+      "CreateRunEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data", "replayed"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/RunDetail" },
           "replayed": { "type": "boolean" }
         }
       },
@@ -1740,9 +1849,32 @@
       "RunDetailEnvelope": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["data"],
+        "required": ["schemaVersion", "requestId", "data"],
         "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "data": { "$ref": "#/components/schemas/RunDetail" }
+        }
+      },
+      "PublicErrorCategory": {
+        "type": "string",
+        "enum": ["AUTHENTICATION", "AUTHORIZATION", "REQUEST", "QUALITY", "PROVIDER", "USAGE_V2", "CONTRACT", "DELIVERY", "INTERNAL"]
+      },
+      "PublicErrorAction": {
+        "type": "string",
+        "enum": ["NONE", "AUTHENTICATE", "MODIFY_REQUEST", "RETRY", "WAIT", "ADD_BUDGET", "CONTACT_SUPPORT"]
+      },
+      "PublicError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "category", "retryable", "action", "requestId", "runId"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "category": { "$ref": "#/components/schemas/PublicErrorCategory" },
+          "retryable": { "type": "boolean" },
+          "action": { "$ref": "#/components/schemas/PublicErrorAction" },
+          "requestId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+          "runId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 }
         }
       },
       "ErrorEnvelope": {
@@ -1754,11 +1886,15 @@
           "error": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["code", "message", "requestId"],
+            "required": ["code", "category", "message", "retryable", "action", "requestId", "runId"],
             "properties": {
-              "code": { "type": "string" },
-              "message": { "type": "string" },
-              "requestId": { "type": "string" },
+              "code": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "category": { "$ref": "#/components/schemas/PublicErrorCategory" },
+              "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "retryable": { "type": "boolean" },
+              "action": { "$ref": "#/components/schemas/PublicErrorAction" },
+              "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "runId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
               "details": {}
             }
           }
@@ -1773,11 +1909,15 @@
           "error": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["code", "message", "requestId", "details"],
+            "required": ["code", "category", "message", "retryable", "action", "requestId", "runId", "details"],
             "properties": {
               "code": { "const": "DELIVERY_NOT_AVAILABLE" },
+              "category": { "const": "DELIVERY" },
               "message": { "const": "delivery is not available" },
+              "retryable": { "type": "boolean" },
+              "action": { "$ref": "#/components/schemas/PublicErrorAction" },
               "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
               "details": {
                 "type": "object",
                 "additionalProperties": false,

@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { readFile } from 'node:fs/promises'
-import { KNOWN_AGENT_EVENT_TYPES } from '../src/contracts'
+import {
+  KNOWN_AGENT_EVENT_TYPES,
+  deliveryUnavailableReasonSchema,
+  publicErrorActionSchema,
+  publicErrorCategorySchema,
+  runStatusSchema,
+} from '../src/contracts'
 
 const filename = new URL('../docs/openapi-v1.json', import.meta.url)
 
@@ -182,7 +188,10 @@ describe('OpenAPI v1 contract', () => {
     ] as const) {
       expect(healthResponseHeaders(path, status)?.Link).toBeDefined()
       expect(healthResponseHeaders(path, status)?.['X-PPT-Agent-Contract-Version']).toBeDefined()
+      expect(healthResponseHeaders(path, status)?.['X-Request-ID']).toBeDefined()
     }
+    const discoveryResponse = (document.paths['/openapi/v1.json']?.get as any)?.responses?.['200']
+    expect(discoveryResponse?.headers?.['X-Request-ID']).toBeDefined()
     expect(JSON.stringify(document.paths['/openapi/v1.json'])).toContain('application/vnd.oai.openapi+json')
     expect(JSON.stringify(document.paths['/openapi/v1.json'])).toContain('service-desc')
     expect(document.components.schemas.BuildIdentity).toBeDefined()
@@ -349,5 +358,60 @@ describe('OpenAPI v1 contract', () => {
     expect(contentContract).toContain('X-PPT-Agent-Schema-Version')
     expect(contentContract).toContain('X-PPT-Agent-Delivery-ID')
     expect(contentContract).toContain('X-PPT-Agent-Content-SHA256')
+
+    const publicDocument = document as any
+    const responseAt = (path: string, method: string, status: string) =>
+      publicDocument.paths[path]?.[method]?.responses?.[status]
+    for (const [path, method, status] of [
+      ['/v1/runs', 'post', '201'],
+      ['/v1/runs/{runId}', 'get', '200'],
+      ['/v1/runs/{runId}/events', 'get', '200'],
+      ['/v1/runs/{runId}/events/history', 'get', '200'],
+      ['/v1/runs/{runId}/deliveries/{deliveryId}/content', 'get', '200'],
+      ['/v1/runs/{runId}/deliveries/{deliveryId}/content', 'get', '409'],
+    ] as const) {
+      expect(responseAt(path, method, status)?.headers?.['X-PPT-Agent-Contract-Version']).toBeDefined()
+      expect(responseAt(path, method, status)?.headers?.['X-Request-ID']).toBeDefined()
+      expect(responseAt(path, method, status)?.headers?.Link).toBeDefined()
+    }
+    expect(JSON.stringify(responseAt('/v1/runs', 'post', '201')))
+      .toContain('#/components/schemas/CreateRunEnvelope')
+    expect(publicDocument.components.schemas.CreateRunEnvelope?.required)
+      .toEqual(['schemaVersion', 'requestId', 'data', 'replayed'])
+    expect(publicDocument.components.schemas.RunDetailEnvelope?.required)
+      .toEqual(['schemaVersion', 'requestId', 'data'])
+    expect(publicDocument.components.schemas.RunEnvelope?.required)
+      .toEqual(['schemaVersion', 'requestId', 'data'])
+    const historyContract = responseAt('/v1/runs/{runId}/events/history', 'get', '200')
+      ?.content?.['application/json']?.schema
+    expect(historyContract?.required).toEqual(['schemaVersion', 'requestId', 'data', 'pagination'])
+    expect(publicDocument.components.schemas.PublicRun?.required).toContain('error')
+    expect(JSON.stringify(publicDocument.components.schemas.PublicRun?.properties?.error))
+      .toContain('#/components/schemas/PublicError')
+    const publicRunRules = publicDocument.components.schemas.PublicRun?.allOf ?? []
+    const interruptedErrorRule = publicRunRules.find((rule: Record<string, any>) =>
+      JSON.stringify(rule.if?.properties?.status?.enum) === JSON.stringify(['RECOVERING', 'FAILED']))
+    expect(interruptedErrorRule?.then?.properties?.error?.$ref)
+      .toBe('#/components/schemas/PublicError')
+    const normalRunErrorRule = publicRunRules.find((rule: Record<string, any>) =>
+      JSON.stringify(rule.if?.properties?.status?.not?.enum)
+        === JSON.stringify(['PAUSED', 'RECOVERING', 'FAILED']))
+    expect(normalRunErrorRule?.then?.properties?.error?.type).toBe('null')
+    expect(publicDocument.components.schemas.RunStatus?.enum).toEqual(runStatusSchema.options)
+    expect(publicDocument.components.schemas.DeliveryUnavailableReason?.enum)
+      .toEqual(deliveryUnavailableReasonSchema.options)
+    expect(publicDocument.components.schemas.PublicErrorCategory?.enum)
+      .toEqual(publicErrorCategorySchema.options)
+    expect(publicDocument.components.schemas.PublicErrorAction?.enum)
+      .toEqual(publicErrorActionSchema.options)
+    expect(publicDocument.components.schemas.PublicError?.required).toEqual([
+      'code', 'category', 'retryable', 'action', 'requestId', 'runId',
+    ])
+    expect(publicDocument.components.schemas.ErrorEnvelope?.properties?.error?.required)
+      .toEqual(['code', 'category', 'message', 'retryable', 'action', 'requestId', 'runId'])
+    expect(JSON.stringify(publicDocument.components.schemas.V4LifecycleEvent))
+      .toContain('#/components/schemas/PublicError')
+    expect(publicDocument.components.schemas.TechnicalRecovery?.properties?.category?.$ref)
+      .toBe('#/components/schemas/PublicErrorCategory')
   })
 })

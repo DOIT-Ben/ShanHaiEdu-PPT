@@ -3,6 +3,7 @@ import {
   type RunStatus,
   type TechnicalRecovery,
   type V4RunFailureCode,
+  type PublicErrorCategory,
 } from '../contracts'
 import type {
   AgentTransaction,
@@ -203,11 +204,22 @@ function recoveryState(
   return {
     resumeState,
     reason: failure.diagnosticCode,
+    category: publicCategoryForTechnicalFailure(failure.category),
     retryable,
     attempt: Math.min(attempt, MAX_TECHNICAL_RECOVERY_ATTEMPTS),
     maxAttempts: MAX_TECHNICAL_RECOVERY_ATTEMPTS,
     nextAttemptAt: retryable ? new Date(now.getTime() + retryDelayMs(attempt)).toISOString() : null,
     active: true,
+  }
+}
+
+function publicCategoryForTechnicalFailure(category: TechnicalFailure['category']): PublicErrorCategory {
+  switch (category) {
+    case 'PROVIDER': return 'PROVIDER'
+    case 'USAGE_V2': return 'USAGE_V2'
+    case 'CONTRACT': return 'CONTRACT'
+    case 'HOST': return 'CONTRACT'
+    case 'INTERNAL': return 'INTERNAL'
   }
 }
 
@@ -233,6 +245,7 @@ export function beginTechnicalRecovery(
         clock,
         errorCode: terminalFailureCode(failure, recovery.attempt),
         reason: terminalLifecycleReason(resumeState),
+        category: publicCategoryForTechnicalFailure(failure.category),
       })
       return transaction.run
     }

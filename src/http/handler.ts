@@ -1,20 +1,29 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { DeliveryAvailability, DeliveryUnavailableReason, HostContext } from '../contracts'
+import type {
+  DeliveryAvailability,
+  DeliveryUnavailableReason,
+  HostContext,
+  PublicError,
+  PublicErrorCategory,
+} from '../contracts'
 import {
   adminRevisionRoundsSettingsSchema,
   adminRevisionRoundsUpdateSchema,
+  agentEventHistoryEnvelopeSchema,
   apiErrorSchema,
   CONTRACT_VERSION,
   deliveryAvailabilitySchema,
   deliveryUnavailableErrorSchema,
   MAX_PLANNING_RETRIES,
+  publicErrorSchema,
+  runEnvelopeSchema,
   runSnapshotSchema,
   runStatusSchema,
 } from '../contracts'
 import { getActiveBlueprint } from '../core/active-blueprint'
 import { assertFinalDeliveryForCompletion } from '../core/delivery-runner'
 import { getGenerationBatch } from '../core/generation-batch'
-import { qualityPolicyAuditForRun } from '../core/v4-lifecycle'
+import { publicErrorCategoryForV4Failure, qualityPolicyAuditForRun } from '../core/v4-lifecycle'
 import { AdminOperationsError, type AdminOperationsPort } from '../core/admin-operations'
 import {
   AdminRevisionRoundsSettingsError,
@@ -29,7 +38,11 @@ import {
 } from '../core/usage-v2-coordinator'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
 import { publicDeliveryRecordSchema, type DeliveryRecord } from '../presentation-contracts'
-import { runDetailSchema } from '../run-detail-contracts'
+import {
+  createRunEnvelopeSchema,
+  runDetailEnvelopeSchema,
+  runDetailSchema,
+} from '../run-detail-contracts'
 import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
@@ -56,7 +69,67 @@ type HandlerDependencies = Readonly<{
   rateLimiter?: PrincipalRateLimiterPort
 }>
 
-function publicRun(run: RunRecord) {
+async function publicRunError(repository: AgentRepository, run: RunRecord): Promise<PublicError | null> {
+  if (run.status === 'PAUSED') {
+    const paused = [...await repository.listEvents(run.id)].reverse()
+      .find((event) => event.type === 'run.paused')
+    const reason = paused?.payload && typeof paused.payload === 'object'
+      ? (paused.payload as { reason?: unknown }).reason
+      : null
+    if (reason !== 'BUDGET_INSUFFICIENT') return null
+    return publicErrorSchema.parse({
+      code: 'BUDGET_INSUFFICIENT',
+      category: 'USAGE_V2',
+      retryable: true,
+      action: 'ADD_BUDGET',
+      requestId: null,
+      runId: run.id,
+    })
+  }
+
+  if (run.status === 'RECOVERING') {
+    const pending = run.pendingTerminalFailure
+    const category = pending
+      ? pending.category ?? publicErrorCategoryForV4Failure(
+          pending.errorCode,
+          pending.reason,
+          run.technicalRecovery?.category,
+        )
+      : run.technicalRecovery?.category ?? 'INTERNAL'
+    const retryable = run.technicalRecovery?.retryable ?? false
+    return publicErrorSchema.parse({
+      code: pending?.errorCode ?? 'TECHNICAL_RECOVERY_PENDING',
+      category,
+      retryable,
+      action: retryable ? 'WAIT' : 'CONTACT_SUPPORT',
+      requestId: null,
+      runId: run.id,
+    })
+  }
+
+  if (run.status !== 'FAILED') return null
+  const events = await repository.listEvents(run.id)
+  const failed = [...events].reverse().find((event) => event.type === 'run.failed')
+  if (failed?.type === 'run.failed' && 'error' in failed.payload) {
+    const parsed = publicErrorSchema.safeParse(failed.payload.error)
+    if (parsed.success && parsed.data.runId === run.id) return parsed.data
+  }
+  const payload = failed?.type === 'run.failed'
+    ? failed.payload as { errorCode?: unknown; reason?: unknown }
+    : null
+  const errorCode = typeof payload?.errorCode === 'string' ? payload.errorCode : 'WORKER_FATAL'
+  const reason = typeof payload?.reason === 'string' ? payload.reason : null
+  return publicErrorSchema.parse({
+    code: errorCode,
+    category: publicErrorCategoryForV4Failure(errorCode, reason, run.technicalRecovery?.category),
+    retryable: false,
+    action: 'CONTACT_SUPPORT',
+    requestId: null,
+    runId: run.id,
+  })
+}
+
+async function publicRun(repository: AgentRepository, run: RunRecord) {
   const normalizedQualityPolicyAudit = qualityPolicyAuditForRun(run)
   const auditPendingOrFailed = ['PENDING', 'REVIEW_PASSED'].includes(run.qualityDisposition ?? '')
     || run.status === 'FAILED'
@@ -122,6 +195,7 @@ function publicRun(run: RunRecord) {
     qualityDisposition,
     qualityPolicyAudit,
     qualityOverrideAudit,
+    error: await publicRunError(repository, run),
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
   })
@@ -153,21 +227,97 @@ function openApiResponse() {
   })
 }
 
-function errorResponse(status: number, code: string, message: string, requestId: string, details?: unknown) {
+function applyContractHeaders(response: Response, requestId: string) {
+  response.headers.set('Link', OPENAPI_LINK)
+  response.headers.set('X-PPT-Agent-Contract-Version', CONTRACT_VERSION)
+  response.headers.set('X-Request-ID', requestId)
+  return response
+}
+
+const DELIVERY_ERROR_CODES = new Set([
+  'DELIVERY_NOT_AVAILABLE',
+  'DELIVERY_NOT_FOUND',
+  'DELIVERY_CONTENT_NOT_FOUND',
+  'INVALID_DELIVERY_FORMAT',
+  'DELIVERY_BLUEPRINT_REQUIRED',
+  'DELIVERY_FAILURE_NOT_READY',
+])
+const QUALITY_ERROR_CODES = new Set([
+  'QUALITY_OVERRIDE_ADMIN_REQUIRED',
+  'QUALITY_OVERRIDE_ISSUES_MISMATCH',
+  'QUALITY_FAILURE_RECOVERY_NOT_ALLOWED',
+  'QUALITY_FAILURE_ACCOUNTING_NOT_FINAL',
+  'QUALITY_FAILURE_USAGE_FINALIZATION_NOT_ACKNOWLEDGED',
+  'QUALITY_FAILURE_BLUEPRINT_INVALID',
+  'QUALITY_FAILURE_ARTIFACTS_INCOMPLETE',
+  'QUALITY_FAILURE_DELIVERY_EXISTS',
+])
+const USAGE_V2_ERROR_CODES = new Set([
+  'USAGE_V2_PROVIDER_BILLING_CATALOG_REQUIRED',
+  'USAGE_V2_PROVIDER_BILLING_PROFILE_NOT_FOUND',
+])
+
+function errorSemantics(status: number, code: string): Readonly<{
+  category: PublicErrorCategory
+  retryable: boolean
+  action: PublicError['action']
+}> {
+  if (DELIVERY_ERROR_CODES.has(code)) return { category: 'DELIVERY', retryable: false, action: 'NONE' }
+  if (QUALITY_ERROR_CODES.has(code)) return { category: 'QUALITY', retryable: false, action: 'CONTACT_SUPPORT' }
+  if (USAGE_V2_ERROR_CODES.has(code)) return { category: 'USAGE_V2', retryable: false, action: 'CONTACT_SUPPORT' }
+  if (code === 'UNAUTHENTICATED') return { category: 'AUTHENTICATION', retryable: false, action: 'AUTHENTICATE' }
+  if (status === 403) return { category: 'AUTHORIZATION', retryable: false, action: 'NONE' }
+  if (status === 429) return { category: 'REQUEST', retryable: true, action: 'WAIT' }
+  if (status === 409) return { category: 'CONTRACT', retryable: true, action: 'RETRY' }
+  if (status >= 400 && status < 500) {
+    return { category: 'CONTRACT', retryable: false, action: status === 422 ? 'MODIFY_REQUEST' : 'NONE' }
+  }
+  return { category: 'INTERNAL', retryable: true, action: 'RETRY' }
+}
+
+function errorResponse(
+  status: number,
+  code: string,
+  message: string,
+  requestId: string,
+  details?: unknown,
+  runId: string | null = null,
+) {
+  const semantics = errorSemantics(status, code)
   const body = apiErrorSchema.parse({
     schemaVersion: CONTRACT_VERSION,
-    error: { code, message, requestId, ...(details === undefined ? {} : { details }) },
+    error: {
+      code,
+      ...semantics,
+      message,
+      requestId,
+      runId,
+      ...(details === undefined ? {} : { details }),
+    },
   })
   return json(body, status)
 }
 
-function deliveryUnavailableResponse(reason: DeliveryUnavailableReason, requestId: string) {
+function deliveryUnavailableSemantics(reason: DeliveryUnavailableReason) {
+  if (reason === 'RUN_NOT_COMPLETED' || reason === 'QUALITY_RECOVERY' || reason === 'ACCOUNTING_PENDING') {
+    return { retryable: true, action: 'WAIT' as const }
+  }
+  if (reason === 'RUN_FAILED' || reason === 'RUN_CANCELLED') {
+    return { retryable: false, action: 'NONE' as const }
+  }
+  return { retryable: false, action: 'CONTACT_SUPPORT' as const }
+}
+
+function deliveryUnavailableResponse(reason: DeliveryUnavailableReason, requestId: string, runId: string) {
   return json(deliveryUnavailableErrorSchema.parse({
     schemaVersion: CONTRACT_VERSION,
     error: {
       code: 'DELIVERY_NOT_AVAILABLE',
+      category: 'DELIVERY',
       message: 'delivery is not available',
+      ...deliveryUnavailableSemantics(reason),
       requestId,
+      runId,
       details: { reason },
     },
   }), 409)
@@ -325,7 +475,7 @@ async function runDetail(repository: AgentRepository, artifacts: ArtifactPort, r
     ? visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal)
     : null
   return runDetailSchema.parse({
-    ...publicRun(run),
+    ...(await publicRun(repository, run)),
     blueprint,
     generationPlan,
     ...(generationBatch ? { generationBatch } : {}),
@@ -398,9 +548,8 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
     repository: dependencies.repository,
     pollMs: dependencies.eventPollMs ?? 500,
   })
-  return async function handle(request: Request): Promise<Response> {
-    const requestIdHeader = request.headers.get('X-Request-ID')
-    const requestId = requestIdHeader && requestIdHeader.length <= 160 ? requestIdHeader : randomUUID()
+  async function handleRequest(request: Request, requestId: string): Promise<Response> {
+    let correlatedRunId: string | null = null
     try {
       const url = new URL(request.url)
       if (request.method === 'GET' && url.pathname === '/health/live') {
@@ -417,6 +566,8 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       if (!host) return errorResponse(401, 'UNAUTHENTICATED', 'authentication is required', requestId)
 
       const parts = url.pathname.split('/').filter(Boolean)
+      const pathRunId = parts[0] === 'v1' && parts[1] === 'runs' ? parts[2] : undefined
+      if (pathRunId && pathRunId.length <= 160 && pathRunId === pathRunId.trim()) correlatedRunId = pathRunId
       if (parts[0] !== 'v1') {
         return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
       }
@@ -534,7 +685,7 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         })
         return json({
           data: {
-            run: publicRun(result.run),
+            run: await publicRun(dependencies.repository, result.run),
             step: { id: result.step.id, status: result.step.status, errorCode: result.step.errorCode, updatedAt: result.step.updatedAt },
           },
           replayed: result.replayed,
@@ -554,7 +705,13 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           return errorResponse(403, 'HOST_CONTEXT_MISMATCH', 'request host does not match authenticated principal', requestId)
         }
         const created = await dependencies.runs.create({ ...body, host: { ...body.host, ...host } }, idempotencyKey)
-        return json({ data: publicRun(created.run), replayed: created.replayed }, created.replayed ? 200 : 201)
+        const detail = await runDetail(dependencies.repository, dependencies.artifacts, created.run)
+        return json(createRunEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: detail,
+          replayed: created.replayed,
+        }), created.replayed ? 200 : 201)
       }
 
       if (parts.length === 2 && request.method === 'GET') {
@@ -570,7 +727,9 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         }
         const page = await dependencies.runs.listOwnedPage(host, { after: cursor, limit: pageSizeValue })
         return json({
-          data: page.runs.map(publicRun),
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: await Promise.all(page.runs.map((run) => publicRun(dependencies.repository, run))),
           pagination: { pageSize: pageSizeValue, nextCursor: page.hasMore ? encodeCursor(page.runs.at(-1)!) : null },
         })
       }
@@ -580,7 +739,11 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
 
       if (parts.length === 3 && request.method === 'GET') {
         const run = await dependencies.runs.getOwned(runId, host)
-        return json({ data: await runDetail(dependencies.repository, dependencies.artifacts, run) })
+        return json(runDetailEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: await runDetail(dependencies.repository, dependencies.artifacts, run),
+        }))
       }
 
       if (parts.length === 4 && parts[3] === 'actions' && request.method === 'POST') {
@@ -591,7 +754,11 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         const body = await request.json().catch(() => null)
         if (!body) return errorResponse(400, 'INVALID_JSON', 'request body must be valid JSON', requestId)
         const updated = await dependencies.runs.act(runId, host, body, idempotencyKey)
-        return json({ data: publicRun(updated) })
+        return json(runEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: await publicRun(dependencies.repository, updated),
+        }))
       }
 
       if (parts.length === 4 && parts[3] === 'events' && request.method === 'GET') {
@@ -621,10 +788,12 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           limit: DEFAULT_EVENT_BATCH_LIMIT,
           maxBytes: DEFAULT_EVENT_BATCH_BYTES,
         })
-        return json({
+        return json(agentEventHistoryEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
           data: page.events,
           pagination: { nextAfter: page.nextAfter, hasMore: page.hasMore },
-        })
+        }))
       }
 
       if (parts.length === 6 && parts[3] === 'deliveries' && parts[5] === 'content' && request.method === 'GET') {
@@ -633,11 +802,11 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         try {
           deliveryId = decodeURIComponent(parts[4]!)
         } catch {
-          return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId)
+          return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId, undefined, runId)
         }
         const format = url.searchParams.get('format') ?? 'pptx'
         if (format !== 'preview' && format !== 'pptx' && format !== 'sources') {
-          return errorResponse(422, 'INVALID_DELIVERY_FORMAT', 'format must be preview, pptx or sources', requestId)
+          return errorResponse(422, 'INVALID_DELIVERY_FORMAT', 'format must be preview, pptx or sources', requestId, undefined, runId)
         }
         const blueprint = run.status === 'COMPLETED'
           ? await getActiveBlueprint(dependencies.repository, run.id, run.revisionRound).catch(() => null)
@@ -649,14 +818,16 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           blueprint,
         )
         if (projection.deliveryAvailability.state === 'UNAVAILABLE') {
-          return deliveryUnavailableResponse(projection.deliveryAvailability.reason, requestId)
+          return deliveryUnavailableResponse(projection.deliveryAvailability.reason, requestId, runId)
         }
         const delivery = projection.delivery
         if (!delivery || delivery.id !== deliveryId) {
-          return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId)
+          return errorResponse(404, 'DELIVERY_NOT_FOUND', 'delivery was not found', requestId, undefined, runId)
         }
         const reference = format === 'preview' ? delivery.preview : format === 'sources' ? delivery.sources : delivery.pptx
-        if (!reference) return errorResponse(404, 'DELIVERY_CONTENT_NOT_FOUND', 'delivery content was not found', requestId)
+        if (!reference) {
+          return errorResponse(404, 'DELIVERY_CONTENT_NOT_FOUND', 'delivery content was not found', requestId, undefined, runId)
+        }
         const artifact = await dependencies.artifacts.get({
           tenantId: run.host.tenantId,
           artifactId: reference.artifactId,
@@ -667,7 +838,7 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           || artifact.bytes.length !== reference.byteLength
           || artifact.sha256 !== reference.sha256
           || digest !== reference.sha256) {
-          return deliveryUnavailableResponse('DELIVERY_CONTENT_INVALID', requestId)
+          return deliveryUnavailableResponse('DELIVERY_CONTENT_INVALID', requestId, runId)
         }
         const safeName = reference.name.replace(/["\\\r\n]/g, '_')
         return new Response(new Uint8Array(artifact.bytes), {
@@ -688,15 +859,21 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
     } catch (error) {
       if (error instanceof RunServiceError) {
-        return errorResponse(error.status, error.code, error.message, requestId)
+        return errorResponse(error.status, error.code, error.message, requestId, undefined, correlatedRunId)
       }
       if (error instanceof AdminOperationsError) {
-        return errorResponse(error.status, error.code, error.message, requestId)
+        return errorResponse(error.status, error.code, error.message, requestId, undefined, correlatedRunId)
       }
       if (error instanceof AdminRevisionRoundsSettingsError) {
-        return errorResponse(error.status, error.code, error.message, requestId)
+        return errorResponse(error.status, error.code, error.message, requestId, undefined, correlatedRunId)
       }
-      return errorResponse(500, 'INTERNAL_ERROR', 'an internal error occurred', requestId)
+      return errorResponse(500, 'INTERNAL_ERROR', 'an internal error occurred', requestId, undefined, correlatedRunId)
     }
+  }
+  return async function handle(request: Request): Promise<Response> {
+    const requestIdHeader = request.headers.get('X-Request-ID')
+    const normalizedRequestId = requestIdHeader?.trim()
+    const requestId = normalizedRequestId && normalizedRequestId.length <= 160 ? normalizedRequestId : randomUUID()
+    return applyContractHeaders(await handleRequest(request, requestId), requestId)
   }
 }

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { runSnapshotSchema } from './contracts'
+import { CONTRACT_VERSION, runSnapshotSchema } from './contracts'
 import { publicDeliveryRecordSchema } from './presentation-contracts'
 
 export const runDetailSchema = runSnapshotSchema.safeExtend({
@@ -62,3 +62,16 @@ export const runDetailSchema = runSnapshotSchema.safeExtend({
 })
 
 export type RunDetail = z.output<typeof runDetailSchema>
+
+export const runDetailEnvelopeSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  requestId: z.string().trim().min(1).max(160),
+  data: runDetailSchema,
+}).strict()
+
+export const createRunEnvelopeSchema = runDetailEnvelopeSchema.extend({
+  replayed: z.boolean(),
+}).strict()
+
+export type RunDetailEnvelope = z.output<typeof runDetailEnvelopeSchema>
+export type CreateRunEnvelope = z.output<typeof createRunEnvelopeSchema>

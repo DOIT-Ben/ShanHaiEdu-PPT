@@ -64,6 +64,7 @@ const completedRunDetail = {
   qualityDisposition: 'REVIEW_PASSED' as const,
   qualityPolicyAudit: null,
   qualityOverrideAudit: null,
+  error: null,
   blueprint: null,
   generationPlan: null,
   deliveries: [publicDelivery],

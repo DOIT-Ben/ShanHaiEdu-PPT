@@ -10,6 +10,37 @@ export const MAX_PLANNING_RETRIES = 2
 const identifierSchema = z.string().trim().min(1).max(160)
 const nonEmptyTextSchema = z.string().trim().min(1)
 
+export const publicErrorCategorySchema = z.enum([
+  'AUTHENTICATION',
+  'AUTHORIZATION',
+  'REQUEST',
+  'QUALITY',
+  'PROVIDER',
+  'USAGE_V2',
+  'CONTRACT',
+  'DELIVERY',
+  'INTERNAL',
+])
+
+export const publicErrorActionSchema = z.enum([
+  'NONE',
+  'AUTHENTICATE',
+  'MODIFY_REQUEST',
+  'RETRY',
+  'WAIT',
+  'ADD_BUDGET',
+  'CONTACT_SUPPORT',
+])
+
+export const publicErrorSchema = z.object({
+  code: z.string().trim().min(1).max(100),
+  category: publicErrorCategorySchema,
+  retryable: z.boolean(),
+  action: publicErrorActionSchema,
+  requestId: identifierSchema.nullable(),
+  runId: identifierSchema.nullable(),
+}).strict()
+
 export const hostContextSchema = z.object({
   tenantId: identifierSchema,
   externalUserId: identifierSchema,
@@ -65,6 +96,7 @@ export const qualityOverrideAuditSchema = z.object({
 export const technicalRecoverySchema = z.object({
   resumeState: z.enum(['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING']),
   reason: z.string().trim().min(1).max(100),
+  category: publicErrorCategorySchema.optional(),
   retryable: z.boolean(),
   attempt: z.number().int().min(1).max(5),
   maxAttempts: z.literal(5),
@@ -110,6 +142,7 @@ export const v4RunFailureCodeSchema = z.enum([
 export const pendingTerminalFailureSchema = z.object({
   errorCode: v4RunFailureCodeSchema,
   reason: v4LifecycleReasonSchema,
+  category: publicErrorCategorySchema.optional(),
   requestedAt: z.string().datetime(),
 }).strict()
 
@@ -433,6 +466,7 @@ export const runSnapshotSchema = z.object({
   generationPlan: z.unknown().nullable().optional(),
   deliveries: z.array(z.unknown()).max(1).optional(),
   deliveryAvailability: deliveryAvailabilitySchema.optional(),
+  error: publicErrorSchema.nullable(),
   issues: z.array(issueSummarySchema).optional(),
   progress: z.array(z.object({
     stepId: identifierSchema,
@@ -503,7 +537,22 @@ export const runSnapshotSchema = z.object({
   if (value.status === 'FAILED' && value.qualityDisposition !== 'HARD_FAILURE') {
     context.addIssue({ code: 'custom', path: ['qualityDisposition'], message: 'failed status requires hard failure disposition' })
   }
+  if (value.error && value.error.runId !== value.id) {
+    context.addIssue({ code: 'custom', path: ['error', 'runId'], message: 'Run error must correlate to the public Run' })
+  }
+  if (['RECOVERING', 'FAILED'].includes(value.status) && !value.error) {
+    context.addIssue({ code: 'custom', path: ['error'], message: 'recovering or failed Run requires a public error' })
+  }
+  if (value.error && !['PAUSED', 'RECOVERING', 'FAILED'].includes(value.status)) {
+    context.addIssue({ code: 'custom', path: ['error'], message: 'only interrupted or failed Runs may expose an error' })
+  }
 })
+
+export const runEnvelopeSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  requestId: identifierSchema,
+  data: runSnapshotSchema,
+}).strict()
 
 const eventBase = {
   schemaVersion: z.literal(CONTRACT_VERSION),
@@ -643,6 +692,7 @@ export const knownAgentEventSchema = z.discriminatedUnion('type', [
     legacyRunFailedPayloadSchema,
     v4LifecyclePayloadSchema('RUN', {
       errorCode: v4RunFailureCodeSchema,
+      error: publicErrorSchema.optional(),
       terminalAccounting: terminalAccountingSchema.optional(),
     }),
   ]) }).strict(),
@@ -666,10 +716,19 @@ const unknownAgentEventSchema = z.object({
 
 export const agentEventSchema = z.union([knownAgentEventSchema, unknownAgentEventSchema])
 
+export const agentEventHistoryEnvelopeSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  requestId: identifierSchema,
+  data: z.array(agentEventSchema).max(100),
+  pagination: z.object({
+    nextAfter: z.number().int().nonnegative(),
+    hasMore: z.boolean(),
+  }).strict(),
+}).strict()
+
 export const apiErrorSchema = z.object({
   schemaVersion: z.literal(CONTRACT_VERSION),
-  error: z.object({
-    code: z.string().trim().min(1).max(100),
+  error: publicErrorSchema.extend({
     message: nonEmptyTextSchema.max(1_000),
     requestId: identifierSchema,
     details: z.unknown().optional(),
@@ -680,13 +739,20 @@ export const deliveryUnavailableErrorSchema = z.object({
   schemaVersion: z.literal(CONTRACT_VERSION),
   error: z.object({
     code: z.literal('DELIVERY_NOT_AVAILABLE'),
+    category: z.literal('DELIVERY'),
     message: z.literal('delivery is not available'),
+    retryable: z.boolean(),
+    action: publicErrorActionSchema,
     requestId: identifierSchema,
+    runId: identifierSchema,
     details: z.object({ reason: deliveryUnavailableReasonSchema }).strict(),
   }).strict(),
 }).strict()
 
 export type HostContext = z.infer<typeof hostContextSchema>
+export type PublicErrorCategory = z.infer<typeof publicErrorCategorySchema>
+export type PublicErrorAction = z.infer<typeof publicErrorActionSchema>
+export type PublicError = z.infer<typeof publicErrorSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
 export type QualityDisposition = z.infer<typeof qualityDispositionSchema>
 export type QualityPolicyAudit = z.infer<typeof qualityPolicyAuditSchema>
@@ -711,3 +777,5 @@ export type V4RunFailureCode = z.infer<typeof v4RunFailureCodeSchema>
 export type KnownAgentEvent = z.infer<typeof knownAgentEventSchema>
 export type AgentEvent = z.infer<typeof agentEventSchema>
 export type AgentEventEnvelope = AgentEvent
+export type AgentEventHistoryEnvelope = z.infer<typeof agentEventHistoryEnvelopeSchema>
+export type RunEnvelope = z.infer<typeof runEnvelopeSchema>

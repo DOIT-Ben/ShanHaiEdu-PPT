@@ -137,7 +137,10 @@ describe('HTTP v1 handler', () => {
     const { handle, health } = fixture()
     const live = await handle(new Request('http://ppt-agent.test/health/live'))
     const beforeTick = await handle(new Request('http://ppt-agent.test/health/ready'))
-    const openapi = await handle(new Request('http://ppt-agent.test/openapi/v1.json'))
+    const openapiRequestId = 'openapi-discovery-request'
+    const openapi = await handle(new Request('http://ppt-agent.test/openapi/v1.json', {
+      headers: { 'X-Request-ID': openapiRequestId },
+    }))
     await health.runTick(async () => ({ scannedRuns: 0, activeRuns: 0 }))
     const ready = await handle(new Request('http://ppt-agent.test/health/ready'))
 
@@ -162,6 +165,7 @@ describe('HTTP v1 handler', () => {
     expect(openapi.status).toBe(200)
     expect(openapi.headers.get('Content-Type')).toContain('application/vnd.oai.openapi+json')
     expect(openapi.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(openapi.headers.get('X-Request-ID')).toBe(openapiRequestId)
     expect(await openapi.json()).toMatchObject({
       openapi: '3.1.0',
       info: { title: 'PPT Agent API', version: '4.3.1' },

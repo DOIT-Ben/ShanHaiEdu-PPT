@@ -936,8 +936,12 @@ describe('mock runtime', () => {
       schemaVersion: CONTRACT_VERSION,
       error: {
         code: 'DELIVERY_NOT_AVAILABLE',
+        category: 'DELIVERY',
         message: 'delivery is not available',
+        retryable: false,
+        action: 'CONTACT_SUPPORT',
         requestId: expect.any(String),
+        runId,
         details: { reason: 'DELIVERY_CONTENT_INVALID' },
       },
     })

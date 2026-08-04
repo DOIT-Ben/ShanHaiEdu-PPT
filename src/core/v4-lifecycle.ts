@@ -8,6 +8,8 @@ import {
   type V4RunFailureCode,
   type TechnicalRecovery,
   type QualityPolicyAudit,
+  type PublicErrorCategory,
+  publicErrorSchema,
 } from '../contracts'
 import { revisionPlanSchema, type RevisionPlan } from '../presentation-contracts'
 import type { AgentRepository, AgentTransaction, ClockPort, NewAgentEvent, RunRecord } from './ports'
@@ -434,11 +436,13 @@ export async function failVisualDeckV4Run(input: Readonly<{
   clock: ClockPort
   runId: string
   errorCode: V4RunFailureCode
+  category?: PublicErrorCategory
 }>) {
   return input.repository.transact(input.runId, (transaction) => failVisualDeckV4Transaction({
     transaction,
     clock: input.clock,
     errorCode: input.errorCode,
+    ...(input.category ? { category: input.category } : {}),
   }))
 }
 
@@ -447,6 +451,7 @@ export function failVisualDeckV4Transaction(input: Readonly<{
   clock: ClockPort
   errorCode: V4RunFailureCode
   reason?: V4LifecycleReason
+  category?: PublicErrorCategory
 }>) {
   const { transaction } = input
   if (transaction.run.status === 'RECOVERING' && transaction.run.pendingTerminalFailure) {
@@ -457,12 +462,14 @@ export function failVisualDeckV4Transaction(input: Readonly<{
     return false
   }
   const terminalAccounting = deriveV4TerminalAccounting(transaction.run, transaction.listSteps())
+  const category = publicErrorCategoryForV4Failure(input.errorCode, input.reason, input.category)
   if (terminalAccounting.accountingStatus !== 'FINAL') {
     const fromStatus = transaction.run.status
     const now = input.clock.now()
     const recovery: TechnicalRecovery = {
       resumeState: fromStatus as TechnicalRecovery['resumeState'],
       reason: 'TERMINAL_ACCOUNTING_PENDING',
+      category,
       retryable: true,
       attempt: 1,
       maxAttempts: 5,
@@ -477,6 +484,7 @@ export function failVisualDeckV4Transaction(input: Readonly<{
       pendingTerminalFailure: {
         errorCode: input.errorCode,
         reason: input.reason ?? 'INTERNAL_FAILURE',
+        category,
         requestedAt: now.toISOString(),
       },
       terminalAccounting,
@@ -500,8 +508,22 @@ export function failVisualDeckV4Transaction(input: Readonly<{
     clock: input.clock,
     errorCode: input.errorCode,
     reason: input.reason ?? 'INTERNAL_FAILURE',
+    category,
     terminalAccounting,
   })
+}
+
+export function publicErrorCategoryForV4Failure(
+  errorCode: V4RunFailureCode | string,
+  reason: V4LifecycleReason | string | null | undefined,
+  category: PublicErrorCategory | undefined,
+): PublicErrorCategory {
+  if (errorCode === 'QUALITY_REMEDIATION_EXHAUSTED'
+    || errorCode === 'QUALITY_ISSUE_STATE_INCONSISTENT') return 'QUALITY'
+  if (reason === 'DELIVERY_FAILED') return 'DELIVERY'
+  if (errorCode === 'TECHNICAL_CONTRACT_INVALID') return 'CONTRACT'
+  if (category) return category
+  return 'INTERNAL'
 }
 
 function completeVisualDeckV4Failure(input: Readonly<{
@@ -509,6 +531,7 @@ function completeVisualDeckV4Failure(input: Readonly<{
   clock: ClockPort
   errorCode: V4RunFailureCode
   reason: V4LifecycleReason
+  category: PublicErrorCategory
   terminalAccounting: ReturnType<typeof deriveV4TerminalAccounting>
 }>) {
   const { transaction } = input
@@ -528,6 +551,14 @@ function completeVisualDeckV4Failure(input: Readonly<{
     qualityDisposition: 'HARD_FAILURE',
     updatedAt: now,
   }
+  const error = publicErrorSchema.parse({
+    code: input.errorCode,
+    category: input.category,
+    retryable: false,
+    action: 'CONTACT_SUPPORT',
+    requestId: null,
+    runId: failedRun.id,
+  })
   transaction.putRun(failedRun)
   enqueueUsageV2RunFinalization(transaction, input.clock)
   if (completedRecovery) {
@@ -554,6 +585,7 @@ function completeVisualDeckV4Failure(input: Readonly<{
         retryable: false,
       }),
       errorCode: input.errorCode,
+      error,
       terminalAccounting: input.terminalAccounting,
     },
   })
@@ -589,6 +621,7 @@ export function reconcileVisualDeckV4TerminalState(transaction: AgentTransaction
       clock,
       errorCode: pending.errorCode,
       reason: pending.reason,
+      category: pending.category ?? publicErrorCategoryForV4Failure(pending.errorCode, pending.reason, undefined),
       terminalAccounting,
     })
   }

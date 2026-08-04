@@ -335,6 +335,7 @@ describe('public v1 contracts', () => {
       committedBudgetUnits: 0,
       qualityScore: null,
       qualityOverride: false,
+      error: null,
       issues: [],
       createdAt: '2026-07-21T00:00:00.000Z',
       updatedAt: '2026-07-21T00:00:00.000Z',
@@ -406,16 +407,42 @@ describe('public v1 contracts', () => {
       status: 'FAILED',
       resumeState: null,
       qualityDisposition: 'HARD_FAILURE',
+      error: {
+        code: 'WORKER_FATAL', category: 'INTERNAL', retryable: false, action: 'CONTACT_SUPPORT',
+        requestId: null, runId: 'run-1',
+      },
     })).toMatchObject({ status: 'FAILED', qualityDisposition: 'HARD_FAILURE' })
 
     const failedWithoutHardFailure = runSnapshotSchema.safeParse({
-      ...base, status: 'FAILED', resumeState: null,
+      ...base,
+      status: 'FAILED',
+      resumeState: null,
+      error: {
+        code: 'WORKER_FATAL', category: 'INTERNAL', retryable: false, action: 'CONTACT_SUPPORT',
+        requestId: null, runId: 'run-1',
+      },
     })
     expect(failedWithoutHardFailure.success).toBe(false)
     if (!failedWithoutHardFailure.success) {
       expect(failedWithoutHardFailure.error.issues.map((issue) => issue.message))
         .toContain('failed status requires hard failure disposition')
     }
+    expect(runSnapshotSchema.safeParse({
+      ...base, status: 'FAILED', resumeState: null, qualityDisposition: 'HARD_FAILURE', error: null,
+    }).success).toBe(false)
+    expect(runSnapshotSchema.safeParse({
+      ...base,
+      status: 'RECOVERING',
+      resumeState: null,
+      technicalRecovery: {
+        resumeState: 'DECK_REVIEW', reason: 'PROVIDER_TIMEOUT', category: 'PROVIDER', retryable: true,
+        attempt: 1, maxAttempts: 5, nextAttemptAt: '2026-07-21T00:00:02.000Z', active: true,
+      },
+      error: null,
+    }).success).toBe(false)
+    expect(runSnapshotSchema.safeParse({
+      ...base, status: 'EXECUTING', resumeState: null, error: undefined,
+    }).success).toBe(false)
 
     const pendingOverride = runSnapshotSchema.safeParse({
       ...base, status: 'EXECUTING', resumeState: null, qualityOverride: true,
@@ -461,8 +488,12 @@ describe('public v1 contracts', () => {
       schemaVersion: CONTRACT_VERSION,
       error: {
         code: 'DELIVERY_NOT_AVAILABLE',
+        category: 'DELIVERY',
         message: 'delivery is not available',
+        retryable: true,
+        action: 'WAIT',
         requestId: 'request-1',
+        runId: 'run-1',
         details: { reason: 'RUN_NOT_COMPLETED' },
       },
     } as const

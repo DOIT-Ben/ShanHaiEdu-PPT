@@ -708,6 +708,7 @@ export class UsageV2Coordinator {
             clock: this.dependencies.clock,
             errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED',
             reason: 'INTERNAL_FAILURE',
+            category: 'USAGE_V2',
           })
         } else {
           const updated = { ...transaction.run, ...transitionRun(transaction.run, 'NEEDS_HUMAN'), updatedAt: now }

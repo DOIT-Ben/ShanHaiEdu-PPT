@@ -1026,7 +1026,7 @@ export class MediaStepRunner {
           status: 'OPEN',
         },
       })
-      if (transitionRequired && !technicalRecovery) {
+      if (transitionRequired && !technicalRecovery && !v4TechnicalFailure) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
@@ -1195,7 +1195,7 @@ export class MediaStepRunner {
           },
         })
       }
-      if (transitionRequired && !technicalRecovery) {
+      if (transitionRequired && !technicalRecovery && !v4TechnicalFailure) {
         transaction.appendEvent({
           schemaVersion: CONTRACT_VERSION,
           type: 'phase.changed',
