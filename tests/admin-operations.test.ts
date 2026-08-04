@@ -193,7 +193,7 @@ async function v2AdminFixture(withBatch = true, withProviderOperation = true) {
       budgetReservationId: reservationId, externalOperationId: null, errorCode: null,
       output: {
         slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r1:v1', model: 'image-2',
-        operationMode: 'IMAGE_EDIT', backgroundMode: 'OPAQUE', pageNumber: 1, revisionRound: 1,
+        operationMode: 'IMAGE_EDIT', aspectRatio: '16:9', backgroundMode: 'OPAQUE', pageNumber: 1, revisionRound: 1,
         batchId,
       },
       createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',

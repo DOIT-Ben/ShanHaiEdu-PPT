@@ -138,6 +138,7 @@ async function usageFixture(overrides: Partial<RunRecord> = {}) {
 
 const usageRequest = {
   ...request,
+  aspectRatio: '16:9',
   pageNumber: 1,
   revisionRound: 0,
   batchReservation: {
@@ -147,7 +148,7 @@ const usageRequest = {
 } as const
 
 const usageIdentityFields = [
-  ['operationIdempotencyKey'], ['batchId'], ['pageNumber'], ['revisionRound'], ['model'], ['operationMode'],
+  ['operationIdempotencyKey'], ['batchId'], ['pageNumber'], ['revisionRound'], ['model'], ['operationMode'], ['aspectRatio'],
 ] as const
 
 type UsageIdentityField = typeof usageIdentityFields[number][0]
@@ -160,6 +161,7 @@ type PersistedUsageMetadata = Readonly<{
   billingSnapshot: Readonly<{
     model: string
     operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+    aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
     [key: string]: unknown
   }>
   [key: string]: unknown
@@ -175,6 +177,10 @@ function tamperedUsageMetadata(metadata: PersistedUsageMetadata, field: UsageIde
     case 'operationMode': return {
       ...metadata,
       billingSnapshot: { ...metadata.billingSnapshot, operationMode: 'IMAGE_EDIT' },
+    }
+    case 'aspectRatio': return {
+      ...metadata,
+      billingSnapshot: { ...metadata.billingSnapshot, aspectRatio: '4:3' },
     }
   }
 }
@@ -638,6 +644,7 @@ describe('media step runner', () => {
       ...request,
       idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
       model: 'image-2',
+      aspectRatio: '4:3' as const,
       operationMode: 'IMAGE_EDIT' as const,
       repairContractHash: 'b'.repeat(64),
       referenceImage: {
@@ -655,7 +662,9 @@ describe('media step runner', () => {
 
     const recovered = await runner.submitSlideImage(editRequest)
 
-    expect(recovered.step).toMatchObject({ status: 'WAITING', externalOperationId: operationId })
+    expect(recovered.step).toMatchObject({
+      status: 'WAITING', externalOperationId: operationId, output: { aspectRatio: '4:3' },
+    })
     expect(images.submitCalls).toBe(1)
     expect(images.lookupRequests).toEqual([{
       tenantId: 'frameflow',
@@ -901,6 +910,7 @@ describe('media step runner', () => {
       backgroundMode: 'OPAQUE',
       model: 'image-2',
       operationMode: 'TEXT_TO_IMAGE',
+      aspectRatio: '16:9',
       artifactId: 'artifact-slide-1-v1',
     })
     expect(replay).toMatchObject({ changed: false, step: { status: 'COMPLETED' } })

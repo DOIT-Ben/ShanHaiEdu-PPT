@@ -194,7 +194,8 @@ function requireUsageMediaIdentity(step: StepRecord, metadata: UsageMediaMetadat
     || metadata.pageNumber !== output.pageNumber
     || metadata.revisionRound !== output.revisionRound
     || metadata.billingSnapshot.model !== output.model
-    || metadata.billingSnapshot.operationMode !== output.operationMode) {
+    || metadata.billingSnapshot.operationMode !== output.operationMode
+    || metadata.billingSnapshot.aspectRatio !== output.aspectRatio) {
     throw new Error('USAGE_V2_MEDIA_IDENTITY_CONFLICT')
   }
   return metadata

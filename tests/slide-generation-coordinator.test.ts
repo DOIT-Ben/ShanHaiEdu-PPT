@@ -420,15 +420,15 @@ describe('slide generation coordinator', () => {
     expect(result.steps.map((step) => step.output)).toEqual([
       {
         slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1', backgroundMode: 'OPAQUE',
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE',
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
       },
       {
         slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1', backgroundMode: 'OPAQUE',
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE',
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
       },
       {
         slideId: 'run-1:slide:3', versionId: 'run-1:slide:3:r0:v1', backgroundMode: 'OPAQUE',
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE',
+        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
       },
     ])
   })

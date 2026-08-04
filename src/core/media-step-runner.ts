@@ -492,6 +492,7 @@ export class MediaStepRunner {
             output: {
               ...output,
               budgetReservationKey: input.budgetReservationKey,
+              aspectRatio: input.aspectRatio ?? '16:9',
               ...(input.batchReservation ? { batchId: input.batchReservation.batchId } : {}),
             },
             updatedAt: this.dependencies.clock.now().toISOString(),
@@ -537,6 +538,7 @@ export class MediaStepRunner {
         output: {
           slideId: input.slideId,
           versionId: input.versionId,
+          aspectRatio: input.aspectRatio ?? '16:9',
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
           model: input.model,
           operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
@@ -603,6 +605,7 @@ export class MediaStepRunner {
           ...persistedOutput,
           slideId: input.slideId,
           versionId: input.versionId,
+          aspectRatio: input.aspectRatio ?? '16:9',
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
           model: input.model,
           operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
@@ -708,6 +711,7 @@ export class MediaStepRunner {
     const output = step.output as {
       slideId?: unknown
       versionId?: unknown
+      aspectRatio?: unknown
       backgroundMode?: unknown
       model?: unknown
       operationMode?: unknown
@@ -729,6 +733,10 @@ export class MediaStepRunner {
       prompt: '',
       model: persistedMediaStepModel(step, model),
       budgetUnits: step.budgetUnits,
+      ...(output.aspectRatio === '16:9' || output.aspectRatio === '4:3'
+        || output.aspectRatio === '1:1' || output.aspectRatio === '3:4'
+        ? { aspectRatio: output.aspectRatio }
+        : {}),
       ...(typeof output.budgetReservationKey === 'string' ? { budgetReservationKey: output.budgetReservationKey } : {}),
       ...(typeof output.batchId === 'string' && typeof step.budgetReservationId === 'string'
         ? { batchReservation: { batchId: output.batchId, reservationId: step.budgetReservationId } }

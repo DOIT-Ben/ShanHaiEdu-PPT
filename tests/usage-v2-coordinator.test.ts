@@ -35,7 +35,7 @@ function mediaStep(pageNumber: number): StepRecord {
     errorCode: null,
     output: {
       slideId: `run-1:slide:${pageNumber}`, versionId: `run-1:slide:${pageNumber}:r0:v1`,
-      model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', backgroundMode: 'OPAQUE',
+      model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9', backgroundMode: 'OPAQUE',
       batchId: 'genbatch_0123456789abcdef0123456789abcdef', pageNumber, revisionRound: 0,
     },
     createdAt: '2026-08-03T07:00:00.000Z', updatedAt: '2026-08-03T07:00:00.000Z',
