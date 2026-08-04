@@ -24,6 +24,13 @@ export type BlueprintImageRequirement = Readonly<{
 export const V4_REVISION_PROMPT_MAX_LENGTH = 12_000
 // Four page-review rounds can each contribute a 1,000-character retry instruction.
 export const V4_REVISION_INSTRUCTION_MAX_LENGTH = 4_100
+export const VISUAL_DECK_V4_ASPECT_RATIO_TOLERANCE = 0.03
+
+export function hasVisualDeckV4AspectRatio(width: number, height: number) {
+  if (!Number.isSafeInteger(width) || width <= 0 || !Number.isSafeInteger(height) || height <= 0) return false
+  const target = 16 / 9
+  return Math.abs(width / height / target - 1) <= VISUAL_DECK_V4_ASPECT_RATIO_TOLERANCE
+}
 
 const VISUAL_DECK_V4_SAFETY_RULES = [
   '视觉元素独立性要求：画面中的每一个主要视觉元素都必须作为完整、独立、边界清晰的对象呈现，不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体。元素之间可以通过位置、方向、箭头、间距和大小关系表达联系，但即使存在语义关系，也必须分别保持完整轮廓、清晰边界和可见间隔；除非用户明确要求物理接触，否则不得通过接触、遮挡、交叠、穿插、融合或共用轮廓来表达关系。',

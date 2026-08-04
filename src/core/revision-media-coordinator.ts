@@ -8,6 +8,7 @@ import {
   blueprintElementAssetKey,
   blueprintImageRequirements,
   completeVisualDeckV4RevisionPrompt,
+  hasVisualDeckV4AspectRatio,
   latestCompletedAssetStep,
   visualDeckPageImageIdentity,
   VISUAL_DECK_V4_NEGATIVE_PROMPT,
@@ -355,9 +356,6 @@ export class RevisionMediaCoordinator {
         && candidate.status === 'COMPLETED')
     if (!step) throw new Error('REVISION_PLAN_NOT_READY')
     const plan = revisionPlanSchema.parse(step.output)
-    const revisionRoute = blueprint.renderMode === 'VISUAL_DECK_V4'
-      ? this.persistedRevisionRoute(run, steps)
-      : { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
     if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3') {
       const requirements = blueprintImageRequirements(run, blueprint)
       const targets = plan.operations.filter((operation) => operation.kind === 'REGENERATE_IMAGE').map((operation) => {
@@ -398,6 +396,27 @@ export class RevisionMediaCoordinator {
         operation.instruction,
       ])
     }
+    let revisionRoute = blueprint.renderMode === 'VISUAL_DECK_V4'
+      ? this.persistedRevisionRoute(run, steps)
+      : { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+    const v4EditSources = new Map<number, Awaited<ReturnType<RevisionMediaCoordinator['controlledSource']>>>()
+    if (blueprint.renderMode === 'VISUAL_DECK_V4'
+      && revisionRoute.operationMode === 'IMAGE_EDIT'
+      && !this.hasPersistedV4RevisionRoute(run, steps)) {
+      const requirements = blueprintImageRequirements(run, blueprint)
+      for (const pageNumber of byPage.keys()) {
+        const requirement = requirements.find((candidate) => candidate.pageNumber === pageNumber && candidate.elementId === null)
+        if (!requirement) throw new Error('V4_REPAIR_SOURCE_REQUIREMENT_MISSING')
+        const sourceStep = latestCompletedAssetStep(steps, requirement, run.revisionRound - 1)
+        const sourceArtifactId = sourceStep ? this.artifactId(sourceStep) : null
+        if (!sourceArtifactId) throw new Error('V4_REPAIR_SOURCE_ARTIFACT_MISSING')
+        v4EditSources.set(pageNumber, await this.controlledSource(run, sourceArtifactId))
+      }
+      if ([...v4EditSources.values()].some((source) => !hasVisualDeckV4AspectRatio(source.width, source.height))) {
+        // An image edit inherits its source frame. Rebuild the complete planned set instead of cropping it.
+        revisionRoute = { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+      }
+    }
     return Promise.all([...byPage].map(async ([pageNumber, instructions]) => {
       const slide = blueprint.slides[pageNumber - 1]
       if (!slide) throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
@@ -436,7 +455,10 @@ export class RevisionMediaCoordinator {
         const sourceStep = latestCompletedAssetStep(steps, requirement, run.revisionRound - 1)
         const sourceArtifactId = sourceStep ? this.artifactId(sourceStep) : null
         if (!sourceArtifactId) throw new Error('V4_REPAIR_SOURCE_ARTIFACT_MISSING')
-        const source = await this.controlledSource(run, sourceArtifactId)
+        const source = v4EditSources.get(pageNumber) ?? await this.controlledSource(run, sourceArtifactId)
+        if (!hasVisualDeckV4AspectRatio(source.width, source.height)) {
+          throw new Error('V4_REPAIR_SOURCE_ASPECT_RATIO_INVALID')
+        }
         const existing = steps.filter((candidate) => {
           const identity = visualDeckPageImageIdentity(candidate.idempotencyKey)
           return candidate.tool === 'generate_slide_image'
@@ -542,6 +564,18 @@ export class RevisionMediaCoordinator {
     return { model: this.dependencies.revisionImageModel, operationMode: 'IMAGE_EDIT' as const }
   }
 
+  private hasPersistedV4RevisionRoute(run: RunRecord, steps: readonly StepRecord[]) {
+    return steps.some((step) => {
+      const identity = visualDeckPageImageIdentity(step.idempotencyKey)
+      return step.tool === 'generate_slide_image'
+        && identity?.runId === run.id
+        && identity.revisionRound === run.revisionRound
+    }) || steps.some((step) => step.idempotencyKey === generationBatchStepKeyFor(run.id, {
+      revisionRound: run.revisionRound,
+      scope: 'REVISION',
+    }))
+  }
+
   private async controlledSource(run: RunRecord, artifactId: string) {
     const source = await this.dependencies.artifacts.get({ tenantId: run.host.tenantId, artifactId })
     if (!source) throw new Error('V4_REPAIR_SOURCE_ARTIFACT_MISSING')
@@ -552,11 +586,6 @@ export class RevisionMediaCoordinator {
     if (sha256 !== source.sha256) throw new Error('V4_REPAIR_SOURCE_SHA_MISMATCH')
     const metadata = await sharp(source.bytes).metadata().catch(() => null)
     if (!metadata?.width || !metadata.height) throw new Error('V4_REPAIR_SOURCE_IMAGE_INVALID')
-    const aspectError = Math.min(
-      Math.abs(metadata.width - metadata.height * 16 / 9),
-      Math.abs(metadata.height - metadata.width * 9 / 16),
-    )
-    if (aspectError > 1) throw new Error('V4_REPAIR_SOURCE_ASPECT_RATIO_INVALID')
     return {
       mimeType: source.mimeType as 'image/png' | 'image/jpeg' | 'image/webp',
       bytes: source.bytes,

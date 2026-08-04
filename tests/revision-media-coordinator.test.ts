@@ -480,6 +480,68 @@ describe('revision media coordinator', () => {
     expect(budget.batchReservationRequests[0]?.model).toBe('image-2')
   })
 
+  test('accepts a controlled V4 repair source within the three-percent 16:9 tolerance', async () => {
+    const { repository, images, artifacts, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+      revisionImageModel: 'image-2',
+    })
+    const bytes = new Uint8Array(await sharp({
+      create: { width: 1360, height: 768, channels: 3, background: '#FFFFFF' },
+    }).png().toBuffer())
+    artifacts.artifacts.set('artifact-r0-2', {
+      mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
+    })
+
+    await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({
+      status: 'REVISING', submitted: 1, total: 1,
+    })
+    const [editKey, editRequest] = [...images.requests.entries()][0]!
+    expect(editKey).toContain(':edit:')
+    expect(editRequest?.model).toBe('image-2')
+    expect(editRequest?.referenceImage?.sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(await revisionImageKey(repository, 2)).toContain(':edit:')
+  })
+
+  test('rebuilds every planned V4 page as 16:9 when one edit source exceeds the tolerance', async () => {
+    const basePlan = revisionPlan()
+    const plan = {
+      ...basePlan,
+      operations: [
+        { ...basePlan.operations[0]!, id: 'operation-page-1', slideId: 'run-1:slide:1' },
+        basePlan.operations[0]!,
+      ],
+    }
+    const { repository, images, artifacts, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan,
+      revisionImageModel: 'image-2',
+    })
+    const bytes = new Uint8Array(await sharp({
+      create: { width: 1536, height: 1024, channels: 3, background: '#FFFFFF' },
+    }).png().toBuffer())
+    artifacts.artifacts.set('artifact-r0-2', {
+      mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
+    })
+
+    await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({
+      status: 'REVISING', submitted: 2, total: 2,
+    })
+    expect([...images.requests.entries()].every(([key, request]) =>
+      !key.includes(':edit:') && request.model === 'nano-banana-pro' && !('referenceImage' in request))).toBe(true)
+    const rebuiltSteps = (await repository.listSteps('run-1')).filter((step) =>
+      step.tool === 'generate_slide_image' && step.idempotencyKey.includes(':r1:v1'))
+    expect(rebuiltSteps).toHaveLength(2)
+    expect(rebuiltSteps.every((step) => {
+      const output = step.output as { operationMode?: unknown; aspectRatio?: unknown }
+      return output.operationMode === 'TEXT_TO_IMAGE' && output.aspectRatio === '16:9'
+    })).toBe(true)
+  })
+
   test.each([
     ['missing', async (artifacts: MockArtifactPort) => { artifacts.artifacts.delete('artifact-r0-2') }, 'V4_REPAIR_SOURCE_ARTIFACT_MISSING'],
     ['cross-tenant', async (artifacts: MockArtifactPort) => { artifacts.owners.set('artifact-r0-2', 'another-tenant') }, 'V4_REPAIR_SOURCE_ARTIFACT_MISSING'],
@@ -497,14 +559,6 @@ describe('revision media coordinator', () => {
         mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
       })
     }, 'V4_REPAIR_SOURCE_IMAGE_INVALID'],
-    ['wrong aspect ratio', async (artifacts: MockArtifactPort) => {
-      const bytes = new Uint8Array(await sharp({
-        create: { width: 100, height: 100, channels: 3, background: '#FFFFFF' },
-      }).png().toBuffer())
-      artifacts.artifacts.set('artifact-r0-2', {
-        mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
-      })
-    }, 'V4_REPAIR_SOURCE_ASPECT_RATIO_INVALID'],
   ] as const)('rejects a %s controlled source before budget reservation or Provider submission', async (_label, mutate, errorCode) => {
     const { repository, budget, images, artifacts, coordinator } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
