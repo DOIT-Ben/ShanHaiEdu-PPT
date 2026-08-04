@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json && mkdir -p dist/docs && cp docs/openapi-v1.json docs/openapi-v2.json dist/docs/",
     "dev:mock": "bun src/server.ts",
+    "dev:v2": "bun src/presentation-job-v2-server.ts",
     "eval:v4": "bun scripts/run-v4-real-evaluation.ts",
     "check:boundaries": "bun scripts/check-boundaries.ts",
     "check": "bun run check:boundaries && bun test && bun run typecheck && bun run build"

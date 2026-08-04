@@ -12,12 +12,19 @@ const presentationJobV2Files = [
   path.resolve(import.meta.dir, '../src/core/presentation-job-v2-ports.ts'),
   path.resolve(import.meta.dir, '../src/core/presentation-job-v2-service.ts'),
   path.resolve(import.meta.dir, '../src/http/presentation-job-v2-handler.ts'),
+  path.resolve(import.meta.dir, '../src/http/presentation-job-v2-service-authentication.ts'),
+  path.resolve(import.meta.dir, '../src/runtime/presentation-job-v2-runtime.ts'),
+  path.resolve(import.meta.dir, '../src/runtime/presentation-job-v2-server-config.ts'),
+  path.resolve(import.meta.dir, '../src/runtime/presentation-job-v2-provider-config.ts'),
+  path.resolve(import.meta.dir, '../src/adapters/http-presentation-job-v2-provider.ts'),
+  path.resolve(import.meta.dir, '../src/presentation-job-v2-server.ts'),
 ]
 const presentationJobV2Forbidden = [
   /frameflow/i,
   /reserveCredits|settleCredits|releaseCredits|finalizeCredits/,
   /credit|price|cookie|session/i,
   /generationPlan|blueprint|nextAttemptAt|leaseToken|providerAlias|budgetUnits|maxRevisionRounds/,
+  /createAgentRuntime|createMockRuntime|RunService|SqliteAgentRepository|UsageV2Coordinator/,
 ]
 
 async function sourceFiles(directory: string): Promise<string[]> {

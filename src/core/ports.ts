@@ -482,6 +482,7 @@ export interface ArtifactPort {
     byteLength: number
     sha256: string
     stream: ReadableStream<Uint8Array>
+    verifiedBody?: Blob
   }> | null>
 
   getByIdempotencyKey(input: Readonly<{

@@ -1,14 +1,14 @@
-import { describe, expect, test } from 'bun:test'
-import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
+import { readFile } from 'node:fs/promises'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { InMemoryPresentationJobV2Repository } from '../src/adapters/presentation-job-v2-in-memory-repository'
 import {
   FixedServicePresentationJobBudgetPolicy,
   MockPresentationJobV2Provider,
 } from '../src/adapters/presentation-job-v2-ports'
 import { MockArtifactPort } from '../src/adapters/mock-ports'
-import type { FrameFlowBackendClient } from '../src/adapters/frameflow-host'
+import { PresentationJobV2ServiceTokenAuthentication } from '../src/http/presentation-job-v2-service-authentication'
 import { approvedPageDesignSnapshotHash } from '../src/presentation-job-v2-contracts'
-import { createMockRuntime } from '../src/runtime/mock-runtime'
+import { createPresentationJobV2Runtime } from '../src/runtime/presentation-job-v2-runtime'
 
 const token = 'presentation-job-v2-runtime-token-0001'
 const snapshot = {
@@ -30,39 +30,7 @@ const snapshot = {
   ],
 } as const
 
-class CallbackSpy implements FrameFlowBackendClient {
-  readonly calls = { document: 0, reserve: 0, settle: 0, release: 0, finalize: 0, preflight: 0 }
-
-  async getDocumentAttachment(): Promise<never> {
-    this.calls.document += 1
-    throw new Error('V2_MUST_NOT_READ_HOST_DOCUMENTS')
-  }
-
-  async reserveCredits(): Promise<never> {
-    this.calls.reserve += 1
-    throw new Error('V2_MUST_NOT_RESERVE_HOST_CREDITS')
-  }
-
-  async settleCredits() {
-    this.calls.settle += 1
-    throw new Error('V2_MUST_NOT_SETTLE_HOST_CREDITS')
-  }
-
-  async releaseCredits() {
-    this.calls.release += 1
-    throw new Error('V2_MUST_NOT_RELEASE_HOST_CREDITS')
-  }
-
-  async finalizeCredits() {
-    this.calls.finalize += 1
-    throw new Error('V2_MUST_NOT_FINALIZE_HOST_CREDITS')
-  }
-
-  async preflightBatchFinalization() {
-    this.calls.preflight += 1
-    throw new Error('V2_MUST_NOT_PREFLIGHT_HOST_CREDITS')
-  }
-}
+const originalFetch = globalThis.fetch
 
 function request(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
@@ -72,22 +40,22 @@ function request(path: string, init: RequestInit = {}) {
   return new Request(`http://ppt-agent.test${path}`, { ...init, headers })
 }
 
+afterEach(() => { globalThis.fetch = originalFetch })
+
 describe('Presentation Job V2 runtime boundary', () => {
-  test('executes V2 end-to-end with zero host document or credit callbacks', async () => {
-    const callbacks = new CallbackSpy()
+  test('executes V2 end-to-end without constructing V1 or making host callbacks', async () => {
+    let outboundHttpCalls = 0
+    globalThis.fetch = (async () => {
+      outboundHttpCalls += 1
+      throw new Error('V2_RUNTIME_UNEXPECTED_HTTP_CALLBACK')
+    }) as unknown as typeof fetch
     const provider = new MockPresentationJobV2Provider()
-    const v1Repository = new InMemoryAgentRepository()
-    const runtime = createMockRuntime({
-      repository: v1Repository,
+    const runtime = createPresentationJobV2Runtime({
+      repository: new InMemoryPresentationJobV2Repository(),
       artifacts: new MockArtifactPort(),
-      apiToken: token,
-      frameFlowBackend: callbacks,
-      v1ExecutionEnabled: false,
-      presentationJobV2: {
-        repository: new InMemoryPresentationJobV2Repository(),
-        provider,
-        budget: new FixedServicePresentationJobBudgetPolicy(1),
-      },
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      authentication: new PresentationJobV2ServiceTokenAuthentication([{ tenantId: 'host-a', token }]),
     })
     const response = await runtime.handler(request('/v2/presentation-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'runtime-v2-job-key' },
@@ -103,17 +71,44 @@ describe('Presentation Job V2 runtime boundary', () => {
     await runtime.tick()
     await runtime.tick()
     const openapi = await runtime.handler(new Request('http://ppt-agent.test/openapi/v2.json'))
+    const health = await runtime.handler(new Request('http://ppt-agent.test/health/ready'))
     const job = await runtime.handler(request(`/v2/presentation-jobs/${jobId}`))
+    const jobBody = await job.json() as { data: { artifact: { artifactId: string } } }
     const usage = await runtime.handler(request(`/v2/presentation-jobs/${jobId}/usage`))
+    const artifact = await runtime.handler(request(
+      `/v2/presentation-jobs/${jobId}/artifacts/${jobBody.data.artifact.artifactId}`,
+    ))
+    const v1 = await runtime.handler(request('/v1/runs'))
 
     expect(response.status).toBe(201)
     expect(openapi.status).toBe(200)
     expect(openapi.headers.get('X-PPT-Agent-Contract-Version')).toBe('2.0')
     expect(await openapi.json()).toMatchObject({ info: { version: '2.0' } })
-    expect(await job.json()).toMatchObject({ data: { status: 'COMPLETED', quality: 'PASSED' } })
+    expect(health.status).toBe(200)
+    expect(await health.json()).toMatchObject({ service: 'ppt-agent-presentation-job-v2', status: 'READY' })
+    expect(jobBody).toMatchObject({ data: { status: 'COMPLETED', quality: 'PASSED' } })
     expect(await usage.json()).toMatchObject({ data: { status: 'FINALIZED', unknownOperationCount: 0 } })
-    expect(callbacks.calls).toEqual({ document: 0, reserve: 0, settle: 0, release: 0, finalize: 0, preflight: 0 })
-    expect(await v1Repository.listRuns()).toEqual([])
+    expect(artifact.status).toBe(200)
+    expect(artifact.headers.get('Content-Type')).toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation')
+    expect(new Uint8Array(await artifact.arrayBuffer()).slice(0, 2)).toEqual(new Uint8Array([0x50, 0x4b]))
+    expect(v1.status).toBe(404)
+    expect(outboundHttpCalls).toBe(0)
     expect(provider.submitCalls).toBe(1)
+  })
+
+  test('keeps the V2 runtime and facade free of host-specific and V1 runtime imports', async () => {
+    const sources = await Promise.all([
+      readFile(new URL('../src/runtime/presentation-job-v2-runtime.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/runtime/presentation-job-v2-server-config.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/http/presentation-job-v2-service-authentication.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/presentation-job-v2-server.ts', import.meta.url), 'utf8'),
+    ])
+    for (const source of sources) {
+      for (const forbidden of [
+        'FrameFlow', 'frameflow', 'createAgentRuntime', 'createMockRuntime', 'RunService',
+        'credit', 'reserveCredits', 'settleCredits', 'releaseCredits', 'finalizeCredits',
+        'generationPlan', 'blueprint', 'FRAMEFLOW_INTERNAL_TOKEN',
+      ]) expect(source).not.toContain(forbidden)
+    }
   })
 })

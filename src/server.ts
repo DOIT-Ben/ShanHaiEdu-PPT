@@ -15,10 +15,10 @@ import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { SqlitePresentationJobV2Repository } from './adapters/presentation-job-v2-sqlite-repository'
 import {
-  DeterministicPresentationJobV2Provider,
   FixedServicePresentationJobBudgetPolicy,
 } from './adapters/presentation-job-v2-ports'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
+import { createPresentationJobV2ProviderFromEnv } from './runtime/presentation-job-v2-provider-config'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
@@ -55,7 +55,7 @@ const presentationJobV2Repository = new SqlitePresentationJobV2Repository(path.j
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
 const presentationJobV2 = {
   repository: presentationJobV2Repository,
-  provider: new DeterministicPresentationJobV2Provider(),
+  provider: createPresentationJobV2ProviderFromEnv(process.env),
   budget: new FixedServicePresentationJobBudgetPolicy(1),
 }
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'

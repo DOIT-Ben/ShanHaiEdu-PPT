@@ -19,13 +19,14 @@ Accepted
 - 服务凭据决定 tenant。V2 拒绝租户覆盖头；对象所有权不匹配一律返回 404。
 - Provider Operation 在 PPT-Agent 内以稳定幂等键记录，固定服务级操作上限在执行前强制。V2 不调用宿主预算、结算、释放、完成或文档 HTTP callback。
 - Job 交付和 Usage 终态独立。已交付 Job 不能因为后续对账或历史 V1 Event 改为 FAILED；Usage `FINALIZED` 后不能变更。
-- V1 继续使用现有 adapter 和 Run 语义以兼容历史。运行时可关闭 V1 执行图，让 V2 在独立 ports 上运行。
+- V1 继续使用现有 adapter 和 Run 语义以兼容历史。V2 提供独立进程入口，只构造 V2 SQLite repository、Artifact port、固定服务级预算、服务认证和通用 Provider port；它不通过 `createAgentRuntime` 或 `createMockRuntime` 初始化 V1 执行图。
 
 ## 后果
 
 - 新宿主只需提供服务凭据、外部身份范围和已预授权的不可变来源快照；宿主自行决定如何消费 Job/Artifact/Usage。
 - 真实通用 Provider 由独立 V2 provider port 注入；本仓库测试使用本地 Mock Provider，不调用计费模型。
 - V2 SQLite 采用专属 `presentation_jobs_v2` 表，避免与 V1 记录发生状态耦合。
+- V2-only 服务使用独立 tenant、Token、监听端口和数据根配置，因此可与 V1 兼容服务并行部署或单独回退。
 
 ## 回退
 

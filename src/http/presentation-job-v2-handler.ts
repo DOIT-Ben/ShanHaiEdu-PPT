@@ -184,7 +184,9 @@ export async function handlePresentationJobV2Request(
         || opened.sha256 !== artifact.sha256) {
         return errorResponse(404, 'PRESENTATION_ARTIFACT_NOT_FOUND', requestId, jobId)
       }
-      return new Response(verifiedBody(opened.stream, artifact.byteLength, artifact.sha256), {
+      const body = opened.verifiedBody
+        ?? verifiedBody(opened.stream, artifact.byteLength, artifact.sha256)
+      return new Response(body, {
         status: 200,
         headers: contractHeaders({
           'Accept-Ranges': 'none',

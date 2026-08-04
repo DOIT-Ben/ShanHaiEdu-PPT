@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import { createReadStream, readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { Readable } from 'node:stream'
 import type { ArtifactPort } from '../core/ports'
 
 type ArtifactMetadata = Readonly<{
@@ -81,13 +80,29 @@ export class LocalArtifactPort implements ArtifactPort {
     if (!metadata || metadata.tenantHash !== digest(input.tenantId)) return null
     const filename = path.join(directory, 'content.bin')
     try {
-      const file = await stat(filename)
-      if (file.size !== metadata.byteLength) throw new Error('ARTIFACT_INTEGRITY_FAILED')
+      const before = await stat(filename)
+      if (before.size !== metadata.byteLength) throw new Error('ARTIFACT_INTEGRITY_FAILED')
+      const digest = createHash('sha256')
+      let byteLength = 0
+      for await (const chunk of createReadStream(filename)) {
+        byteLength += chunk.byteLength
+        digest.update(chunk)
+      }
+      const after = await stat(filename)
+      if (byteLength !== metadata.byteLength
+        || digest.digest('hex') !== metadata.sha256
+        || after.size !== before.size
+        || after.mtimeMs !== before.mtimeMs
+        || after.ino !== before.ino) {
+        throw new Error('ARTIFACT_INTEGRITY_FAILED')
+      }
+      const verifiedBody = Bun.file(filename)
       return {
         mimeType: metadata.mimeType,
         byteLength: metadata.byteLength,
         sha256: metadata.sha256,
-        stream: Readable.toWeb(createReadStream(filename)) as unknown as ReadableStream<Uint8Array>,
+        stream: verifiedBody.stream(),
+        verifiedBody,
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
