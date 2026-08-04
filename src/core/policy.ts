@@ -89,6 +89,28 @@ export function recoverV4QualityFailure(state: RunPolicyState): RunPolicyState {
   return { ...state, status: 'DECK_REVIEW', resumeState: null, version: state.version + 1 }
 }
 
+/** Only Usage V2 terminal reconciliation may invalidate a completed V4 delivery. */
+export function failCompletedUsageV2Finalization(state: RunPolicyState): RunPolicyState {
+  if (state.status !== 'COMPLETED' || state.presentationMode !== 'VISUAL_DECK_V4') {
+    throw new PolicyError(
+      'USAGE_V2_FINALIZATION_FAILURE_NOT_ALLOWED',
+      'Usage V2 finalization failure requires a completed V4 run',
+    )
+  }
+  return { ...state, status: 'FAILED', resumeState: null, version: state.version + 1 }
+}
+
+/** Only same-identity administrator reconciliation may restore this terminal failure. */
+export function restoreCompletedUsageV2Finalization(state: RunPolicyState): RunPolicyState {
+  if (state.status !== 'FAILED' || state.presentationMode !== 'VISUAL_DECK_V4') {
+    throw new PolicyError(
+      'USAGE_V2_FINALIZATION_RECOVERY_NOT_ALLOWED',
+      'Usage V2 finalization recovery requires a failed V4 run',
+    )
+  }
+  return { ...state, status: 'COMPLETED', resumeState: null, version: state.version + 1 }
+}
+
 export function applyRunAction(
   state: RunPolicyState,
   action: RunAction,

@@ -592,4 +592,67 @@ describe('SQLite repository', () => {
     expect(await repository.listRunsWithPendingMedia(10)).toEqual(['run-1'])
     repository.close()
   })
+
+  test('does not close event replay at run.completed while Usage V2 finalization is still scheduled', async () => {
+    const filename = await databasePath()
+    const repository = new SqliteAgentRepository(filename)
+    await repository.createRun({
+      ...run(),
+      status: 'COMPLETED',
+      presentationMode: 'VISUAL_DECK_V4',
+      accountingProtocol: 'FRAMEFLOW_USAGE_V2',
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        id: 'step-finalize-usage-v2',
+        runId: 'run-1',
+        idempotencyKey: 'run-1:usage-v2:finalize',
+        inputHash: 'finalize-input',
+        tool: 'finalize_usage_v2',
+        status: 'RUNNING',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: {
+          schemaVersion: '2', idempotencyKey: 'finalize:run-1', deliveryState: 'PENDING',
+          nextAttemptAt: '2026-07-21T00:00:00.000Z', bill: null,
+        },
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'run.completed',
+        payload: {
+          presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', completed: 1, total: 1,
+          pageNumbers: [1, 2], revisionKind: null, revisionRound: 0, maxRevisionRounds: 2,
+          budgetUnits: 100, committedBudgetUnits: 0, reason: null, retryable: null,
+          requiresUserAction: false, nextAction: null,
+          deliveryId: 'run-1:delivery:r0', qualityOverride: false,
+        },
+      })
+    })
+
+    expect((await repository.readEvents('run-1', {
+      afterSequence: 0, limit: 100, maxBytes: 256 * 1024,
+    })).terminalSequence).toBeNull()
+
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep('run-1:usage-v2:finalize')!
+      transaction.putStep({
+        ...step,
+        status: 'COMPLETED',
+        output: {
+          ...(step.output as object),
+          deliveryState: 'ACKNOWLEDGED',
+          bill: { status: 'SETTLED' },
+        },
+      })
+    })
+    expect((await repository.readEvents('run-1', {
+      afterSequence: 0, limit: 100, maxBytes: 256 * 1024,
+    })).terminalSequence).toBe(1)
+    repository.close()
+  })
 })

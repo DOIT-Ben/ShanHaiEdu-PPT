@@ -163,9 +163,13 @@ describe('delivery runner', () => {
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'finalize_usage_v2'))
       .toMatchObject({
         status: 'RUNNING', idempotencyKey: 'run-1:usage-v2:finalize',
-        output: { idempotencyKey: 'finalize:run-1', deliveryState: 'PENDING' },
+        output: {
+          idempotencyKey: 'finalize:run-1', deliveryState: 'PENDING',
+          nextAttemptAt: '2026-07-21T00:00:00.000Z',
+        },
       })
-    expect(await repository.getTerminalEvent('run-1')).toMatchObject({ type: 'run.completed' })
+    expect(await repository.getTerminalEvent('run-1')).toBeNull()
+    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({ type: 'run.completed' })
   })
 
   test('stores PNG and PPTX artifacts before atomically completing the run', async () => {

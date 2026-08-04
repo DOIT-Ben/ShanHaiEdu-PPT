@@ -125,4 +125,25 @@ describe('operations report', () => {
       }),
     ])
   })
+
+  test('surfaces a rejected Usage V2 terminal finalization with one same-identity retry action', () => {
+    const report = buildOperationsReport({
+      runs: [run('run-finalize-review', 'FAILED', 'teacher-1')],
+      steps: [step({
+        id: 'step-usage-finalize', runId: 'run-finalize-review', tool: 'finalize_usage_v2', status: 'FAILED',
+        idempotencyKey: 'run-finalize-review:usage-v2:finalize', budgetUnits: 0,
+        budgetReservationId: null, externalOperationId: null,
+        errorCode: 'HOST_USAGE_V2_REVIEW_REQUIRED',
+      })],
+      events: [],
+      filters,
+    })
+
+    expect(report.reconciliation).toEqual([
+      expect.objectContaining({
+        stepId: 'step-usage-finalize', stepKey: 'run-finalize-review:usage-v2:finalize',
+        errorCode: 'HOST_USAGE_V2_REVIEW_REQUIRED', allowedActions: ['REINSPECT'],
+      }),
+    ])
+  })
 })

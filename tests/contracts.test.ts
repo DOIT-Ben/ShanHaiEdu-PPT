@@ -10,6 +10,14 @@ import {
 } from '../src/contracts'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1', externalProjectId: 'deck-1' }
+const v4Release = {
+  softwareVersion: '4.3.1',
+  presentationMode: 'VISUAL_DECK_V4' as const,
+  compilerVersion: 'visual-deck-v4-chain-3',
+  contractVersion: CONTRACT_VERSION,
+  gitSha: 'd25de292cee1d8049b1456b88fd36b29340890c6',
+  releaseId: 'contract-test',
+}
 
 const approvedPageDesignSource = {
   kind: 'APPROVED_PAGE_DESIGN' as const,
@@ -362,6 +370,7 @@ describe('public v1 contracts', () => {
       status: 'DELIVERING',
       resumeState: null,
       presentationMode: 'VISUAL_DECK_V4',
+      release: v4Release,
       qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
       qualityOverride: false,
       qualityPolicyAudit: policyAudit,
@@ -371,6 +380,7 @@ describe('public v1 contracts', () => {
       status: 'DELIVERING',
       resumeState: null,
       presentationMode: 'VISUAL_DECK_V4',
+      release: v4Release,
       qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
       qualityOverride: true,
       qualityPolicyAudit: policyAudit,
@@ -392,6 +402,7 @@ describe('public v1 contracts', () => {
       status: 'DELIVERING',
       resumeState: null,
       presentationMode: 'VISUAL_DECK_V4',
+      release: v4Release,
       qualityDisposition: 'SYSTEM_POLICY_ACCEPTED',
       qualityOverride: true,
       qualityPolicyAudit: policyAudit,
@@ -461,6 +472,19 @@ describe('public v1 contracts', () => {
     }).success).toBe(false)
     expect(runSnapshotSchema.safeParse({
       ...base, status: 'EXECUTING', resumeState: null, qualityDisposition: 'HARD_FAILURE',
+    }).success).toBe(false)
+
+    const v4PublicRun = {
+      ...base,
+      status: 'EXECUTING' as const,
+      resumeState: null,
+      presentationMode: 'VISUAL_DECK_V4' as const,
+    }
+    expect(runSnapshotSchema.safeParse(v4PublicRun).success).toBe(false)
+    expect(runSnapshotSchema.parse({ ...v4PublicRun, release: v4Release }).release).toEqual(v4Release)
+    expect(runSnapshotSchema.safeParse({
+      ...v4PublicRun,
+      release: { ...v4Release, presentationMode: 'SLIDE_IMAGE_V2' },
     }).success).toBe(false)
   })
 

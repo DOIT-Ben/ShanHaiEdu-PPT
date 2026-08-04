@@ -17,6 +17,7 @@ import {
   MAX_PLANNING_RETRIES,
   publicErrorSchema,
   runEnvelopeSchema,
+  runListEnvelopeSchema,
   runSnapshotSchema,
   runStatusSchema,
 } from '../contracts'
@@ -34,6 +35,7 @@ import { RunService, RunServiceError } from '../core/run-service'
 import {
   accountingProtocolFor,
   isUsageV2RunFinalizationAcknowledged,
+  isUsageV2RunFinalizationRetryScheduled,
   usageV2FinalizeStepKey,
 } from '../core/usage-v2-coordinator'
 import type { RuntimeHealthMonitor } from '../observability/runtime-health'
@@ -266,6 +268,9 @@ function errorSemantics(status: number, code: string): Readonly<{
   if (QUALITY_ERROR_CODES.has(code)) return { category: 'QUALITY', retryable: false, action: 'CONTACT_SUPPORT' }
   if (USAGE_V2_ERROR_CODES.has(code)) return { category: 'USAGE_V2', retryable: false, action: 'CONTACT_SUPPORT' }
   if (code === 'UNAUTHENTICATED') return { category: 'AUTHENTICATION', retryable: false, action: 'AUTHENTICATE' }
+  if (code === 'IDEMPOTENCY_CONFLICT') {
+    return { category: 'CONTRACT', retryable: false, action: 'MODIFY_REQUEST' }
+  }
   if (status === 403) return { category: 'AUTHORIZATION', retryable: false, action: 'NONE' }
   if (status === 429) return { category: 'REQUEST', retryable: true, action: 'WAIT' }
   if (status === 409) return { category: 'CONTRACT', retryable: true, action: 'RETRY' }
@@ -399,21 +404,23 @@ async function projectDelivery(
   run: RunRecord,
   blueprint: Awaited<ReturnType<typeof getActiveBlueprint>> | null,
 ): Promise<DeliveryProjection> {
-  if (run.terminalAccounting?.accountingStatus === 'RECONCILIATION_REQUIRED') {
-    return unavailableDelivery('ACCOUNTING_PENDING')
-  }
+  if (run.status === 'FAILED') return unavailableDelivery('RUN_FAILED')
+  if (run.status === 'CANCELLED') return unavailableDelivery('RUN_CANCELLED')
   if (run.status === 'RECOVERING' && run.pendingTerminalFailure) {
     return unavailableDelivery('QUALITY_RECOVERY')
   }
-  if (run.status === 'FAILED') return unavailableDelivery('RUN_FAILED')
-  if (run.status === 'CANCELLED') return unavailableDelivery('RUN_CANCELLED')
+  if (run.terminalAccounting?.accountingStatus === 'RECONCILIATION_REQUIRED') {
+    return unavailableDelivery('ACCOUNTING_FAILED')
+  }
   if (run.status !== 'COMPLETED') return unavailableDelivery('RUN_NOT_COMPLETED')
 
   if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') {
     const finalization = (await repository.listSteps(run.id))
       .find((step) => step.idempotencyKey === usageV2FinalizeStepKey(run.id))
     if (!isUsageV2RunFinalizationAcknowledged(finalization)) {
-      return unavailableDelivery('ACCOUNTING_PENDING')
+      return unavailableDelivery(isUsageV2RunFinalizationRetryScheduled(finalization)
+        ? 'ACCOUNTING_PENDING'
+        : 'ACCOUNTING_FAILED')
     }
   }
 
@@ -726,12 +733,12 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           if (!cursor) return errorResponse(422, 'INVALID_CURSOR', 'cursor is invalid', requestId)
         }
         const page = await dependencies.runs.listOwnedPage(host, { after: cursor, limit: pageSizeValue })
-        return json({
+        return json(runListEnvelopeSchema.parse({
           schemaVersion: CONTRACT_VERSION,
           requestId,
           data: await Promise.all(page.runs.map((run) => publicRun(dependencies.repository, run))),
           pagination: { pageSize: pageSizeValue, nextCursor: page.hasMore ? encodeCursor(page.runs.at(-1)!) : null },
-        })
+        }))
       }
 
       const runId = parts[2]

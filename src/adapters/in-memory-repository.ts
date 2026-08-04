@@ -13,6 +13,7 @@ import type {
 import { deliveryRecordSchema, type DeliveryRecord } from '../presentation-contracts'
 import { isPendingRunReconciliationStep } from '../core/media-reconciliation'
 import { buildOperationsReport } from '../core/operations'
+import { isUsageV2RunFinalizationAcknowledged } from '../core/usage-v2-coordinator'
 
 type StoredRun = {
   run: RunRecord
@@ -25,17 +26,26 @@ function clone<T>(value: T): T {
   return structuredClone(value)
 }
 
-function effectiveTerminalEvent(events: readonly AgentEvent[]): TerminalAgentEvent | null {
+function effectiveTerminalEvent(
+  events: readonly AgentEvent[],
+  run: RunRecord | undefined,
+  steps: readonly StepRecord[],
+): TerminalAgentEvent | null {
   const lastResumeSequence = [...events].reverse()
     .find((candidate) => candidate.type === 'run.resumed')?.sequence ?? 0
+  const usageV2Completed = run?.accountingProtocol !== 'FRAMEFLOW_USAGE_V2'
+    || isUsageV2RunFinalizationAcknowledged(
+      steps.find((step) => step.tool === 'finalize_usage_v2'),
+    )
   return events.find((candidate): candidate is TerminalAgentEvent => {
     if (candidate.sequence <= lastResumeSequence) return false
+    if (candidate.type === 'run.completed') return usageV2Completed
     if (candidate.type === 'run.accounting.finalized') return true
     if (candidate.type === 'run.failed') {
       return !('terminalAccounting' in candidate.payload)
         || candidate.payload.terminalAccounting?.accountingStatus !== 'RECONCILIATION_REQUIRED'
     }
-    return candidate.type === 'run.completed' || candidate.type === 'run.cancelled'
+    return candidate.type === 'run.cancelled'
   }) ?? null
 }
 
@@ -143,13 +153,18 @@ export class InMemoryAgentRepository implements AgentRepository {
 
   async getTerminalEvent(runId: string) {
     const stored = this.#runs.get(runId)
-    const event = effectiveTerminalEvent(stored?.events ?? [])
+    const event = effectiveTerminalEvent(
+      stored?.events ?? [],
+      stored?.run,
+      [...(stored?.steps.values() ?? [])],
+    )
     return event ? clone(event) : null
   }
 
   async readEvents(runId: string, input: Readonly<{ afterSequence: number; limit: number; maxBytes: number }>) {
     const snapshot = (this.#runs.get(runId)?.events ?? []).map(clone)
-    const terminal = effectiveTerminalEvent(snapshot)
+    const stored = this.#runs.get(runId)
+    const terminal = effectiveTerminalEvent(snapshot, stored?.run, [...(stored?.steps.values() ?? [])])
     const candidates = snapshot.filter((event) => event.sequence > input.afterSequence).slice(0, input.limit + 1)
     const events: AgentEvent[] = []
     let byteLength = 0

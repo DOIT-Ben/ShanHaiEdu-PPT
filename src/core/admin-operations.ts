@@ -137,8 +137,11 @@ export class AdminOperationsService implements AdminOperationsPort {
       }
       const usageEventRetry = currentTarget.tool === 'report_usage_v2'
         && currentTarget.status === 'FAILED'
+      const usageFinalizationRetry = currentTarget.tool === 'finalize_usage_v2'
+        && currentTarget.status === 'FAILED'
       if (input.action === 'REINSPECT'
         && !usageEventRetry
+        && !usageFinalizationRetry
         && (!['WAITING', 'BILLING_UNKNOWN'].includes(currentTarget.status) || !currentTarget.externalOperationId)) {
         throw new AdminOperationsError(409, 'STEP_NOT_REINSPECTABLE', 'step cannot be reinspected')
       }
@@ -187,11 +190,16 @@ export class AdminOperationsService implements AdminOperationsPort {
 
     let updated: StepRecord
     if (input.action === 'REINSPECT') {
-      if (prepared.target.tool === 'report_usage_v2' && prepared.target.status === 'FAILED') {
+      if (['report_usage_v2', 'finalize_usage_v2'].includes(prepared.target.tool)
+        && prepared.target.status === 'FAILED') {
         if (!this.dependencies.usageV2) {
           throw new AdminOperationsError(503, 'USAGE_V2_COORDINATOR_REQUIRED', 'Usage V2 recovery is unavailable')
         }
-        await this.dependencies.usageV2.retryRejectedEvent(input.runId, prepared.target.idempotencyKey)
+        if (prepared.target.tool === 'report_usage_v2') {
+          await this.dependencies.usageV2.retryRejectedEvent(input.runId, prepared.target.idempotencyKey)
+        } else {
+          await this.dependencies.usageV2.retryRejectedFinalization(input.runId, prepared.target.idempotencyKey)
+        }
         const refreshed = (await this.dependencies.repository.listSteps(input.runId))
           .find((step) => step.idempotencyKey === prepared.target.idempotencyKey)
         if (!refreshed) throw new AdminOperationsError(409, 'ADMIN_ACTION_TARGET_MISSING', 'admin action target is unavailable')
@@ -211,7 +219,7 @@ export class AdminOperationsService implements AdminOperationsPort {
       if (!actionStep || !current) throw new AdminOperationsError(409, 'ADMIN_ACTION_STATE_MISSING', 'admin action state is unavailable')
       if (input.action === 'REINSPECT' && (
         ['WAITING', 'BILLING_UNKNOWN'].includes(current.status)
-        || (current.tool === 'report_usage_v2' && current.status !== 'COMPLETED')
+        || (['report_usage_v2', 'finalize_usage_v2'].includes(current.tool) && current.status !== 'COMPLETED')
       )) {
         const now = this.dependencies.clock.now().toISOString()
         transaction.putStep({

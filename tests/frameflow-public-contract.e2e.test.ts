@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import JSZip from 'jszip'
+import sharp from 'sharp'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
 import { FixedClock, MockArtifactPort } from '../src/adapters/mock-ports'
@@ -15,10 +16,12 @@ import {
 } from '../src/core/ports'
 import { providerTechnicalFailure } from '../src/core/technical-recovery'
 import { createMockRuntime } from '../src/runtime/mock-runtime'
+import { ServiceTokenAuthentication } from '../src/http/service-token-authentication'
 import { createRunEnvelopeSchema, runDetailEnvelopeSchema } from '../src/run-detail-contracts'
-import type { UsageRunBill } from '../src/usage-accounting-contracts'
+import { UsageAccountingRequestError, type UsageRunBill } from '../src/usage-accounting-contracts'
 
 const token = 'frameflow-contract-token-0001'
+const adminToken = 'frameflow-contract-admin-token-0001'
 const host = { tenantId: 'frameflow', externalUserId: 'frameflow-user-1', externalProjectId: 'project-1' }
 
 const frameFlowV4Request = {
@@ -68,6 +71,16 @@ function createRequest(key: string, body: unknown = frameFlowV4Request, requestI
   }, requestId)
 }
 
+function adminRequest(path: string, init: RequestInit = {}, requestId = 'frameflow-admin-request-1') {
+  const headers = new Headers(init.headers)
+  headers.set('Authorization', `Bearer ${adminToken}`)
+  headers.set('X-PPT-Agent-Tenant', host.tenantId)
+  headers.set('X-PPT-Agent-User', 'frameflow-admin-1')
+  headers.set('X-PPT-Agent-Role', 'ADMIN')
+  headers.set('X-Request-ID', requestId)
+  return new Request(`http://ppt-agent.test${path}`, { ...init, headers })
+}
+
 function expectContractHeaders(response: Response, requestId: string) {
   expect(response.headers.get('X-PPT-Agent-Contract-Version')).toBe('1')
   expect(response.headers.get('X-Request-ID')).toBe(requestId)
@@ -81,6 +94,20 @@ async function advanceToTerminal(runtime: ReturnType<typeof createMockRuntime>, 
     await runtime.tick()
   }
   throw new Error('RUN_DID_NOT_REACH_TERMINAL_STATE')
+}
+
+async function advanceUntilStatus(
+  runtime: ReturnType<typeof createMockRuntime>,
+  repository: InMemoryAgentRepository,
+  runId: string,
+  status: 'COMPLETED' | 'FAILED',
+) {
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    const current = await repository.getRun(runId)
+    if (current?.status === status) return current
+    await runtime.tick()
+  }
+  throw new Error(`RUN_DID_NOT_REACH_${status}`)
 }
 
 class HardPageBlocker implements VisualReviewPort {
@@ -121,6 +148,46 @@ class UnknownSubmissionImages implements ImageGenerationPort {
 
   async inspect(): Promise<never> {
     throw new Error('UNKNOWN_SUBMISSION_MUST_NOT_BE_INSPECTED_WITHOUT_OPERATION_ID')
+  }
+}
+
+class CountingCompletedImages implements ImageGenerationPort {
+  readonly submissions: Parameters<ImageGenerationPort['submit']>[0][] = []
+  readonly operations = new Map<string, Readonly<{ operationId: string; artifactId: string }>>()
+
+  constructor(private readonly artifacts: MockArtifactPort) {}
+
+  async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+    this.submissions.push(structuredClone(input))
+    const existing = this.operations.get(input.idempotencyKey)
+    if (existing) return { operationId: existing.operationId, state: 'COMPLETED' as const }
+    const operationId = `counting-image-${this.operations.size + 1}`
+    const bytes = await sharp({
+      create: { width: 1280, height: 720, channels: 3, background: '#5A8F7B' },
+    }).png().toBuffer()
+    const artifact = await this.artifacts.put({
+      tenantId: input.tenantId,
+      runId: input.idempotencyKey.split(':slide:')[0]!,
+      name: `${operationId}.png`,
+      mimeType: 'image/png',
+      bytes,
+      idempotencyKey: `${input.idempotencyKey}:counting-artifact`,
+    })
+    this.operations.set(input.idempotencyKey, { operationId, artifactId: artifact.artifactId })
+    return { operationId, state: 'COMPLETED' as const }
+  }
+
+  async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+    const operation = this.operations.get(input.idempotencyKey)
+    return operation
+      ? { state: 'SUBMITTED' as const, operationId: operation.operationId }
+      : { state: 'NOT_SUBMITTED' as const }
+  }
+
+  async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
+    const operation = [...this.operations.values()].find((candidate) => candidate.operationId === input.operationId)
+    if (!operation) throw new Error('COUNTING_IMAGE_OPERATION_NOT_FOUND')
+    return { state: 'COMPLETED' as const, artifactId: operation.artifactId }
   }
 }
 
@@ -176,6 +243,60 @@ class AuthorizationCapUsage implements UsageAccountingPort {
 
   async finalizeRun(input: Parameters<UsageAccountingPort['finalizeRun']>[0]) {
     return settledBill(input.runId)
+  }
+}
+
+type TerminalFinalizeOutcome = 'REVIEW_REQUIRED' | 'LEGACY_RECONCILIATION' | 'RECONCILING' | 'SETTLED' | 'REJECTED'
+
+class TerminalFinalizeUsage implements UsageAccountingPort {
+  readonly finalizeAttempts: Parameters<UsageAccountingPort['finalizeRun']>[0][] = []
+  readonly eventAttempts: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
+
+  constructor(
+    readonly outcomes: TerminalFinalizeOutcome[],
+    private readonly clock: FixedClock,
+  ) {}
+
+  async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
+    return {
+      allowed: true as const,
+      permitId: `permit-${input.pageNumber}`,
+      pricingVersion: 'ppt-image-v1',
+      userPriceMilli: 10_000,
+    }
+  }
+
+  async ingestEvent(input: Parameters<UsageAccountingPort['ingestEvent']>[0]) {
+    this.eventAttempts.push(structuredClone(input.event))
+    return {
+      replayed: false,
+      bill: {
+        ...settledBill(input.event.pptRunId),
+        status: 'ACTIVE' as const,
+        lastEventSequence: input.event.sequence,
+        settledAt: null,
+      },
+    }
+  }
+
+  async getRunBill(input: Parameters<UsageAccountingPort['getRunBill']>[0]) {
+    return { ...settledBill(input.runId), status: 'ACTIVE' as const, settledAt: null }
+  }
+
+  async finalizeRun(input: Parameters<UsageAccountingPort['finalizeRun']>[0]) {
+    this.finalizeAttempts.push(structuredClone(input))
+    const outcome = this.outcomes.shift() ?? 'SETTLED'
+    if (outcome === 'REJECTED') {
+      throw new UsageAccountingRequestError('PPT_USAGE_FINALIZE_REJECTED', 'REJECTED')
+    }
+    return {
+      ...settledBill(input.runId),
+      status: outcome,
+      settledAt: outcome === 'SETTLED' ? this.clock.now().toISOString() : null,
+      nextReconcileAt: outcome === 'RECONCILING'
+        ? new Date(this.clock.now().getTime() + 1_000).toISOString()
+        : null,
+    }
   }
 }
 
@@ -542,6 +663,242 @@ describe('FrameFlow public V4 contract', () => {
         requiresUserAction: true,
         nextAction: 'ADD_BUDGET',
       },
+    })
+  })
+
+  test('fails a completed Usage V2 Run on REVIEW_REQUIRED and lets an administrator retry only the original finalize identity', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const images = new CountingCompletedImages(artifacts)
+    const clock = new FixedClock()
+    const usage = new TerminalFinalizeUsage(['REVIEW_REQUIRED', 'SETTLED'], clock)
+    const runtime = createMockRuntime({
+      repository,
+      artifacts,
+      images,
+      clock,
+      apiToken: token,
+      authentication: new ServiceTokenAuthentication([{
+        tenantId: host.tenantId,
+        userToken: token,
+        adminToken,
+      }]),
+      defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      usageAccounting: usage,
+      providerBillingCatalog: billingCatalog,
+    })
+    const created = await runtime.handler(createRequest('frameflow-create-finalize-review'))
+    const runId = ((await created.json()) as Record<string, any>).data.id as string
+
+    await advanceUntilStatus(runtime, repository, runId, 'FAILED')
+    const submissionCount = images.submissions.length
+    const usageEventCount = usage.eventAttempts.length
+    expect(submissionCount).toBe(2)
+    expect(new Set(images.submissions.map((submission) => submission.idempotencyKey)).size).toBe(2)
+    expect(await repository.listDeliveries(runId)).toHaveLength(1)
+
+    const detailRequestId = 'request-finalize-review-detail'
+    const detailResponse = await runtime.handler(request(`/v1/runs/${runId}`, {}, detailRequestId))
+    expectContractHeaders(detailResponse, detailRequestId)
+    const detail = runDetailEnvelopeSchema.parse(await detailResponse.json())
+    expect(detail).toMatchObject({
+      data: {
+        status: 'FAILED',
+        qualityDisposition: 'HARD_FAILURE',
+        error: {
+          code: 'USAGE_V2_FINALIZATION_REJECTED', category: 'USAGE_V2', retryable: false,
+          action: 'CONTACT_SUPPORT', requestId: null, runId,
+        },
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_FAILED' },
+      },
+    })
+
+    const historyResponse = await runtime.handler(request(`/v1/runs/${runId}/events/history`))
+    const history = agentEventHistoryEnvelopeSchema.parse(await historyResponse.json())
+    const completed = history.data.find((event) => event.type === 'run.completed')!
+    expect(history.data.at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: {
+        errorCode: 'USAGE_V2_FINALIZATION_REJECTED',
+        error: {
+          code: 'USAGE_V2_FINALIZATION_REJECTED', category: 'USAGE_V2', retryable: false,
+          action: 'CONTACT_SUPPORT', requestId: null, runId,
+        },
+      },
+    })
+    expect(history.data.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(history.data.some((event) =>
+      event.type === 'phase.changed' && event.payload.to === 'NEEDS_HUMAN')).toBe(false)
+
+    const streamResponse = await runtime.handler(request(`/v1/runs/${runId}/events?after=${completed.sequence}`))
+    const streamed = (await streamResponse.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, any>)
+    expect(streamed.some((event) => event.type === 'run.failed')).toBe(true)
+
+    const deliveryId = `${runId}:delivery:r0`
+    const download = await runtime.handler(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=pptx`,
+    ))
+    expect(download.status).toBe(409)
+    expect(await download.json()).toMatchObject({
+      error: {
+        code: 'DELIVERY_NOT_AVAILABLE', retryable: false, action: 'NONE', runId,
+        details: { reason: 'RUN_FAILED' },
+      },
+    })
+
+    const failedRun = (await repository.getRun(runId))!
+    const userRetry = await runtime.handler(request(
+      `/v1/runs/${runId}/actions`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'user-finalize-retry-blocked-1' },
+        body: JSON.stringify({ schemaVersion: '1', type: 'RETRY_DELIVERY', expectedVersion: failedRun.version }),
+      },
+    ))
+    expect(userRetry.status).toBe(409)
+    expect(await userRetry.json()).toMatchObject({
+      error: {
+        code: 'QUALITY_FAILURE_RECOVERY_NOT_ALLOWED', retryable: false, action: 'CONTACT_SUPPORT', runId,
+      },
+    })
+    expect(images.submissions).toHaveLength(submissionCount)
+
+    const operationsResponse = await runtime.handler(adminRequest('/v1/admin/operations'))
+    expect(operationsResponse.status).toBe(200)
+    const operations = await operationsResponse.json() as Record<string, any>
+    const finalizeItem = operations.data.reconciliation.find((item: Record<string, any>) =>
+      item.runId === runId && item.allowedActions.includes('REINSPECT'))
+    expect(finalizeItem).toMatchObject({
+      stepKey: `${runId}:usage-v2:finalize`,
+      status: 'FAILED',
+      errorCode: 'HOST_USAGE_V2_REVIEW_REQUIRED',
+      allowedActions: ['REINSPECT'],
+    })
+
+    const recoveryRequestId = 'request-finalize-review-recovery'
+    const recovery = await runtime.handler(adminRequest(
+      `/v1/admin/operations/${runId}/actions`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'admin-finalize-reinspect-1' },
+        body: JSON.stringify({
+          stepId: finalizeItem.stepId,
+          action: 'REINSPECT',
+          expectedVersion: finalizeItem.runVersion,
+          reason: '宿主终态账务问题已修复，重投原 finalize 身份。',
+        }),
+      },
+      recoveryRequestId,
+    ))
+    expect(recovery.status).toBe(200)
+    expectContractHeaders(recovery, recoveryRequestId)
+    expect(await recovery.json()).toMatchObject({
+      data: { run: { status: 'COMPLETED', error: null }, step: { status: 'COMPLETED', errorCode: null } },
+      replayed: false,
+    })
+    expect(usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey))
+      .toEqual([`finalize:${runId}`, `finalize:${runId}`])
+    expect(images.submissions).toHaveLength(submissionCount)
+    expect(usage.eventAttempts).toHaveLength(usageEventCount)
+    expect(await repository.listDeliveries(runId)).toHaveLength(1)
+
+    const recoveredDetail = runDetailEnvelopeSchema.parse(await (await runtime.handler(
+      request(`/v1/runs/${runId}`),
+    )).json())
+    expect(recoveredDetail.data).toMatchObject({
+      status: 'COMPLETED', error: null,
+      deliveryAvailability: { state: 'AVAILABLE', deliveryId },
+    })
+  })
+
+  test('fails a completed Usage V2 Run on an explicit terminal finalize rejection without resubmitting media', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const images = new CountingCompletedImages(artifacts)
+    const clock = new FixedClock()
+    const usage = new TerminalFinalizeUsage(['REJECTED'], clock)
+    const runtime = createMockRuntime({
+      repository, artifacts, images, clock, apiToken: token,
+      defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      usageAccounting: usage,
+      providerBillingCatalog: billingCatalog,
+    })
+    const created = await runtime.handler(createRequest('frameflow-create-finalize-rejected'))
+    const runId = ((await created.json()) as Record<string, any>).data.id as string
+
+    await advanceUntilStatus(runtime, repository, runId, 'FAILED')
+    expect(images.submissions).toHaveLength(2)
+    expect(usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey)).toEqual([`finalize:${runId}`])
+    expect((await repository.listSteps(runId)).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({ status: 'FAILED', errorCode: 'PPT_USAGE_FINALIZE_REJECTED' })
+    const detail = runDetailEnvelopeSchema.parse(await (await runtime.handler(request(`/v1/runs/${runId}`))).json())
+    expect(detail.data).toMatchObject({
+      status: 'FAILED',
+      error: {
+        code: 'USAGE_V2_FINALIZATION_REJECTED', category: 'USAGE_V2', retryable: false,
+        action: 'CONTACT_SUPPORT', runId,
+      },
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_FAILED' },
+    })
+    expect((await repository.listEvents(runId)).some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('keeps RECONCILING on a durable retry deadline and settles the same finalize identity without resubmitting media', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const images = new CountingCompletedImages(artifacts)
+    const clock = new FixedClock()
+    const usage = new TerminalFinalizeUsage(['RECONCILING', 'SETTLED'], clock)
+    const runtime = createMockRuntime({
+      repository, artifacts, images, clock, apiToken: token,
+      defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
+      usageAccounting: usage,
+      providerBillingCatalog: billingCatalog,
+    })
+    const created = await runtime.handler(createRequest('frameflow-create-finalize-reconciling'))
+    const runId = ((await created.json()) as Record<string, any>).data.id as string
+
+    for (let attempt = 0; attempt < 15 && usage.finalizeAttempts.length === 0; attempt += 1) {
+      await runtime.tick()
+    }
+    expect(usage.finalizeAttempts).toHaveLength(1)
+    const submissionCount = images.submissions.length
+    const finalization = (await repository.listSteps(runId)).find((step) => step.tool === 'finalize_usage_v2')!
+    expect(finalization).toMatchObject({
+      status: 'RUNNING', errorCode: null,
+      output: {
+        idempotencyKey: `finalize:${runId}`, deliveryState: 'PENDING',
+        nextAttemptAt: new Date(clock.now().getTime() + 1_000).toISOString(),
+        bill: { status: 'RECONCILING' },
+      },
+    })
+    const waitingDetail = runDetailEnvelopeSchema.parse(await (await runtime.handler(request(`/v1/runs/${runId}`))).json())
+    expect(waitingDetail.data).toMatchObject({
+      status: 'COMPLETED', error: null,
+      deliveries: [],
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_PENDING' },
+    })
+    const waitingDownload = await runtime.handler(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(`${runId}:delivery:r0`)}/content?format=pptx`,
+    ))
+    expect(await waitingDownload.json()).toMatchObject({
+      error: { retryable: true, action: 'WAIT', details: { reason: 'ACCOUNTING_PENDING' } },
+    })
+
+    clock.advance(1_000)
+    await runtime.tick()
+    expect(usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey))
+      .toEqual([`finalize:${runId}`, `finalize:${runId}`])
+    expect(images.submissions).toHaveLength(submissionCount)
+    expect((await repository.listSteps(runId)).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({ status: 'COMPLETED', output: { deliveryState: 'ACKNOWLEDGED', bill: { status: 'SETTLED' } } })
+    const settledDetail = runDetailEnvelopeSchema.parse(await (await runtime.handler(request(`/v1/runs/${runId}`))).json())
+    expect(settledDetail.data).toMatchObject({
+      status: 'COMPLETED', error: null,
+      deliveryAvailability: { state: 'AVAILABLE', deliveryId: `${runId}:delivery:r0` },
     })
   })
 })

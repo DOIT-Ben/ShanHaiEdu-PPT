@@ -125,11 +125,12 @@ describe('OpenAPI v1 contract', () => {
       security: unknown[]
       paths: Record<string, Record<string, unknown>>
       components: {
-        parameters: Record<string, { name?: string; required?: boolean }>
+        parameters: Record<string, { name?: string; required?: boolean; description?: string }>
         responses: Record<string, { headers?: Record<string, unknown> }>
         securitySchemes: Record<string, { description?: string }>
         schemas: Record<string, {
           required?: string[]
+          enum?: Array<string | null>
           oneOf?: Array<{ $ref?: string; properties?: Record<string, { const?: string }> }>
           properties?: Record<string, { enum?: Array<string | null>; description?: string; const?: string }>
           allOf?: Array<{
@@ -171,6 +172,8 @@ describe('OpenAPI v1 contract', () => {
     expect(document.paths['/v1/admin/planning-failures']?.get).toBeDefined()
     expect(document.paths['/v1/admin/operations']?.get).toBeDefined()
     expect(document.paths['/v1/admin/operations/{runId}/actions']?.post).toBeDefined()
+    expect(JSON.stringify(document.paths['/v1/admin/operations/{runId}/actions']?.post))
+      .toContain('finalize:<runId>')
     expect(document.paths['/v1/admin/settings/revision-rounds']?.get).toBeDefined()
     expect(document.paths['/v1/admin/settings/revision-rounds']?.patch).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
@@ -206,6 +209,8 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(document.components.schemas.Readiness?.properties?.worker))
       .toContain('lastTickActivityAt')
     expect(document.components.parameters.IdempotencyKey?.required).toBe(true)
+    expect(document.components.parameters.IdempotencyKey?.description)
+      .toContain('retryable=false and action=MODIFY_REQUEST')
     expect(document.components.parameters.TenantId).toMatchObject({ name: 'X-PPT-Agent-Tenant', required: true })
     expect(document.components.parameters.ExternalUserId).toMatchObject({ name: 'X-PPT-Agent-User', required: true })
     expect(document.components.parameters.ExternalProjectId).toMatchObject({ name: 'X-PPT-Agent-Project', required: false })
@@ -228,6 +233,9 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.PublicRun?.properties?.pendingTerminalFailure).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.terminalAccounting).toBeDefined()
     expect(document.components.schemas.PublicRun?.properties?.release).toBeDefined()
+    expect(document.components.schemas.PublicRun?.allOf?.some((rule) =>
+      rule.if?.properties?.presentationMode?.const === 'VISUAL_DECK_V4'
+        && rule.then?.required?.includes('release'))).toBe(true)
     expect(document.components.schemas.TechnicalRecovery).toBeDefined()
     expect(document.components.schemas.TechnicalRecovery?.properties?.resumeState?.enum)
       .toEqual(['PLANNING', 'EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'REVISING', 'DELIVERING'])
@@ -276,6 +284,7 @@ describe('OpenAPI v1 contract', () => {
       'TECHNICAL_RECOVERY_EXHAUSTED',
       'TECHNICAL_CONFIGURATION_REQUIRED',
       'TECHNICAL_CONTRACT_INVALID',
+      'USAGE_V2_FINALIZATION_REJECTED',
     ]) {
       expect(v4LifecycleEvent).toContain(errorCode)
     }
@@ -308,6 +317,7 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
       .toContain('#/components/schemas/RunDetail')
     expect(document.components.schemas.DeliveryAvailability).toBeDefined()
+    expect(document.components.schemas.DeliveryUnavailableReason?.enum).toContain('ACCOUNTING_FAILED')
     expect(JSON.stringify(document.paths['/v1/runs/{runId}']?.get))
       .toContain('#/components/schemas/RunDetailEnvelope')
     expect(document.components.schemas.CreateRunRequest?.properties?.targetAudience).toBeDefined()
@@ -364,7 +374,10 @@ describe('OpenAPI v1 contract', () => {
       publicDocument.paths[path]?.[method]?.responses?.[status]
     for (const [path, method, status] of [
       ['/v1/runs', 'post', '201'],
+      ['/v1/runs', 'get', '200'],
       ['/v1/runs/{runId}', 'get', '200'],
+      ['/v1/runs/{runId}/actions', 'post', '200'],
+      ['/v1/admin/operations/{runId}/actions', 'post', '200'],
       ['/v1/runs/{runId}/events', 'get', '200'],
       ['/v1/runs/{runId}/events/history', 'get', '200'],
       ['/v1/runs/{runId}/deliveries/{deliveryId}/content', 'get', '200'],
@@ -376,12 +389,22 @@ describe('OpenAPI v1 contract', () => {
     }
     expect(JSON.stringify(responseAt('/v1/runs', 'post', '201')))
       .toContain('#/components/schemas/CreateRunEnvelope')
+    expect(JSON.stringify(responseAt('/v1/runs', 'get', '200')))
+      .toContain('#/components/schemas/RunListEnvelope')
+    expect(JSON.stringify(responseAt('/v1/runs/{runId}/actions', 'post', '200')))
+      .toContain('#/components/schemas/RunEnvelope')
+    expect(JSON.stringify(responseAt('/v1/admin/operations/{runId}/actions', 'post', '200')))
+      .toContain('#/components/schemas/AdminOperationsActionEnvelope')
     expect(publicDocument.components.schemas.CreateRunEnvelope?.required)
       .toEqual(['schemaVersion', 'requestId', 'data', 'replayed'])
     expect(publicDocument.components.schemas.RunDetailEnvelope?.required)
       .toEqual(['schemaVersion', 'requestId', 'data'])
     expect(publicDocument.components.schemas.RunEnvelope?.required)
       .toEqual(['schemaVersion', 'requestId', 'data'])
+    expect(publicDocument.components.schemas.RunListEnvelope?.required)
+      .toEqual(['schemaVersion', 'requestId', 'data', 'pagination'])
+    expect(publicDocument.components.schemas.AdminOperationsActionEnvelope?.required)
+      .toEqual(['data', 'replayed'])
     const historyContract = responseAt('/v1/runs/{runId}/events/history', 'get', '200')
       ?.content?.['application/json']?.schema
     expect(historyContract?.required).toEqual(['schemaVersion', 'requestId', 'data', 'pagination'])

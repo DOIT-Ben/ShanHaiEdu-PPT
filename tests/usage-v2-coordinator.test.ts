@@ -62,7 +62,7 @@ class RecordingUsagePort implements UsageAccountingPort {
   failFirstEventUnknown = false
   rejectEvents = false
   readonly finalizeAttempts: Parameters<UsageAccountingPort['finalizeRun']>[0][] = []
-  finalizeOutcomes: (UsageRunBill['status'] | 'UNKNOWN')[] = []
+  finalizeOutcomes: (UsageRunBill['status'] | 'UNKNOWN' | 'REJECTED')[] = []
 
   async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
     this.permits.push(structuredClone(input))
@@ -89,6 +89,7 @@ class RecordingUsagePort implements UsageAccountingPort {
     this.finalizeAttempts.push(structuredClone(input))
     const outcome = this.finalizeOutcomes.shift() ?? 'SETTLED'
     if (outcome === 'UNKNOWN') throw new UsageAccountingRequestError('HOST_USAGE_V2_FINALIZE_UNKNOWN', 'UNKNOWN')
+    if (outcome === 'REJECTED') throw new UsageAccountingRequestError('PPT_USAGE_FINALIZE_REJECTED', 'REJECTED')
     return bill({ status: outcome, settledMilli: 10_000, releasedMilli: 290_000 })
   }
 }
@@ -145,6 +146,9 @@ describe('Usage V2 coordinator', () => {
       enqueueUsageV2RunFinalization(transaction, clock)
     })
 
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({ output: { nextAttemptAt: clock.now().toISOString() } })
+
     expect(await coordinator.reconcileTerminalRun('run-1')).toBe(false)
     expect((await repository.listSteps('run-1')).find((step) => step.tool === 'finalize_usage_v2'))
       .toMatchObject({ status: 'RUNNING', errorCode: 'HOST_USAGE_V2_FINALIZE_UNKNOWN' })
@@ -188,6 +192,96 @@ describe('Usage V2 coordinator', () => {
         output: { deliveryState: 'REVIEW_REQUIRED', bill: { status: 'REVIEW_REQUIRED' } },
       })
     expect(review.usage.finalizeAttempts).toHaveLength(1)
+  })
+
+  test.each([
+    ['REVIEW_REQUIRED', 'HOST_USAGE_V2_REVIEW_REQUIRED'],
+    ['LEGACY_RECONCILIATION', 'HOST_USAGE_V2_LEGACY_RECONCILIATION'],
+    ['REJECTED', 'PPT_USAGE_FINALIZE_REJECTED'],
+  ] as const)('fails a completed V4 Run when terminal finalization is deterministically %s', async (
+    outcome,
+    stepErrorCode,
+  ) => {
+    const current = await fixture()
+    current.usage.finalizeOutcomes = [outcome]
+    await current.repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'COMPLETED',
+        qualityDisposition: 'REVIEW_PASSED',
+      })
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'run.completed',
+        payload: {
+          presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', completed: 1, total: 1,
+          pageNumbers: [1], revisionKind: null, revisionRound: 0, maxRevisionRounds: 2,
+          budgetUnits: 30, committedBudgetUnits: 1, reason: null, retryable: null,
+          requiresUserAction: false, nextAction: null,
+          deliveryId: 'run-1:delivery:r0', qualityOverride: false,
+        },
+      })
+      enqueueUsageV2RunFinalization(transaction, current.clock)
+    })
+
+    expect(await current.coordinator.reconcileTerminalRun('run-1')).toBe(false)
+    expect((await current.repository.listSteps('run-1')).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({
+        status: 'FAILED',
+        errorCode: stepErrorCode,
+        output: { idempotencyKey: 'finalize:run-1', deliveryState: 'REVIEW_REQUIRED', nextAttemptAt: null },
+      })
+    expect(await current.repository.getRun('run-1')).toMatchObject({ status: 'FAILED' })
+    const events = await current.repository.listEvents('run-1')
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: {
+        errorCode: 'USAGE_V2_FINALIZATION_REJECTED',
+        error: {
+          code: 'USAGE_V2_FINALIZATION_REJECTED', category: 'USAGE_V2', retryable: false,
+          action: 'CONTACT_SUPPORT', requestId: null, runId: 'run-1',
+        },
+      },
+    })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(events.some((event) =>
+      event.type === 'phase.changed' && event.payload.to === 'NEEDS_HUMAN')).toBe(false)
+  })
+
+  test('retries a rejected terminal finalization with its original identity and restores the existing delivery', async () => {
+    const current = await fixture()
+    current.usage.finalizeOutcomes = ['REVIEW_REQUIRED', 'SETTLED']
+    await current.repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'COMPLETED',
+        qualityDisposition: 'REVIEW_PASSED',
+      })
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'run.completed',
+        payload: {
+          presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', completed: 1, total: 1,
+          pageNumbers: [1], revisionKind: null, revisionRound: 0, maxRevisionRounds: 2,
+          budgetUnits: 30, committedBudgetUnits: 1, reason: null, retryable: null,
+          requiresUserAction: false, nextAction: null,
+          deliveryId: 'run-1:delivery:r0', qualityOverride: false,
+        },
+      })
+      enqueueUsageV2RunFinalization(transaction, current.clock)
+    })
+    await current.coordinator.reconcileTerminalRun('run-1')
+    const failed = (await current.repository.listSteps('run-1'))
+      .find((step) => step.tool === 'finalize_usage_v2')!
+
+    expect(await current.coordinator.retryRejectedFinalization('run-1', failed.idempotencyKey)).toBe(true)
+    expect(current.usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey))
+      .toEqual(['finalize:run-1', 'finalize:run-1'])
+    expect(await current.repository.getRun('run-1')).toMatchObject({
+      status: 'COMPLETED', qualityDisposition: 'REVIEW_PASSED',
+    })
+    expect((await current.repository.listEvents('run-1')).slice(-3).map((event) => event.type))
+      .toEqual(['phase.changed', 'run.resumed', 'run.completed'])
   })
 
   test('serializes ten concurrent observed and resolved events with immutable identities', async () => {

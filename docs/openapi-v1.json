@@ -160,7 +160,7 @@
       ],
       "post": {
         "operationId": "applyOperationsAction",
-        "description": "Idempotently reinspects or manually reconciles one Step with an administrator audit event.",
+        "description": "Idempotently reinspects or manually reconciles one Step with an administrator audit event. REINSPECT on a rejected finalize_usage_v2 Step resubmits only the persisted finalize:<runId> identity; it does not resubmit Provider media or create a new accounting identity.",
         "parameters": [
           { "$ref": "#/components/parameters/RunId" },
           { "$ref": "#/components/parameters/IdempotencyKey" }
@@ -184,7 +184,15 @@
           }
         },
         "responses": {
-          "200": { "description": "Applied or replayed administrator action" },
+          "200": {
+            "description": "Applied or replayed administrator action",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AdminOperationsActionEnvelope" } } }
+          },
           "429": { "$ref": "#/components/responses/RateLimited" },
           "403": { "$ref": "#/components/responses/Error" },
           "4XX": { "$ref": "#/components/responses/Error" },
@@ -238,7 +246,15 @@
           { "name": "pageSize", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }
         ],
         "responses": {
-          "200": { "description": "Cursor-paginated runs" },
+          "200": {
+            "description": "Cursor-paginated runs",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunListEnvelope" } } }
+          },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }
@@ -285,7 +301,15 @@
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunAction" } } }
         },
         "responses": {
-          "200": { "description": "Updated Run" },
+          "200": {
+            "description": "Updated Run",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunEnvelope" } } }
+          },
           "429": { "$ref": "#/components/responses/RateLimited" },
           "4XX": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
@@ -427,7 +451,13 @@
     },
     "parameters": {
       "RunId": { "name": "runId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
-      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" } },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "A key already bound to a different request returns IDEMPOTENCY_CONFLICT with retryable=false and action=MODIFY_REQUEST; clients must not retry the conflicting request unchanged.",
+        "schema": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" }
+      },
       "TenantId": { "name": "X-PPT-Agent-Tenant", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
       "ExternalUserId": { "name": "X-PPT-Agent-User", "in": "header", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
       "ExternalProjectId": { "name": "X-PPT-Agent-Project", "in": "header", "required": false, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
@@ -838,7 +868,7 @@
                 "properties": {
                   "type": { "const": "run.failed" },
                   "payload": {
-                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] }, "error": { "$ref": "#/components/schemas/PublicError" }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID", "USAGE_V2_FINALIZATION_REJECTED"] }, "error": { "$ref": "#/components/schemas/PublicError" }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
                     "unevaluatedProperties": false
                   }
                 }
@@ -1390,6 +1420,26 @@
             }
           },
           {
+            "if": {
+              "properties": { "presentationMode": { "const": "VISUAL_DECK_V4" } },
+              "required": ["presentationMode"]
+            },
+            "then": {
+              "required": ["release"],
+              "properties": {
+                "release": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ReleaseIdentity" },
+                    {
+                      "properties": { "presentationMode": { "const": "VISUAL_DECK_V4" } },
+                      "required": ["presentationMode"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
             "if": { "properties": { "status": { "const": "FAILED" } }, "required": ["status"] },
             "then": { "properties": { "qualityDisposition": { "const": "HARD_FAILURE" } } }
           },
@@ -1442,7 +1492,7 @@
         "additionalProperties": false,
         "required": ["errorCode", "reason", "requestedAt"],
         "properties": {
-          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID"] },
+          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID", "USAGE_V2_FINALIZATION_REJECTED"] },
           "reason": { "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "REVISION_REJECTED_BY_USER", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER"] },
           "category": { "$ref": "#/components/schemas/PublicErrorCategory" },
           "requestedAt": { "type": "string", "format": "date-time" }
@@ -1468,6 +1518,7 @@
           "RUN_CANCELLED",
           "QUALITY_RECOVERY",
           "ACCOUNTING_PENDING",
+          "ACCOUNTING_FAILED",
           "VERIFIED_FINAL_DELIVERY_MISSING",
           "DELIVERY_CONTRACT_INVALID",
           "DELIVERY_CONTENT_INVALID"
@@ -1722,6 +1773,62 @@
           "schemaVersion": { "const": "1" },
           "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "data": { "$ref": "#/components/schemas/PublicRun" }
+        }
+      },
+      "RunListEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data", "pagination"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/PublicRun" }
+          },
+          "pagination": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pageSize", "nextCursor"],
+            "properties": {
+              "pageSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+              "nextCursor": { "type": ["string", "null"], "maxLength": 512 }
+            }
+          }
+        }
+      },
+      "AdminOperationsActionEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["data", "replayed"],
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run", "step"],
+            "properties": {
+              "run": { "$ref": "#/components/schemas/PublicRun" },
+              "step": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "status", "errorCode", "updatedAt"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                  "status": {
+                    "enum": [
+                      "RUNNING", "RESERVED", "SUBMITTING", "WAITING", "COMPLETED", "RELEASING", "FAILED",
+                      "RESERVATION_UNKNOWN", "SUBMISSION_UNKNOWN", "COMPLETED_AFTER_CANCEL", "FAILED_NOT_CHARGED",
+                      "FAILED_CHARGED", "BILLING_UNKNOWN"
+                    ]
+                  },
+                  "errorCode": { "type": ["string", "null"], "maxLength": 200 },
+                  "updatedAt": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          },
+          "replayed": { "type": "boolean" }
         }
       },
       "CreateRunEnvelope": {

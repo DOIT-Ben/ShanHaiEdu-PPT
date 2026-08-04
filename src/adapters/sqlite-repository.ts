@@ -309,20 +309,37 @@ export class SqliteAgentRepository implements AgentRepository {
 
   #terminalEventRow(runId: string) {
     return this.#database.query<JsonRow, [string, string]>(`
-      SELECT data
+      SELECT agent_events.data
       FROM agent_events
-      WHERE run_id = ?
+      JOIN agent_runs ON agent_runs.id = agent_events.run_id
+      WHERE agent_events.run_id = ?
         AND sequence > COALESCE((
           SELECT MAX(sequence)
           FROM agent_events
           WHERE run_id = ? AND json_extract(data, '$.type') = 'run.resumed'
         ), 0)
         AND (
-          json_extract(data, '$.type') IN ('run.completed', 'run.cancelled', 'run.accounting.finalized')
+          (
+            json_extract(agent_events.data, '$.type') = 'run.completed'
+            AND (
+              COALESCE(json_extract(agent_runs.data, '$.accountingProtocol'), 'LEGACY_RESERVATION_V1')
+                <> 'FRAMEFLOW_USAGE_V2'
+              OR EXISTS (
+                SELECT 1
+                FROM agent_steps
+                WHERE agent_steps.run_id = agent_runs.id
+                  AND agent_steps.tool = 'finalize_usage_v2'
+                  AND agent_steps.status = 'COMPLETED'
+                  AND json_extract(agent_steps.data, '$.output.deliveryState') = 'ACKNOWLEDGED'
+                  AND json_extract(agent_steps.data, '$.output.bill.status') IN ('SETTLED', 'CAP_EXCEEDED')
+              )
+            )
+          )
+          OR json_extract(agent_events.data, '$.type') IN ('run.cancelled', 'run.accounting.finalized')
           OR (
-            json_extract(data, '$.type') = 'run.failed'
+            json_extract(agent_events.data, '$.type') = 'run.failed'
             AND COALESCE(
-              json_extract(data, '$.payload.terminalAccounting.accountingStatus'),
+              json_extract(agent_events.data, '$.payload.terminalAccounting.accountingStatus'),
               'FINAL'
             ) <> 'RECONCILIATION_REQUIRED'
           )

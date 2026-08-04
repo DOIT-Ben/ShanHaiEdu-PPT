@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { CONTRACT_VERSION } from '../contracts'
+import { CONTRACT_VERSION, publicErrorSchema, type KnownAgentEvent } from '../contracts'
 import {
   UsageAccountingRequestError,
   usageOperationEventV2Schema,
@@ -13,7 +13,12 @@ import {
 } from '../usage-accounting-contracts'
 import { hashInput } from './hash'
 import { isPendingMediaReconciliationStep } from './media-reconciliation'
-import { isTerminalStatus, transitionRun } from './policy'
+import {
+  failCompletedUsageV2Finalization,
+  isTerminalStatus,
+  restoreCompletedUsageV2Finalization,
+  transitionRun,
+} from './policy'
 import type {
   AgentRepository,
   AgentTransaction,
@@ -24,7 +29,12 @@ import type {
   StepRecord,
   UsageAccountingPort,
 } from './ports'
-import { failVisualDeckV4Transaction, isVisualDeckV4 } from './v4-lifecycle'
+import {
+  allPageNumbers,
+  failVisualDeckV4Transaction,
+  isVisualDeckV4,
+  v4LifecyclePayload,
+} from './v4-lifecycle'
 
 type UsageMediaMetadata = Readonly<{
   protocol: 'FRAMEFLOW_USAGE_V2'
@@ -90,6 +100,8 @@ type UsageFinalizeOutput = Readonly<{
   bill: UsageRunBill | null
 }>
 
+export const USAGE_V2_FINALIZATION_REJECTED_CODE = 'USAGE_V2_FINALIZATION_REJECTED'
+
 export function accountingProtocolFor(run: Pick<RunRecord, 'accountingProtocol'>) {
   return run.accountingProtocol ?? 'LEGACY_RESERVATION_V1'
 }
@@ -110,6 +122,16 @@ export function isUsageV2RunFinalizationAcknowledged(step: StepRecord | null | u
   }
 }
 
+export function isUsageV2RunFinalizationRetryScheduled(step: StepRecord | null | undefined) {
+  if (!step || step.tool !== 'finalize_usage_v2' || step.status !== 'RUNNING') return false
+  try {
+    const output = finalizeStepOutput(step)
+    return output.deliveryState === 'PENDING' && output.nextAttemptAt !== null
+  } catch {
+    return false
+  }
+}
+
 function finalizeRequestKey(runId: string) {
   return `finalize:${runId}`
 }
@@ -119,7 +141,10 @@ function finalizeStepOutput(step: StepRecord): UsageFinalizeOutput {
   if (output.schemaVersion !== '2'
     || output.idempotencyKey !== finalizeRequestKey(step.runId)
     || !['PENDING', 'ACKNOWLEDGED', 'REVIEW_REQUIRED'].includes(String(output.deliveryState))
-    || (output.nextAttemptAt !== null && typeof output.nextAttemptAt !== 'string')) {
+    || (output.nextAttemptAt !== null
+      && (typeof output.nextAttemptAt !== 'string'
+        || Number.isNaN(Date.parse(output.nextAttemptAt))
+        || new Date(output.nextAttemptAt).toISOString() !== output.nextAttemptAt))) {
     throw new Error('USAGE_V2_FINALIZE_OUTBOX_INVALID')
   }
   const bill = output.bill === null ? null : usageRunBillSchema.parse(output.bill)
@@ -151,7 +176,7 @@ export function enqueueUsageV2RunFinalization(transaction: AgentTransaction, clo
     schemaVersion: '2',
     idempotencyKey: requestKey,
     deliveryState: 'PENDING',
-    nextAttemptAt: null,
+    nextAttemptAt: now,
     bill: null,
   }
   const step: StepRecord = {
@@ -498,6 +523,29 @@ export class UsageV2Coordinator {
     return this.completeUsageReview(runId, key)
   }
 
+  async retryRejectedFinalization(runId: string, key: string) {
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      if (accountingProtocolFor(transaction.run) !== 'FRAMEFLOW_USAGE_V2') throw new Error('USAGE_V2_RUN_REQUIRED')
+      const step = transaction.getStep(key)
+      if (!step || step.tool !== 'finalize_usage_v2' || key !== usageV2FinalizeStepKey(runId)) {
+        throw new Error('USAGE_V2_FINALIZE_OUTBOX_NOT_FOUND')
+      }
+      const output = finalizeStepOutput(step)
+      if (step.status !== 'FAILED' || output.deliveryState !== 'REVIEW_REQUIRED') {
+        throw new Error('USAGE_V2_FINALIZE_OUTBOX_NOT_RETRYABLE')
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      transaction.putStep({
+        ...step,
+        status: 'RUNNING',
+        errorCode: null,
+        output: { ...output, deliveryState: 'PENDING', nextAttemptAt: now },
+        updatedAt: now,
+      })
+    })
+    return this.reconcileTerminalRun(runId)
+  }
+
   async reconcileTerminalRun(runId: string) {
     const run = await this.dependencies.repository.getRun(runId)
     if (!run || accountingProtocolFor(run) !== 'FRAMEFLOW_USAGE_V2' || !isTerminalStatus(run.status)) return false
@@ -532,6 +580,7 @@ export class UsageV2Coordinator {
         errorCode: error instanceof UsageAccountingRequestError ? error.code : 'HOST_USAGE_V2_FINALIZE_UNKNOWN',
         nextAttemptAt: rejected ? null : new Date(this.dependencies.clock.now().getTime() + 1_000).toISOString(),
         bill: output.bill,
+        failCompletedRun: rejected,
       })
       return false
     }
@@ -539,6 +588,7 @@ export class UsageV2Coordinator {
     if (bill.status === 'SETTLED' || bill.status === 'CAP_EXCEEDED') {
       await this.updateFinalization(runId, {
         status: 'COMPLETED', deliveryState: 'ACKNOWLEDGED', errorCode: null, nextAttemptAt: null, bill,
+        recoverCompletedRun: true,
       })
       return true
     }
@@ -546,6 +596,7 @@ export class UsageV2Coordinator {
       await this.updateFinalization(runId, {
         status: 'FAILED', deliveryState: 'REVIEW_REQUIRED',
         errorCode: `HOST_USAGE_V2_${bill.status}`, nextAttemptAt: null, bill,
+        failCompletedRun: true,
       })
       return false
     }
@@ -820,6 +871,8 @@ export class UsageV2Coordinator {
       errorCode: string | null
       nextAttemptAt: string | null
       bill: UsageRunBill | null
+      failCompletedRun?: boolean
+      recoverCompletedRun?: boolean
     }>,
   ) {
     await this.dependencies.repository.transact(runId, (transaction) => {
@@ -838,7 +891,92 @@ export class UsageV2Coordinator {
         },
         updatedAt: this.dependencies.clock.now().toISOString(),
       })
+      if (update.failCompletedRun) this.failCompletedRunForFinalization(transaction)
+      if (update.recoverCompletedRun) this.restoreCompletedRunAfterFinalization(transaction)
     })
+  }
+
+  private failCompletedRunForFinalization(transaction: AgentTransaction) {
+    if (transaction.run.status === 'FAILED') {
+      return transaction.listEvents().some((event) =>
+        event.type === 'run.failed' && event.payload.errorCode === USAGE_V2_FINALIZATION_REJECTED_CODE)
+    }
+    if (transaction.run.status !== 'COMPLETED' || !isVisualDeckV4(transaction.run)) return false
+    const completed = transaction.listEvents().some((event) => event.type === 'run.completed')
+    if (!completed) throw new Error('USAGE_V2_COMPLETED_EVENT_MISSING')
+    const from = transaction.run.status
+    const now = this.dependencies.clock.now().toISOString()
+    const policy = failCompletedUsageV2Finalization(transaction.run)
+    const failedRun: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
+    const error = publicErrorSchema.parse({
+      code: USAGE_V2_FINALIZATION_REJECTED_CODE,
+      category: 'USAGE_V2',
+      retryable: false,
+      action: 'CONTACT_SUPPORT',
+      requestId: null,
+      runId: failedRun.id,
+    })
+    transaction.putRun(failedRun)
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'phase.changed',
+      payload: { from, to: 'FAILED', reason: USAGE_V2_FINALIZATION_REJECTED_CODE },
+    })
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'run.failed',
+      payload: {
+        ...v4LifecyclePayload(failedRun, 'RUN', {
+          completed: 0,
+          total: 1,
+          pageNumbers: allPageNumbers(failedRun),
+          reason: 'INTERNAL_FAILURE',
+          retryable: false,
+        }),
+        errorCode: USAGE_V2_FINALIZATION_REJECTED_CODE,
+        error,
+        ...(failedRun.terminalAccounting ? { terminalAccounting: failedRun.terminalAccounting } : {}),
+      },
+    })
+    return true
+  }
+
+  private restoreCompletedRunAfterFinalization(transaction: AgentTransaction) {
+    if (transaction.run.status !== 'FAILED' || !isVisualDeckV4(transaction.run)) return false
+    const events = transaction.listEvents()
+    const lastResumeSequence = [...events].reverse()
+      .find((event) => event.type === 'run.resumed')?.sequence ?? 0
+    const failure = [...events].reverse().find((event) =>
+      event.sequence > lastResumeSequence && event.type === 'run.failed')
+    if (!failure || failure.type !== 'run.failed'
+      || failure.payload.errorCode !== USAGE_V2_FINALIZATION_REJECTED_CODE) return false
+    const completed = [...events].reverse().find(
+      (event): event is Extract<KnownAgentEvent, { type: 'run.completed' }> => event.type === 'run.completed',
+    )
+    if (!completed || !('presentationMode' in completed.payload)) {
+      throw new Error('USAGE_V2_COMPLETED_EVENT_MISSING')
+    }
+    const from = transaction.run.status
+    const now = this.dependencies.clock.now().toISOString()
+    const policy = restoreCompletedUsageV2Finalization(transaction.run)
+    const restored: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
+    transaction.putRun(restored)
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'phase.changed',
+      payload: { from, to: 'COMPLETED', reason: 'USAGE_V2_FINALIZATION_RECONCILED' },
+    })
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'run.resumed',
+      payload: { status: 'COMPLETED' },
+    })
+    transaction.appendEvent({
+      schemaVersion: CONTRACT_VERSION,
+      type: 'run.completed',
+      payload: completed.payload,
+    })
+    return true
   }
 
   private async withRunLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {

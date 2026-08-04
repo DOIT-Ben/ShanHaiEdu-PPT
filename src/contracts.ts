@@ -137,6 +137,7 @@ export const v4RunFailureCodeSchema = z.enum([
   'TECHNICAL_RECOVERY_EXHAUSTED',
   'TECHNICAL_CONFIGURATION_REQUIRED',
   'TECHNICAL_CONTRACT_INVALID',
+  'USAGE_V2_FINALIZATION_REJECTED',
 ])
 
 export const pendingTerminalFailureSchema = z.object({
@@ -410,6 +411,7 @@ export const deliveryUnavailableReasonSchema = z.enum([
   'RUN_CANCELLED',
   'QUALITY_RECOVERY',
   'ACCOUNTING_PENDING',
+  'ACCOUNTING_FAILED',
   'VERIFIED_FINAL_DELIVERY_MISSING',
   'DELIVERY_CONTRACT_INVALID',
   'DELIVERY_CONTENT_INVALID',
@@ -546,12 +548,28 @@ export const runSnapshotSchema = z.object({
   if (value.error && !['PAUSED', 'RECOVERING', 'FAILED'].includes(value.status)) {
     context.addIssue({ code: 'custom', path: ['error'], message: 'only interrupted or failed Runs may expose an error' })
   }
+  if (value.presentationMode === 'VISUAL_DECK_V4' && !value.release) {
+    context.addIssue({ code: 'custom', path: ['release'], message: 'visual deck v4 requires release identity' })
+  }
+  if (value.release && value.release.presentationMode !== value.presentationMode) {
+    context.addIssue({ code: 'custom', path: ['release', 'presentationMode'], message: 'release identity must match presentation mode' })
+  }
 })
 
 export const runEnvelopeSchema = z.object({
   schemaVersion: z.literal(CONTRACT_VERSION),
   requestId: identifierSchema,
   data: runSnapshotSchema,
+}).strict()
+
+export const runListEnvelopeSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  requestId: identifierSchema,
+  data: z.array(runSnapshotSchema).max(100),
+  pagination: z.object({
+    pageSize: z.number().int().min(1).max(100),
+    nextCursor: z.string().max(512).nullable(),
+  }).strict(),
 }).strict()
 
 const eventBase = {
@@ -779,3 +797,4 @@ export type AgentEvent = z.infer<typeof agentEventSchema>
 export type AgentEventEnvelope = AgentEvent
 export type AgentEventHistoryEnvelope = z.infer<typeof agentEventHistoryEnvelopeSchema>
 export type RunEnvelope = z.infer<typeof runEnvelopeSchema>
+export type RunListEnvelope = z.infer<typeof runListEnvelopeSchema>

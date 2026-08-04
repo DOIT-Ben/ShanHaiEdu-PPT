@@ -6,6 +6,7 @@ import { AdminOperationsService } from '../src/core/admin-operations'
 import { AdminRevisionRoundsSettingsService } from '../src/core/admin-revision-rounds-settings'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { RunService } from '../src/core/run-service'
+import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
 import { InMemoryPrincipalRateLimiter } from '../src/http/principal-rate-limiter'
 import { RuntimeHealthMonitor } from '../src/observability/runtime-health'
@@ -201,6 +202,11 @@ describe('HTTP v1 handler', () => {
         ...transaction.run,
         status: 'DECK_REVIEW',
         presentationMode: 'VISUAL_DECK_V4',
+        release: {
+          ...transaction.run.release!,
+          presentationMode: 'VISUAL_DECK_V4',
+          compilerVersion: 'visual-deck-v4-chain-3',
+        },
         automationLevel: 'BOUNDED_AUTO',
         qualityOverride: true,
         qualityDisposition: 'PENDING',
@@ -240,6 +246,11 @@ describe('HTTP v1 handler', () => {
         ...legacyRun,
         status: 'DELIVERING',
         presentationMode: 'VISUAL_DECK_V4',
+        release: {
+          ...transaction.run.release!,
+          presentationMode: 'VISUAL_DECK_V4',
+          compilerVersion: 'visual-deck-v4-chain-3',
+        },
         automationLevel: 'BOUNDED_AUTO',
         qualityOverride: true,
         qualityOverrideBy: 'ppt-agent-quality-policy',
@@ -324,10 +335,21 @@ describe('HTTP v1 handler', () => {
     await createRun(handle, 'http-create-0002')
     const firstPage = await handle(request('/v1/runs?pageSize=1'))
     const body = await firstPage.json() as { data: unknown[]; pagination: { nextCursor: string | null } }
+    const nextCursor = body.pagination.nextCursor
 
+    expect(firstPage.status).toBe(200)
+    expect(firstPage.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(firstPage.headers.get('X-Request-ID')).toBeTruthy()
+    expect(firstPage.headers.get('Link')).toContain('</openapi/v1.json>; rel="service-desc"')
+    expect(body).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      requestId: expect.any(String),
+      pagination: { pageSize: 1, nextCursor: expect.any(String) },
+    })
     expect(body.data).toHaveLength(1)
-    expect(body.pagination.nextCursor).not.toBeNull()
-    const secondPage = await handle(request(`/v1/runs?pageSize=1&cursor=${body.pagination.nextCursor}`))
+    expect(nextCursor).not.toBeNull()
+    const secondPage = await handle(request(`/v1/runs?pageSize=1&cursor=${nextCursor}`))
+    expect(secondPage.status).toBe(200)
     expect((await secondPage.json() as { data: unknown[] }).data).toHaveLength(1)
   })
 
@@ -350,7 +372,32 @@ describe('HTTP v1 handler', () => {
 
     expect(missingKey.status).toBe(400)
     expect(applied.status).toBe(200)
-    expect((await applied.json() as { data: { status: string } }).data.status).toBe('PAUSED')
+    expect(applied.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(applied.headers.get('X-Request-ID')).toBeTruthy()
+    expect(applied.headers.get('Link')).toContain('</openapi/v1.json>; rel="service-desc"')
+    expect(await applied.json()).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      requestId: expect.any(String),
+      data: { status: 'PAUSED' },
+    })
+  })
+
+  test('does not tell clients to retry an idempotency key bound to another request', async () => {
+    const { handle } = fixture()
+    expect((await createRun(handle, 'http-idempotency-conflict')).status).toBe(201)
+    const conflict = await handle(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'http-idempotency-conflict' },
+      body: JSON.stringify({ ...createBody, visualDirection: '另一套明确不同的课堂视觉方向' }),
+    }))
+
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toMatchObject({
+      error: {
+        code: 'IDEMPOTENCY_CONFLICT', category: 'CONTRACT', retryable: false,
+        action: 'MODIFY_REQUEST',
+      },
+    })
   })
 
   test('rate limits run creation and actions with a retry deadline', async () => {
@@ -750,8 +797,8 @@ describe('HTTP v1 handler', () => {
     expect(hidden.status).toBe(404)
   })
 
-  test('keeps a completed Usage V2 delivery unavailable until terminal accounting is acknowledged', async () => {
-    const { repository, artifacts, handle } = fixture()
+  test('publishes WAIT for a completed Usage V2 delivery only with a persisted retry deadline', async () => {
+    const { repository, artifacts, clock, handle } = fixture()
     const created = await createRun(handle, 'http-create-accounting-pending-delivery')
     const runId = (await created.json() as { data: { id: string } }).data.id
     const previewBytes = new TextEncoder().encode('verified-preview-bytes')
@@ -772,6 +819,11 @@ describe('HTTP v1 handler', () => {
         status: 'COMPLETED',
         accountingProtocol: 'FRAMEFLOW_USAGE_V2',
         presentationMode: 'VISUAL_DECK_V4',
+        release: {
+          ...transaction.run.release!,
+          presentationMode: 'VISUAL_DECK_V4',
+          compilerVersion: 'visual-deck-v4-chain-3',
+        },
         qualityDisposition: 'REVIEW_PASSED',
       })
       transaction.putDelivery({
@@ -799,20 +851,49 @@ describe('HTTP v1 handler', () => {
       })
     })
 
-    const detail = await handle(request(`/v1/runs/${runId}`))
-    expect(await detail.json()).toMatchObject({
+    const unscheduledDetail = await handle(request(`/v1/runs/${runId}`))
+    expect(await unscheduledDetail.json()).toMatchObject({
+      data: {
+        deliveries: [],
+        deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_FAILED' },
+      },
+    })
+    const unscheduledContent = await handle(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=pptx`,
+    ))
+    expect(unscheduledContent.status).toBe(409)
+    expect(await unscheduledContent.json()).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      error: {
+        code: 'DELIVERY_NOT_AVAILABLE', retryable: false, action: 'CONTACT_SUPPORT',
+        details: { reason: 'ACCOUNTING_FAILED' },
+      },
+    })
+
+    await repository.transact(runId, (transaction) => {
+      const queued = enqueueUsageV2RunFinalization(transaction, clock)!
+      transaction.putStep({
+        ...queued,
+        output: { ...(queued.output as object), nextAttemptAt: clock.now().toISOString() },
+      })
+    })
+    const scheduledDetail = await handle(request(`/v1/runs/${runId}`))
+    expect(await scheduledDetail.json()).toMatchObject({
       data: {
         deliveries: [],
         deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_PENDING' },
       },
     })
-    const content = await handle(request(
+    const scheduledContent = await handle(request(
       `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=pptx`,
     ))
-    expect(content.status).toBe(409)
-    expect(await content.json()).toMatchObject({
+    expect(scheduledContent.status).toBe(409)
+    expect(await scheduledContent.json()).toMatchObject({
       schemaVersion: CONTRACT_VERSION,
-      error: { code: 'DELIVERY_NOT_AVAILABLE', details: { reason: 'ACCOUNTING_PENDING' } },
+      error: {
+        code: 'DELIVERY_NOT_AVAILABLE', retryable: true, action: 'WAIT',
+        details: { reason: 'ACCOUNTING_PENDING' },
+      },
     })
   })
 })
