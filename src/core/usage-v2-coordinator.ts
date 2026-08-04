@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { CONTRACT_VERSION, publicErrorSchema, type KnownAgentEvent } from '../contracts'
 import {
   UsageAccountingRequestError,
+  usageDateTimeSchema,
   usageOperationEventV2Schema,
   usagePermitSchema,
   usageRunBillSchema,
@@ -140,19 +141,17 @@ function finalizeStepOutput(step: StepRecord): UsageFinalizeOutput {
   const output = outputRecord(step) as Partial<UsageFinalizeOutput>
   if (output.schemaVersion !== '2'
     || output.idempotencyKey !== finalizeRequestKey(step.runId)
-    || !['PENDING', 'ACKNOWLEDGED', 'REVIEW_REQUIRED'].includes(String(output.deliveryState))
-    || (output.nextAttemptAt !== null
-      && (typeof output.nextAttemptAt !== 'string'
-        || Number.isNaN(Date.parse(output.nextAttemptAt))
-        || new Date(output.nextAttemptAt).toISOString() !== output.nextAttemptAt))) {
+    || !['PENDING', 'ACKNOWLEDGED', 'REVIEW_REQUIRED'].includes(String(output.deliveryState))) {
     throw new Error('USAGE_V2_FINALIZE_OUTBOX_INVALID')
   }
+  const nextAttemptAt = usageDateTimeSchema.nullable().safeParse(output.nextAttemptAt)
+  if (!nextAttemptAt.success) throw new Error('USAGE_V2_FINALIZE_OUTBOX_INVALID')
   const bill = output.bill === null ? null : usageRunBillSchema.parse(output.bill)
   return {
     schemaVersion: '2',
     idempotencyKey: output.idempotencyKey,
     deliveryState: output.deliveryState as UsageFinalizeOutput['deliveryState'],
-    nextAttemptAt: output.nextAttemptAt,
+    nextAttemptAt: nextAttemptAt.data,
     bill,
   }
 }
@@ -581,6 +580,7 @@ export class UsageV2Coordinator {
         nextAttemptAt: rejected ? null : new Date(this.dependencies.clock.now().getTime() + 1_000).toISOString(),
         bill: output.bill,
         failCompletedRun: rejected,
+        recoverCompletedRun: !rejected,
       })
       return false
     }
@@ -606,6 +606,7 @@ export class UsageV2Coordinator {
       : new Date(this.dependencies.clock.now().getTime() + 1_000).toISOString()
     await this.updateFinalization(runId, {
       status: 'RUNNING', deliveryState: 'PENDING', errorCode: null, nextAttemptAt, bill,
+      recoverCompletedRun: true,
     })
     return false
   }
@@ -892,7 +893,14 @@ export class UsageV2Coordinator {
         updatedAt: this.dependencies.clock.now().toISOString(),
       })
       if (update.failCompletedRun) this.failCompletedRunForFinalization(transaction)
-      if (update.recoverCompletedRun) this.restoreCompletedRunAfterFinalization(transaction)
+      if (update.recoverCompletedRun) {
+        this.restoreCompletedRunAfterFinalization(
+          transaction,
+          update.status === 'COMPLETED'
+            ? 'USAGE_V2_FINALIZATION_RECONCILED'
+            : 'USAGE_V2_FINALIZATION_RETRY_SCHEDULED',
+        )
+      }
     })
   }
 
@@ -941,7 +949,10 @@ export class UsageV2Coordinator {
     return true
   }
 
-  private restoreCompletedRunAfterFinalization(transaction: AgentTransaction) {
+  private restoreCompletedRunAfterFinalization(
+    transaction: AgentTransaction,
+    reason: 'USAGE_V2_FINALIZATION_RECONCILED' | 'USAGE_V2_FINALIZATION_RETRY_SCHEDULED',
+  ) {
     if (transaction.run.status !== 'FAILED' || !isVisualDeckV4(transaction.run)) return false
     const events = transaction.listEvents()
     const lastResumeSequence = [...events].reverse()
@@ -964,7 +975,7 @@ export class UsageV2Coordinator {
     transaction.appendEvent({
       schemaVersion: CONTRACT_VERSION,
       type: 'phase.changed',
-      payload: { from, to: 'COMPLETED', reason: 'USAGE_V2_FINALIZATION_RECONCILED' },
+      payload: { from, to: 'COMPLETED', reason },
     })
     transaction.appendEvent({
       schemaVersion: CONTRACT_VERSION,

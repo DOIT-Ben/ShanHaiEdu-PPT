@@ -87,6 +87,32 @@ function expectContractHeaders(response: Response, requestId: string) {
   expect(response.headers.get('Link')).toContain('</openapi/v1.json>; rel="service-desc"')
 }
 
+async function expectSseRemainsOpen(
+  runtime: ReturnType<typeof createMockRuntime>,
+  runId: string,
+  after: number,
+  expectedEventType: string,
+) {
+  const controller = new AbortController()
+  const response = await runtime.handler(request(
+    `/v1/runs/${runId}/events?after=${after}`,
+    { signal: controller.signal },
+  ))
+  const reader = response.body!.getReader()
+  const first = await reader.read()
+  const text = new TextDecoder().decode(first.value)
+  const streamState = await Promise.race([
+    reader.read().then((next) => next.done ? 'closed' : 'data'),
+    Bun.sleep(25).then(() => 'open'),
+  ])
+  await reader.cancel()
+  controller.abort()
+
+  expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+  expect(text).toContain(`event: ${expectedEventType}`)
+  expect(streamState).toBe('open')
+}
+
 async function advanceToTerminal(runtime: ReturnType<typeof createMockRuntime>, repository: InMemoryAgentRepository, runId: string) {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const current = await repository.getRun(runId)
@@ -246,7 +272,8 @@ class AuthorizationCapUsage implements UsageAccountingPort {
   }
 }
 
-type TerminalFinalizeOutcome = 'REVIEW_REQUIRED' | 'LEGACY_RECONCILIATION' | 'RECONCILING' | 'SETTLED' | 'REJECTED'
+type TerminalFinalizeOutcome = 'REVIEW_REQUIRED' | 'LEGACY_RECONCILIATION' | 'RECONCILING' | 'SETTLED' | 'UNKNOWN' | 'REJECTED'
+type ReconcileTimestampFormat = 'MILLISECONDS' | 'SECONDS'
 
 class TerminalFinalizeUsage implements UsageAccountingPort {
   readonly finalizeAttempts: Parameters<UsageAccountingPort['finalizeRun']>[0][] = []
@@ -255,6 +282,7 @@ class TerminalFinalizeUsage implements UsageAccountingPort {
   constructor(
     readonly outcomes: TerminalFinalizeOutcome[],
     private readonly clock: FixedClock,
+    private readonly reconcileTimestampFormat: ReconcileTimestampFormat = 'MILLISECONDS',
   ) {}
 
   async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
@@ -289,12 +317,18 @@ class TerminalFinalizeUsage implements UsageAccountingPort {
     if (outcome === 'REJECTED') {
       throw new UsageAccountingRequestError('PPT_USAGE_FINALIZE_REJECTED', 'REJECTED')
     }
+    if (outcome === 'UNKNOWN') {
+      throw new UsageAccountingRequestError('HOST_USAGE_V2_FINALIZE_UNKNOWN', 'UNKNOWN')
+    }
+    const nextReconcileAt = new Date(this.clock.now().getTime() + 1_000).toISOString()
     return {
       ...settledBill(input.runId),
       status: outcome,
       settledAt: outcome === 'SETTLED' ? this.clock.now().toISOString() : null,
       nextReconcileAt: outcome === 'RECONCILING'
-        ? new Date(this.clock.now().getTime() + 1_000).toISOString()
+        ? this.reconcileTimestampFormat === 'SECONDS'
+          ? nextReconcileAt.replace('.000Z', 'Z')
+          : nextReconcileAt
         : null,
     }
   }
@@ -666,12 +700,12 @@ describe('FrameFlow public V4 contract', () => {
     })
   })
 
-  test('fails a completed Usage V2 Run on REVIEW_REQUIRED and lets an administrator retry only the original finalize identity', async () => {
+  test('recovers REVIEW_REQUIRED through REINSPECT, UNKNOWN and SETTLED with the original delivery identity', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
     const images = new CountingCompletedImages(artifacts)
     const clock = new FixedClock()
-    const usage = new TerminalFinalizeUsage(['REVIEW_REQUIRED', 'SETTLED'], clock)
+    const usage = new TerminalFinalizeUsage(['REVIEW_REQUIRED', 'UNKNOWN', 'SETTLED'], clock)
     const runtime = createMockRuntime({
       repository,
       artifacts,
@@ -796,22 +830,75 @@ describe('FrameFlow public V4 contract', () => {
     expect(recovery.status).toBe(200)
     expectContractHeaders(recovery, recoveryRequestId)
     expect(await recovery.json()).toMatchObject({
-      data: { run: { status: 'COMPLETED', error: null }, step: { status: 'COMPLETED', errorCode: null } },
+      data: {
+        run: { status: 'COMPLETED', qualityDisposition: 'REVIEW_PASSED' },
+        step: { status: 'RUNNING', errorCode: 'HOST_USAGE_V2_FINALIZE_UNKNOWN' },
+      },
       replayed: false,
     })
     expect(usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey))
       .toEqual([`finalize:${runId}`, `finalize:${runId}`])
+    expect((await repository.listSteps(runId)).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({
+        status: 'RUNNING',
+        output: {
+          idempotencyKey: `finalize:${runId}`, deliveryState: 'PENDING',
+          nextAttemptAt: new Date(clock.now().getTime() + 1_000).toISOString(),
+        },
+      })
     expect(images.submissions).toHaveLength(submissionCount)
     expect(usage.eventAttempts).toHaveLength(usageEventCount)
     expect(await repository.listDeliveries(runId)).toHaveLength(1)
 
-    const recoveredDetail = runDetailEnvelopeSchema.parse(await (await runtime.handler(
+    const pendingDetail = runDetailEnvelopeSchema.parse(await (await runtime.handler(
       request(`/v1/runs/${runId}`),
     )).json())
-    expect(recoveredDetail.data).toMatchObject({
+    expect(pendingDetail.data).toMatchObject({
+      status: 'COMPLETED', error: null,
+      deliveries: [],
+      deliveryAvailability: { state: 'UNAVAILABLE', reason: 'ACCOUNTING_PENDING' },
+    })
+    const pendingDownload = await runtime.handler(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(deliveryId)}/content?format=pptx`,
+    ))
+    expect(pendingDownload.status).toBe(409)
+    expect(await pendingDownload.json()).toMatchObject({
+      error: {
+        code: 'DELIVERY_NOT_AVAILABLE', retryable: true, action: 'WAIT', runId,
+        details: { reason: 'ACCOUNTING_PENDING' },
+      },
+    })
+    const pendingHistory = agentEventHistoryEnvelopeSchema.parse(await (await runtime.handler(
+      request(`/v1/runs/${runId}/events/history`),
+    )).json())
+    const pendingTail = pendingHistory.data.at(-1)!
+    expect(pendingHistory.data.slice(-3).map((event) => event.type))
+      .toEqual(['phase.changed', 'run.resumed', 'run.completed'])
+    expect(pendingHistory.data.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(pendingHistory.data.some((event) =>
+      event.type === 'phase.changed' && event.payload.to === 'NEEDS_HUMAN')).toBe(false)
+    await expectSseRemainsOpen(runtime, runId, pendingTail.sequence - 1, 'run.completed')
+
+    clock.advance(1_000)
+    await runtime.tick()
+    expect(usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey))
+      .toEqual([`finalize:${runId}`, `finalize:${runId}`, `finalize:${runId}`])
+    expect(images.submissions).toHaveLength(submissionCount)
+    expect(usage.eventAttempts).toHaveLength(usageEventCount)
+    expect(await repository.listDeliveries(runId)).toHaveLength(1)
+    const settledDetail = runDetailEnvelopeSchema.parse(await (await runtime.handler(
+      request(`/v1/runs/${runId}`),
+    )).json())
+    expect(settledDetail.data).toMatchObject({
       status: 'COMPLETED', error: null,
       deliveryAvailability: { state: 'AVAILABLE', deliveryId },
     })
+    const resumed = pendingHistory.data.find((event) => event.type === 'run.resumed')!
+    const settledStream = await runtime.handler(request(`/v1/runs/${runId}/events?after=${resumed.sequence}`))
+    const settledStreamEvents = (await settledStream.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, any>)
+    expect(settledStreamEvents.map((event) => event.type)).toEqual(['run.completed'])
   })
 
   test('fails a completed Usage V2 Run on an explicit terminal finalize rejection without resubmitting media', async () => {
@@ -846,12 +933,18 @@ describe('FrameFlow public V4 contract', () => {
     expect((await repository.listEvents(runId)).some((event) => event.type === 'approval.required')).toBe(false)
   })
 
-  test('keeps RECONCILING on a durable retry deadline and settles the same finalize identity without resubmitting media', async () => {
+  test.each([
+    ['with milliseconds', 'MILLISECONDS'],
+    ['without milliseconds', 'SECONDS'],
+  ] as const)('keeps RECONCILING %s on a durable retry deadline and settles the same finalize identity', async (
+    _label,
+    timestampFormat,
+  ) => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
     const images = new CountingCompletedImages(artifacts)
     const clock = new FixedClock()
-    const usage = new TerminalFinalizeUsage(['RECONCILING', 'SETTLED'], clock)
+    const usage = new TerminalFinalizeUsage(['RECONCILING', 'SETTLED'], clock, timestampFormat)
     const runtime = createMockRuntime({
       repository, artifacts, images, clock, apiToken: token,
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
@@ -867,11 +960,14 @@ describe('FrameFlow public V4 contract', () => {
     expect(usage.finalizeAttempts).toHaveLength(1)
     const submissionCount = images.submissions.length
     const finalization = (await repository.listSteps(runId)).find((step) => step.tool === 'finalize_usage_v2')!
+    const expectedNextAttemptAt = new Date(clock.now().getTime() + 1_000).toISOString()
     expect(finalization).toMatchObject({
       status: 'RUNNING', errorCode: null,
       output: {
         idempotencyKey: `finalize:${runId}`, deliveryState: 'PENDING',
-        nextAttemptAt: new Date(clock.now().getTime() + 1_000).toISOString(),
+        nextAttemptAt: timestampFormat === 'SECONDS'
+          ? expectedNextAttemptAt.replace('.000Z', 'Z')
+          : expectedNextAttemptAt,
         bill: { status: 'RECONCILING' },
       },
     })
@@ -887,6 +983,10 @@ describe('FrameFlow public V4 contract', () => {
     expect(await waitingDownload.json()).toMatchObject({
       error: { retryable: true, action: 'WAIT', details: { reason: 'ACCOUNTING_PENDING' } },
     })
+    const waitingEvents = await repository.listEvents(runId)
+    const waitingTail = waitingEvents.at(-1)!
+    expect(waitingTail.type).toBe('run.completed')
+    await expectSseRemainsOpen(runtime, runId, waitingTail.sequence - 1, 'run.completed')
 
     clock.advance(1_000)
     await runtime.tick()

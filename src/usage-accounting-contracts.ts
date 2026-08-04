@@ -3,7 +3,8 @@ import { z } from 'zod'
 const identifierSchema = z.string().trim().min(1).max(200)
 const nonnegativeSafeIntegerSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const currencySchema = z.string().regex(/^[A-Z]{3}$/)
-const nullableDateTimeSchema = z.string().datetime().nullable()
+export const usageDateTimeSchema = z.string().datetime()
+const nullableDateTimeSchema = usageDateTimeSchema.nullable()
 
 export const usageAccountingProtocolSchema = z.enum([
   'LEGACY_RESERVATION_V1',
@@ -45,9 +46,9 @@ const usageEventShape = {
   model: identifierSchema,
   status: z.enum(['PROCESSING', 'COMPLETED', 'FAILED', 'CANCELLED']),
   providerBilling: providerBillingSchema,
-  operationCreatedAt: z.string().datetime(),
+  operationCreatedAt: usageDateTimeSchema,
   operationCompletedAt: nullableDateTimeSchema,
-  eventAt: z.string().datetime(),
+  eventAt: usageDateTimeSchema,
 } as const
 
 export const usageOperationEventV2Schema = z.object(usageEventShape).strict().superRefine((value, context) => {

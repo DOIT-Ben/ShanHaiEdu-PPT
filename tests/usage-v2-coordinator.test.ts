@@ -2,13 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock } from '../src/adapters/mock-ports'
 import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
+import { SqliteAgentRepository } from '../src/adapters/sqlite-repository'
 import {
   enqueueUsageV2RunFinalization,
+  isUsageV2RunFinalizationRetryScheduled,
   usageV2FinalizeStepKey,
   UsageV2Coordinator,
 } from '../src/core/usage-v2-coordinator'
 import { reconcileVisualDeckV4TerminalState } from '../src/core/v4-lifecycle'
-import type { RunRecord, StepRecord, UsageAccountingPort } from '../src/core/ports'
+import type { AgentRepository, RunRecord, StepRecord, UsageAccountingPort } from '../src/core/ports'
 import { UsageAccountingRequestError, type UsageOperationEventV2, type UsageRunBill } from '../src/usage-accounting-contracts'
 
 const host = { tenantId: 'frameflow', externalUserId: 'teacher-1' }
@@ -138,6 +140,30 @@ async function authorizeAndAttachOperation(
 }
 
 describe('Usage V2 coordinator', () => {
+  test.each([
+    ['without milliseconds', '2026-08-03T07:00:01Z', true],
+    ['with milliseconds', '2026-08-03T07:00:01.000Z', true],
+    ['invalid', 'not-a-date', false],
+  ] as const)('validates a durable finalize retry datetime %s with the Usage V2 contract', async (
+    _label,
+    nextAttemptAt,
+    expected,
+  ) => {
+    const { repository, clock } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'COMPLETED' })
+      const queued = enqueueUsageV2RunFinalization(transaction, clock)!
+      transaction.putStep({
+        ...queued,
+        output: { ...(queued.output as object), nextAttemptAt },
+      })
+    })
+
+    const finalization = (await repository.listSteps('run-1'))
+      .find((step) => step.tool === 'finalize_usage_v2')!
+    expect(isUsageV2RunFinalizationRetryScheduled(finalization)).toBe(expected)
+  })
+
   test('retries an unknown terminal finalization with the original durable key and completes once', async () => {
     const { repository, usage, coordinator, clock } = await fixture()
     usage.finalizeOutcomes = ['UNKNOWN', 'SETTLED']
@@ -282,6 +308,82 @@ describe('Usage V2 coordinator', () => {
     })
     expect((await current.repository.listEvents('run-1')).slice(-3).map((event) => event.type))
       .toEqual(['phase.changed', 'run.resumed', 'run.completed'])
+  })
+
+  test.each([
+    ['in-memory', 'UNKNOWN'],
+    ['in-memory', 'RECONCILING'],
+    ['SQLite', 'UNKNOWN'],
+    ['SQLite', 'RECONCILING'],
+  ] as const)('restores a REVIEW_REQUIRED Run to durable %s recovery after REINSPECT returns %s', async (
+    repositoryKind,
+    pendingOutcome,
+  ) => {
+    const repository: AgentRepository = repositoryKind === 'SQLite'
+      ? new SqliteAgentRepository(':memory:')
+      : new InMemoryAgentRepository()
+    const usage = new RecordingUsagePort()
+    usage.finalizeOutcomes = ['REVIEW_REQUIRED', pendingOutcome, 'SETTLED']
+    const clock = new FixedClock()
+    const coordinator = new UsageV2Coordinator({
+      repository, usage, billingCatalog: catalog(25_000), clock,
+    })
+    await repository.createRun({ ...run(), slideCount: 1, committedBudgetUnits: 1 })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        status: 'COMPLETED',
+        qualityDisposition: 'REVIEW_PASSED',
+      })
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'run.completed',
+        payload: {
+          presentationMode: 'VISUAL_DECK_V4', stage: 'RUN', completed: 1, total: 1,
+          pageNumbers: [1], revisionKind: null, revisionRound: 0, maxRevisionRounds: 2,
+          budgetUnits: 30, committedBudgetUnits: 1, reason: null, retryable: null,
+          requiresUserAction: false, nextAction: null,
+          deliveryId: 'run-1:delivery:r0', qualityOverride: false,
+        },
+      })
+      enqueueUsageV2RunFinalization(transaction, clock)
+    })
+
+    await coordinator.reconcileTerminalRun('run-1')
+    const rejected = (await repository.listSteps('run-1'))
+      .find((step) => step.tool === 'finalize_usage_v2')!
+    expect(await coordinator.retryRejectedFinalization('run-1', rejected.idempotencyKey)).toBe(false)
+
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'COMPLETED', qualityDisposition: 'REVIEW_PASSED',
+    })
+    expect((await repository.listSteps('run-1')).find((step) => step.tool === 'finalize_usage_v2'))
+      .toMatchObject({
+        status: 'RUNNING', errorCode: pendingOutcome === 'UNKNOWN' ? 'HOST_USAGE_V2_FINALIZE_UNKNOWN' : null,
+        output: {
+          idempotencyKey: 'finalize:run-1', deliveryState: 'PENDING',
+          nextAttemptAt: new Date(clock.now().getTime() + 1_000).toISOString(),
+        },
+      })
+    const pendingEvents = await repository.listEvents('run-1')
+    expect(pendingEvents.slice(-3).map((event) => event.type))
+      .toEqual(['phase.changed', 'run.resumed', 'run.completed'])
+    expect(pendingEvents.at(-3)).toMatchObject({
+      type: 'phase.changed',
+      payload: { from: 'FAILED', to: 'COMPLETED', reason: 'USAGE_V2_FINALIZATION_RETRY_SCHEDULED' },
+    })
+    expect(pendingEvents.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(pendingEvents.some((event) =>
+      event.type === 'phase.changed' && event.payload.to === 'NEEDS_HUMAN')).toBe(false)
+    expect(await repository.getTerminalEvent('run-1')).toBeNull()
+
+    clock.advance(1_000)
+    expect(await coordinator.reconcileTerminalRun('run-1')).toBe(true)
+    expect(usage.finalizeAttempts.map((attempt) => attempt.idempotencyKey))
+      .toEqual(['finalize:run-1', 'finalize:run-1', 'finalize:run-1'])
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'COMPLETED' })
+    expect(await repository.getTerminalEvent('run-1')).toMatchObject({ type: 'run.completed' })
+    if (repository instanceof SqliteAgentRepository) repository.close()
   })
 
   test('serializes ten concurrent observed and resolved events with immutable identities', async () => {

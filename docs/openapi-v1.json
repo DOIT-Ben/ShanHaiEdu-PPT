@@ -1421,6 +1421,63 @@
           },
           {
             "if": {
+              "properties": { "presentationMode": { "const": "SLIDE_IMAGE_V2" } },
+              "required": ["presentationMode", "release"]
+            },
+            "then": {
+              "properties": {
+                "release": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ReleaseIdentity" },
+                    {
+                      "properties": { "presentationMode": { "const": "SLIDE_IMAGE_V2" } },
+                      "required": ["presentationMode"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "presentationMode": { "const": "SLIDE_IMAGE_V2_1" } },
+              "required": ["presentationMode", "release"]
+            },
+            "then": {
+              "properties": {
+                "release": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ReleaseIdentity" },
+                    {
+                      "properties": { "presentationMode": { "const": "SLIDE_IMAGE_V2_1" } },
+                      "required": ["presentationMode"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "presentationMode": { "const": "LAYERED_COURSEWARE_V3" } },
+              "required": ["presentationMode", "release"]
+            },
+            "then": {
+              "properties": {
+                "release": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ReleaseIdentity" },
+                    {
+                      "properties": { "presentationMode": { "const": "LAYERED_COURSEWARE_V3" } },
+                      "required": ["presentationMode"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
               "properties": { "presentationMode": { "const": "VISUAL_DECK_V4" } },
               "required": ["presentationMode"]
             },

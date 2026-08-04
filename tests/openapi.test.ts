@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import {
   KNOWN_AGENT_EVENT_TYPES,
   deliveryUnavailableReasonSchema,
+  presentationModeSchema,
   publicErrorActionSchema,
   publicErrorCategorySchema,
   runStatusSchema,
@@ -11,6 +12,34 @@ import {
 const filename = new URL('../docs/openapi-v1.json', import.meta.url)
 
 describe('OpenAPI v1 contract', () => {
+  test('keeps release presentationMode consistency in parity with Zod for every mode', async () => {
+    type ReleaseModeRule = {
+      if?: { properties?: { presentationMode?: { const?: string } }; required?: string[] }
+      then?: { properties?: { release?: unknown }; required?: string[] }
+    }
+    const document = JSON.parse(await readFile(filename, 'utf8')) as {
+      components: { schemas: { PublicRun: { allOf?: ReleaseModeRule[] } } }
+    }
+    const rules = document.components.schemas.PublicRun.allOf ?? []
+
+    for (const mode of presentationModeSchema.options) {
+      const rule = rules.find((candidate) =>
+        candidate.if?.properties?.presentationMode?.const === mode
+        && (mode === 'VISUAL_DECK_V4'
+          ? candidate.then?.required?.includes('release')
+          : candidate.if?.required?.includes('release')))
+      expect(rule?.then?.properties?.release).toMatchObject({
+        allOf: [
+          { $ref: '#/components/schemas/ReleaseIdentity' },
+          {
+            properties: { presentationMode: { const: mode } },
+            required: ['presentationMode'],
+          },
+        ],
+      })
+    }
+  })
+
   test('keeps the OpenAPI known event enum in parity with the Zod discriminated union', async () => {
     const document = JSON.parse(await readFile(filename, 'utf8')) as {
       components: {
