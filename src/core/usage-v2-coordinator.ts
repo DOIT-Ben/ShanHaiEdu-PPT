@@ -187,6 +187,19 @@ function usageMetadata(step: StepRecord): UsageMediaMetadata {
   return parsed.data
 }
 
+function requireUsageMediaIdentity(step: StepRecord, metadata: UsageMediaMetadata) {
+  const output = outputRecord(step)
+  if (metadata.operationIdempotencyKey !== step.idempotencyKey
+    || metadata.batchId !== output.batchId
+    || metadata.pageNumber !== output.pageNumber
+    || metadata.revisionRound !== output.revisionRound
+    || metadata.billingSnapshot.model !== output.model
+    || metadata.billingSnapshot.operationMode !== output.operationMode) {
+    throw new Error('USAGE_V2_MEDIA_IDENTITY_CONFLICT')
+  }
+  return metadata
+}
+
 function eventStepOutput(step: StepRecord): UsageOutboxOutput {
   const output = outputRecord(step) as Partial<UsageOutboxOutput>
   const parsed = usageOperationEventV2Schema.safeParse(output.event)
@@ -587,7 +600,7 @@ export class UsageV2Coordinator {
       .find((candidate) => candidate.idempotencyKey === mediaStepKey)
     if (!step || step.tool !== 'generate_slide_image') throw new Error('STEP_NOT_FOUND')
     if (operationId && step.externalOperationId !== operationId) throw new Error('USAGE_V2_PROVIDER_OPERATION_CONFLICT')
-    return { run, step, metadata: usageMetadata(step) }
+    return { run, step, metadata: requireUsageMediaIdentity(step, usageMetadata(step)) }
   }
 
   private async enqueueEvent(run: RunRecord, candidate: UsageOperationEventV2) {

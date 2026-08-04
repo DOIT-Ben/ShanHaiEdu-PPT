@@ -20,6 +20,7 @@ import { planningStepKey } from '../src/core/planning-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
+import { applyRunAction } from '../src/core/policy'
 import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
@@ -250,9 +251,16 @@ function revisionUsageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill 
 class RevisionUsagePort implements UsageAccountingPort {
   readonly permits: Parameters<UsageAccountingPort['authorizeOperation']>[0][] = []
   readonly events: Parameters<UsageAccountingPort['ingestEvent']>[0]['event'][] = []
+  permitResult: 'ALLOW' | 'DENY' = 'ALLOW'
 
   async authorizeOperation(input: Parameters<UsageAccountingPort['authorizeOperation']>[0]) {
     this.permits.push(structuredClone(input))
+    if (this.permitResult === 'DENY') {
+      return {
+        allowed: false as const, stopReason: 'AUTHORIZATION_CAP_REACHED' as const,
+        authorizedOperations: 30, authorizationCapOperations: 30, providerSpendSafetyCapOperations: 30,
+      }
+    }
     return { allowed: true as const, permitId: `permit-${input.pageNumber}`, pricingVersion: 'ppt-image-v1', userPriceMilli: 10_000 }
   }
 
@@ -265,18 +273,22 @@ class RevisionUsagePort implements UsageAccountingPort {
   async finalizeRun() { return revisionUsageBill({ status: 'SETTLED' }) }
 }
 
-async function usageV2RevisionFixture() {
+async function usageV2RevisionFixture(inputs: Readonly<{
+  plan?: ReturnType<typeof revisionPlan>
+  imageConcurrency?: number
+}> = {}) {
   const basePlan = revisionPlan()
-  const plan = {
+  const plan = inputs.plan ?? {
     ...basePlan,
     operations: [
       { ...basePlan.operations[0]!, id: 'operation-page-1', slideId: 'run-1:slide:1', instruction: 'Correct page one.' },
       { ...basePlan.operations[0]!, id: 'operation-page-2', slideId: 'run-1:slide:2', instruction: 'Correct page two.' },
     ],
   }
+  const imageConcurrency = inputs.imageConcurrency ?? 2
   const base = await fixture({
     presentationMode: 'VISUAL_DECK_V4', accountingProtocol: 'FRAMEFLOW_USAGE_V2',
-  }, { blueprint: visualDeckV4Blueprint(), plan, imageConcurrency: 2 })
+  }, { blueprint: visualDeckV4Blueprint(), plan, imageConcurrency })
   const usage = new RevisionUsagePort()
   const usageV2 = new UsageV2Coordinator({
     repository: base.repository,
@@ -293,7 +305,7 @@ async function usageV2RevisionFixture() {
   })
   const coordinator = new RevisionMediaCoordinator({
     repository: base.repository, media, batchBudget: base.budget, artifacts: base.artifacts,
-    clock: base.clock, revisionImageModel: 'image-2', imageConcurrency: 2,
+    clock: base.clock, revisionImageModel: 'image-2', imageConcurrency,
   })
   return { ...base, usage, media, coordinator }
 }
@@ -317,6 +329,83 @@ describe('revision media coordinator', () => {
     expect(usage.events.filter((event) => event.eventType === 'OPERATION_OBSERVED')).toHaveLength(2)
     expect(usage.events.filter((event) => event.eventType === 'BILLING_RESOLVED')).toHaveLength(2)
     expect(budget.batchFinalizationAttempts).toHaveLength(0)
+  })
+
+  test('keeps a permit-denied V4 revision paused and resumes the original image operation once', async () => {
+    const { repository, images, usage, coordinator } = await usageV2RevisionFixture({
+      plan: revisionPlan(), imageConcurrency: 1,
+    })
+    usage.permitResult = 'DENY'
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'PAUSED', submitted: 1, total: 1 })
+    expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAUSED', completed: 0, total: 1 })
+    expect(images.submitCalls).toBe(0)
+    const [mediaStep] = (await repository.listSteps('run-1')).filter((step) =>
+      step.tool === 'generate_slide_image' && step.idempotencyKey.includes(':r1:'))
+    expect(mediaStep).toMatchObject({ status: 'FAILED', errorCode: 'AUTHORIZATION_CAP_REACHED' })
+    const originalKey = mediaStep!.idempotencyKey
+    const pausedEvents = await repository.listEvents('run-1')
+    expect(pausedEvents.find((event) => event.type === 'run.paused')).toMatchObject({
+      payload: {
+        presentationMode: 'VISUAL_DECK_V4', reason: 'BUDGET_INSUFFICIENT',
+        requiresUserAction: true, nextAction: 'ADD_BUDGET', resumeState: 'REVISING',
+      },
+    })
+    expect(pausedEvents.some((event) => event.type === 'approval.required'
+      && event.payload.kind === 'HUMAN_REVIEW')).toBe(false)
+    expect(pausedEvents.some((event) => event.type === 'revision.completed')).toBe(false)
+    expect(pausedEvents.some((event) => event.type === 'technical.recovery.started')).toBe(false)
+    expect(pausedEvents.some((event) => event.type === 'run.failed'
+      && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
+
+    await repository.transact('run-1', (transaction) => {
+      const funded = applyRunAction(transaction.run, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'ADD_BUDGET',
+        expectedVersion: transaction.run.version,
+        additionalBudgetUnits: 5,
+      })
+      const resumed = applyRunAction(funded, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'RESUME',
+        expectedVersion: funded.version,
+      })
+      transaction.putRun({ ...transaction.run, ...resumed, updatedAt: transaction.run.updatedAt })
+    })
+    usage.permitResult = 'ALLOW'
+
+    expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(usage.permits.map((permit) => permit.operationIdempotencyKey)).toEqual([originalKey, originalKey])
+    expect(images.submitCalls).toBe(1)
+    expect(images.requests.has(originalKey)).toBe(true)
+  })
+
+  test('releases the whole unsubmitted V4 revision batch when a permit-paused Run is cancelled', async () => {
+    const { repository, images, usage, coordinator, generation } = await usageV2RevisionFixture({
+      plan: revisionPlan(), imageConcurrency: 1,
+    })
+    usage.permitResult = 'DENY'
+    await coordinator.submit('run-1', 5)
+
+    await repository.transact('run-1', (transaction) => {
+      const cancelled = applyRunAction(transaction.run, {
+        schemaVersion: CONTRACT_VERSION,
+        type: 'CANCEL',
+        expectedVersion: transaction.run.version,
+        reason: '用户取消额度不足的返修任务。',
+      })
+      transaction.putRun({ ...transaction.run, ...cancelled, updatedAt: transaction.run.updatedAt })
+    })
+
+    expect(await generation.reconcileTerminalGenerationBatch('run-1')).toBe(true)
+    expect(images.submitCalls).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'CANCELLED', committedBudgetUnits: 20 })
+    expect((await repository.listSteps('run-1')).find((step) =>
+      step.idempotencyKey === generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })))
+      .toMatchObject({
+        status: 'COMPLETED',
+        output: { accounting: { settlement: 'RELEASED', settledUnits: 0, releasedUnits: 5 } },
+      })
   })
 
   test('edits the latest controlled V4 page with the configured GPT model before review', async () => {

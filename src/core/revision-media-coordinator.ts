@@ -90,6 +90,11 @@ function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefin
     && (technicalFailureFromStep(step) !== null || isUsageAuthorizationCapFailureStep(step))
 }
 
+function isRevisionMediaFailure(run: RunRecord, step: StepRecord) {
+  return isMediaFailureStepStatus(step.status)
+    && !(isVisualDeckV4(run) && isUsageAuthorizationCapFailureStep(step))
+}
+
 export class RevisionMediaCoordinator {
   private readonly imageConcurrency: number
 
@@ -201,7 +206,7 @@ export class RevisionMediaCoordinator {
       const unexpected = outcomes.find((outcome): outcome is { error: unknown } => 'error' in outcome)
       if (unexpected) throw unexpected.error
       const failed = outcomes.find((outcome): outcome is { step: StepRecord } =>
-        'step' in outcome && isMediaFailureStepStatus(outcome.step.status))
+        'step' in outcome && isRevisionMediaFailure(run, outcome.step))
       if (failed) await this.failV4Revision(run, failed.step, targets.length)
       await refreshGenerationBatch({
         repository: this.dependencies.repository,
@@ -223,7 +228,7 @@ export class RevisionMediaCoordinator {
       const key = target.idempotencyKey
       const existing = stepsByKey.get(key)
       const result = await this.submitTarget(run, target, unitBudgetUnits, existing)
-      if (isMediaFailureStepStatus(result.step.status)) {
+      if (isRevisionMediaFailure(run, result.step)) {
         await this.failV4Revision(run, result.step, targets.length)
         break
       }
@@ -243,7 +248,7 @@ export class RevisionMediaCoordinator {
     const run = await this.requireRun(runId)
     const targets = await this.targets(run)
     const initialSteps = await this.currentSteps(run, targets)
-    const initialFailure = initialSteps.find((step) => isMediaFailureStepStatus(step.status))
+    const initialFailure = initialSteps.find((step) => isRevisionMediaFailure(run, step))
     if (initialFailure) {
       await this.failV4Revision(run, initialFailure, targets.length)
       return this.summary(await this.requireRun(runId))
@@ -262,7 +267,7 @@ export class RevisionMediaCoordinator {
       }
     }
     const refreshed = await this.currentSteps(run, targets)
-    const failed = refreshed.find((step) => isMediaFailureStepStatus(step.status))
+    const failed = refreshed.find((step) => isRevisionMediaFailure(run, step))
     const completed = refreshed.filter((step) => step.status === 'COMPLETED' && this.artifactId(step)).length
     const latest = await this.requireRun(runId)
     const details = await this.details(run)

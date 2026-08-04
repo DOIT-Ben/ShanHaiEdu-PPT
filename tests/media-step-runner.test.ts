@@ -146,6 +146,56 @@ const usageRequest = {
   },
 } as const
 
+const usageIdentityFields = [
+  ['operationIdempotencyKey'], ['batchId'], ['pageNumber'], ['revisionRound'], ['model'], ['operationMode'],
+] as const
+
+type UsageIdentityField = typeof usageIdentityFields[number][0]
+
+type PersistedUsageMetadata = Readonly<{
+  operationIdempotencyKey: string
+  batchId: string
+  pageNumber: number
+  revisionRound: number
+  billingSnapshot: Readonly<{
+    model: string
+    operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+    [key: string]: unknown
+  }>
+  [key: string]: unknown
+}>
+
+function tamperedUsageMetadata(metadata: PersistedUsageMetadata, field: UsageIdentityField): PersistedUsageMetadata {
+  switch (field) {
+    case 'operationIdempotencyKey': return { ...metadata, operationIdempotencyKey: 'run-1:tampered-operation-key' }
+    case 'batchId': return { ...metadata, batchId: 'genbatch_tampered0123456789abcdef012345' }
+    case 'pageNumber': return { ...metadata, pageNumber: 2 }
+    case 'revisionRound': return { ...metadata, revisionRound: 1 }
+    case 'model': return { ...metadata, billingSnapshot: { ...metadata.billingSnapshot, model: 'tampered-model' } }
+    case 'operationMode': return {
+      ...metadata,
+      billingSnapshot: { ...metadata.billingSnapshot, operationMode: 'IMAGE_EDIT' },
+    }
+  }
+}
+
+async function tamperPersistedUsageIdentity(
+  repository: InMemoryAgentRepository,
+  field: UsageIdentityField,
+) {
+  await repository.transact('run-1', (transaction) => {
+    const step = transaction.getStep(usageRequest.idempotencyKey)!
+    const output = step.output as Record<string, unknown>
+    transaction.putStep({
+      ...step,
+      output: {
+        ...output,
+        usageV2: tamperedUsageMetadata(output.usageV2 as PersistedUsageMetadata, field),
+      },
+    })
+  })
+}
+
 describe('media step runner', () => {
   test('resumes a 4.2 V1 batch page without changing the persisted Provider step identity', async () => {
     const { repository, images, runner } = await fixture({
@@ -300,6 +350,50 @@ describe('media step runner', () => {
     })
     expect(images.submitCalls).toBe(1)
   })
+
+  test.each(usageIdentityFields)(
+    'rejects a shape-valid post-submit Usage V2 %s mismatch without emitting the wrong event',
+    async (field) => {
+      const { repository, images, usage, runner } = await usageFixture()
+      const submit = images.submit.bind(images)
+      images.submit = async (input) => {
+        const accepted = await submit(input)
+        await tamperPersistedUsageIdentity(repository, field)
+        return accepted
+      }
+
+      const result = await runner.submitSlideImage(usageRequest)
+      const providerOperationId = images.operations.get(usageRequest.idempotencyKey)!
+
+      expect(result.step).toMatchObject({
+        idempotencyKey: usageRequest.idempotencyKey,
+        status: 'WAITING',
+        externalOperationId: providerOperationId,
+        errorCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+        output: {
+          technicalFailure: {
+            category: 'USAGE_V2', disposition: 'NON_RETRYABLE',
+            diagnosticCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+          },
+          usageV2Recovery: {
+            stage: 'PROVIDER_SUBMISSION', providerOperationId,
+            operationIdempotencyKey: usageRequest.idempotencyKey,
+            diagnosticCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+          },
+        },
+      })
+      expect(usage.events).toHaveLength(0)
+      expect(await repository.getRun('run-1')).toMatchObject({
+        status: 'RECOVERING', pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      })
+      await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
+      expect(images.submitCalls).toBe(1)
+      const events = await repository.listEvents('run-1')
+      expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+      expect(events.some((event) => event.type === 'run.failed'
+        && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
+    },
+  )
 
   test('requires a persisted Usage V2 permit before Provider submission without a legacy reservation', async () => {
     const { repository, budget, images, usage, runner } = await usageFixture()
@@ -461,6 +555,66 @@ describe('media step runner', () => {
     expect(events.some((event) => event.type === 'run.failed'
       && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
   })
+
+  test.each(usageIdentityFields)(
+    'rejects a shape-valid post-result Usage V2 %s mismatch without emitting a resolved event',
+    async (field) => {
+      const { repository, images, usage, runner } = await usageFixture()
+      const submitted = await runner.submitSlideImage(usageRequest)
+      const providerOperationId = submitted.step.externalOperationId!
+      images.complete(usageRequest.idempotencyKey, 'artifact-slide-1-v1')
+      const inspect = images.inspect.bind(images)
+      images.inspect = async (input) => {
+        const result = await inspect(input)
+        await tamperPersistedUsageIdentity(repository, field)
+        return result
+      }
+
+      const result = await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
+
+      expect(result).toMatchObject({
+        changed: true,
+        step: {
+          idempotencyKey: usageRequest.idempotencyKey,
+          status: 'WAITING',
+          externalOperationId: providerOperationId,
+          errorCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+          output: {
+            technicalFailure: {
+              category: 'USAGE_V2', disposition: 'NON_RETRYABLE',
+              diagnosticCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+            },
+            usageV2Recovery: {
+              stage: 'PROVIDER_RESULT', providerOperationId,
+              operationIdempotencyKey: usageRequest.idempotencyKey,
+              providerStatus: 'COMPLETED', billingState: 'CHARGED',
+              diagnosticCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+            },
+          },
+        },
+      })
+      expect(usage.events).toEqual([
+        expect.objectContaining({
+          eventType: 'OPERATION_OBSERVED',
+          batchId: usageRequest.batchReservation.batchId,
+          pageNumber: usageRequest.pageNumber,
+          revisionRound: usageRequest.revisionRound,
+          idempotencyKey: usageRequest.idempotencyKey,
+          providerOperationId,
+          model: usageRequest.model,
+        }),
+      ])
+      expect(await repository.getRun('run-1')).toMatchObject({
+        status: 'RECOVERING', pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+      })
+      await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
+      expect(images.submitCalls).toBe(1)
+      const events = await repository.listEvents('run-1')
+      expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+      expect(events.some((event) => event.type === 'run.failed'
+        && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
+    },
+  )
 
   test('keeps an unknown permit recoverable and retries the same key before one Provider submission', async () => {
     const { images, usage, runner } = await usageFixture()
