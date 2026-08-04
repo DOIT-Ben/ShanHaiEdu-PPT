@@ -446,7 +446,7 @@ Forbidden changes: {{forbiddenChanges}}.
 即使元素存在语义关系，也只能通过位置、方向、箭头、间距和大小关系表达；除非用户明确要求物理接触，否则不得新增接触、遮挡、交叠、穿插、融合或共用轮廓。
 COUNTABLE OBJECT SAFETY: keep exactly one authoritative set of every countable teaching object and preserve the required total cardinality.
 Do not invent any additional labels, captions, page numbers, decorative words, watermarks, logos, or content from another slide.
-Return one finished full-bleed 16:9 slide image. Do not add explanations, borders, watermarks, or content from another slide.
+Target a finished, full-bleed landscape slide at approximately 16:9. Minor pixel-dimension variance is acceptable; do not intentionally return a 3:2, 4:3, or square image. Do not add explanations, borders, watermarks, or content from another slide.
 ```
 
 - 空数组对应的分段在运行时省略；`{{preserve.unaffectedAreas}}` 是后端冻结并持久化的原样保护指令。

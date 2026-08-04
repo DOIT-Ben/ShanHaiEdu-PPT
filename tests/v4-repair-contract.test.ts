@@ -110,6 +110,14 @@ describe('V4 repair contract', () => {
     expect(prompt).toContain('不得绑定、粘合、嵌套或合成为不可分割的组合主体')
   })
 
+  test('targets a 16:9 landscape output without demanding pixel-perfect dimensions', () => {
+    const prompt = compileV4RepairPrompt(contract())
+
+    expect(prompt).toContain('Target a finished, full-bleed landscape slide at approximately 16:9.')
+    expect(prompt).toContain('Minor pixel-dimension variance is acceptable; do not intentionally return a 3:2, 4:3, or square image.')
+    expect(prompt).not.toContain('Return one finished full-bleed 16:9 slide image.')
+  })
+
   test('keeps the persisted contract strict', () => {
     expect(v4RepairContractSchema.safeParse({ ...contract(), rawProviderResponse: 'forbidden' }).success).toBe(false)
   })
