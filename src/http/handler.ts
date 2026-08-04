@@ -48,10 +48,16 @@ import {
 import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
-import { OPENAPI_DOCUMENT_JSON } from './openapi-document'
+import {
+  handlePresentationJobV2Request,
+  type PresentationJobV2HandlerDependencies,
+} from './presentation-job-v2-handler'
+import { OPENAPI_DOCUMENT_JSON, OPENAPI_V2_DOCUMENT_JSON } from './openapi-document'
 
 const OPENAPI_PATH = '/openapi/v1.json'
 const OPENAPI_LINK = `<${OPENAPI_PATH}>; rel="service-desc"; type="application/vnd.oai.openapi+json"`
+const OPENAPI_V2_PATH = '/openapi/v2.json'
+const OPENAPI_V2_LINK = `<${OPENAPI_V2_PATH}>; rel="service-desc"; type="application/vnd.oai.openapi+json"`
 
 export interface HostAuthenticationPort {
   authenticate(request: Request): Promise<HostContext | null>
@@ -69,6 +75,7 @@ type HandlerDependencies = Readonly<{
   operations?: AdminOperationsPort
   revisionRoundsSettings?: AdminRevisionRoundsSettingsPort
   rateLimiter?: PrincipalRateLimiterPort
+  presentationJobV2?: PresentationJobV2HandlerDependencies
 }>
 
 async function publicRunError(repository: AgentRepository, run: RunRecord): Promise<PublicError | null> {
@@ -229,9 +236,24 @@ function openApiResponse() {
   })
 }
 
+function openApiV2Response() {
+  return new Response(OPENAPI_V2_DOCUMENT_JSON, {
+    status: 200,
+    headers: {
+      'Cache-Control': 'no-cache',
+      'Content-Type': 'application/vnd.oai.openapi+json; charset=utf-8',
+      Link: OPENAPI_V2_LINK,
+      'X-Content-Type-Options': 'nosniff',
+      'X-PPT-Agent-Contract-Version': '2.0',
+    },
+  })
+}
+
 function applyContractHeaders(response: Response, requestId: string) {
-  response.headers.set('Link', OPENAPI_LINK)
-  response.headers.set('X-PPT-Agent-Contract-Version', CONTRACT_VERSION)
+  if (!response.headers.has('Link')) response.headers.set('Link', OPENAPI_LINK)
+  if (!response.headers.has('X-PPT-Agent-Contract-Version')) {
+    response.headers.set('X-PPT-Agent-Contract-Version', CONTRACT_VERSION)
+  }
   response.headers.set('X-Request-ID', requestId)
   return response
 }
@@ -568,6 +590,15 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       }
       if (request.method === 'GET' && url.pathname === OPENAPI_PATH) {
         return openApiResponse()
+      }
+      if (request.method === 'GET' && url.pathname === OPENAPI_V2_PATH) {
+        return openApiV2Response()
+      }
+      if (url.pathname.startsWith('/v2/')) {
+        if (!dependencies.presentationJobV2) {
+          return errorResponse(503, 'PRESENTATION_JOB_V2_UNAVAILABLE', 'presentation jobs are unavailable', requestId)
+        }
+        return await handlePresentationJobV2Request(dependencies.presentationJobV2, request, requestId)
       }
       const host = await dependencies.authentication.authenticate(request)
       if (!host) return errorResponse(401, 'UNAUTHENTICATED', 'authentication is required', requestId)

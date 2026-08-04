@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { createReadStream, readFileSync } from 'node:fs'
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { Readable } from 'node:stream'
 import type { ArtifactPort } from '../core/ports'
 
 type ArtifactMetadata = Readonly<{
@@ -67,6 +68,27 @@ export class LocalArtifactPort implements ArtifactPort {
         throw new Error('ARTIFACT_INTEGRITY_FAILED')
       }
       return { mimeType: metadata.mimeType, bytes, sha256: metadata.sha256 }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  async open(input: Parameters<ArtifactPort['open']>[0]) {
+    if (!/^artifact-[a-f0-9]{40}$/.test(input.artifactId)) return null
+    const directory = path.join(this.rootDirectory, input.artifactId)
+    const metadata = await this.readMetadata(directory)
+    if (!metadata || metadata.tenantHash !== digest(input.tenantId)) return null
+    const filename = path.join(directory, 'content.bin')
+    try {
+      const file = await stat(filename)
+      if (file.size !== metadata.byteLength) throw new Error('ARTIFACT_INTEGRITY_FAILED')
+      return {
+        mimeType: metadata.mimeType,
+        byteLength: metadata.byteLength,
+        sha256: metadata.sha256,
+        stream: Readable.toWeb(createReadStream(filename)) as unknown as ReadableStream<Uint8Array>,
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error

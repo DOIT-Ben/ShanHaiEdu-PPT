@@ -1210,6 +1210,7 @@ describe('run service', () => {
     let artifactReads = 0
     const racingArtifacts = {
       put: seeded.artifacts.put.bind(seeded.artifacts),
+      open: seeded.artifacts.open.bind(seeded.artifacts),
       getByIdempotencyKey: seeded.artifacts.getByIdempotencyKey.bind(seeded.artifacts),
       verifyIntegrity: seeded.artifacts.verifyIntegrity.bind(seeded.artifacts),
       get: async (input: Parameters<typeof seeded.artifacts.get>[0]) => {
@@ -1255,6 +1256,7 @@ describe('run service', () => {
     let artifactReads = 0
     const racingArtifacts = {
       put: seeded.artifacts.put.bind(seeded.artifacts),
+      open: seeded.artifacts.open.bind(seeded.artifacts),
       getByIdempotencyKey: seeded.artifacts.getByIdempotencyKey.bind(seeded.artifacts),
       verifyIntegrity: seeded.artifacts.verifyIntegrity.bind(seeded.artifacts),
       get: async (input: Parameters<typeof seeded.artifacts.get>[0]) => {

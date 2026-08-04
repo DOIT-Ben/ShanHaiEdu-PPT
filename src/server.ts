@@ -13,6 +13,11 @@ import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { FrameFlowUsageAccountingAdapter } from './adapters/frameflow-usage-accounting'
 import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
+import { SqlitePresentationJobV2Repository } from './adapters/presentation-job-v2-sqlite-repository'
+import {
+  DeterministicPresentationJobV2Provider,
+  FixedServicePresentationJobBudgetPolicy,
+} from './adapters/presentation-job-v2-ports'
 import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
@@ -46,7 +51,13 @@ const dataRoot = path.resolve(process.env.PPT_AGENT_DATA_ROOT?.trim() || '.priva
 await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
+const presentationJobV2Repository = new SqlitePresentationJobV2Repository(path.join(dataRoot, 'presentation-jobs-v2.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
+const presentationJobV2 = {
+  repository: presentationJobV2Repository,
+  provider: new DeterministicPresentationJobV2Provider(),
+  budget: new FixedServicePresentationJobBudgetPolicy(1),
+}
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
 const usageV2Runtime = resolveUsageV2RuntimeConfig(process.env, await repository.listRuns())
 if (usageV2Runtime.requiresUsageV2Runtime && tenantId !== 'frameflow') {
@@ -159,6 +170,7 @@ const runtime = runtimeMode === 'gateway'
       return createAgentRuntime({
         repository,
         artifacts,
+        presentationJobV2,
         ...(discovery ? { discovery } : {}),
         ...(discovery ? { candidateReviewer: model } : {}),
         apiToken,
@@ -195,7 +207,7 @@ const runtime = runtimeMode === 'gateway'
       })
     })()
   : createMockRuntime({
-      repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
+      repository, artifacts, presentationJobV2, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
       revisionImageModel: revisionImageModel || 'image-2',
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
@@ -238,6 +250,7 @@ const stop = () => {
   clearInterval(timer)
   server.stop(true)
   repository.close()
+  presentationJobV2Repository.close()
   process.exit(0)
 }
 process.on('SIGINT', stop)

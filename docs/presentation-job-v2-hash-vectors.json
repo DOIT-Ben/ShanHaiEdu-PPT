@@ -1,0 +1,48 @@
+{
+  "algorithm": "SHA-256 over UTF-8 canonical JSON: recursively sort object keys, preserve array order, omit undefined values, then JSON serialize without extra whitespace.",
+  "vectors": [
+    {
+      "name": "approved-page-design-triangle-zh-cn-v1",
+      "snapshot": {
+        "schemaVersion": "1",
+        "title": "认识三角形",
+        "subject": "数学",
+        "gradeBand": "小学一年级",
+        "lessonDurationMinutes": 40,
+        "audience": "小学一年级学生",
+        "objectives": ["辨认三角形的基本特征", "在生活场景中寻找三角形"],
+        "pages": [
+          {
+            "pageNumber": 1,
+            "title": "三角形在哪里",
+            "teachingPurpose": "从熟悉物体中建立三角形的直观印象。",
+            "editableCopy": ["观察屋顶、路标和积木的边。"],
+            "layoutIntent": "左侧展示物体，右侧突出三条边围成的形状。",
+            "visualRequirements": ["展示三个日常物体"],
+            "teacherNotes": "引导学生描述看到的边和角。",
+            "teacherScript": "请大家找一找，哪些物体上藏着三角形？",
+            "studentActivity": "圈出图片中的三角形。",
+            "animationSequence": ["依次高亮三个物体", "描出三角形轮廓"],
+            "boardPlan": "板书三条线段首尾相连。",
+            "evidence": [{ "type": "FACT", "text": "三角形由三条线段首尾相连围成。", "source": "课程标准材料" }]
+          },
+          {
+            "pageNumber": 2,
+            "title": "三角形的特征",
+            "teachingPurpose": "归纳三条边和三个角的结构特征。",
+            "editableCopy": ["三条边", "三个角"],
+            "layoutIntent": "中心为大三角形，周围标注边和角。",
+            "visualRequirements": ["使用高对比标注"],
+            "teacherNotes": "让学生跟读结构名称。",
+            "teacherScript": "数一数，三角形有几条边、几个角？",
+            "studentActivity": "用手指沿着三条边比划。",
+            "animationSequence": ["出现三条边", "出现三个角"],
+            "boardPlan": "画一个三角形并标出三条边。",
+            "evidence": [{ "type": "FACT", "text": "三角形有三条边和三个角。", "source": "课程标准材料" }]
+          }
+        ]
+      },
+      "sha256": "ce6f1c9e7f3ad42ba0231ea8638739c94116abb938bea5d73b1e945580400f92"
+    }
+  ]
+}

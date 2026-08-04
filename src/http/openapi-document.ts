@@ -1,12 +1,14 @@
 import { readFileSync } from 'node:fs'
 
-const candidates = [
-  new URL('../docs/openapi-v1.json', import.meta.url),
-  new URL('../../docs/openapi-v1.json', import.meta.url),
-]
+function candidates(filename: string) {
+  return [
+    new URL(`../docs/${filename}`, import.meta.url),
+    new URL(`../../docs/${filename}`, import.meta.url),
+  ]
+}
 
-function loadOpenApiDocument() {
-  for (const candidate of candidates) {
+function loadOpenApiDocument(filename: string, title: string) {
+  for (const candidate of candidates(filename)) {
     try {
       const source = readFileSync(candidate, 'utf8')
       const document = JSON.parse(source) as {
@@ -15,7 +17,7 @@ function loadOpenApiDocument() {
         paths?: unknown
       }
       if (document.openapi !== '3.1.0'
-        || document.info?.title !== 'PPT Agent API'
+        || document.info?.title !== title
         || typeof document.info.version !== 'string'
         || !document.paths
         || typeof document.paths !== 'object') {
@@ -29,4 +31,5 @@ function loadOpenApiDocument() {
   throw new Error('OPENAPI_DOCUMENT_UNAVAILABLE')
 }
 
-export const OPENAPI_DOCUMENT_JSON = loadOpenApiDocument()
+export const OPENAPI_DOCUMENT_JSON = loadOpenApiDocument('openapi-v1.json', 'PPT Agent API')
+export const OPENAPI_V2_DOCUMENT_JSON = loadOpenApiDocument('openapi-v2.json', 'PPT Agent Presentation Job API')

@@ -4,6 +4,7 @@ import type { HostContext } from '../contracts'
 import type { BlueprintDraft } from '../presentation-contracts'
 import type { HostAuthenticationPort } from '../http/handler'
 import { createHttpHandler } from '../http/handler'
+import type { PresentationJobV2AuthenticationPort } from '../http/presentation-job-v2-handler'
 import { InMemoryPrincipalRateLimiter, type PrincipalRateLimiterPort } from '../http/principal-rate-limiter'
 import { SharedTokenAuthentication } from '../http/service-token-authentication'
 export { ServiceTokenAuthentication, SharedTokenAuthentication } from '../http/service-token-authentication'
@@ -40,6 +41,7 @@ import type {
   BudgetPort,
   ClockPort,
   DeckReviewPort,
+  DocumentPort,
   ImageGenerationPort,
   PresentationRendererPort,
   RevisionApplicationPort,
@@ -51,6 +53,12 @@ import type {
   UsageAccountingPort,
   VisualReviewPort,
 } from '../core/ports'
+import { PresentationJobV2Service } from '../core/presentation-job-v2-service'
+import type {
+  PresentationJobV2BudgetPolicy,
+  PresentationJobV2ProviderPort,
+  PresentationJobV2Repository,
+} from '../core/presentation-job-v2-ports'
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
@@ -74,6 +82,16 @@ class MockFrameFlowBackend implements FrameFlowBackendClient {
   async releaseCredits() {}
   async finalizeCredits() {}
   async preflightBatchFinalization() {}
+}
+
+class DisabledV1Ports implements DocumentPort, BudgetPort, BatchBudgetPort {
+  async resolve(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
+  async reserve(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
+  async settle(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
+  async release(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
+  async preflightBatchFinalization(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
+  async reserveBatch(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
+  async finalizeBatch(): Promise<never> { throw new Error('V1_EXECUTION_DISABLED') }
 }
 
 type MockReflectionFailureMode = 'NONE' | 'INVALID_SLIDE_CRITIC'
@@ -519,6 +537,12 @@ type RuntimeInput = Readonly<{
   defaultAccountingProtocol?: UsageAccountingProtocol
   usageAccounting?: UsageAccountingPort
   providerBillingCatalog?: ProviderBillingCatalog
+  v1ExecutionEnabled?: boolean
+  presentationJobV2?: Readonly<{
+    repository: PresentationJobV2Repository
+    provider: PresentationJobV2ProviderPort
+    budget: PresentationJobV2BudgetPolicy
+  }>
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -528,6 +552,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const imageConcurrency = input.imageConcurrency ?? 50
   const revisionImageModel = input.revisionImageModel?.trim() || 'image-2'
   const runLeaseTtlMs = input.runLeaseTtlMs ?? 60_000
+  const v1ExecutionEnabled = input.v1ExecutionEnabled ?? true
   if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency < 1 || workerConcurrency > 8) {
     throw new Error('WORKER_CONCURRENCY_INVALID')
   }
@@ -584,8 +609,14 @@ export function createAgentRuntime(input: RuntimeInput) {
   const candidateReviewer: AssetCandidateReviewPort | undefined = input.candidateReviewer
     ? { reviewCandidate: trackedCall(input.candidateReviewer.reviewCandidate.bind(input.candidateReviewer)) }
     : undefined
-  const documents = new FrameFlowHostAdapter(input.frameFlowBackend ?? new MockFrameFlowBackend())
-  const budget = input.budget ?? documents
+  const disabledV1Ports = new DisabledV1Ports()
+  const v1Ports = v1ExecutionEnabled
+    ? new FrameFlowHostAdapter(input.frameFlowBackend ?? new MockFrameFlowBackend())
+    : disabledV1Ports
+  const documents: DocumentPort = v1Ports
+  const budget: BudgetPort & BatchBudgetPort = v1ExecutionEnabled
+    ? input.budget ?? v1Ports
+    : disabledV1Ports
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
   if (Boolean(input.usageAccounting) !== Boolean(input.providerBillingCatalog)) {
@@ -616,6 +647,15 @@ export function createAgentRuntime(input: RuntimeInput) {
     runAction: { limit: input.runActionRateLimitPerMinute ?? 60, windowMs: 60_000 },
     now: () => clock.now().getTime(),
   })
+  const presentationJobs = input.presentationJobV2
+    ? new PresentationJobV2Service({
+        repository: input.presentationJobV2.repository,
+        artifacts: input.artifacts,
+        provider: input.presentationJobV2.provider,
+        budget: input.presentationJobV2.budget,
+        clock,
+      })
+    : null
   const planning = new PlanningRunner({
     repository: input.repository,
     documents,
@@ -796,7 +836,17 @@ export function createAgentRuntime(input: RuntimeInput) {
     }
   }
 
+  const tickPresentationJobs = async () => {
+    if (!presentationJobs) return { scannedJobs: 0 }
+    return await health.trackTickOperation('presentation-jobs-v2', () =>
+      presentationJobs.tick({ limit: workerConcurrency }))
+  }
+
   const tick = () => health.runTick(async () => {
+    if (!v1ExecutionEnabled) {
+      const v2 = await tickPresentationJobs()
+      return { scannedRuns: v2.scannedJobs, activeRuns: v2.scannedJobs }
+    }
     const candidates = await input.repository.listRunnableRuns({
       now: clock.now().toISOString(),
       limit: workerConcurrency,
@@ -841,24 +891,37 @@ export function createAgentRuntime(input: RuntimeInput) {
     const failure = [...runnableResults, ...reconciliationResults]
       .find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failure) throw failure.reason
+    const v2 = await tickPresentationJobs()
     return {
-      scannedRuns: candidates.length + pendingMediaIds.length,
-      activeRuns: runnableResults.filter((result) => result.status === 'fulfilled' && result.value).length,
+      scannedRuns: candidates.length + pendingMediaIds.length + v2.scannedJobs,
+      activeRuns: runnableResults.filter((result) => result.status === 'fulfilled' && result.value).length + v2.scannedJobs,
     }
   })
+
+  const authentication = input.authentication ?? new SharedTokenAuthentication(input.apiToken)
+  const presentationJobAuthentication = typeof (authentication as Partial<PresentationJobV2AuthenticationPort>).authenticateService === 'function'
+    ? authentication as HostAuthenticationPort & PresentationJobV2AuthenticationPort
+    : null
 
   return {
     handler: createHttpHandler({
       runs,
       repository: input.repository,
       artifacts: input.artifacts,
-      authentication: input.authentication ?? new SharedTokenAuthentication(input.apiToken),
+      authentication,
       health,
       operations,
       revisionRoundsSettings,
       rateLimiter,
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
+      ...(presentationJobs && presentationJobAuthentication ? {
+        presentationJobV2: {
+          service: presentationJobs,
+          artifacts: input.artifacts,
+          authentication: presentationJobAuthentication,
+        },
+      } : {}),
     }),
     tick,
     health,

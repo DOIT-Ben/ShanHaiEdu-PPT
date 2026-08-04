@@ -1,0 +1,22 @@
+# Presentation Job V2 Changelog
+
+## [2.0] - 2026-08-05
+
+### Added
+
+- 独立、宿主无关的 Presentation Job HTTP 合同：创建、读取 Job、下载 Artifact 与读取 Usage。
+- 服务凭据绑定 tenant；V2 拒绝 `X-PPT-Agent-Tenant`，只接受必填的外部用户和可选项目范围。
+- `APPROVED_PAGE_DESIGN` 不可变快照输入，包含 artifactVersionId、SHA-256、完整严格 schema 与可复算哈希向量。
+- 稳定 Job 状态 `QUEUED`、`RUNNING`、`COMPLETED`、`FAILED`，以及独立的 `PENDING`、`RECONCILING`、`FINALIZED` Usage 投影。
+- 流式 PPTX Artifact 下载，声明 Content-Type、Length、Disposition、ETag、Artifact ID、SHA-256 与合同版本；V2.0 对 Range 返回 `416`。
+
+### Compatibility
+
+- V2 与 V1 Run、V1 SSE/Event、V1 Delivery 和历史账务记录完全隔离；V1 行为与公共合同不变。
+- 同一 tenant、external user、external project（可为空）和 Idempotency-Key 的规范化请求可重放；同键不同请求返回不可重试冲突。
+
+### Delivery And Usage
+
+- `COMPLETED` 必须具有可读取的 PPTX 且质量为 `PASSED` 或明确的 `BEST_EFFORT`。
+- 安全、完整性、版权/隐私、关键教学内容等交付阻断结果为 `FAILED`，不公开 Artifact；返修耗尽本身不会生成 `BEST_EFFORT`。
+- 已交付 Job 的 Usage 若需对账，Job 仍为 `COMPLETED`，Usage 仅投影 `RECONCILING` + `WAIT`；`FINALIZED` 时未知操作数为零且终态不可变。
