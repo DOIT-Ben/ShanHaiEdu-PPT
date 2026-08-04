@@ -60,7 +60,7 @@ describe('gateway image generation adapter', () => {
     expect(JSON.parse(String(request.init.body))).toMatchObject({
       model: 'image-2', size: '1:1', resolution: '1K', n: 1,
     })
-    expect(String(JSON.parse(String(request.init.body)).prompt)).toContain('transparent background')
+    expect(String(JSON.parse(String(request.init.body)).prompt)).toContain('透明背景中的独立主体')
   })
 
   test('classifies validation rejection as not submitted and network failure as unknown', async () => {

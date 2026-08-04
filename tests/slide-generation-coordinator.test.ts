@@ -402,10 +402,10 @@ describe('slide generation coordinator', () => {
 
     expect(legacyPrompt).toBe(legacy.slides[0]!.visualPrompt)
     expect(reflectedPrompt).toContain(reflected.slides[0]!.visualPrompt)
-    expect(reflectedPrompt).toContain(`Global art direction: ${reflected.visualDirection}.`)
-    expect(reflectedPrompt).toContain('Place one strong focal subject in the right half')
-    expect(reflectedPrompt).toContain('No text, no letters, no numbers')
-    expect(reflectedPrompt).toContain('do not draw a text box')
+    expect(reflectedPrompt).toContain(`全局艺术方向：${reflected.visualDirection}。`)
+    expect(reflectedPrompt).toContain('将一个强主视觉置于右半区')
+    expect(reflectedPrompt).toContain('不得绘制文字、字母、数字')
+    expect(reflectedPrompt).toContain('不得绘制文字框')
     expect(reflectedPrompt.length).toBeLessThanOrEqual(3_000)
   })
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import sharp from 'sharp'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import {
   FixedClock,
@@ -106,6 +107,7 @@ async function fixture(options: Readonly<{
   reviewConcurrency?: number
   runOverrides?: Partial<RunRecord>
   plannedBlueprint?: PresentationBlueprint
+  pageImageDimensions?: readonly Readonly<{ width: number; height: number }>[]
   onReviewCompleted?: () => void
 }> = {}) {
   const repository = new InMemoryAgentRepository()
@@ -119,10 +121,23 @@ async function fixture(options: Readonly<{
   const clock = new FixedClock()
   const artifacts = new MockArtifactPort()
   const renderer = new MockPresentationRendererPort()
-  const sourceArtifacts = await Promise.all([1, 2, 3].map((pageNumber) => artifacts.put({
-    tenantId: 'frameflow', runId: 'run-1', name: `slide-${pageNumber}.png`, mimeType: 'image/png',
-    bytes: new TextEncoder().encode(`source-${pageNumber}`), idempotencyKey: `source-${pageNumber}`,
-  })))
+  const sourceArtifacts = await Promise.all([1, 2, 3].map(async (pageNumber) => {
+    const dimensions = options.pageImageDimensions?.[pageNumber - 1]
+    const bytes = dimensions
+      ? await sharp({
+          create: {
+            width: dimensions.width,
+            height: dimensions.height,
+            channels: 4,
+            background: { r: 255, g: 255, b: 255, alpha: 1 },
+          },
+        }).png().toBuffer()
+      : new TextEncoder().encode(`source-${pageNumber}`)
+    return artifacts.put({
+      tenantId: 'frameflow', runId: 'run-1', name: `slide-${pageNumber}.png`, mimeType: 'image/png',
+      bytes, idempotencyKey: `source-${pageNumber}`,
+    })
+  }))
   await repository.createRun(run(options.runOverrides))
   await repository.transact('run-1', (transaction) => {
     transaction.putStep({
@@ -299,6 +314,67 @@ describe('page review coordinator', () => {
         pageNumbers: [2], completed: 0, total: 1,
       },
     })
+  })
+
+  test('redraws the complete V4 deck when page review finds one source outside the three-percent 16:9 tolerance', async () => {
+    const planned = visualDeckV4Blueprint()
+    const { repository, coordinator } = await fixture({
+      plannedBlueprint: planned,
+      pageImageDimensions: [
+        { width: 1600, height: 900 },
+        { width: 1536, height: 1024 },
+        { width: 1600, height: 900 },
+      ],
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+      },
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({
+      status: 'REVISING', approved: 2, rejected: 1, total: 3,
+    })
+    const plan = (await repository.listSteps('run-1'))
+      .find((step) => step.idempotencyKey === revisionPlanStepKey('run-1', 1))
+    expect(plan?.tool).toBe('plan_page_revision')
+    const operations = (plan!.output as {
+      operations: readonly {
+        slideId: string
+        kind: string
+        instruction: string
+        issueIds: readonly string[]
+      }[]
+    }).operations
+    expect(operations).toHaveLength(3)
+    expect(operations.map((operation) => operation.slideId)).toEqual([
+      'run-1:slide:1', 'run-1:slide:2', 'run-1:slide:3',
+    ])
+    expect(operations.every((operation) => operation.kind === 'REGENERATE_IMAGE')).toBe(true)
+    expect(operations.every((operation) => operation.instruction.includes('相对误差不得超过 3%'))).toBe(true)
+    expect(operations.every((operation) => operation.issueIds.includes('step-image-2:aspect-ratio'))).toBe(true)
+    expect((await repository.listEvents('run-1')).find((event) =>
+      event.type === 'issue.detected' && event.payload.id === 'step-image-2:aspect-ratio')).toMatchObject({
+      payload: { category: 'IMAGE_QUALITY', severity: 'CRITICAL', slideIds: ['run-1:slide:2'] },
+    })
+  })
+
+  test('does not policy-accept a hard V4 aspect-ratio issue after the revision limit is exhausted', async () => {
+    const { repository, coordinator } = await fixture({
+      plannedBlueprint: visualDeckV4Blueprint(),
+      pageImageDimensions: [
+        { width: 1600, height: 900 },
+        { width: 1536, height: 1024 },
+        { width: 1600, height: 900 },
+      ],
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+        maxRevisionRounds: 0,
+      },
+    })
+
+    expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
+    expect((await repository.listEvents('run-1')).some((event) => event.type === 'deck_review.started')).toBe(false)
   })
 
   test('keeps a rejected supervised v4 page behind internal review when automatic revision is disabled', async () => {

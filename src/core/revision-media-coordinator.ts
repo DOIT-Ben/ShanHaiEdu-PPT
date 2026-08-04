@@ -10,6 +10,8 @@ import {
   completeVisualDeckV4RevisionPrompt,
   hasVisualDeckV4AspectRatio,
   latestCompletedAssetStep,
+  SLIDE_IMAGE_V21_SAFETY_RULES,
+  slideImageV21ContentPrompt,
   visualDeckPageImageIdentity,
   VISUAL_DECK_V4_NEGATIVE_PROMPT,
 } from './blueprint-assets'
@@ -94,6 +96,49 @@ function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefin
 function isRevisionMediaFailure(run: RunRecord, step: StepRecord) {
   return isMediaFailureStepStatus(step.status)
     && !(isVisualDeckV4(run) && isUsageAuthorizationCapFailureStep(step))
+}
+
+const REVISION_IMAGE_PROMPT_MAX_LENGTH = 3_000
+const REVISION_SOURCE_MIN_LENGTH = 400
+
+function truncatePromptSegment(value: string, maximum: number) {
+  const normalized = value.trim()
+  if (normalized.length <= maximum) return normalized
+  const candidate = normalized.slice(0, maximum)
+  const boundary = Math.max(
+    candidate.lastIndexOf('。'), candidate.lastIndexOf('！'), candidate.lastIndexOf('？'),
+    candidate.lastIndexOf('.'), candidate.lastIndexOf('!'), candidate.lastIndexOf('?'),
+    candidate.lastIndexOf('；'), candidate.lastIndexOf(';'), candidate.lastIndexOf('\n'),
+  )
+  if (boundary >= Math.floor(maximum / 2)) return candidate.slice(0, boundary + 1).trim()
+  const wordBoundary = Math.max(candidate.lastIndexOf(' '), candidate.lastIndexOf('\t'))
+  return (wordBoundary >= Math.floor(maximum / 2) ? candidate.slice(0, wordBoundary) : candidate).trim()
+}
+
+function compileBoundedRevisionImagePrompt(input: Readonly<{
+  correction: string
+  sourcePrompt: string
+  correctionLabel: string
+  sourceLabel: string
+  preservation: string
+  requiredSuffix?: readonly string[]
+}>) {
+  const suffix = input.requiredSuffix ?? []
+  const build = (correction: string, source: string) => [
+    `${input.correctionLabel}：${correction}`,
+    input.preservation,
+    `${input.sourceLabel}：${source}`,
+    ...suffix,
+  ].join(' ')
+  const overhead = build('', '').length
+  const correctionBudget = Math.min(2_000, REVISION_IMAGE_PROMPT_MAX_LENGTH - overhead - REVISION_SOURCE_MIN_LENGTH)
+  if (correctionBudget < 1) throw new Error('REVISION_IMAGE_PROMPT_BUDGET_INVALID')
+  const correction = truncatePromptSegment(input.correction, correctionBudget)
+  const sourceBudget = REVISION_IMAGE_PROMPT_MAX_LENGTH - overhead - correction.length
+  if (sourceBudget < 1) throw new Error('REVISION_IMAGE_PROMPT_BUDGET_INVALID')
+  const prompt = build(correction, truncatePromptSegment(input.sourcePrompt, sourceBudget))
+  if (prompt.length > REVISION_IMAGE_PROMPT_MAX_LENGTH) throw new Error('REVISION_IMAGE_PROMPT_BUDGET_EXCEEDED')
+  return prompt
 }
 
 export class RevisionMediaCoordinator {
@@ -376,7 +421,13 @@ export class RevisionMediaCoordinator {
           stepId: `step-${run.id}-asset-${hashInput(assetKey).slice(0, 20)}-r${run.revisionRound}`,
           slideId: `${run.id}:slide:${pageNumber}`,
           versionId: `${run.id}:slide:${pageNumber}:element:${element.elementId}:r${run.revisionRound}:v1`,
-          prompt: `${element.prompt} Quality correction: ${operation.instruction}`.slice(0, 3_000),
+          prompt: compileBoundedRevisionImagePrompt({
+            correction: operation.instruction,
+            sourcePrompt: element.prompt,
+            correctionLabel: '素材质量修正',
+            sourceLabel: '原始独立素材要求',
+            preservation: '除明确修正项外，必须保留原素材的知识对象、构图和可用性要求。',
+          }),
           negativePrompt: element.negativePrompt,
           aspectRatio: element.aspectRatio,
           backgroundMode: element.backgroundMode,
@@ -508,6 +559,10 @@ export class RevisionMediaCoordinator {
         const repairContractHash = v4RepairContractHash(repairContract)
         return this.v4Target(run, pageNumber, repairContract, repairContractHash, source)
       }
+      const isV21 = blueprint.renderMode === 'SLIDE_IMAGE_V2_1'
+      const sourcePrompt = isV21
+        ? slideImageV21ContentPrompt(blueprint, slide)
+        : slide.visualPrompt
       return {
         pageNumber,
         elementId: null,
@@ -516,7 +571,14 @@ export class RevisionMediaCoordinator {
         stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
         slideId: `${run.id}:slide:${pageNumber}`,
         versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
-        prompt: `Quality correction for this page only: ${instructions.join(' ')} Preserve the approved page brief and all allowed copy exactly. ${slide.visualPrompt}`.slice(0, 3_000),
+        prompt: compileBoundedRevisionImagePrompt({
+          correction: instructions.join(' | '),
+          sourcePrompt,
+          correctionLabel: '仅修正本页',
+          sourceLabel: isV21 ? '原页面视觉要求' : '已批准的页面视觉要求',
+          preservation: '必须准确保留已批准的页面施工单和所有允许显示的文字。',
+          ...(isV21 ? { requiredSuffix: SLIDE_IMAGE_V21_SAFETY_RULES } : {}),
+        }),
         negativePrompt: null,
         aspectRatio: '16:9' as const,
         backgroundMode: 'OPAQUE' as const,

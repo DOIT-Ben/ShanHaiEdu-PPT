@@ -1,5 +1,13 @@
 import { z } from 'zod'
 import type { PresentationBlueprint } from '../presentation-contracts'
+import {
+  VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH,
+  VISUAL_DECK_V4_REPAIR_CONSTRAINT_MAX_LENGTH,
+} from '../visual-deck-v4-contracts'
+import {
+  V4_REVISION_INSTRUCTION_MAX_LENGTH,
+  VISUAL_DECK_V4_SAFETY_RULES,
+} from './blueprint-assets'
 import { hashInput } from './hash'
 
 const identifierSchema = z.string().trim().min(1).max(160)
@@ -8,6 +16,43 @@ const V4_REPAIR_MAX_ISSUES = 100
 // Four bounded rounds can contribute 50 plan operations and one page-review
 // instruction per round: 4 * 50 + 4 = 204 unique local changes.
 const V4_REPAIR_MAX_CHANGES = 204
+const V4_REPAIR_NO_FULL_REGENERATION = '不得重新设计或重新生成整页幻灯片。'
+export const V4_REPAIR_PROMPT_MAX_LENGTH = 12_000
+
+function controlledDataSection(label: string, values: readonly string[]) {
+  return values.length > 0 ? `受控业务数据｜${label}：${values.join(' | ')}` : ''
+}
+
+function v4RepairPromptText(value: Readonly<{
+  requiredChanges: readonly string[]
+  preserve: Readonly<{
+    allowedCopy: readonly string[]
+    continuityRules: readonly string[]
+    unaffectedAreas: string
+  }>
+  exactConstraints: Readonly<{
+    facts: readonly string[]
+    numbers: readonly string[]
+    formulas: readonly string[]
+  }>
+  forbiddenChanges: readonly string[]
+}>) {
+  return [
+    '在附带的源幻灯片上原位编辑。仅执行明确列出的修改。',
+    `必须执行的修改：${value.requiredChanges.join(' | ')}`,
+    value.preserve.unaffectedAreas,
+    controlledDataSection('必须原样保留的可见文字', value.preserve.allowedCopy),
+    value.exactConstraints.facts.length > 0
+      ? `${controlledDataSection('仅供语义与计数准确性核对、不得新增显示的教学事实', value.exactConstraints.facts)} 除非完整且精确的字符串也列在“必须原样保留的可见文字”中，否则不得展示、转录、引用或改写这些事实。`
+      : '',
+    controlledDataSection('必须原样保留的数字', value.exactConstraints.numbers),
+    controlledDataSection('必须原样保留的公式', value.exactConstraints.formulas),
+    controlledDataSection('视觉连续性规则', value.preserve.continuityRules),
+    controlledDataSection('禁止的修改', value.forbiddenChanges),
+    ...VISUAL_DECK_V4_SAFETY_RULES,
+    '输出一张完成的满版横向幻灯片，目标比例约为 16:9。允许轻微的像素尺寸偏差，但不得有意输出 3:2、4:3 或方形图片。不得输出解释、边框、水印或其他幻灯片的内容。',
+  ].filter(Boolean).join(' ')
+}
 
 export const v4RepairContractSchema = z.object({
   schemaVersion: z.literal('v4-repair-contract-1'),
@@ -40,10 +85,47 @@ export const v4RepairContractSchema = z.object({
   if (new Set(value.issueIds).size !== value.issueIds.length) {
     context.addIssue({ code: 'custom', path: ['issueIds'], message: 'repair issue ids must be unique' })
   }
+  if (value.requiredChanges.join('').length > V4_REVISION_INSTRUCTION_MAX_LENGTH) {
+    context.addIssue({
+      code: 'custom',
+      path: ['requiredChanges'],
+      message: 'repair changes exceed the lossless image prompt budget',
+    })
+  }
+  const criticalContentLength = [
+    ...value.preserve.allowedCopy,
+    ...value.exactConstraints.facts,
+    ...value.exactConstraints.numbers,
+    ...value.exactConstraints.formulas,
+  ].join('').length
+  if (criticalContentLength > VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH) {
+    context.addIssue({
+      code: 'custom',
+      path: ['exactConstraints'],
+      message: 'repair critical content exceeds the lossless image prompt budget',
+    })
+  }
+  const constraintLength = [
+    ...value.preserve.continuityRules,
+    ...value.forbiddenChanges,
+  ].join('').length
+  if (constraintLength > VISUAL_DECK_V4_REPAIR_CONSTRAINT_MAX_LENGTH + V4_REPAIR_NO_FULL_REGENERATION.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['forbiddenChanges'],
+      message: 'repair image constraints exceed the lossless image prompt budget',
+    })
+  }
+  if (v4RepairPromptText(value).length > V4_REPAIR_PROMPT_MAX_LENGTH) {
+    context.addIssue({
+      code: 'custom',
+      path: ['requiredChanges'],
+      message: 'repair prompt exceeds the lossless image prompt budget',
+    })
+  }
 })
 
 export type V4RepairContract = z.infer<typeof v4RepairContractSchema>
-export const V4_REPAIR_PROMPT_MAX_LENGTH = 12_000
 
 type VisualDeckV4Proposal = NonNullable<PresentationBlueprint['visualDeckV4Proposal']>
 
@@ -74,7 +156,7 @@ export function compileV4RepairContract(input: Readonly<{
     preserve: {
       allowedCopy: unique([brief.title, ...brief.lockedCopy]),
       continuityRules: unique(input.proposal.visualContract.continuityRules),
-      unaffectedAreas: 'Preserve every pixel and composition decision outside the requested changes as closely as possible.',
+      unaffectedAreas: '除明确列出的修改外，尽可能保持每一个像素和构图决定不变。',
     },
     exactConstraints: {
       facts: unique(brief.facts),
@@ -84,7 +166,7 @@ export function compileV4RepairContract(input: Readonly<{
     forbiddenChanges: unique([
       ...input.proposal.visualContract.forbidden,
       ...input.proposal.presentationSpec.forbidden,
-      'Do not redesign or regenerate the entire slide.',
+      V4_REPAIR_NO_FULL_REGENERATION,
     ]),
     sourceArtifact: input.sourceArtifact,
     editModel: input.editModel,
@@ -101,28 +183,9 @@ export function v4RepairImageKey(contract: V4RepairContract, contractHash = v4Re
   return `${parsed.runId}:slide:${parsed.pageNumber}:image:r${parsed.revisionRound}:v1:edit:${contractHash.slice(0, 24)}`
 }
 
-function section(label: string, values: readonly string[]) {
-  return values.length > 0 ? `${label}: ${values.join(' | ')}.` : ''
-}
-
 export function compileV4RepairPrompt(contract: V4RepairContract) {
   const value = v4RepairContractSchema.parse(contract)
-  const prompt = [
-    'Edit the attached source slide in place. Apply only the explicitly requested changes.',
-    section('Required changes', value.requiredChanges),
-    value.preserve.unaffectedAreas,
-    section('Visible text that must remain exact', value.preserve.allowedCopy),
-    section('Teaching facts that must remain visually true', value.exactConstraints.facts),
-    section('Numbers that must remain exact', value.exactConstraints.numbers),
-    section('Formulas that must remain exact', value.exactConstraints.formulas),
-    section('Visual continuity rules', value.preserve.continuityRules),
-    section('Forbidden changes', value.forbiddenChanges),
-    '视觉元素独立性要求：编辑后仍须让每个主要视觉元素保持完整轮廓、清晰边界和可见间隔，不得绑定、粘合、嵌套或合成为不可分割的组合主体。',
-    '即使元素存在语义关系，也只能通过位置、方向、箭头、间距和大小关系表达；除非用户明确要求物理接触，否则不得新增接触、遮挡、交叠、穿插、融合或共用轮廓。',
-    'COUNTABLE OBJECT SAFETY: keep exactly one authoritative set of every countable teaching object and preserve the required total cardinality.',
-    'Do not invent any additional labels, captions, page numbers, decorative words, watermarks, logos, or content from another slide.',
-    'Target a finished, full-bleed landscape slide at approximately 16:9. Minor pixel-dimension variance is acceptable; do not intentionally return a 3:2, 4:3, or square image. Do not add explanations, borders, watermarks, or content from another slide.',
-  ].filter(Boolean).join(' ')
+  const prompt = v4RepairPromptText(value)
   if (prompt.length > V4_REPAIR_PROMPT_MAX_LENGTH) throw new Error('V4_REPAIR_PROMPT_BUDGET_EXCEEDED')
   return prompt
 }

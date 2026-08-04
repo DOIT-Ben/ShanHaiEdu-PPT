@@ -1,9 +1,15 @@
 import { CONTRACT_VERSION } from '../contracts'
+import sharp from 'sharp'
 import { revisionPlanSchema, type PresentationBlueprint } from '../presentation-contracts'
 import { mapWithConcurrency } from './concurrency'
 import { beginTechnicalRecovery } from './technical-recovery'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintImageRequirements, latestCompletedAssetStep, visualDeckV4AllowedCopy } from './blueprint-assets'
+import {
+  blueprintImageRequirements,
+  hasVisualDeckV4AspectRatio,
+  latestCompletedAssetStep,
+  visualDeckV4AllowedCopy,
+} from './blueprint-assets'
 import { hashInput } from './hash'
 import { renderAndStoreSlidePreviews, requirePresentationArtifactReferences } from './presentation-render-input'
 import type { AgentRepository, ArtifactPort, ClockPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
@@ -23,6 +29,15 @@ import {
 const COMPOSITE_REVIEW_VERSION = 'classroom-v4'
 
 type AutomaticPageRevisionOutcome = 'STARTED' | 'EXHAUSTED' | 'NOT_ALLOWED'
+
+type V4AspectRatioViolation = Readonly<{
+  pageNumber: number
+  width: number
+  height: number
+  issueId: string
+}>
+
+const V4_ASPECT_RATIO_REPAIR_INSTRUCTION = '重新生成当前整页幻灯片，严格使用横向 16:9 输出；实际像素宽高与 16:9 的相对误差不得超过 3%。保留已批准的页面施工单、可见文字、数字、公式和教学事实，不得裁切源图。'
 
 function compositeReviewVersion(deckTitle: string, pageNumber: number) {
   return deckTitle.includes('5以内数的分与合') && pageNumber === 2
@@ -107,7 +122,13 @@ export class PageReviewCoordinator {
     })
     reviews.push(...assetReviews.filter((result): result is ReviewSlideResult => result !== null))
 
+    const aspectRatioViolations = fullPageRaster
+      ? await this.v4AspectRatioViolations(run, imageSteps)
+      : []
+    await this.recordV4AspectRatioViolations(run.id, aspectRatioViolations)
+    const aspectRatioInvalidPageNumbers = new Set(aspectRatioViolations.map((violation) => violation.pageNumber))
     let rejected = reviews.filter((result) => result.review && !result.review.approved).length
+      + aspectRatioViolations.length
     if (!fullPageRaster && !reviews.some((result) => result.review === null) && rejected === 0) {
       try {
         const references = await requirePresentationArtifactReferences(this.dependencies.repository, run, blueprint)
@@ -146,7 +167,9 @@ export class PageReviewCoordinator {
     }
 
     rejected = reviews.filter((result) => result.review && !result.review.approved).length
-    const approved = reviews.filter((result) => result.review?.approved).length
+      + aspectRatioViolations.length
+    const approved = reviews.filter((result) => result.review?.approved
+      && !aspectRatioInvalidPageNumbers.has(this.reviewPageNumber(run.id, result.step))).length
     const total = requirements.length + (fullPageRaster ? 0 : blueprint.slides.length)
     const executionFailed = reviews.some((result) => result.review === null) || reviews.length !== total
     if (!executionFailed) {
@@ -157,17 +180,25 @@ export class PageReviewCoordinator {
         && !executionFailed
         && rejected > 0
         && reviews.length === total
-        ? await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews)
+        ? await this.startAutomaticPageRevision(run, blueprint, imageSteps, reviews, aspectRatioViolations)
         : 'NOT_ALLOWED'
       if (automaticRevision !== 'STARTED') {
-        const problemPageNumbers = this.problemPageNumbers(blueprint, imageSteps, reviews)
+        const problemPageNumbers = this.problemPageNumbers(
+          blueprint,
+          imageSteps,
+          reviews,
+          aspectRatioInvalidPageNumbers,
+        )
         if (fullPageRaster && !executionFailed && rejected > 0 && automaticRevision === 'EXHAUSTED') {
           await this.moveToDeckReview(runId, total, {
             reason: 'PAGE_REVIEW_REJECTED',
             pageNumbers: problemPageNumbers,
-            acceptedIssueIds: reviews
-              .filter((result) => result.review && !result.review.approved)
-              .map((result) => `${result.step.id}:visual-review`),
+            acceptedIssueIds: [
+              ...reviews
+                .filter((result) => result.review && !result.review.approved)
+                .map((result) => `${result.step.id}:visual-review`),
+              ...aspectRatioViolations.map((violation) => violation.issueId),
+            ],
           })
         } else {
           await this.moveToHuman(runId, executionFailed ? 'PAGE_REVIEW_FAILED' : 'PAGE_REVIEW_REJECTED', {
@@ -189,6 +220,7 @@ export class PageReviewCoordinator {
     blueprint: PresentationBlueprint,
     imageSteps: readonly (StepRecord | null)[],
     reviews: readonly ReviewSlideResult[],
+    aspectRatioViolations: readonly V4AspectRatioViolation[],
   ): Promise<AutomaticPageRevisionOutcome> {
     if (run.automationLevel !== 'BOUNDED_AUTO') return 'NOT_ALLOWED'
     if (run.revisionRound >= run.maxRevisionRounds) return 'EXHAUSTED'
@@ -201,16 +233,28 @@ export class PageReviewCoordinator {
       if (!slide) throw new Error('BLUEPRINT_SLIDE_NOT_FOUND')
       return [{ slide, reviewResult }]
     })
-    if (rejected.length === 0) return 'EXHAUSTED'
+    const aspectRatioRepair = aspectRatioViolations.length > 0
+    const targets = aspectRatioRepair
+      ? blueprint.slides.map((slide) => ({
+          slide,
+          reviewResult: rejected.find((candidate) => candidate.slide.pageNumber === slide.pageNumber)?.reviewResult,
+        }))
+      : rejected
+    if (targets.length === 0) return 'EXHAUSTED'
+    const aspectRatioIssueIds = aspectRatioViolations.map((violation) => violation.issueId)
     const steps = await this.dependencies.repository.listSteps(run.id)
     try {
-      for (const { slide, reviewResult } of rejected) {
+      for (const { slide, reviewResult } of targets) {
+        const instruction = [
+          reviewResult?.review?.retryInstruction,
+          aspectRatioRepair ? V4_ASPECT_RATIO_REPAIR_INSTRUCTION : '',
+        ].filter(Boolean).join(' ')
         visualDeckV4RevisionInstructions({
           runId: run.id,
           pageNumber: slide.pageNumber,
           revisionRound: targetRevisionRound,
           steps,
-          currentInstructions: [reviewResult.review!.retryInstruction!],
+          currentInstructions: [instruction],
         })
       }
     } catch (error) {
@@ -222,13 +266,21 @@ export class PageReviewCoordinator {
       reviewId: `${run.id}:page-review:r${run.revisionRound}`,
       revisionRound: targetRevisionRound,
       createdAt: this.dependencies.clock.now().toISOString(),
-      summary: `自动局部重绘 ${rejected.length} 个未通过视觉质检的页面，其他页面保持不变。`,
-      operations: rejected.map(({ slide, reviewResult }) => ({
+      summary: aspectRatioRepair
+        ? `检测到页面比例超出 16:9 的 3% 容差，自动整套重绘 ${targets.length} 个页面。`
+        : `自动局部重绘 ${targets.length} 个未通过视觉质检的页面，其他页面保持不变。`,
+      operations: targets.map(({ slide, reviewResult }) => ({
         id: `${run.id}:page-revision:r${targetRevisionRound}:p${slide.pageNumber}`,
         slideId: `${run.id}:slide:${slide.pageNumber}`,
         kind: 'REGENERATE_IMAGE' as const,
-        issueIds: [`${reviewResult.step.id}:visual-review`],
-        instruction: reviewResult.review!.retryInstruction!,
+        issueIds: [...new Set([
+          ...(reviewResult ? [`${reviewResult.step.id}:visual-review`] : []),
+          ...aspectRatioIssueIds,
+        ])],
+        instruction: [
+          reviewResult?.review?.retryInstruction,
+          aspectRatioRepair ? V4_ASPECT_RATIO_REPAIR_INSTRUCTION : '',
+        ].filter(Boolean).join(' '),
         sourceChunkIds: slide.sourceChunkIds,
       })),
     })
@@ -266,14 +318,14 @@ export class PageReviewCoordinator {
       appendV4LifecycleEvent(transaction, 'page_review.completed', {
         completed: reviews.length,
         total: reviews.length,
-        pageNumbers: rejected.map(({ slide }) => slide.pageNumber),
+        pageNumbers: targets.map(({ slide }) => slide.pageNumber),
         revisionRound: run.revisionRound,
         reason: 'PAGE_REVIEW_REJECTED',
         retryable: true,
       })
       appendV4LifecycleEvent(transaction, 'revision.started', {
         completed: 0,
-        total: rejected.length,
+        total: targets.length,
         reason: 'PAGE_REVIEW_REJECTED',
         retryable: true,
         ...revisionDetails(plan, true),
@@ -320,10 +372,67 @@ export class PageReviewCoordinator {
   }
 
   private reviewSlideId(runId: string, step: StepRecord) {
+    const pageNumber = this.reviewPageNumber(runId, step)
+    return pageNumber === null ? null : `${runId}:slide:${pageNumber}`
+  }
+
+  private reviewPageNumber(runId: string, step: StepRecord) {
     const prefix = `${runId}:slide:`
     if (!step.idempotencyKey.startsWith(prefix)) return null
     const pageNumber = Number(step.idempotencyKey.slice(prefix.length).split(':')[0])
-    return Number.isSafeInteger(pageNumber) && pageNumber > 0 ? `${runId}:slide:${pageNumber}` : null
+    return Number.isSafeInteger(pageNumber) && pageNumber > 0 ? pageNumber : null
+  }
+
+  private async v4AspectRatioViolations(
+    run: RunRecord,
+    imageSteps: readonly (StepRecord | null)[],
+  ): Promise<readonly V4AspectRatioViolation[]> {
+    const results = await mapWithConcurrency(imageSteps, this.reviewConcurrency, async (imageStep, index) => {
+      if (!imageStep) return null
+      const output = this.imageOutput(imageStep)
+      if (!output) return null
+      const artifact = await this.dependencies.artifacts.get({
+        tenantId: run.host.tenantId,
+        artifactId: output.artifactId,
+      })
+      if (!artifact || !artifact.mimeType.startsWith('image/') || artifact.bytes.length === 0) return null
+      const metadata = await sharp(artifact.bytes).metadata().catch(() => null)
+      if (!metadata?.width || !metadata.height || hasVisualDeckV4AspectRatio(metadata.width, metadata.height)) return null
+      const pageNumber = index + 1
+      return {
+        pageNumber,
+        width: metadata.width,
+        height: metadata.height,
+        issueId: `${imageStep.id}:aspect-ratio`,
+      }
+    })
+    return results.filter((result): result is V4AspectRatioViolation => result !== null)
+  }
+
+  private async recordV4AspectRatioViolations(
+    runId: string,
+    violations: readonly V4AspectRatioViolation[],
+  ) {
+    if (violations.length === 0) return
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      for (const violation of violations) {
+        if (transaction.listEvents().some((event) => event.type === 'issue.detected' && event.payload.id === violation.issueId)) continue
+        transaction.appendEvent({
+          schemaVersion: CONTRACT_VERSION,
+          type: 'issue.detected',
+          payload: {
+            id: violation.issueId,
+            category: 'IMAGE_QUALITY',
+            severity: 'CRITICAL',
+            summary: `第 ${violation.pageNumber} 页实际像素 ${violation.width}×${violation.height} 与 16:9 的相对误差超过 3%。`,
+            slideIds: [`${transaction.run.id}:slide:${violation.pageNumber}`],
+            sourceChunkIds: [],
+            status: 'OPEN',
+            repairDomain: 'ASSET',
+          },
+        })
+      }
+    })
   }
 
   private imageOutput(step: StepRecord) {
@@ -473,11 +582,13 @@ export class PageReviewCoordinator {
     blueprint: PresentationBlueprint,
     imageSteps: readonly (StepRecord | null)[],
     reviews: readonly ReviewSlideResult[],
+    aspectRatioInvalidPageNumbers: ReadonlySet<number> = new Set(),
   ) {
     return imageSteps.flatMap((imageStep, index) => {
       const pageNumber = blueprint.slides[index]?.pageNumber
       if (!pageNumber) return []
       if (!imageStep) return [pageNumber]
+      if (aspectRatioInvalidPageNumbers.has(pageNumber)) return [pageNumber]
       const result = reviews.find((candidate) => candidate.step.idempotencyKey === `${imageStep.idempotencyKey}:review`)
       return result?.review?.approved ? [] : [pageNumber]
     })

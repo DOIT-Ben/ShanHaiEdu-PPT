@@ -134,9 +134,9 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     const prompt = [
       input.prompt,
       input.backgroundMode === 'TRANSPARENT'
-        ? 'Use an isolated subject on a transparent background. Never draw a checkerboard, transparency grid, frame, or backdrop.'
+        ? '使用透明背景中的独立主体。不得绘制棋盘格、透明度网格、画框或背景。'
         : '',
-      input.negativePrompt ? `Avoid: ${input.negativePrompt}.` : '',
+      input.negativePrompt ? `避免：${input.negativePrompt}。` : '',
     ].filter(Boolean).join(' ')
     const reference = input.referenceImage
     const body = reference

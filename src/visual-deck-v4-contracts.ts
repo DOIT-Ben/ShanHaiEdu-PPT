@@ -32,7 +32,10 @@ export const visualDeckV4ConfigSchema = z.object({
 const identifierSchema = z.string().trim().min(1).max(160)
 const boundedText = (maximum: number) => z.string().trim().min(1).max(maximum)
 
-export const VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH = 6_000
+// These fields are losslessly repeated for image creation and image editing.
+// Reserve the remaining 12k prompt budget for corrections and fixed safeguards.
+export const VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH = 4_000
+export const VISUAL_DECK_V4_REPAIR_CONSTRAINT_MAX_LENGTH = 2_300
 
 export const visualDeckV4SourceModeSchema = z.enum(['SOURCE_GROUNDED', 'OPEN_KNOWLEDGE'])
 
@@ -566,6 +569,18 @@ export const visualDeckV4ProposalDraftSchema = z.object({
       }
     })
   })
+  const repairConstraintLength = [
+    ...value.visualContract.continuityRules,
+    ...value.visualContract.forbidden,
+    ...value.presentationSpec.forbidden,
+  ].join('').length
+  if (repairConstraintLength > VISUAL_DECK_V4_REPAIR_CONSTRAINT_MAX_LENGTH) {
+    context.addIssue({
+      code: 'custom',
+      path: ['visualContract', 'continuityRules'],
+      message: 'v4 repair image constraints exceed the lossless image prompt budget',
+    })
+  }
   if (value.presentationSpec.sourceMode !== value.sourceUnderstanding.sourceMode) {
     context.addIssue({ code: 'custom', path: ['presentationSpec', 'sourceMode'], message: 'v4 source mode must be consistent' })
   }

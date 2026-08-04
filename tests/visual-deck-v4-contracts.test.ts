@@ -89,6 +89,22 @@ describe('visual deck v4 contracts', () => {
     )
     expect(() => visualDeckV4ProposalSchema.parse(unboundedCriticalContent))
       .toThrow('v4 critical slide content exceeds the lossless image prompt budget')
+
+    const repairPromptOverflow = proposal()
+    repairPromptOverflow.visualContract.continuityRules = Array.from(
+      { length: 12 },
+      (_, index) => `连续性规则${index + 1}：${'必须保留的视觉约束。'.repeat(30)}`.slice(0, 300),
+    )
+    repairPromptOverflow.visualContract.forbidden = Array.from(
+      { length: 20 },
+      (_, index) => `视觉禁项${index + 1}：${'不得出现在修订图片中。'.repeat(30)}`.slice(0, 300),
+    )
+    repairPromptOverflow.presentationSpec.forbidden = Array.from(
+      { length: 20 },
+      (_, index) => `课件禁项${index + 1}：${'不得改变教材范围。'.repeat(30)}`.slice(0, 300),
+    )
+    expect(() => visualDeckV4ProposalSchema.parse(repairPromptOverflow))
+      .toThrow('v4 repair image constraints exceed the lossless image prompt budget')
   })
 
   test('removes only number and formula references that are absent from visible copy', () => {

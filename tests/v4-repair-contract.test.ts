@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { PresentationBlueprint } from '../src/presentation-contracts'
 import {
   controlledVisualDeckPageArtifact,
+  hasVisualDeckV4AspectRatio,
   latestCompletedAssetStep,
   type BlueprintImageRequirement,
 } from '../src/core/blueprint-assets'
@@ -59,6 +60,11 @@ function contract() {
 }
 
 describe('V4 repair contract', () => {
+  test('uses a relative three-percent tolerance for a 16:9 repair source', () => {
+    expect(hasVisualDeckV4AspectRatio(1600, 927)).toBe(true)
+    expect(hasVisualDeckV4AspectRatio(1600, 929)).toBe(false)
+  })
+
   test('freezes the exact edit scope, teaching constraints, source identity and edit model', () => {
     expect(contract()).toEqual({
       schemaVersion: 'v4-repair-contract-1',
@@ -74,14 +80,14 @@ describe('V4 repair contract', () => {
       preserve: {
         allowedCopy: ['五可以分成二和三', '5', '2 + 3 = 5'],
         continuityRules: ['保持绿色与白色课堂视觉系统', '保持扁平信息图风格'],
-        unaffectedAreas: 'Preserve every pixel and composition decision outside the requested changes as closely as possible.',
+        unaffectedAreas: '除明确列出的修改外，尽可能保持每一个像素和构图决定不变。',
       },
       exactConstraints: {
         facts: ['画面中恰好五个圆片，并分成两个非空组'],
         numbers: ['5', '2', '3'],
         formulas: ['2 + 3 = 5'],
       },
-      forbiddenChanges: ['水印', '品牌标志', '不得增加教材外结论', 'Do not redesign or regenerate the entire slide.'],
+      forbiddenChanges: ['水印', '品牌标志', '不得增加教材外结论', '不得重新设计或重新生成整页幻灯片。'],
       sourceArtifact,
       editModel: 'image-2',
     })
@@ -100,26 +106,62 @@ describe('V4 repair contract', () => {
   test('compiles an image-edit instruction without weakening exact constraints', () => {
     const prompt = compileV4RepairPrompt(contract())
 
-    expect(prompt).toContain('Edit the attached source slide in place')
+    expect(prompt).toContain('在附带的源幻灯片上原位编辑')
     expect(prompt).toContain('只把左侧圆片改成两个')
     expect(prompt).toContain('五可以分成二和三')
     expect(prompt).toContain('恰好五个圆片')
     expect(prompt).toContain('2 + 3 = 5')
-    expect(prompt).toContain('Do not redesign or regenerate the entire slide')
+    expect(prompt).toContain('不得重新设计或重新生成整页幻灯片')
     expect(prompt).toContain('视觉元素独立性要求')
-    expect(prompt).toContain('不得绑定、粘合、嵌套或合成为不可分割的组合主体')
+    expect(prompt).toContain('不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体')
   })
 
   test('targets a 16:9 landscape output without demanding pixel-perfect dimensions', () => {
     const prompt = compileV4RepairPrompt(contract())
 
-    expect(prompt).toContain('Target a finished, full-bleed landscape slide at approximately 16:9.')
-    expect(prompt).toContain('Minor pixel-dimension variance is acceptable; do not intentionally return a 3:2, 4:3, or square image.')
-    expect(prompt).not.toContain('Return one finished full-bleed 16:9 slide image.')
+    expect(prompt).toContain('输出一张完成的满版横向幻灯片，目标比例约为 16:9。')
+    expect(prompt).toContain('允许轻微的像素尺寸偏差，但不得有意输出 3:2、4:3 或方形图片。')
+    expect(prompt).not.toContain('像素级精确')
   })
 
   test('keeps the persisted contract strict', () => {
     expect(v4RepairContractSchema.safeParse({ ...contract(), rawProviderResponse: 'forbidden' }).success).toBe(false)
+  })
+
+  test('rejects a persisted image-edit contract before its lossless prompt budget can overflow', () => {
+    const oversized = {
+      ...contract(),
+      requiredChanges: ['修订'.repeat(1_000), '修订'.repeat(1_000), '修订'.repeat(50)],
+      preserve: {
+        allowedCopy: Array.from({ length: 8 }, () => '可见文字'.repeat(125)),
+        continuityRules: Array.from({ length: 4 }, () => '连续性规则'.repeat(60)),
+        unaffectedAreas: '保持未修改区域。'.repeat(30),
+      },
+      exactConstraints: { facts: [], numbers: [], formulas: [] },
+      forbiddenChanges: Array.from({ length: 5 }, () => '禁项'.repeat(150)),
+    }
+
+    expect(v4RepairContractSchema.safeParse(oversized).success).toBe(false)
+  })
+
+  test('rejects a fragmented image-edit contract whose rendered separators exceed the prompt budget', () => {
+    const fragmented = {
+      ...contract(),
+      requiredChanges: Array.from({ length: 204 }, () => 'r'.repeat(20)),
+      preserve: {
+        allowedCopy: Array.from({ length: 10 }, () => 'a'.repeat(50)),
+        continuityRules: Array.from({ length: 12 }, () => 'e'.repeat(100)),
+        unaffectedAreas: 'u'.repeat(300),
+      },
+      exactConstraints: {
+        facts: Array.from({ length: 20 }, () => 'b'.repeat(100)),
+        numbers: Array.from({ length: 20 }, () => 'c'.repeat(20)),
+        formulas: Array.from({ length: 20 }, () => 'd'.repeat(50)),
+      },
+      forbiddenChanges: Array.from({ length: 50 }, () => 'f'.repeat(20)),
+    }
+
+    expect(v4RepairContractSchema.safeParse(fragmented).success).toBe(false)
   })
 
   test('accepts every issue from one valid 100-issue deck review', () => {

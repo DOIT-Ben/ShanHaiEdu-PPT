@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-renderer'
-import { blueprintImageRequirements } from '../src/core/blueprint-assets'
+import { blueprintImageRequirements, V4_REVISION_PROMPT_MAX_LENGTH } from '../src/core/blueprint-assets'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 
 function blueprint() {
@@ -57,24 +57,54 @@ describe('visual deck v4 execution', () => {
     const briefs = planned.visualDeckV4Proposal!.slideBriefs
 
     expect(requirements).toHaveLength(2)
-    expect(requirements[0]?.prompt).toContain('single raster image')
-    expect(requirements[0]?.prompt).toContain('Allowed on-slide copy')
-    expect(requirements[0]?.prompt).toContain('CLOSED VISIBLE TEXT ALLOWLIST')
-    expect(requirements[0]?.prompt).toContain('NON-VISIBLE facts for semantic and counting accuracy only')
-    expect(requirements[0]?.prompt).toContain('Never transcribe, quote, paraphrase, summarize, caption, or display')
-    expect(requirements[0]?.negativePrompt).toContain('page citations or page ranges')
-    expect(requirements[0]?.negativePrompt).toContain('facts-field prose')
+    expect(requirements[0]?.prompt).toContain('单一栅格图像')
+    expect(requirements[0]?.prompt).toContain('允许显示的页面文字')
+    expect(requirements[0]?.prompt).toContain('封闭可见文字白名单')
+    expect(requirements[0]?.prompt).toContain('仅供语义与计数准确性核对、不得显示的事实')
+    expect(requirements[0]?.prompt).toContain('不得转录、引用、改写、概括、添加说明或展示')
+    expect(requirements[0]?.negativePrompt).toContain('页面引文或页码范围')
+    expect(requirements[0]?.negativePrompt).toContain('事实字段中的说明文字')
     expect(requirements[0]?.prompt).toContain(briefs[0]!.title)
     expect(requirements[0]?.prompt).toContain(briefs[0]!.lockedCopy[0]!)
-    expect(requirements[0]?.prompt).toContain('Do not invent any additional labels')
-    expect(requirements[0]?.prompt).toContain('COUNTABLE OBJECT SAFETY')
-    expect(requirements[0]?.prompt).toContain('Never duplicate solid objects')
+    expect(requirements[0]?.prompt).toContain('不得虚构额外标签')
+    expect(requirements[0]?.prompt).toContain('可计数对象安全要求')
+    expect(requirements[0]?.prompt).toContain('不得用重复的实体对象')
     expect(requirements[0]?.prompt).toContain('视觉元素独立性要求')
     expect(requirements[0]?.prompt).toContain('不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体')
     expect(requirements[0]?.prompt).toContain('除非用户明确要求物理接触')
     expect(requirements[0]?.prompt).not.toContain(briefs[1]!.title)
     expect(requirements[0]?.prompt).not.toContain(briefs[1]!.keyClaim)
     expect(requirements[1]?.prompt).not.toContain(briefs[0]!.keyClaim)
+  })
+
+  test('keeps V4 hard constraints when optional art direction exceeds the image prompt budget', () => {
+    const planned = blueprint()
+    const proposal = planned.visualDeckV4Proposal!
+    proposal.slideBriefs[0] = {
+      ...proposal.slideBriefs[0]!,
+      keyClaim: `低优先级核心信息 ${'K'.repeat(970)}`,
+      audienceTakeaway: `低优先级受众收获 ${'L'.repeat(970)}`,
+      visualMetaphor: `低优先级视觉构思 ${'M'.repeat(970)}`,
+      composition: `低优先级构图描述 ${'N'.repeat(970)}`,
+    }
+    proposal.visualContract = {
+      ...proposal.visualContract,
+      artDirection: `低优先级艺术方向 ${'A'.repeat(980)}`,
+      typography: `低优先级字体方向 ${'B'.repeat(480)}`,
+      medium: `低优先级媒介方向 ${'C'.repeat(280)}`,
+      compositionRules: Array.from({ length: 12 }, (_, index) =>
+        `低优先级构图规则 ${index + 1}：${'D'.repeat(270)}`),
+      continuityRules: Array.from({ length: 12 }, (_, index) =>
+        `低优先级连续性规则 ${index + 1}：${'E'.repeat(260)} LOW_PRIORITY_TAIL`),
+      forbidden: ['必须保留的禁项：不得添加水印。'],
+    }
+
+    const prompt = blueprintImageRequirements({ id: 'run-v4-execution', revisionRound: 0 }, planned)[0]!.prompt
+
+    expect(prompt.length).toBeLessThanOrEqual(V4_REVISION_PROMPT_MAX_LENGTH)
+    expect(prompt).toContain('必须保留的禁项：不得添加水印。')
+    expect(prompt).toContain('可计数对象安全要求')
+    expect(prompt).not.toContain('LOW_PRIORITY_TAIL')
   })
 
   test('renders previews and pptx pages as one full-slide raster without native text', async () => {

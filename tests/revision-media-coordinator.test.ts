@@ -427,7 +427,7 @@ describe('revision media coordinator', () => {
     expect(request.referenceImage).toEqual({
       mimeType: 'image/png', bytes: sourceBytes, sha256: sourceSha256,
     })
-    expect(request.prompt).toContain('Edit the attached source slide in place')
+    expect(request.prompt).toContain('在附带的源幻灯片上原位编辑')
     expect(request.prompt).toContain('Remove the inconsistent object')
     expect(step?.output).toMatchObject({
       model: 'image-2',
@@ -848,15 +848,51 @@ describe('revision media coordinator', () => {
     })
   })
 
+  test('keeps a V3 repair instruction when the original element prompt reaches its contract limit', async () => {
+    const revised = layeredBlueprint()
+    const target = revised.slides[1]!.layeredDesign!.elements.find((element) => element.kind === 'IMAGE'
+      && element.elementId === 'knowledge-2')
+    if (!target || target.kind !== 'IMAGE') throw new Error('TEST_V3_IMAGE_TARGET_MISSING')
+    target.prompt = 'A'.repeat(2_980)
+    const plan = layeredRevisionPlan()
+    plan.operations[0] = {
+      ...plan.operations[0]!,
+      instruction: '必须保留这条 V3 修订指令，不得被原始素材描述截断。',
+    }
+    const { images, coordinator } = await fixture({}, { blueprint: revised, plan })
+
+    await coordinator.submit('run-1', 5)
+
+    const prompt = [...images.requests.values()][0]?.prompt ?? ''
+    expect(prompt).toContain('必须保留这条 V3 修订指令')
+    expect(prompt.length).toBeLessThanOrEqual(3_000)
+  })
+
+  test('restores the V2.1 no-text safety rule when regenerating a reviewed page', async () => {
+    const revised = {
+      ...blueprint('blueprint-v2-1', true),
+      renderMode: 'SLIDE_IMAGE_V2_1' as const,
+    }
+    const { images, coordinator } = await fixture({ presentationMode: 'SLIDE_IMAGE_V2_1' }, {
+      blueprint: revised,
+      plan: revisionPlan(),
+    })
+
+    await coordinator.submit('run-1', 5)
+
+    const prompt = [...images.requests.values()][0]?.prompt ?? ''
+    expect(prompt).toContain('不得绘制文字、字母、数字、公式、说明文字、水印或徽标；')
+  })
+
   test('redraws a v4 page with the complete approved brief plus the review correction', async () => {
     const base = visualDeckV4Blueprint()
     const brief = base.visualDeckV4Proposal!.slideBriefs[1]!
     brief.lockedCopy = [...brief.lockedCopy, '权威对象总数：12；6+6=12']
     brief.facts = Array.from(
-      { length: 12 },
-      (_, index) => `${index === 11 ? '最后一条权威对象总数事实：12' : `来源事实 ${index + 1}`}：${
-        '绿色植物利用光能制造有机物并释放氧气。'.repeat(20)
-      }`.slice(0, 400),
+      { length: 10 },
+      (_, index) => `${index === 9 ? '最后一条权威对象总数事实：12' : `来源事实 ${index + 1}`}：${
+        '绿色植物利用光能制造有机物并释放氧气。'.repeat(15)
+      }`.slice(0, 350),
     )
     brief.numbers = ['12']
     brief.formulas = ['6+6=12']
@@ -877,17 +913,17 @@ describe('revision media coordinator', () => {
     await coordinator.submit('run-1', 5)
 
     const request = [...images.requests.values()][0]
-    expect(request?.prompt).toContain('Edit the attached source slide in place')
+    expect(request?.prompt).toContain('在附带的源幻灯片上原位编辑')
     expect(request?.prompt).toContain(base.visualDeckV4Proposal!.slideBriefs[1]!.title)
     expect(request?.prompt).toContain('Correction 1')
     expect(request?.prompt).toContain('Correction 50')
     expect(request?.prompt).toContain('最后一条权威对象总数事实：12')
-    expect(request?.prompt).toContain('Numbers that must remain exact: 12')
-    expect(request?.prompt).toContain('Formulas that must remain exact: 6+6=12')
-    expect(request?.prompt).toContain('COUNTABLE OBJECT SAFETY')
-    expect(request?.prompt).toContain('Do not invent any additional labels')
-    expect(request?.prompt).toContain('Visible text that must remain exact')
-    expect(request?.negativePrompt).toContain('facts-field prose')
+    expect(request?.prompt).toContain('必须原样保留的数字：12')
+    expect(request?.prompt).toContain('必须原样保留的公式：6+6=12')
+    expect(request?.prompt).toContain('可计数对象安全要求')
+    expect(request?.prompt).toContain('不得虚构额外标签')
+    expect(request?.prompt).toContain('必须原样保留的可见文字')
+    expect(request?.negativePrompt).toContain('事实字段中的说明文字')
     expect(request?.prompt.length).toBeLessThanOrEqual(V4_REVISION_PROMPT_MAX_LENGTH)
     images.complete(await revisionImageKey(repository, 2), 'artifact-r1-2')
     expect(await coordinator.refresh('run-1')).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
