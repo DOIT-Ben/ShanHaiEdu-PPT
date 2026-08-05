@@ -96,15 +96,18 @@ describe('internal Presentation Job V2 provider', () => {
       const response = await runtime.handler(request(`/v2/presentation-jobs/${createdBody.data.jobId}`))
       job = await response.json() as JobEnvelope
       if (job?.data.status === 'COMPLETED' || job?.data.status === 'FAILED') break
+      clock.advance(1_000)
     }
 
     expect(created.status).toBe(201)
-    const artifactId = job!.data.artifact!.artifactId
+    expect(job?.data.status).toBe('COMPLETED')
+    if (!job?.data.artifact) throw new Error('completed Presentation Job V2 did not expose an Artifact')
+    const artifactId = job.data.artifact.artifactId
     expect(job).toMatchObject({
       data: {
         status: 'COMPLETED',
         usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
-        artifact: { artifactId: expect.any(String) },
+        artifact: { artifactId },
       },
     })
     const [run] = await repository.listRuns()
