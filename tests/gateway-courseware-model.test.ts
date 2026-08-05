@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFile } from 'node:fs/promises'
 import sharp from 'sharp'
+import * as ts from 'typescript'
 import {
   GatewayCoursewareModel,
   gatewayCoursewareModelProfile,
@@ -12,6 +13,83 @@ import { hashInput } from '../src/core/hash'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
 import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
 import { LEGACY_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
+
+const LEDGER_SYSTEM_PROMPT_IDS = [
+  'TXT-00',
+  'V4-01',
+  'V4-02',
+  'V4-07',
+  'V4-08',
+  'V4-04',
+  'V4-09',
+  'V4-10',
+  'V4-03L',
+  'V4-05L',
+  'V4-06',
+  'REV-01',
+  'REV-02',
+  'REV-03L',
+  'TXT-10',
+  'TXT-11',
+  'TXT-20',
+  'REV-04',
+  'VIS-01',
+  'VIS-02',
+  'VIS-03',
+  'VIS-04',
+] as const
+
+function ledgerSystemPrompt(markdown: string, id: typeof LEDGER_SYSTEM_PROMPT_IDS[number]) {
+  const heading = `### \`${id}\``
+  const headingStart = markdown.indexOf(heading)
+  if (headingStart < 0) throw new Error(`LEDGER_PROMPT_HEADING_MISSING:${id}`)
+  const nextHeading = markdown.indexOf('\n### ', headingStart + heading.length)
+  const section = markdown.slice(headingStart, nextHeading < 0 ? markdown.length : nextHeading)
+  const codeBlock = /```text\n([\s\S]*?)\n```/.exec(section)?.[1]
+  if (codeBlock === undefined) throw new Error(`LEDGER_SYSTEM_PROMPT_MISSING:${id}`)
+  return codeBlock
+}
+
+function staticSystemPrompts(sourceText: string, fileName: string) {
+  const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const prompts: string[] = []
+  const collect = (expression: ts.Expression): void => {
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+      prompts.push(expression.text)
+      return
+    }
+    if (ts.isTemplateExpression(expression)) {
+      prompts.push([
+        expression.head.text,
+        ...expression.templateSpans.flatMap((span) => ['{{DYNAMIC}}', span.literal.text]),
+      ].join(''))
+      return
+    }
+    if (ts.isConditionalExpression(expression)) {
+      collect(expression.whenTrue)
+      collect(expression.whenFalse)
+      return
+    }
+    if (ts.isParenthesizedExpression(expression)) collect(expression.expression)
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(sourceFile) === 'system') collect(node.initializer)
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)
+      && node.name.text === 'system' && node.initializer) collect(node.initializer)
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return prompts
+}
+
+function normalizeDynamicPrompt(value: string) {
+  return value.replace(/\{\{[^{}]+\}\}/g, '{{DYNAMIC}}')
+}
+
+function promptOpeningSentence(value: string) {
+  const end = value.indexOf('。')
+  return end < 0 ? value : value.slice(0, end + 1)
+}
 
 function blueprintDraft() {
   return blueprintDraftSchema.parse({
@@ -206,6 +284,27 @@ describe('gateway courseware model', () => {
     expect(promptLedger).not.toContain('NotebookLM')
     expect(runtimePrompts).not.toMatch(/你是[^。]*(Critic|Optimizer)/)
     expect(promptLedger).not.toMatch(/你是[^。]*(Critic|Optimizer)/)
+  })
+
+  test('keeps every text and visual system prompt identical to the internal prompt ledger', async () => {
+    const [gatewaySource, reflectionSource, promptLedger] = await Promise.all([
+      readFile(new URL('../src/adapters/gateway-courseware-model.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/adapters/gateway/v4-reflection.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../docs/internal-prompt-ledger.md', import.meta.url), 'utf8'),
+    ])
+    const runtimePrompts = [
+      ...staticSystemPrompts(gatewaySource, 'gateway-courseware-model.ts'),
+      ...staticSystemPrompts(reflectionSource, 'v4-reflection.ts'),
+    ]
+    expect(runtimePrompts).toHaveLength(LEDGER_SYSTEM_PROMPT_IDS.length)
+    const runtimeByOpening = new Map(runtimePrompts.map((prompt) => [promptOpeningSentence(prompt), prompt]))
+    expect(runtimeByOpening.size).toBe(runtimePrompts.length)
+
+    for (const id of LEDGER_SYSTEM_PROMPT_IDS) {
+      const expected = normalizeDynamicPrompt(ledgerSystemPrompt(promptLedger, id))
+      const actual = runtimeByOpening.get(promptOpeningSentence(expected))
+      expect({ [id]: actual }).toEqual({ [id]: expected })
+    }
   })
 
   test('selects the MiniMax profile when either configured model is MiniMax M3', () => {

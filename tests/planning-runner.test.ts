@@ -349,6 +349,8 @@ describe('planning runner', () => {
     expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('建立光合作用的基本心智模型')
     expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('还包含密封钟罩实验')
     expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('可编辑标题卡')
+    expect(result.blueprint?.slides[0]?.visualPrompt).toContain('不得绘制任何文字、字母、数字、公式、标志、水印或徽标。')
+    expect(result.blueprint?.slides[0]?.visualPrompt).not.toContain('logo')
     expect(result.blueprint?.slides[1]?.visualPrompt).toContain('只画密封钟罩中的实验叶片')
     expect(result.blueprint?.slides[1]?.visualPrompt).not.toContain('第一页建立光照情境')
     expect(result.blueprint?.slides[1]?.visualPrompt).not.toContain('回顾第一页阳光情境')
