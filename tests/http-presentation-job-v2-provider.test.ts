@@ -131,7 +131,7 @@ describe('HTTP Presentation Job V2 provider', () => {
     expect(requests[0]!.url).toBe('https://provider.example/v1/presentation-operations')
     expect(requests[0]!.headers.get('Idempotency-Key')).toBe('presentation-job-7:provider:1')
     expect(await requests[0]!.clone().json()).toEqual({
-      contractVersion: '1.0',
+      contractVersion: '2.0',
       jobId: 'presentation-job-7',
       source,
       maximumBillableImageOperations: 10,

@@ -4,7 +4,10 @@ import {
   PRESENTATION_JOB_V2_PPTX_MIME_TYPE,
   type PresentationJobV2ProviderPort,
 } from '../core/presentation-job-v2-ports'
-import { presentationJobV2UsageSummarySchema } from '../presentation-job-v2-contracts'
+import {
+  PRESENTATION_JOB_V2_CONTRACT_VERSION,
+  presentationJobV2UsageSummarySchema,
+} from '../presentation-job-v2-contracts'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -115,7 +118,7 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
           'Idempotency-Key': input.idempotencyKey,
         },
         body: JSON.stringify({
-          contractVersion: '1.0',
+          contractVersion: PRESENTATION_JOB_V2_CONTRACT_VERSION,
           jobId: input.jobId,
           source: input.source,
           maximumBillableImageOperations: input.maximumBillableImageOperations,

@@ -194,7 +194,7 @@ export class InternalPresentationJobV2Provider implements PresentationJobV2Provi
   async inspect(input: Parameters<PresentationJobV2ProviderPort['inspect']>[0]) {
     const run = await this.dependencies.repository.getRun(input.operationId)
     if (!run || run.host.tenantId !== this.dependencies.internalTenantId) {
-      return { state: 'FAILED' as const, errorCode: 'PRESENTATION_OPERATION_NOT_FOUND', usage: this.emptyUsage() }
+      return { state: 'FAILED' as const, errorCode: 'PRESENTATION_OPERATION_NOT_FOUND', usage: this.unknownUsage() }
     }
     const steps = await this.dependencies.repository.listSteps(run.id)
     const usage = usageSummary(run, steps)
@@ -242,12 +242,17 @@ export class InternalPresentationJobV2Provider implements PresentationJobV2Provi
     }
   }
 
-  private emptyUsage(): PresentationJobV2UsageSummary {
+  private unknownUsage(): PresentationJobV2UsageSummary {
     return {
       billableImageOperations: 0,
       notChargedImageOperations: 0,
-      unknownImageOperations: 0,
-      byModel: [],
+      unknownImageOperations: 1,
+      byModel: [{
+        model: INTERNAL_MODEL,
+        billableImageOperations: 0,
+        notChargedImageOperations: 0,
+        unknownImageOperations: 1,
+      }],
     }
   }
 }

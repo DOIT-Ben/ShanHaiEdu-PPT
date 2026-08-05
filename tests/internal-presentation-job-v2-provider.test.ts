@@ -114,6 +114,38 @@ function request(path: string, init: RequestInit = {}) {
 }
 
 describe('internal Presentation Job V2 provider', () => {
+  test('keeps usage unknown when the submitted internal Run cannot be recovered', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    const provider = new InternalPresentationJobV2Provider({
+      runs: new RunService({ repository, artifacts, clock }),
+      repository,
+      artifacts,
+      internalTenantId: presentationJobV2InternalTenantId('frameflow-missing-run'),
+    })
+
+    await expect(provider.inspect({
+      jobId: 'presentation-job-missing-run',
+      operationId: 'missing-internal-run',
+      idempotencyKey: 'presentation-job-missing-run:provider:1',
+    })).resolves.toEqual({
+      state: 'FAILED',
+      errorCode: 'PRESENTATION_OPERATION_NOT_FOUND',
+      usage: {
+        billableImageOperations: 0,
+        notChargedImageOperations: 0,
+        unknownImageOperations: 1,
+        byModel: [{
+          model: 'nanobanana',
+          billableImageOperations: 0,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 1,
+        }],
+      },
+    })
+  })
+
   test('runs the frozen V2 source through the existing intelligent-agent pipeline', async () => {
     const repository = new InMemoryAgentRepository()
     const presentationJobs = new InMemoryPresentationJobV2Repository()
