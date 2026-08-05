@@ -6,6 +6,8 @@ import { assertReadablePptxArtifact } from '../src/core/pptx-artifact-validation
 const MEBIBYTE = 1024 * 1024
 const CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50
 const END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50
+const DATA_DESCRIPTOR_FLAG = 0x0008
+const DATA_DESCRIPTOR_SIGNATURE = 0x08074b50
 
 let validPptxBytes: Uint8Array
 
@@ -74,6 +76,71 @@ function corruptDeclaredCrc(bytes: Uint8Array, name: string) {
   const corruptedCrc = (view.getUint32(entry.offset + 16, true) ^ 0xffffffff) >>> 0
   view.setUint32(entry.offset + 16, corruptedCrc, true)
   view.setUint32(entry.localHeaderOffset + 14, corruptedCrc, true)
+  return output
+}
+
+function claimMissingDataDescriptor(bytes: Uint8Array, name: string) {
+  const output = bytes.slice()
+  const entry = centralDirectoryEntry(output, name)
+  const view = zipView(output)
+  view.setUint16(entry.offset + 8, view.getUint16(entry.offset + 8, true) | DATA_DESCRIPTOR_FLAG, true)
+  view.setUint16(
+    entry.localHeaderOffset + 6,
+    view.getUint16(entry.localHeaderOffset + 6, true) | DATA_DESCRIPTOR_FLAG,
+    true,
+  )
+  view.setUint32(entry.localHeaderOffset + 14, 0, true)
+  view.setUint32(entry.localHeaderOffset + 18, 0, true)
+  view.setUint32(entry.localHeaderOffset + 22, 0, true)
+  return output
+}
+
+function addDataDescriptor(bytes: Uint8Array, name: string, withSignature: boolean) {
+  const inputView = zipView(bytes)
+  const entries = centralDirectoryEntries(bytes)
+  const entry = entries.find((candidate) => candidate.name === name)
+  if (!entry) throw new Error(`TEST_ZIP_ENTRY_NOT_FOUND:${name}`)
+  const compressedSize = inputView.getUint32(entry.offset + 20, true)
+  const uncompressedSize = inputView.getUint32(entry.offset + 24, true)
+  const crc32 = inputView.getUint32(entry.offset + 16, true)
+  const localNameLength = inputView.getUint16(entry.localHeaderOffset + 26, true)
+  const localExtraLength = inputView.getUint16(entry.localHeaderOffset + 28, true)
+  const descriptorOffset = entry.localHeaderOffset + 30 + localNameLength + localExtraLength + compressedSize
+  const descriptorLength = withSignature ? 16 : 12
+  const output = new Uint8Array(bytes.byteLength + descriptorLength)
+  output.set(bytes.subarray(0, descriptorOffset))
+  output.set(bytes.subarray(descriptorOffset), descriptorOffset + descriptorLength)
+  const view = zipView(output)
+  let descriptorValueOffset = descriptorOffset
+  if (withSignature) {
+    view.setUint32(descriptorValueOffset, DATA_DESCRIPTOR_SIGNATURE, true)
+    descriptorValueOffset += 4
+  }
+  view.setUint32(descriptorValueOffset, crc32, true)
+  view.setUint32(descriptorValueOffset + 4, compressedSize, true)
+  view.setUint32(descriptorValueOffset + 8, uncompressedSize, true)
+
+  const originalEndOffset = findEndOfCentralDirectory(bytes)
+  const shiftedEndOffset = originalEndOffset + descriptorLength
+  const originalCentralDirectoryOffset = inputView.getUint32(originalEndOffset + 16, true)
+  view.setUint32(shiftedEndOffset + 16, originalCentralDirectoryOffset + descriptorLength, true)
+  for (const candidate of entries) {
+    const shiftedCentralEntryOffset = candidate.offset + descriptorLength
+    const shiftedLocalHeaderOffset = candidate.localHeaderOffset >= descriptorOffset
+      ? candidate.localHeaderOffset + descriptorLength
+      : candidate.localHeaderOffset
+    view.setUint32(shiftedCentralEntryOffset + 42, shiftedLocalHeaderOffset, true)
+  }
+  const shiftedEntryOffset = entry.offset + descriptorLength
+  view.setUint16(shiftedEntryOffset + 8, view.getUint16(shiftedEntryOffset + 8, true) | DATA_DESCRIPTOR_FLAG, true)
+  view.setUint16(
+    entry.localHeaderOffset + 6,
+    view.getUint16(entry.localHeaderOffset + 6, true) | DATA_DESCRIPTOR_FLAG,
+    true,
+  )
+  view.setUint32(entry.localHeaderOffset + 14, 0, true)
+  view.setUint32(entry.localHeaderOffset + 18, 0, true)
+  view.setUint32(entry.localHeaderOffset + 22, 0, true)
   return output
 }
 
@@ -197,6 +264,24 @@ describe('PPTX artifact validation', () => {
     await expect(assertReadablePptxArtifact(bytes, 2))
       .rejects.toThrow('FINAL_PPTX_ARCHIVE_CRC_INVALID')
   })
+
+  test('rejects a data-descriptor flag when the descriptor is missing', async () => {
+    const bytes = claimMissingDataDescriptor(validPptxBytes, '[Content_Types].xml')
+
+    await expect(assertReadablePptxArtifact(bytes, 2))
+      .rejects.toThrow('FINAL_PPTX_ARCHIVE_INVALID')
+  })
+
+  for (const [label, withSignature] of [
+    ['signed', true],
+    ['signatureless', false],
+  ] as const) {
+    test(`accepts a valid ${label} data descriptor`, async () => {
+      const bytes = addDataDescriptor(validPptxBytes, '[Content_Types].xml', withSignature)
+
+      await expect(assertReadablePptxArtifact(bytes, 2)).resolves.toBeUndefined()
+    })
+  }
 
   for (const [label, mutate] of [
     ['ZIP64', (view: DataView, endOffset: number) => {

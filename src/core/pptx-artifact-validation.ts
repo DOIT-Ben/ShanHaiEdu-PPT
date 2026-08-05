@@ -16,6 +16,7 @@ const MAX_PPTX_TOTAL_XML_BYTES = 16 * 1024 * 1024
 const MAX_PPTX_COMPRESSION_RATIO = 200
 const ZIP_LOCAL_FILE_HEADER_SIGNATURE = 0x04034b50
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50
+const ZIP_DATA_DESCRIPTOR_SIGNATURE = 0x08074b50
 const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06054b50
 const ZIP64_EXTRA_FIELD_ID = 0x0001
@@ -67,6 +68,7 @@ type RawZipEntry = Readonly<{
   uncompressedSize: number
   localHeaderOffset: number
   dataOffset: number
+  localRecordEndOffset: number
 }>
 
 type PptxArchiveReadState = {
@@ -368,7 +370,7 @@ function parseRawZipEntriesUnchecked(bytes: Uint8Array) {
         throw new Error('FINAL_PPTX_ARCHIVE_LIMIT_EXCEEDED')
       }
     }
-    const dataOffset = validateZipLocalHeader({
+    const { dataOffset, localRecordEndOffset } = validateZipLocalHeader({
       bytes,
       view,
       centralDirectoryOffset,
@@ -390,12 +392,13 @@ function parseRawZipEntriesUnchecked(bytes: Uint8Array) {
       uncompressedSize,
       localHeaderOffset,
       dataOffset,
+      localRecordEndOffset,
     })
     offset = entryEnd
   }
   if (offset !== centralDirectoryEnd || hasNonCanonicalName) throw new Error('FINAL_PPTX_ARCHIVE_INVALID')
   const spans = entries
-    .map((entry) => ({ start: entry.localHeaderOffset, end: entry.dataOffset + entry.compressedSize }))
+    .map((entry) => ({ start: entry.localHeaderOffset, end: entry.localRecordEndOffset }))
     .sort((left, right) => left.start - right.start)
   for (let index = 1; index < spans.length; index += 1) {
     if (spans[index]!.start < spans[index - 1]!.end) throw new Error('FINAL_PPTX_ARCHIVE_INVALID')
@@ -478,21 +481,60 @@ function validateZipLocalHeader(input: Readonly<{
   const localNameOffset = localHeaderOffset + 30
   const localExtraOffset = localNameOffset + localNameLength
   const dataOffset = localExtraOffset + localExtraLength
+  const dataEndOffset = dataOffset + input.compressedSize
   if (localFlags !== input.flags
     || localCompressionMethod !== input.compressionMethod
     || localNameLength !== input.nameBytes.byteLength
-    || dataOffset + input.compressedSize > input.centralDirectoryOffset
+    || dataEndOffset > input.centralDirectoryOffset
     || !equalBytes(input.bytes.subarray(localNameOffset, localExtraOffset), input.nameBytes)) {
     throw new Error('FINAL_PPTX_ARCHIVE_INVALID')
   }
   assertNoZip64ExtraField(view, localExtraOffset, localExtraLength)
-  if ((input.flags & ZIP_DATA_DESCRIPTOR_FLAG) === 0
-    && (view.getUint32(localHeaderOffset + 14, true) !== input.crc32
+  if ((input.flags & ZIP_DATA_DESCRIPTOR_FLAG) === 0) {
+    if (view.getUint32(localHeaderOffset + 14, true) !== input.crc32
       || view.getUint32(localHeaderOffset + 18, true) !== input.compressedSize
-      || view.getUint32(localHeaderOffset + 22, true) !== input.uncompressedSize)) {
+      || view.getUint32(localHeaderOffset + 22, true) !== input.uncompressedSize) {
+      throw new Error('FINAL_PPTX_ARCHIVE_INVALID')
+    }
+    return { dataOffset, localRecordEndOffset: dataEndOffset }
+  }
+  if (view.getUint32(localHeaderOffset + 14, true) !== 0
+    || view.getUint32(localHeaderOffset + 18, true) !== 0
+    || view.getUint32(localHeaderOffset + 22, true) !== 0) {
     throw new Error('FINAL_PPTX_ARCHIVE_INVALID')
   }
-  return dataOffset
+  return {
+    dataOffset,
+    localRecordEndOffset: validateZipDataDescriptor({
+      view,
+      offset: dataEndOffset,
+      limit: input.centralDirectoryOffset,
+      crc32: input.crc32,
+      compressedSize: input.compressedSize,
+      uncompressedSize: input.uncompressedSize,
+    }),
+  }
+}
+
+function validateZipDataDescriptor(input: Readonly<{
+  view: DataView
+  offset: number
+  limit: number
+  crc32: number
+  compressedSize: number
+  uncompressedSize: number
+}>) {
+  const descriptorMatches = (offset: number) => offset + 12 <= input.limit
+    && input.view.getUint32(offset, true) === input.crc32
+    && input.view.getUint32(offset + 4, true) === input.compressedSize
+    && input.view.getUint32(offset + 8, true) === input.uncompressedSize
+  if (input.offset + 16 <= input.limit
+    && input.view.getUint32(input.offset, true) === ZIP_DATA_DESCRIPTOR_SIGNATURE
+    && descriptorMatches(input.offset + 4)) {
+    return input.offset + 16
+  }
+  if (descriptorMatches(input.offset)) return input.offset + 12
+  throw new Error('FINAL_PPTX_ARCHIVE_INVALID')
 }
 
 function equalBytes(left: Uint8Array, right: Uint8Array) {

@@ -24,7 +24,7 @@
 - V2 SQLite repository 对存储 JSON 做结构化校验，并把仍使用 `billingStatus`、`unknownOperationCount` 的旧提交记录保守升级为 `RECONCILING`。已有 Provider Operation 一律保留未知用量，不伪造零用量；历史 deterministic 记录多出的根级 `model` 是唯一兼容读取边界，读取时剥离，其他未知字段继续拒绝。
 - 通用 HTTP Provider 提交请求复用冻结的 `PRESENTATION_JOB_V2_CONTRACT_VERSION`，请求与响应均为 `2.0`，不再发送旧的 `1.0` 字面量。
 - Worker 不再把 HTTP Provider 的 `retryAfterMs` 压缩为固定 1 秒；执行轮询和终态 Usage 对账都会把合法退避时间写入下一次可运行时间。
-- V2 不再把只有 ZIP 魔数的任意字节发布为 PPTX。Artifact 在解压前解析原始 ZIP 中央目录，拒绝 ZIP64、跨盘、加密、非规范路径和规范化重名，并按原始 entry 限制 2,048 项、256 MiB 单项、512 MiB 总未压缩量、200:1 压缩比、4 MiB 单 XML part 和 16 MiB XML 总量。每个 entry 再串行流式解压，按实际输出即时复核限额并增量校验 CRC；非 XML 内容不累计到内存。随后校验 OPC Content Types、presentation/slide MIME Override、根关系、页面关系、页数和每个 PresentationML `sld` 根元素。
+- V2 不再把只有 ZIP 魔数的任意字节发布为 PPTX。Artifact 在解压前解析原始 ZIP 中央目录，拒绝 ZIP64、跨盘、加密、非规范路径和规范化重名；data descriptor 必须紧跟压缩数据，采用标准 12/16 字节结构并与中央目录的 CRC 和大小一致。原始 entry 限制为 2,048 项、256 MiB 单项、512 MiB 总未压缩量、200:1 压缩比、4 MiB 单 XML part 和 16 MiB XML 总量。每个 entry 再串行流式解压，按实际输出即时复核限额并增量校验 CRC；非 XML 内容不累计到内存。随后校验 OPC Content Types、presentation/slide MIME Override、根关系、页面关系、页数和每个 PresentationML `sld` 根元素。
 
 ### Compatibility
 

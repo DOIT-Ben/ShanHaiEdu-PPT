@@ -22,7 +22,7 @@ Presentation Job V2 已经把宿主侧合同收敛为不可变来源、Job、Art
 - 未配置 `PPT_AGENT_V2_PROVIDER_MODE` 时，只有注入内部 Provider 的主进程可以默认选择 `internal`。独立 `presentation-job-v2-server` 必须显式选择 `http`；`deterministic` 只能显式用于测试和本地合同验证。
 - 失败 Job 与已交付 Job 的 Usage 都可以从 `RECONCILING` 恢复到 `FINALIZED`，恢复只更新 Usage，不改写既有 Job 终态或重新提交 Provider Operation。
 - 已记录 Provider Operation 但私有 Run 缺失、旧 SQLite 记录无法证明逐模型实际用量、或对账结果超过公开硬上限时，Usage 必须保持 `RECONCILING`；不得用空汇总伪造零用量，也不得因交付后的账务异常改写已交付 Job 终态。
-- 通用 HTTP Provider 的 `retryAfterMs` 同时进入执行轮询和终态 Usage 对账的 Worker 调度时间。Artifact 先直接解析原始 ZIP EOCD、中央目录和本地头，拒绝 ZIP64、跨磁盘、加密、非规范路径和规范化后重名的 entry；按原始 entry 限制 2,048 项、256 MiB 单项、512 MiB 总未压缩量、200:1 压缩比、4 MiB 单 XML part 和 16 MiB XML 总量。JSZip 只以 `checkCRC32: false` 装载结构，随后按原始 entry 串行流式解压，依据实际输出字节即时执行同一组限额并增量校验 CRC；超限立即销毁输入和解压流，只有受限 XML 内容进入内存。最后再校验 OPC Content Types、presentation/slide MIME Override、根关系、页面关系、预期页数和 PresentationML slide 根；不能只凭 MIME、ZIP 魔数或可解析 XML 判定为 PPTX。
+- 通用 HTTP Provider 的 `retryAfterMs` 同时进入执行轮询和终态 Usage 对账的 Worker 调度时间。Artifact 先直接解析原始 ZIP EOCD、中央目录和本地头，拒绝 ZIP64、跨磁盘、加密、非规范路径和规范化后重名的 entry；使用 data descriptor 的 entry 必须紧跟标准 12/16 字节 descriptor，且 CRC 与大小逐项匹配中央目录。按原始 entry 限制 2,048 项、256 MiB 单项、512 MiB 总未压缩量、200:1 压缩比、4 MiB 单 XML part 和 16 MiB XML 总量。JSZip 只以 `checkCRC32: false` 装载结构，随后按原始 entry 串行流式解压，依据实际输出字节即时执行同一组限额并增量校验 CRC；超限立即销毁输入和解压流，只有受限 XML 内容进入内存。最后再校验 OPC Content Types、presentation/slide MIME Override、根关系、页面关系、预期页数和 PresentationML slide 根；不能只凭 MIME、ZIP 魔数或可解析 XML 判定为 PPTX。
 
 ## 后果
 
