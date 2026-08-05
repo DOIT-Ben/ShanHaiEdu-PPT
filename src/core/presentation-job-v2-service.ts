@@ -303,6 +303,14 @@ export class PresentationJobV2Service {
     })
     if (result.state === 'RUNNING' || result.usage.unknownImageOperations > 0) return await this.defer(job)
     if (job.status === 'COMPLETED' && result.state !== 'COMPLETED') return await this.defer(job)
+    if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
+      const now = this.dependencies.clock.now().toISOString()
+      return await this.save({
+        ...job,
+        errorCode: 'PROVIDER_USAGE_CAP_EXCEEDED',
+        updatedAt: now,
+      }, this.retryAt(now))
+    }
     const now = this.dependencies.clock.now().toISOString()
     await this.save({
       ...job,

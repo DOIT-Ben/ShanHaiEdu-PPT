@@ -126,13 +126,18 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
     billingStatus: 'SETTLED' | 'NOT_CHARGED' | 'UNKNOWN',
   ): PresentationJobV2UsageSummary {
     const count = source.snapshot.pages.length
-    const summary = {
+    const byModel = {
       model: 'nanobanana',
       billableImageOperations: billingStatus === 'SETTLED' ? count : 0,
       notChargedImageOperations: billingStatus === 'NOT_CHARGED' ? count : 0,
       unknownImageOperations: billingStatus === 'UNKNOWN' ? count : 0,
     }
-    return { ...summary, byModel: [summary] }
+    return {
+      billableImageOperations: byModel.billableImageOperations,
+      notChargedImageOperations: byModel.notChargedImageOperations,
+      unknownImageOperations: byModel.unknownImageOperations,
+      byModel: [byModel],
+    }
   }
 }
 

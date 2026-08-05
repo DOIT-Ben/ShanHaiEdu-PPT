@@ -183,7 +183,7 @@ describe('Presentation Job V2 service', () => {
     expect(provider.submitCalls).toBe(1)
   })
 
-  test('preserves a delivered Artifact when reconciled usage exceeds the authorization cap', async () => {
+  test('preserves a delivered Artifact but does not finalize reconciled usage above the authorization cap', async () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
     const provider = new MockPresentationJobV2Provider()
@@ -236,13 +236,16 @@ describe('Presentation Job V2 service', () => {
       artifact: deliveredArtifact,
     })
     expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
-      status: 'FINALIZED',
-      billableImageOperations: snapshot.pages.length * 5 + 1,
-      unknownImageOperations: 0,
+      status: 'RECONCILING',
+      action: 'WAIT',
+      billableImageOperations: 0,
+      unknownImageOperations: snapshot.pages.length,
     })
     expect(await repository.getPresentationJob(jobId)).toMatchObject({
       status: 'COMPLETED',
       artifact: { artifactId: deliveredArtifact.artifactId },
+      usage: { status: 'RECONCILING' },
+      errorCode: 'PROVIDER_USAGE_CAP_EXCEEDED',
     })
     expect(await service.getArtifactOwned(owner, jobId, deliveredArtifact.artifactId))
       .toEqual(expect.objectContaining({ artifactId: deliveredArtifact.artifactId }))
