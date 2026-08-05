@@ -15,6 +15,7 @@ import {
   PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE,
   type PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
+import { storedGenerationBatchSchema } from '../generation-batch-contracts'
 
 const INTERNAL_MODEL = 'nanobanana'
 
@@ -35,12 +36,39 @@ function internalIdentity(owner: PresentationJobV2Owner) {
   }
 }
 
-function operationKind(step: StepRecord) {
+function batchReleasedOperationKeys(steps: readonly StepRecord[]) {
+  const released = new Set<string>()
+  for (const batchStep of steps) {
+    if (batchStep.tool !== 'generate_image_batch') continue
+    const parsed = storedGenerationBatchSchema.safeParse(batchStep.output)
+    if (!parsed.success || !['SETTLED', 'RELEASED'].includes(parsed.data.accounting.settlement)
+      || parsed.data.accounting.reconciliationUnits !== 0) continue
+    const pageKeys = new Set(parsed.data.pages.map((page) => page.idempotencyKey))
+    const mediaSteps = steps.filter((step) => step.tool === 'generate_slide_image' && pageKeys.has(step.idempotencyKey))
+    const settledUnits = mediaSteps
+      .filter((step) => ['COMPLETED', 'COMPLETED_AFTER_CANCEL', 'FAILED_CHARGED'].includes(step.status))
+      .reduce((total, step) => total + step.budgetUnits, 0)
+    const releasedUnits = mediaSteps
+      .filter((step) => ['FAILED', 'FAILED_NOT_CHARGED'].includes(step.status))
+      .reduce((total, step) => total + step.budgetUnits, 0)
+    if (parsed.data.accounting.settledUnits !== settledUnits
+      || parsed.data.accounting.releasedUnits !== releasedUnits) continue
+    for (const step of mediaSteps) {
+      if (step.status === 'FAILED' && step.externalOperationId) released.add(step.idempotencyKey)
+    }
+  }
+  return released
+}
+
+function operationKind(step: StepRecord, releasedOperationKeys: ReadonlySet<string>) {
   if (['COMPLETED', 'COMPLETED_AFTER_CANCEL', 'FAILED_CHARGED'].includes(step.status)) return 'billable' as const
   if (step.status === 'FAILED_NOT_CHARGED') return 'notCharged' as const
   if (['BILLING_UNKNOWN', 'SUBMISSION_UNKNOWN', 'RESERVATION_UNKNOWN'].includes(step.status)) return 'unknown' as const
-  if (['WAITING', 'SUBMITTING'].includes(step.status) || (step.status === 'FAILED' && step.externalOperationId)) {
+  if (['WAITING', 'SUBMITTING'].includes(step.status)) {
     return 'unknown' as const
+  }
+  if (step.status === 'FAILED' && step.externalOperationId) {
+    return releasedOperationKeys.has(step.idempotencyKey) ? 'notCharged' as const : 'unknown' as const
   }
   return null
 }
@@ -53,6 +81,7 @@ function operationModel(step: StepRecord, fallback: string) {
 }
 
 function usageSummary(run: RunRecord, steps: readonly StepRecord[]): PresentationJobV2UsageSummary {
+  const releasedOperationKeys = batchReleasedOperationKeys(steps)
   const models = new Map<string, {
     model: string
     billableImageOperations: number
@@ -61,7 +90,7 @@ function usageSummary(run: RunRecord, steps: readonly StepRecord[]): Presentatio
   }>()
   for (const step of steps) {
     if (step.tool !== 'generate_slide_image') continue
-    const kind = operationKind(step)
+    const kind = operationKind(step, releasedOperationKeys)
     if (!kind) continue
     const model = operationModel(step, run.imageModel)
     const entry = models.get(model) ?? {
