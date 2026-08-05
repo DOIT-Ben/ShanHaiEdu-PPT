@@ -170,7 +170,7 @@ function expectStrictObjectSchemas(value: unknown) {
 }
 
 describe('gateway courseware model', () => {
-  test('assigns a distinct professional role to every V4 text stage', async () => {
+  test('assigns a distinct role with 20 years of experience to every internal prompt stage', async () => {
     const [gatewaySource, reflectionSource, promptLedger] = await Promise.all([
       readFile(new URL('../src/adapters/gateway-courseware-model.ts', import.meta.url), 'utf8'),
       readFile(new URL('../src/adapters/gateway/v4-reflection.ts', import.meta.url), 'utf8'),
@@ -194,6 +194,13 @@ describe('gateway courseware model', () => {
     for (const role of stageRoles) {
       expect(runtimePrompts).toContain(role)
       expect(promptLedger).toContain(role)
+    }
+    const runtimeRoleLines = runtimePrompts.split('\n').filter((line) => line.includes('你是'))
+    const ledgerRoleLines = promptLedger.split('\n').filter((line) => line.startsWith('你是'))
+    expect(runtimeRoleLines).toHaveLength(ledgerRoleLines.length)
+    expect(ledgerRoleLines.length).toBeGreaterThan(stageRoles.length)
+    for (const line of [...runtimeRoleLines, ...ledgerRoleLines]) {
+      expect(line).toContain('你是一位拥有 20 年经验的')
     }
     expect(runtimePrompts).not.toContain('NotebookLM')
     expect(promptLedger).not.toContain('NotebookLM')
