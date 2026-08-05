@@ -336,8 +336,9 @@ Usage V2 的 Run 即使已经进入 `COMPLETED`，在宿主终态 finalize 得�
 ```
 
 `COMPLETED` 只允许引用页集、修订轮次、活动 Blueprint/Proposal 哈希均匹配的 `VERIFIED FINAL` 交付。V4 在写入
-终态前会读回持久化 Artifact，复核 MIME、长度和 SHA-256；PNG 必须可完整解码，PPTX 必须通过 ZIP CRC、必需条目
-和实际 `ppt/slides/slideN.xml` 数量校验。非空但损坏或页数不符的文件进入技术恢复，不会成为 FINAL。若 Artifact 已写入
+终态前会读回持久化 Artifact，复核 MIME、长度和 SHA-256；PNG 必须可完整解码，PPTX 必须先通过 ZIP entry、解压量
+和压缩比预算，再通过 CRC、OPC Content Types、根关系、页面关系、实际 `ppt/slides/slideN.xml` 数量和 slide 根元素校验。
+非空但损坏、伪造 Open XML 或页数不符的文件进入技术恢复，不会成为 FINAL。若 Artifact 已写入
 但首次读回暂时失败，恢复会按原交付幂等键读取并复用已验证字节，只补写缺失 Artifact，不用重新渲染出的变化字节覆盖
 同一身份。
 历史 `LEGACY_UNVERIFIED` 交付只在持久化兼容层归一化，不会出现在公开 `deliveries` 中，也不能访问内容接口。

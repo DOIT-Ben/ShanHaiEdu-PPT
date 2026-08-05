@@ -305,7 +305,8 @@ export class PresentationJobV2Service {
       operationId: operation.operationId,
       idempotencyKey: operation.idempotencyKey,
     })
-    if (result.state === 'RUNNING' || result.usage.unknownImageOperations > 0) return await this.defer(job)
+    if (result.state === 'RUNNING') return await this.defer(job, result.retryAfterMs)
+    if (result.usage.unknownImageOperations > 0) return await this.defer(job)
     if (job.status === 'COMPLETED' && result.state !== 'COMPLETED') return await this.defer(job)
     if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
       const now = this.dependencies.clock.now().toISOString()
@@ -365,7 +366,7 @@ export class PresentationJobV2Service {
     return Math.max(MIN_PROVIDER_RETRY_DELAY_MS, Math.min(MAX_PROVIDER_RETRY_DELAY_MS, Math.ceil(value)))
   }
 
-  private async defer(job: PresentationJobV2Record) {
+  private async defer(job: PresentationJobV2Record, providerRetryAfterMs?: number) {
     const current = await this.dependencies.repository.getPresentationJob(job.id) ?? job
     const runnable = current.status === 'QUEUED' || current.status === 'RUNNING'
       || (['COMPLETED', 'FAILED'].includes(current.status) && current.usage.status === 'RECONCILING')
@@ -374,7 +375,7 @@ export class PresentationJobV2Service {
     await this.save({
       ...current,
       updatedAt: now,
-    }, this.retryAt(now))
+    }, new Date(Date.parse(now) + this.providerRetryDelayMs(providerRetryAfterMs)).toISOString())
   }
 
   private async requireOwned(owner: PresentationJobV2Owner, jobId: string) {

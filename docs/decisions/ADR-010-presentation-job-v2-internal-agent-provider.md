@@ -22,7 +22,7 @@ Presentation Job V2 已经把宿主侧合同收敛为不可变来源、Job、Art
 - 未配置 `PPT_AGENT_V2_PROVIDER_MODE` 时，只有注入内部 Provider 的主进程可以默认选择 `internal`。独立 `presentation-job-v2-server` 必须显式选择 `http`；`deterministic` 只能显式用于测试和本地合同验证。
 - 失败 Job 与已交付 Job 的 Usage 都可以从 `RECONCILING` 恢复到 `FINALIZED`，恢复只更新 Usage，不改写既有 Job 终态或重新提交 Provider Operation。
 - 已记录 Provider Operation 但私有 Run 缺失、旧 SQLite 记录无法证明逐模型实际用量、或对账结果超过公开硬上限时，Usage 必须保持 `RECONCILING`；不得用空汇总伪造零用量，也不得因交付后的账务异常改写已交付 Job 终态。
-- 通用 HTTP Provider 的 `retryAfterMs` 进入 Worker 调度时间；Artifact 必须通过 ZIP CRC、Open XML、根关系、页面关系和预期页数校验后才能发布，不能只凭 MIME 或 ZIP 魔数判定为 PPTX。
+- 通用 HTTP Provider 的 `retryAfterMs` 同时进入执行轮询和终态 Usage 对账的 Worker 调度时间。Artifact 先根据 ZIP 中央目录限制 2,048 个 entry、256 MiB 单 entry、512 MiB 总未压缩量、200:1 压缩比、4 MiB 单 XML part 和 16 MiB XML 总量，再执行 CRC、OPC Content Types、presentation/slide MIME Override、根关系、页面关系、预期页数和 PresentationML slide 根校验；不能只凭 MIME、ZIP 魔数或可解析 XML 判定为 PPTX。
 
 ## 后果
 

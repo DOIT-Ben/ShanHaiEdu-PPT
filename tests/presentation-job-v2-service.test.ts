@@ -316,6 +316,40 @@ describe('Presentation Job V2 service', () => {
     })).toEqual([expect.objectContaining({ id: created.job.jobId })])
   })
 
+  test('honors the Provider inspection backoff while terminal usage reconciles', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-reconciliation-backoff')
+
+    await service.tick({ limit: 10 })
+    await provider.complete(`${created.job.jobId}:provider:1`, 'PASSED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    provider.inspect = async () => ({ state: 'RUNNING', retryAfterMs: 30_000 })
+    clock.advance(1_000)
+    await service.tick({ limit: 10 })
+    clock.advance(1_000)
+
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([])
+
+    clock.advance(29_000)
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([expect.objectContaining({ id: created.job.jobId })])
+  })
+
   test('does not let a reconciling Job starve a newer queued Job', async () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
