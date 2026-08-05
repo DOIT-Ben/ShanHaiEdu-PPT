@@ -21,6 +21,7 @@ Presentation Job V2 已经把宿主侧合同收敛为不可变来源、Job、Art
 - Provider 从真实图片 Step 汇总 `billable`、`notCharged`、`unknown` 用量并按模型分组。Job 和 Usage 都公开固定策略 `maximumBillableImageOperationsPerPage: 5`；服务在提交前传递绝对上限，并拒绝超过页数乘 5 的 Provider Usage。
 - 未配置 `PPT_AGENT_V2_PROVIDER_MODE` 时，只有注入内部 Provider 的主进程可以默认选择 `internal`。独立 `presentation-job-v2-server` 必须显式选择 `http`；`deterministic` 只能显式用于测试和本地合同验证。
 - 失败 Job 与已交付 Job 的 Usage 都可以从 `RECONCILING` 恢复到 `FINALIZED`，恢复只更新 Usage，不改写既有 Job 终态或重新提交 Provider Operation。
+- 已记录 Provider Operation 但私有 Run 缺失、旧 SQLite 记录无法证明逐模型实际用量、或对账结果超过公开硬上限时，Usage 必须保持 `RECONCILING`；不得用空汇总伪造零用量，也不得因交付后的账务异常改写已交付 Job 终态。
 
 ## 后果
 
