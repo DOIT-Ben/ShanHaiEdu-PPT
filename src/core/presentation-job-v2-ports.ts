@@ -91,8 +91,11 @@ export type PublicPresentationJobV2Usage = Readonly<{
 export interface PresentationJobV2Repository {
   createPresentationJob(job: PresentationJobV2Record): Promise<void>
   getPresentationJob(jobId: string): Promise<PresentationJobV2Record | null>
-  savePresentationJob(job: PresentationJobV2Record): Promise<void>
-  listRunnablePresentationJobs(input: Readonly<{ limit: number }>): Promise<readonly PresentationJobV2Record[]>
+  savePresentationJob(job: PresentationJobV2Record, workerEligibleAt: string | null): Promise<void>
+  listRunnablePresentationJobs(input: Readonly<{
+    limit: number
+    now: string
+  }>): Promise<readonly PresentationJobV2Record[]>
 }
 
 export interface PresentationJobV2BudgetPolicy {

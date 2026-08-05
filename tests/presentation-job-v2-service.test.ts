@@ -65,12 +65,13 @@ describe('Presentation Job V2 service', () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
     const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
     const service = new PresentationJobV2Service({
       repository,
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
 
     const created = await service.create(owner, request(), 'presentation-job-key-1')
@@ -137,12 +138,13 @@ describe('Presentation Job V2 service', () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
     const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
     const service = new PresentationJobV2Service({
       repository,
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     const created = await service.create(owner, request(), 'presentation-job-reconcile')
     const jobId = created.job.jobId
@@ -166,6 +168,7 @@ describe('Presentation Job V2 service', () => {
     })
 
     await provider.resolveBilling(`${jobId}:provider:1`)
+    clock.advance(1_000)
     await service.tick({ limit: 10 })
 
     expect(await service.getOwned(owner, jobId)).toMatchObject({
@@ -180,12 +183,138 @@ describe('Presentation Job V2 service', () => {
     expect(provider.submitCalls).toBe(1)
   })
 
+  test('preserves a delivered Artifact when reconciled usage exceeds the authorization cap', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const inspect = provider.inspect.bind(provider)
+    let returnOverCapUsage = false
+    provider.inspect = async (input) => {
+      const result = await inspect(input)
+      if (!returnOverCapUsage || result.state !== 'COMPLETED') return result
+      const billableImageOperations = snapshot.pages.length * 5 + 1
+      return {
+        ...result,
+        usage: {
+          billableImageOperations,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 0,
+          byModel: [{
+            model: 'nanobanana',
+            billableImageOperations,
+            notChargedImageOperations: 0,
+            unknownImageOperations: 0,
+          }],
+        },
+      }
+    }
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-delivered-cap-exceeded')
+    const jobId = created.job.jobId
+
+    await service.tick({ limit: 10 })
+    await provider.complete(`${jobId}:provider:1`, 'PASSED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    const delivered = await service.getOwned(owner, jobId)
+    const deliveredArtifact = structuredClone(delivered.artifact!)
+    expect(delivered).toMatchObject({ status: 'COMPLETED', artifact: expect.any(Object) })
+
+    returnOverCapUsage = true
+    clock.advance(1_000)
+    await service.tick({ limit: 10 })
+
+    expect(await service.getOwned(owner, jobId)).toMatchObject({
+      status: 'COMPLETED',
+      quality: 'PASSED',
+      artifact: deliveredArtifact,
+    })
+    expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
+      status: 'FINALIZED',
+      billableImageOperations: snapshot.pages.length * 5 + 1,
+      unknownImageOperations: 0,
+    })
+    expect(await repository.getPresentationJob(jobId)).toMatchObject({
+      status: 'COMPLETED',
+      artifact: { artifactId: deliveredArtifact.artifactId },
+    })
+    expect(await service.getArtifactOwned(owner, jobId, deliveredArtifact.artifactId))
+      .toEqual(expect.objectContaining({ artifactId: deliveredArtifact.artifactId }))
+  })
+
+  test('continues after one Job fails and backs it off before processing the next Job', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const inspect = provider.inspect.bind(provider)
+    let failingJobId: string | null = null
+    provider.inspect = async (input) => {
+      if (input.jobId === failingJobId) throw new Error('PRESENTATION_PROVIDER_TEMPORARY_FAILURE')
+      return inspect(input)
+    }
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const first = await service.create(owner, request(), 'presentation-job-worker-failure-a')
+    const second = await service.create(owner, request(), 'presentation-job-worker-failure-b')
+    await service.tick({ limit: 10 })
+    failingJobId = (await repository.listRunnablePresentationJobs({
+      limit: 1,
+      now: clock.now().toISOString(),
+    }))[0]!.id
+    const otherJobId = failingJobId === first.job.jobId ? second.job.jobId : first.job.jobId
+
+    await expect(service.tick({ limit: 1 })).resolves.toMatchObject({ scannedJobs: 1, failedJobs: 1 })
+    await expect(service.tick({ limit: 1 })).resolves.toMatchObject({ scannedJobs: 1, failedJobs: 0 })
+
+    expect(await service.getOwned(owner, otherJobId)).toMatchObject({ status: 'COMPLETED' })
+    expect(await service.getOwned(owner, failingJobId)).toMatchObject({ status: 'RUNNING' })
+  })
+
+  test('does not let a reconciling Job starve a newer queued Job', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const waiting = await service.create(owner, request(), 'presentation-job-worker-waiting')
+    await service.tick({ limit: 10 })
+    await provider.complete(`${waiting.job.jobId}:provider:1`, 'PASSED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    expect(await service.getUsageOwned(owner, waiting.job.jobId)).toMatchObject({ status: 'RECONCILING' })
+
+    clock.advance(1)
+    const queued = await service.create(owner, request(), 'presentation-job-worker-queued')
+    await service.tick({ limit: 1 })
+
+    expect(await service.getOwned(owner, queued.job.jobId)).toMatchObject({ status: 'RUNNING' })
+    expect(await service.getUsageOwned(owner, waiting.job.jobId)).toMatchObject({ status: 'RECONCILING' })
+  })
+
   test('finalizes reconciled usage without changing a failed Job outcome', async () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
     const provider = new MockPresentationJobV2Provider()
     const inspect = provider.inspect.bind(provider)
     let billingResolved = false
+    const clock = new FixedClock()
     provider.inspect = async (input) => {
       const result = await inspect(input)
       if (!billingResolved || result.state !== 'FAILED') return result
@@ -210,7 +339,7 @@ describe('Presentation Job V2 service', () => {
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     const created = await service.create(owner, request(), 'presentation-job-failed-usage-reconciliation')
     const jobId = created.job.jobId
@@ -225,6 +354,7 @@ describe('Presentation Job V2 service', () => {
     })
 
     billingResolved = true
+    clock.advance(1_000)
     await service.tick({ limit: 10 })
 
     expect(await service.getOwned(owner, jobId)).toMatchObject({ status: 'FAILED', artifact: null })

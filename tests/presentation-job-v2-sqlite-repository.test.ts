@@ -56,12 +56,13 @@ describe('SQLite Presentation Job V2 repository', () => {
     const first = new SqlitePresentationJobV2Repository(filename)
     const provider = new MockPresentationJobV2Provider()
     const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
     const service = new PresentationJobV2Service({
       repository: first,
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     const created = await service.create(owner, {
       source: {
@@ -80,7 +81,7 @@ describe('SQLite Presentation Job V2 repository', () => {
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     await resumed.tick({ limit: 10 })
     const stored = await reopened.getPresentationJob(created.job.jobId)
@@ -129,7 +130,15 @@ describe('SQLite Presentation Job V2 repository', () => {
     await resumed.tick({ limit: 10 })
     await provider.fail(`${reconciling.job.jobId}:provider:1`, 'PROVIDER_OPERATION_FAILED', 'UNKNOWN')
     await resumed.tick({ limit: 10 })
-    expect(await reopened.listRunnablePresentationJobs({ limit: 10 })).toEqual([
+    expect(await reopened.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([])
+    clock.advance(1_000)
+    expect(await reopened.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([
       expect.objectContaining({
         id: reconciling.job.jobId,
         status: 'FAILED',

@@ -28,12 +28,27 @@ export class SqlitePresentationJobV2Repository implements PresentationJobV2Repos
         external_project_id TEXT,
         status TEXT NOT NULL,
         usage_status TEXT NOT NULL,
+        next_attempt_at TEXT,
         updated_at TEXT NOT NULL
       ) STRICT;
       CREATE INDEX IF NOT EXISTS presentation_jobs_v2_owner_idx
         ON presentation_jobs_v2(tenant_id, external_user_id, external_project_id, updated_at DESC, id DESC);
-      CREATE INDEX IF NOT EXISTS presentation_jobs_v2_runnable_idx
-        ON presentation_jobs_v2(status, usage_status, updated_at ASC, id ASC);
+    `)
+    const columns = this.#database.query<{ name: string }, []>(
+      'PRAGMA table_info(presentation_jobs_v2)',
+    ).all()
+    if (!columns.some((column) => column.name === 'next_attempt_at')) {
+      this.#database.exec('ALTER TABLE presentation_jobs_v2 ADD COLUMN next_attempt_at TEXT')
+    }
+    this.#database.exec(`
+      UPDATE presentation_jobs_v2
+      SET next_attempt_at = updated_at
+      WHERE next_attempt_at IS NULL
+        AND (status IN ('QUEUED', 'RUNNING')
+          OR (status IN ('COMPLETED', 'FAILED') AND usage_status = 'RECONCILING'));
+      DROP INDEX IF EXISTS presentation_jobs_v2_runnable_idx;
+      CREATE INDEX presentation_jobs_v2_runnable_idx
+        ON presentation_jobs_v2(status, usage_status, next_attempt_at ASC, updated_at ASC, id ASC);
     `)
   }
 
@@ -42,10 +57,10 @@ export class SqlitePresentationJobV2Repository implements PresentationJobV2Repos
   }
 
   async createPresentationJob(job: PresentationJobV2Record) {
-    this.#database.query<unknown, [string, string, string, string, string | null, string, string, string]>(`
+    this.#database.query<unknown, [string, string, string, string, string | null, string, string, string | null, string]>(`
       INSERT INTO presentation_jobs_v2 (
-        id, data, tenant_id, external_user_id, external_project_id, status, usage_status, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, data, tenant_id, external_user_id, external_project_id, status, usage_status, next_attempt_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       job.id,
       JSON.stringify(job),
@@ -54,6 +69,7 @@ export class SqlitePresentationJobV2Repository implements PresentationJobV2Repos
       job.owner.externalProjectId,
       job.status,
       job.usage.status,
+      job.updatedAt,
       job.updatedAt,
     )
   }
@@ -64,10 +80,10 @@ export class SqlitePresentationJobV2Repository implements PresentationJobV2Repos
     ).get(jobId))
   }
 
-  async savePresentationJob(job: PresentationJobV2Record) {
-    const outcome = this.#database.query<unknown, [string, string, string, string | null, string, string, string, string]>(`
+  async savePresentationJob(job: PresentationJobV2Record, workerEligibleAt: string | null) {
+    const outcome = this.#database.query<unknown, [string, string, string, string | null, string, string, string | null, string, string]>(`
       UPDATE presentation_jobs_v2
-      SET data = ?, tenant_id = ?, external_user_id = ?, external_project_id = ?, status = ?, usage_status = ?, updated_at = ?
+      SET data = ?, tenant_id = ?, external_user_id = ?, external_project_id = ?, status = ?, usage_status = ?, next_attempt_at = ?, updated_at = ?
       WHERE id = ?
     `).run(
       JSON.stringify(job),
@@ -76,23 +92,25 @@ export class SqlitePresentationJobV2Repository implements PresentationJobV2Repos
       job.owner.externalProjectId,
       job.status,
       job.usage.status,
+      workerEligibleAt,
       job.updatedAt,
       job.id,
     )
     if (outcome.changes !== 1) throw new Error('PRESENTATION_JOB_NOT_FOUND')
   }
 
-  async listRunnablePresentationJobs(input: Readonly<{ limit: number }>) {
+  async listRunnablePresentationJobs(input: Readonly<{ limit: number; now: string }>) {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new Error('PRESENTATION_JOB_LIST_LIMIT_INVALID')
     }
-    return this.#database.query<JsonRow, [number]>(`
+    return this.#database.query<JsonRow, [string, number]>(`
       SELECT data
       FROM presentation_jobs_v2
-      WHERE status IN ('QUEUED', 'RUNNING')
-        OR (status IN ('COMPLETED', 'FAILED') AND usage_status = 'RECONCILING')
+      WHERE (status IN ('QUEUED', 'RUNNING')
+        OR (status IN ('COMPLETED', 'FAILED') AND usage_status = 'RECONCILING'))
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
       ORDER BY updated_at ASC, id ASC
       LIMIT ?
-    `).all(input.limit).map((row) => JSON.parse(row.data) as PresentationJobV2Record)
+    `).all(input.now, input.limit).map((row) => parseJob(row)!)
   }
 }

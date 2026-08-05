@@ -47,17 +47,19 @@ function fixture() {
   const repository = new InMemoryPresentationJobV2Repository()
   const artifacts = new MockArtifactPort()
   const provider = new MockPresentationJobV2Provider()
+  const clock = new FixedClock()
   const service = new PresentationJobV2Service({
     repository,
     artifacts,
     provider,
     budget: new FixedServicePresentationJobBudgetPolicy(1),
-    clock: new FixedClock(),
+    clock,
   })
   return {
     service,
     artifacts,
     provider,
+    clock,
     handle: createPresentationJobV2HttpHandler({
       service,
       artifacts,
@@ -192,7 +194,7 @@ describe('Presentation Job V2 HTTP facade', () => {
   })
 
   test('keeps an artifact readable while Usage waits, then finalizes without changing Job delivery', async () => {
-    const { service, provider, handle } = fixture()
+    const { service, provider, clock, handle } = fixture()
     const created = await handle(request('/v2/presentation-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'http-v2-reconcile-key' },
       body: JSON.stringify(createBody()),
@@ -211,6 +213,7 @@ describe('Presentation Job V2 HTTP facade', () => {
     expect(download.status).toBe(200)
 
     await provider.resolveBilling(`${jobId}:provider:1`)
+    clock.advance(1_000)
     await service.tick({ limit: 10 })
     expect(await (await handle(request(`/v2/presentation-jobs/${jobId}`))).json()).toMatchObject({
       data: { status: 'COMPLETED', artifact: deliveredBody.data.artifact },
