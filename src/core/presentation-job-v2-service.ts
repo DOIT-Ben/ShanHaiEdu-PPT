@@ -6,6 +6,7 @@ import {
   presentationJobV2UsageSchema,
   PRESENTATION_JOB_V2_CONTRACT_VERSION,
   type PresentationJobV2CreateRequest,
+  type PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
 import type { ArtifactPort, ClockPort } from './ports'
 import {
@@ -22,6 +23,15 @@ import {
 } from './presentation-job-v2-ports'
 
 const MAX_PROVIDER_OPERATIONS_PER_JOB = 1
+
+function emptyUsage(): PresentationJobV2UsageSummary {
+  return {
+    billableImageOperations: 0,
+    notChargedImageOperations: 0,
+    unknownImageOperations: 0,
+    byModel: [],
+  }
+}
 
 export class PresentationJobV2Error extends Error {
   constructor(readonly status: number, readonly code: string, message = code) {
@@ -65,7 +75,10 @@ function publicUsage(job: PresentationJobV2Record): PublicPresentationJobV2Usage
     usageVersion: job.usage.usageVersion,
     status: job.usage.status,
     action: job.usage.action,
-    unknownOperationCount: job.usage.unknownOperationCount,
+    billableImageOperations: job.usage.billableImageOperations,
+    notChargedImageOperations: job.usage.notChargedImageOperations,
+    unknownImageOperations: job.usage.unknownImageOperations,
+    byModel: job.usage.byModel,
     finalizedAt: job.usage.finalizedAt,
   })
 }
@@ -105,10 +118,10 @@ export class PresentationJobV2Service {
       artifact: null,
       providerOperations: [],
       usage: {
+        ...emptyUsage(),
         usageVersion: 1,
         status: 'PENDING',
         action: 'WAIT',
-        unknownOperationCount: 0,
         finalizedAt: null,
       },
       errorCode: null,
@@ -155,7 +168,7 @@ export class PresentationJobV2Service {
 
   private async submit(job: PresentationJobV2Record) {
     if (job.providerOperations.length >= MAX_PROVIDER_OPERATIONS_PER_JOB) {
-      return await this.fail(job, 'SERVICE_OPERATION_CAP_REACHED', 'SETTLED')
+      return await this.fail(job, 'SERVICE_OPERATION_CAP_REACHED', emptyUsage())
     }
     const idempotencyKey = `${job.id}:provider:1`
     const authorization = await this.dependencies.budget.authorize({
@@ -164,7 +177,7 @@ export class PresentationJobV2Service {
       operationIdempotencyKey: idempotencyKey,
       priorProviderOperations: job.providerOperations.length,
     })
-    if (!authorization.allowed) return await this.fail(job, 'SERVICE_OPERATION_NOT_AUTHORIZED', 'SETTLED')
+    if (!authorization.allowed) return await this.fail(job, 'SERVICE_OPERATION_NOT_AUTHORIZED', emptyUsage())
     const submitted = await this.dependencies.provider.submit({
       jobId: job.id,
       owner: job.owner,
@@ -176,7 +189,7 @@ export class PresentationJobV2Service {
       idempotencyKey,
       operationId: submitted.operationId,
       status: 'SUBMITTED',
-      billingStatus: 'UNKNOWN',
+      usage: emptyUsage(),
       createdAt: now,
       completedAt: null,
     }
@@ -192,7 +205,7 @@ export class PresentationJobV2Service {
 
   private async inspect(job: PresentationJobV2Record) {
     const operation = job.providerOperations.at(-1)
-    if (!operation) return await this.fail(job, 'PROVIDER_OPERATION_MISSING', 'SETTLED')
+    if (!operation) return await this.fail(job, 'PROVIDER_OPERATION_MISSING', emptyUsage())
     const result = await this.dependencies.provider.inspect({
       jobId: job.id,
       operationId: operation.operationId,
@@ -201,10 +214,10 @@ export class PresentationJobV2Service {
     if (result.state === 'RUNNING') {
       return await this.save({ ...job, progressPercent: 75, updatedAt: this.dependencies.clock.now().toISOString() })
     }
-    if (result.state === 'FAILED') return await this.fail(job, result.errorCode, result.billingStatus)
-    if (result.quality === 'BLOCKING_FAILURE') return await this.fail(job, 'DELIVERY_BLOCKED_BY_QUALITY', result.billingStatus)
+    if (result.state === 'FAILED') return await this.fail(job, result.errorCode, result.usage)
+    if (result.quality === 'BLOCKING_FAILURE') return await this.fail(job, 'DELIVERY_BLOCKED_BY_QUALITY', result.usage)
     if (result.artifact.mimeType !== PRESENTATION_JOB_V2_PPTX_MIME_TYPE || !isPptx(result.artifact.bytes)) {
-      return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.billingStatus)
+      return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.usage)
     }
     const stored = await this.dependencies.artifacts.put({
       tenantId: job.owner.tenantId,
@@ -225,7 +238,7 @@ export class PresentationJobV2Service {
     const completedOperation: PresentationJobV2ProviderOperation = {
       ...operation,
       status: 'COMPLETED',
-      billingStatus: result.billingStatus,
+      usage: result.usage,
       completedAt: now,
     }
     await this.save({
@@ -236,7 +249,7 @@ export class PresentationJobV2Service {
       quality: result.quality,
       artifact,
       providerOperations: [completedOperation],
-      usage: this.usage(result.billingStatus, now),
+      usage: this.usage(result.usage, now),
       updatedAt: now,
     })
   }
@@ -249,17 +262,17 @@ export class PresentationJobV2Service {
       operationId: operation.operationId,
       idempotencyKey: operation.idempotencyKey,
     })
-    if (result.state !== 'COMPLETED' || result.billingStatus === 'UNKNOWN') return
+    if (result.state !== 'COMPLETED' || result.usage.unknownImageOperations > 0) return
     const now = this.dependencies.clock.now().toISOString()
     await this.save({
       ...job,
-      providerOperations: [{ ...operation, billingStatus: 'SETTLED' }],
-      usage: this.usage('SETTLED', now),
+      providerOperations: [{ ...operation, usage: result.usage }],
+      usage: this.usage(result.usage, now),
       updatedAt: now,
     })
   }
 
-  private async fail(job: PresentationJobV2Record, errorCode: string, billingStatus: 'SETTLED' | 'UNKNOWN') {
+  private async fail(job: PresentationJobV2Record, errorCode: string, usage: PresentationJobV2UsageSummary) {
     const now = this.dependencies.clock.now().toISOString()
     const operation = job.providerOperations.at(-1)
     await this.save({
@@ -269,17 +282,17 @@ export class PresentationJobV2Service {
       progressPercent: 100,
       quality: null,
       artifact: null,
-      providerOperations: operation ? [{ ...operation, status: 'FAILED', billingStatus, completedAt: now }] : [],
-      usage: this.usage(billingStatus, now),
+      providerOperations: operation ? [{ ...operation, status: 'FAILED', usage, completedAt: now }] : [],
+      usage: this.usage(usage, now),
       errorCode,
       updatedAt: now,
     })
   }
 
-  private usage(billingStatus: 'SETTLED' | 'UNKNOWN', now: string) {
-    return billingStatus === 'UNKNOWN'
-      ? { usageVersion: 1 as const, status: 'RECONCILING' as const, action: 'WAIT' as const, unknownOperationCount: 1, finalizedAt: null }
-      : { usageVersion: 1 as const, status: 'FINALIZED' as const, action: 'NONE' as const, unknownOperationCount: 0, finalizedAt: now }
+  private usage(summary: PresentationJobV2UsageSummary, now: string): PresentationJobV2Record['usage'] {
+    return summary.unknownImageOperations > 0
+      ? { ...summary, usageVersion: 1, status: 'RECONCILING', action: 'WAIT', finalizedAt: null }
+      : { ...summary, usageVersion: 1, status: 'FINALIZED', action: 'NONE', finalizedAt: now }
   }
 
   private async save(job: PresentationJobV2Record) {

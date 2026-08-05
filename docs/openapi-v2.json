@@ -261,27 +261,45 @@
           }
         ]
       },
+      "PresentationJobUsageByModel": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model", "billableImageOperations", "notChargedImageOperations", "unknownImageOperations"],
+        "properties": {
+          "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "billableImageOperations": { "type": "integer", "minimum": 0 },
+          "notChargedImageOperations": { "type": "integer", "minimum": 0 },
+          "unknownImageOperations": { "type": "integer", "minimum": 0 }
+        }
+      },
       "PresentationJobUsage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["contractVersion", "jobId", "usageVersion", "status", "action", "unknownOperationCount", "finalizedAt"],
+        "required": ["contractVersion", "jobId", "usageVersion", "status", "action", "billableImageOperations", "notChargedImageOperations", "unknownImageOperations", "byModel", "finalizedAt"],
         "properties": {
           "contractVersion": { "const": "2.0" },
           "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "usageVersion": { "const": 1 },
           "status": { "enum": ["PENDING", "RECONCILING", "FINALIZED"] },
           "action": { "enum": ["WAIT", "NONE"] },
-          "unknownOperationCount": { "type": "integer", "minimum": 0 },
+          "billableImageOperations": { "type": "integer", "minimum": 0 },
+          "notChargedImageOperations": { "type": "integer", "minimum": 0 },
+          "unknownImageOperations": { "type": "integer", "minimum": 0 },
+          "byModel": {
+            "type": "array",
+            "maxItems": 20,
+            "items": { "$ref": "#/components/schemas/PresentationJobUsageByModel" }
+          },
           "finalizedAt": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
         },
         "allOf": [
           {
             "if": { "properties": { "status": { "const": "RECONCILING" } }, "required": ["status"] },
-            "then": { "properties": { "action": { "const": "WAIT" }, "unknownOperationCount": { "minimum": 1 }, "finalizedAt": { "type": "null" } } }
+            "then": { "properties": { "action": { "const": "WAIT" }, "unknownImageOperations": { "minimum": 1 }, "finalizedAt": { "type": "null" } } }
           },
           {
             "if": { "properties": { "status": { "const": "FINALIZED" } }, "required": ["status"] },
-            "then": { "properties": { "action": { "const": "NONE" }, "unknownOperationCount": { "const": 0 }, "finalizedAt": { "type": "string", "format": "date-time" } } }
+            "then": { "properties": { "action": { "const": "NONE" }, "unknownImageOperations": { "const": 0 }, "finalizedAt": { "type": "string", "format": "date-time" } } }
           }
         ]
       },

@@ -1,6 +1,7 @@
 import type {
   ApprovedPageDesignSnapshotSource,
   PresentationJobV2CreateRequest,
+  PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
 
 export const PRESENTATION_JOB_V2_PPTX_MIME_TYPE =
@@ -29,16 +30,15 @@ export type PresentationJobV2ProviderOperation = Readonly<{
   idempotencyKey: string
   operationId: string
   status: 'SUBMITTED' | 'COMPLETED' | 'FAILED'
-  billingStatus: 'SETTLED' | 'UNKNOWN'
+  usage: PresentationJobV2UsageSummary
   createdAt: string
   completedAt: string | null
 }>
 
-export type PresentationJobV2UsageRecord = Readonly<{
+export type PresentationJobV2UsageRecord = Readonly<PresentationJobV2UsageSummary & {
   usageVersion: 1
   status: PresentationJobV2UsageStatus
   action: 'WAIT' | 'NONE'
-  unknownOperationCount: number
   finalizedAt: string | null
 }>
 
@@ -78,7 +78,10 @@ export type PublicPresentationJobV2Usage = Readonly<{
   usageVersion: 1
   status: PresentationJobV2UsageStatus
   action: 'WAIT' | 'NONE'
-  unknownOperationCount: number
+  billableImageOperations: number
+  notChargedImageOperations: number
+  unknownImageOperations: number
+  byModel: PresentationJobV2UsageSummary['byModel']
   finalizedAt: string | null
 }>
 
@@ -108,12 +111,12 @@ export type PresentationJobV2ProviderResult =
         mimeType: typeof PRESENTATION_JOB_V2_PPTX_MIME_TYPE
       }>
       quality: 'PASSED' | 'BEST_EFFORT' | 'BLOCKING_FAILURE'
-      billingStatus: 'SETTLED' | 'UNKNOWN'
+      usage: PresentationJobV2UsageSummary
     }>
   | Readonly<{
       state: 'FAILED'
       errorCode: string
-      billingStatus: 'SETTLED' | 'UNKNOWN'
+      usage: PresentationJobV2UsageSummary
     }>
 
 export interface PresentationJobV2ProviderPort {

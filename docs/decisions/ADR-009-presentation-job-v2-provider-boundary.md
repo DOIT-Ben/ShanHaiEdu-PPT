@@ -19,6 +19,7 @@ Accepted
 - 服务凭据决定 tenant。V2 拒绝租户覆盖头；对象所有权不匹配一律返回 404。
 - Provider Operation 在 PPT-Agent 内以稳定幂等键记录，固定服务级操作上限在执行前强制。V2 不调用宿主预算、结算、释放、完成或文档 HTTP callback。
 - Job 交付和 Usage 终态独立。已交付 Job 不能因为后续对账或历史 V1 Event 改为 FAILED；Usage `FINALIZED` 后不能变更。
+- Usage 只公开按模型聚合的可计费、未收费和未知图片操作事实，不包含宿主价格或积分；聚合总数必须与 `byModel` 一致。
 - V1 继续使用现有 adapter 和 Run 语义以兼容历史。V2 提供独立进程入口，只构造 V2 SQLite repository、Artifact port、固定服务级预算、服务认证和通用 Provider port；它不通过 `createAgentRuntime` 或 `createMockRuntime` 初始化 V1 执行图。
 
 ## 后果

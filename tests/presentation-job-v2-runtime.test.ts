@@ -87,7 +87,10 @@ describe('Presentation Job V2 runtime boundary', () => {
     expect(health.status).toBe(200)
     expect(await health.json()).toMatchObject({ service: 'ppt-agent-presentation-job-v2', status: 'READY' })
     expect(jobBody).toMatchObject({ data: { status: 'COMPLETED', quality: 'PASSED' } })
-    expect(await usage.json()).toMatchObject({ data: { status: 'FINALIZED', unknownOperationCount: 0 } })
+    expect(await usage.json()).toMatchObject({ data: {
+      status: 'FINALIZED', billableImageOperations: snapshot.pages.length,
+      notChargedImageOperations: 0, unknownImageOperations: 0,
+    } })
     expect(artifact.status).toBe(200)
     expect(artifact.headers.get('Content-Type')).toBe('application/vnd.openxmlformats-officedocument.presentationml.presentation')
     expect(new Uint8Array(await artifact.arrayBuffer()).slice(0, 2)).toEqual(new Uint8Array([0x50, 0x4b]))

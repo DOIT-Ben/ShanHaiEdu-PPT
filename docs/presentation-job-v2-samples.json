@@ -99,7 +99,15 @@
         "usageVersion": 1,
         "status": "RECONCILING",
         "action": "WAIT",
-        "unknownOperationCount": 1,
+        "billableImageOperations": 0,
+        "notChargedImageOperations": 0,
+        "unknownImageOperations": 2,
+        "byModel": [{
+          "model": "nanobanana",
+          "billableImageOperations": 0,
+          "notChargedImageOperations": 0,
+          "unknownImageOperations": 2
+        }],
         "finalizedAt": null
       }
     },
@@ -112,7 +120,15 @@
         "usageVersion": 1,
         "status": "FINALIZED",
         "action": "NONE",
-        "unknownOperationCount": 0,
+        "billableImageOperations": 2,
+        "notChargedImageOperations": 0,
+        "unknownImageOperations": 0,
+        "byModel": [{
+          "model": "nanobanana",
+          "billableImageOperations": 2,
+          "notChargedImageOperations": 0,
+          "unknownImageOperations": 0
+        }],
         "finalizedAt": "2026-08-05T00:01:00.000Z"
       }
     }

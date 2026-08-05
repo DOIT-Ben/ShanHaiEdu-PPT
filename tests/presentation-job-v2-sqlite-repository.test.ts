@@ -88,7 +88,10 @@ describe('SQLite Presentation Job V2 repository', () => {
       id: created.job.jobId,
       status: 'COMPLETED',
       owner,
-      usage: { status: 'FINALIZED', unknownOperationCount: 0 },
+      usage: {
+        status: 'FINALIZED', billableImageOperations: snapshot.pages.length,
+        notChargedImageOperations: 0, unknownImageOperations: 0,
+      },
     })
 
     const bestEffort = await resumed.create(owner, {

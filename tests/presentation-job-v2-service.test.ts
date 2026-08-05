@@ -93,7 +93,11 @@ describe('Presentation Job V2 service', () => {
       artifact: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
     })
     expect((await service.getUsageOwned(owner, created.job.jobId))).toMatchObject({
-      status: 'FINALIZED', action: 'NONE', unknownOperationCount: 0,
+      status: 'FINALIZED', action: 'NONE',
+      billableImageOperations: snapshot.pages.length,
+      notChargedImageOperations: 0,
+      unknownImageOperations: 0,
+      byModel: [{ model: 'nanobanana', billableImageOperations: snapshot.pages.length }],
     })
     expect(provider.submitCalls).toBe(1)
   })
@@ -155,7 +159,11 @@ describe('Presentation Job V2 service', () => {
     await service.getArtifactOwned(owner, jobId, delivered.artifact!.artifactId)
     expect(await repository.getPresentationJob(jobId)).toEqual(storedBeforeReads)
     expect(delivered).toMatchObject({ status: 'COMPLETED', quality: 'PASSED', artifact: expect.any(Object) })
-    expect(usageBefore).toMatchObject({ status: 'RECONCILING', action: 'WAIT', unknownOperationCount: 1 })
+    expect(usageBefore).toMatchObject({
+      status: 'RECONCILING', action: 'WAIT',
+      billableImageOperations: 0, notChargedImageOperations: 0,
+      unknownImageOperations: snapshot.pages.length,
+    })
 
     await provider.resolveBilling(`${jobId}:provider:1`)
     await service.tick({ limit: 10 })
@@ -164,7 +172,10 @@ describe('Presentation Job V2 service', () => {
       status: 'COMPLETED', quality: 'PASSED', artifact: delivered.artifact,
     })
     expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
-      status: 'FINALIZED', action: 'NONE', unknownOperationCount: 0,
+      status: 'FINALIZED', action: 'NONE',
+      billableImageOperations: snapshot.pages.length,
+      notChargedImageOperations: 0,
+      unknownImageOperations: 0,
     })
     expect(provider.submitCalls).toBe(1)
   })

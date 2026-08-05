@@ -11,6 +11,7 @@
 - 流式 PPTX Artifact 下载，声明 Content-Type、Length、Disposition、ETag、Artifact ID、SHA-256 与合同版本；V2.0 对 Range 返回 `416`。
 - 独立 V2-only server/runtime，只装配 V2 SQLite、Artifact、固定服务级操作上限与宿主无关 Provider port；不初始化 V1 Run 或宿主 adapter。
 - 可选通用 HTTP Provider adapter；默认仍为 deterministic Provider，只有显式配置时才会发起 Provider HTTP 操作。
+- Usage 按模型公开可计费、明确未收费和待核对的图片操作数；总数必须与 `byModel` 汇总一致，供宿主按自己的价格表幂等结算。
 
 ### Compatibility
 

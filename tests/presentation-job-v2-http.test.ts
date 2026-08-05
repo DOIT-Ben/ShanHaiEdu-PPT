@@ -216,7 +216,7 @@ describe('Presentation Job V2 HTTP facade', () => {
       data: { status: 'COMPLETED', artifact: deliveredBody.data.artifact },
     })
     expect(await (await handle(request(`/v2/presentation-jobs/${jobId}/usage`))).json()).toMatchObject({
-      data: { status: 'FINALIZED', action: 'NONE', unknownOperationCount: 0 },
+      data: { status: 'FINALIZED', action: 'NONE', unknownImageOperations: 0 },
     })
     expect(provider.submitCalls).toBe(1)
   })

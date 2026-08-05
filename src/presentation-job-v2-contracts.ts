@@ -123,21 +123,67 @@ export const presentationJobV2PublicJobSchema = z.object({
   }
 })
 
+export const presentationJobV2UsageByModelSchema = z.object({
+  model: identifierSchema,
+  billableImageOperations: z.number().int().nonnegative(),
+  notChargedImageOperations: z.number().int().nonnegative(),
+  unknownImageOperations: z.number().int().nonnegative(),
+}).strict()
+
+export const presentationJobV2UsageSummarySchema = z.object({
+  billableImageOperations: z.number().int().nonnegative(),
+  notChargedImageOperations: z.number().int().nonnegative(),
+  unknownImageOperations: z.number().int().nonnegative(),
+  byModel: z.array(presentationJobV2UsageByModelSchema).max(20),
+}).strict().superRefine((value, context) => {
+  const models = new Set<string>()
+  const totals = value.byModel.reduce((result, item, index) => {
+    if (models.has(item.model)) {
+      context.addIssue({ code: 'custom', path: ['byModel', index, 'model'], message: 'usage models must be unique' })
+    }
+    models.add(item.model)
+    return {
+      billableImageOperations: result.billableImageOperations + item.billableImageOperations,
+      notChargedImageOperations: result.notChargedImageOperations + item.notChargedImageOperations,
+      unknownImageOperations: result.unknownImageOperations + item.unknownImageOperations,
+    }
+  }, { billableImageOperations: 0, notChargedImageOperations: 0, unknownImageOperations: 0 })
+  for (const field of ['billableImageOperations', 'notChargedImageOperations', 'unknownImageOperations'] as const) {
+    if (totals[field] !== value[field]) {
+      context.addIssue({ code: 'custom', path: [field], message: `${field} must equal the byModel total` })
+    }
+  }
+})
+
 export const presentationJobV2UsageSchema = z.object({
   contractVersion: z.literal(PRESENTATION_JOB_V2_CONTRACT_VERSION),
   jobId: identifierSchema,
   usageVersion: z.literal(1),
   status: z.enum(['PENDING', 'RECONCILING', 'FINALIZED']),
   action: z.enum(['WAIT', 'NONE']),
-  unknownOperationCount: z.number().int().nonnegative(),
+  billableImageOperations: z.number().int().nonnegative(),
+  notChargedImageOperations: z.number().int().nonnegative(),
+  unknownImageOperations: z.number().int().nonnegative(),
+  byModel: z.array(presentationJobV2UsageByModelSchema).max(20),
   finalizedAt: z.string().datetime().nullable(),
 }).strict().superRefine((value, context) => {
+  const summary = presentationJobV2UsageSummarySchema.safeParse({
+    billableImageOperations: value.billableImageOperations,
+    notChargedImageOperations: value.notChargedImageOperations,
+    unknownImageOperations: value.unknownImageOperations,
+    byModel: value.byModel,
+  })
+  if (!summary.success) {
+    for (const issue of summary.error.issues) {
+      context.addIssue({ code: 'custom', path: issue.path, message: issue.message })
+    }
+  }
   if (value.status === 'RECONCILING'
-    && (value.action !== 'WAIT' || value.unknownOperationCount < 1 || value.finalizedAt !== null)) {
+    && (value.action !== 'WAIT' || value.unknownImageOperations < 1 || value.finalizedAt !== null)) {
     context.addIssue({ code: 'custom', message: 'reconciling usage must wait with unknown operations' })
   }
   if (value.status === 'FINALIZED'
-    && (value.action !== 'NONE' || value.unknownOperationCount !== 0 || value.finalizedAt === null)) {
+    && (value.action !== 'NONE' || value.unknownImageOperations !== 0 || value.finalizedAt === null)) {
     context.addIssue({ code: 'custom', message: 'finalized usage must be immutable and fully known' })
   }
 })
@@ -160,4 +206,5 @@ export type ApprovedPageDesignSnapshotSource = z.infer<typeof approvedPageDesign
 export type PresentationJobV2CreateRequest = z.infer<typeof presentationJobV2CreateRequestSchema>
 export type PresentationJobV2Artifact = z.infer<typeof presentationJobV2ArtifactSchema>
 export type PresentationJobV2PublicJob = z.infer<typeof presentationJobV2PublicJobSchema>
+export type PresentationJobV2UsageSummary = z.infer<typeof presentationJobV2UsageSummarySchema>
 export type PresentationJobV2Usage = z.infer<typeof presentationJobV2UsageSchema>

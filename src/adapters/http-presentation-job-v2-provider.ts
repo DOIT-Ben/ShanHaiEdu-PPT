@@ -4,6 +4,7 @@ import {
   PRESENTATION_JOB_V2_PPTX_MIME_TYPE,
   type PresentationJobV2ProviderPort,
 } from '../core/presentation-job-v2-ports'
+import { presentationJobV2UsageSummarySchema } from '../presentation-job-v2-contracts'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -12,7 +13,6 @@ const DEFAULT_MAXIMUM_ARTIFACT_BYTES = 200 * 1024 * 1024
 
 const operationIdSchema = z.string().trim().min(1).max(512)
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
-const billingStatusSchema = z.enum(['SETTLED', 'UNKNOWN'])
 const inspectionSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('RUNNING'),
@@ -21,12 +21,12 @@ const inspectionSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('FAILED'),
     errorCode: z.string().trim().min(1).max(160),
-    billingStatus: billingStatusSchema,
+    usage: presentationJobV2UsageSummarySchema,
   }).strict(),
   z.object({
     state: z.literal('COMPLETED'),
     quality: z.enum(['PASSED', 'BEST_EFFORT', 'BLOCKING_FAILURE']),
-    billingStatus: billingStatusSchema,
+    usage: presentationJobV2UsageSummarySchema,
     artifact: z.object({
       name: z.string().trim().min(1).max(240),
       mimeType: z.literal(PRESENTATION_JOB_V2_PPTX_MIME_TYPE),
@@ -149,7 +149,17 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
       return {
         state: 'FAILED' as const,
         errorCode: `PRESENTATION_PROVIDER_INSPECT_HTTP_${response.status}`,
-        billingStatus: 'UNKNOWN' as const,
+        usage: {
+          billableImageOperations: 0,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 1,
+          byModel: [{
+            model: 'unknown',
+            billableImageOperations: 0,
+            notChargedImageOperations: 0,
+            unknownImageOperations: 1,
+          }],
+        },
       }
     }
     const parsed = inspectionSchema.safeParse(await response.json().catch(() => null))
@@ -159,14 +169,14 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
       return {
         state: 'FAILED' as const,
         errorCode: 'DELIVERY_BLOCKED_BY_QUALITY',
-        billingStatus: parsed.data.billingStatus,
+        usage: parsed.data.usage,
       }
     }
     const bytes = await this.downloadArtifact(operationId, parsed.data.artifact)
     return {
       state: 'COMPLETED' as const,
       quality: parsed.data.quality,
-      billingStatus: parsed.data.billingStatus,
+      usage: parsed.data.usage,
       artifact: {
         bytes,
         name: parsed.data.artifact.name,

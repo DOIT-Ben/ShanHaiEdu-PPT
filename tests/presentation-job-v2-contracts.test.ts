@@ -92,11 +92,30 @@ describe('Presentation Job V2 contract', () => {
     expect(presentationJobV2PublicJobSchema.safeParse({ ...completed, artifact: null }).success).toBe(false)
     expect(presentationJobV2UsageSchema.safeParse({
       contractVersion: '2.0', jobId: 'job-a', usageVersion: 1, status: 'FINALIZED', action: 'NONE',
-      unknownOperationCount: 0, finalizedAt: '2026-08-05T00:00:02.000Z',
+      billableImageOperations: 2, notChargedImageOperations: 0, unknownImageOperations: 0,
+      byModel: [{
+        model: 'nanobanana', billableImageOperations: 2,
+        notChargedImageOperations: 0, unknownImageOperations: 0,
+      }],
+      finalizedAt: '2026-08-05T00:00:02.000Z',
     }).success).toBe(true)
     expect(presentationJobV2UsageSchema.safeParse({
       contractVersion: '2.0', jobId: 'job-a', usageVersion: 1, status: 'FINALIZED', action: 'NONE',
-      unknownOperationCount: 1, finalizedAt: '2026-08-05T00:00:02.000Z',
+      billableImageOperations: 1, notChargedImageOperations: 0, unknownImageOperations: 1,
+      byModel: [{
+        model: 'nanobanana', billableImageOperations: 1,
+        notChargedImageOperations: 0, unknownImageOperations: 1,
+      }],
+      finalizedAt: '2026-08-05T00:00:02.000Z',
+    }).success).toBe(false)
+    expect(presentationJobV2UsageSchema.safeParse({
+      contractVersion: '2.0', jobId: 'job-a', usageVersion: 1, status: 'FINALIZED', action: 'NONE',
+      billableImageOperations: 2, notChargedImageOperations: 0, unknownImageOperations: 0,
+      byModel: [{
+        model: 'nanobanana', billableImageOperations: 1,
+        notChargedImageOperations: 0, unknownImageOperations: 0,
+      }],
+      finalizedAt: '2026-08-05T00:00:02.000Z',
     }).success).toBe(false)
   })
 })
