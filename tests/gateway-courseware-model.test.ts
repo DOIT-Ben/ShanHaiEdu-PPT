@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { readFile } from 'node:fs/promises'
 import sharp from 'sharp'
 import {
   GatewayCoursewareModel,
@@ -169,6 +170,37 @@ function expectStrictObjectSchemas(value: unknown) {
 }
 
 describe('gateway courseware model', () => {
+  test('assigns a distinct professional role to every V4 text stage', async () => {
+    const [gatewaySource, reflectionSource, promptLedger] = await Promise.all([
+      readFile(new URL('../src/adapters/gateway-courseware-model.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/adapters/gateway/v4-reflection.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../docs/internal-prompt-ledger.md', import.meta.url), 'utf8'),
+    ])
+    const runtimePrompts = `${gatewaySource}\n${reflectionSource}`
+    const stageRoles = [
+      '演示文稿需求分析与资料研究专家',
+      '演示文稿叙事架构师与视觉总监',
+      '演示文稿叙事与视觉一致性审稿专家',
+      '演示文稿叙事与视觉方案局部修订专家',
+      'PPT 大纲与逐页视觉规划专家',
+      '逐页视觉施工单质量审稿专家',
+      '逐页视觉施工单局部修订专家',
+      '独立演示文稿叙事与视觉方案审查修订专家',
+      '独立逐页视觉施工单审查修订专家',
+      '演示文稿质量总审专家',
+      '整页视觉演示局部修订专家',
+      '整页视觉演示完整规划修订专家',
+    ]
+    for (const role of stageRoles) {
+      expect(runtimePrompts).toContain(role)
+      expect(promptLedger).toContain(role)
+    }
+    expect(runtimePrompts).not.toContain('NotebookLM')
+    expect(promptLedger).not.toContain('NotebookLM')
+    expect(runtimePrompts).not.toMatch(/你是[^。]*(Critic|Optimizer)/)
+    expect(promptLedger).not.toMatch(/你是[^。]*(Critic|Optimizer)/)
+  })
+
   test('selects the MiniMax profile when either configured model is MiniMax M3', () => {
     expect(gatewayCoursewareModelProfile({ textModel: 'MiniMax-M3', visionModel: 'gpt-5.6' })).toBe('MINIMAX_M3')
     expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6', visionModel: 'minimax-m3' })).toBe('MINIMAX_M3')
