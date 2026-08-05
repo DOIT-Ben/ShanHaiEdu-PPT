@@ -463,6 +463,8 @@ describe('gateway courseware model', () => {
     expect(slideSystemPrompt).toContain('视觉元素独立性要求')
     expect(slideSystemPrompt).toContain('不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体')
     expect(slideSystemPrompt).toContain('除非用户明确要求物理接触')
+    expect(slideSystemPrompt).toContain('你是 PPT Agent 的逐页视觉施工单规划器')
+    expect(slideSystemPrompt).not.toContain('NotebookLM')
   })
 
   test('keeps the chain-1 final coherence operation on its original strict structured contract', async () => {
