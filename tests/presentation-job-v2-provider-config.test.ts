@@ -4,8 +4,23 @@ import { DeterministicPresentationJobV2Provider } from '../src/adapters/presenta
 import { createPresentationJobV2ProviderFromEnv } from '../src/runtime/presentation-job-v2-provider-config'
 
 describe('Presentation Job V2 provider configuration', () => {
-  test('keeps the deterministic provider as the safe default', () => {
-    expect(createPresentationJobV2ProviderFromEnv({})).toBeInstanceOf(DeterministicPresentationJobV2Provider)
+  test('selects the in-process intelligent-agent provider when the main runtime injects it', () => {
+    const internalProvider = new DeterministicPresentationJobV2Provider()
+    expect(Reflect.apply(createPresentationJobV2ProviderFromEnv, undefined, [
+      {},
+      { internalProvider },
+    ])).toBe(internalProvider)
+  })
+
+  test('fails closed instead of enabling the deterministic provider implicitly', () => {
+    expect(() => createPresentationJobV2ProviderFromEnv({}))
+      .toThrow('PPT_AGENT_V2_PROVIDER_MODE_REQUIRED')
+  })
+
+  test('uses the deterministic provider only when explicitly selected', () => {
+    expect(createPresentationJobV2ProviderFromEnv({
+      PPT_AGENT_V2_PROVIDER_MODE: 'deterministic',
+    })).toBeInstanceOf(DeterministicPresentationJobV2Provider)
   })
 
   test('constructs the HTTP provider only when explicitly selected', () => {

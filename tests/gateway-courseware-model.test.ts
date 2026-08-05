@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { readFile } from 'node:fs/promises'
 import sharp from 'sharp'
+import * as ts from 'typescript'
 import {
   GatewayCoursewareModel,
   gatewayCoursewareModelProfile,
@@ -11,6 +13,83 @@ import { hashInput } from '../src/core/hash'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
 import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
 import { LEGACY_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
+
+const LEDGER_SYSTEM_PROMPT_IDS = [
+  'TXT-00',
+  'V4-01',
+  'V4-02',
+  'V4-07',
+  'V4-08',
+  'V4-04',
+  'V4-09',
+  'V4-10',
+  'V4-03L',
+  'V4-05L',
+  'V4-06',
+  'REV-01',
+  'REV-02',
+  'REV-03L',
+  'TXT-10',
+  'TXT-11',
+  'TXT-20',
+  'REV-04',
+  'VIS-01',
+  'VIS-02',
+  'VIS-03',
+  'VIS-04',
+] as const
+
+function ledgerSystemPrompt(markdown: string, id: typeof LEDGER_SYSTEM_PROMPT_IDS[number]) {
+  const heading = `### \`${id}\``
+  const headingStart = markdown.indexOf(heading)
+  if (headingStart < 0) throw new Error(`LEDGER_PROMPT_HEADING_MISSING:${id}`)
+  const nextHeading = markdown.indexOf('\n### ', headingStart + heading.length)
+  const section = markdown.slice(headingStart, nextHeading < 0 ? markdown.length : nextHeading)
+  const codeBlock = /```text\n([\s\S]*?)\n```/.exec(section)?.[1]
+  if (codeBlock === undefined) throw new Error(`LEDGER_SYSTEM_PROMPT_MISSING:${id}`)
+  return codeBlock
+}
+
+function staticSystemPrompts(sourceText: string, fileName: string) {
+  const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const prompts: string[] = []
+  const collect = (expression: ts.Expression): void => {
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+      prompts.push(expression.text)
+      return
+    }
+    if (ts.isTemplateExpression(expression)) {
+      prompts.push([
+        expression.head.text,
+        ...expression.templateSpans.flatMap((span) => ['{{DYNAMIC}}', span.literal.text]),
+      ].join(''))
+      return
+    }
+    if (ts.isConditionalExpression(expression)) {
+      collect(expression.whenTrue)
+      collect(expression.whenFalse)
+      return
+    }
+    if (ts.isParenthesizedExpression(expression)) collect(expression.expression)
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(sourceFile) === 'system') collect(node.initializer)
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)
+      && node.name.text === 'system' && node.initializer) collect(node.initializer)
+    ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return prompts
+}
+
+function normalizeDynamicPrompt(value: string) {
+  return value.replace(/\{\{[^{}]+\}\}/g, '{{DYNAMIC}}')
+}
+
+function promptOpeningSentence(value: string) {
+  const end = value.indexOf('。')
+  return end < 0 ? value : value.slice(0, end + 1)
+}
 
 function blueprintDraft() {
   return blueprintDraftSchema.parse({
@@ -169,6 +248,65 @@ function expectStrictObjectSchemas(value: unknown) {
 }
 
 describe('gateway courseware model', () => {
+  test('assigns a distinct role with 20 years of experience to every internal prompt stage', async () => {
+    const [gatewaySource, reflectionSource, promptLedger] = await Promise.all([
+      readFile(new URL('../src/adapters/gateway-courseware-model.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/adapters/gateway/v4-reflection.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../docs/internal-prompt-ledger.md', import.meta.url), 'utf8'),
+    ])
+    const runtimePrompts = `${gatewaySource}\n${reflectionSource}`
+    const stageRoles = [
+      '演示文稿需求分析与资料研究专家',
+      '演示文稿叙事架构师与视觉总监',
+      '演示文稿叙事与视觉一致性审稿专家',
+      '演示文稿叙事与视觉方案局部修订专家',
+      'PPT 大纲与逐页视觉规划专家',
+      '逐页视觉施工单质量审稿专家',
+      '逐页视觉施工单局部修订专家',
+      '独立演示文稿叙事与视觉方案审查修订专家',
+      '独立逐页视觉施工单审查修订专家',
+      '演示文稿质量总审专家',
+      '整页视觉演示局部修订专家',
+      '整页视觉演示完整规划修订专家',
+    ]
+    for (const role of stageRoles) {
+      expect(runtimePrompts).toContain(role)
+      expect(promptLedger).toContain(role)
+    }
+    const runtimeRoleLines = runtimePrompts.split('\n').filter((line) => line.includes('你是'))
+    const ledgerRoleLines = promptLedger.split('\n').filter((line) => line.startsWith('你是'))
+    expect(runtimeRoleLines).toHaveLength(ledgerRoleLines.length)
+    expect(ledgerRoleLines.length).toBeGreaterThan(stageRoles.length)
+    for (const line of [...runtimeRoleLines, ...ledgerRoleLines]) {
+      expect(line).toContain('你是一位拥有 20 年经验的')
+    }
+    expect(runtimePrompts).not.toContain('NotebookLM')
+    expect(promptLedger).not.toContain('NotebookLM')
+    expect(runtimePrompts).not.toMatch(/你是[^。]*(Critic|Optimizer)/)
+    expect(promptLedger).not.toMatch(/你是[^。]*(Critic|Optimizer)/)
+  })
+
+  test('keeps every text and visual system prompt identical to the internal prompt ledger', async () => {
+    const [gatewaySource, reflectionSource, promptLedger] = await Promise.all([
+      readFile(new URL('../src/adapters/gateway-courseware-model.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../src/adapters/gateway/v4-reflection.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../docs/internal-prompt-ledger.md', import.meta.url), 'utf8'),
+    ])
+    const runtimePrompts = [
+      ...staticSystemPrompts(gatewaySource, 'gateway-courseware-model.ts'),
+      ...staticSystemPrompts(reflectionSource, 'v4-reflection.ts'),
+    ]
+    expect(runtimePrompts).toHaveLength(LEDGER_SYSTEM_PROMPT_IDS.length)
+    const runtimeByOpening = new Map(runtimePrompts.map((prompt) => [promptOpeningSentence(prompt), prompt]))
+    expect(runtimeByOpening.size).toBe(runtimePrompts.length)
+
+    for (const id of LEDGER_SYSTEM_PROMPT_IDS) {
+      const expected = normalizeDynamicPrompt(ledgerSystemPrompt(promptLedger, id))
+      const actual = runtimeByOpening.get(promptOpeningSentence(expected))
+      expect({ [id]: actual }).toEqual({ [id]: expected })
+    }
+  })
+
   test('selects the MiniMax profile when either configured model is MiniMax M3', () => {
     expect(gatewayCoursewareModelProfile({ textModel: 'MiniMax-M3', visionModel: 'gpt-5.6' })).toBe('MINIMAX_M3')
     expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6', visionModel: 'minimax-m3' })).toBe('MINIMAX_M3')
@@ -463,6 +601,10 @@ describe('gateway courseware model', () => {
     expect(slideSystemPrompt).toContain('视觉元素独立性要求')
     expect(slideSystemPrompt).toContain('不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体')
     expect(slideSystemPrompt).toContain('除非用户明确要求物理接触')
+    expect(slideSystemPrompt).toContain('你是一位拥有 20 年经验的 PPT 大纲与逐页视觉规划专家')
+    expect(slideSystemPrompt).toContain('拆解为清晰、连贯且可执行的逐页 Slide Brief')
+    expect(slideSystemPrompt).not.toContain('PPT Agent 的逐页视觉施工单规划器')
+    expect(slideSystemPrompt).not.toContain('NotebookLM')
   })
 
   test('keeps the chain-1 final coherence operation on its original strict structured contract', async () => {

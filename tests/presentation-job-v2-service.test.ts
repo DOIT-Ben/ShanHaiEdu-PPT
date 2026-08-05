@@ -65,12 +65,13 @@ describe('Presentation Job V2 service', () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
     const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
     const service = new PresentationJobV2Service({
       repository,
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
 
     const created = await service.create(owner, request(), 'presentation-job-key-1')
@@ -93,7 +94,11 @@ describe('Presentation Job V2 service', () => {
       artifact: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
     })
     expect((await service.getUsageOwned(owner, created.job.jobId))).toMatchObject({
-      status: 'FINALIZED', action: 'NONE', unknownOperationCount: 0,
+      status: 'FINALIZED', action: 'NONE',
+      billableImageOperations: snapshot.pages.length,
+      notChargedImageOperations: 0,
+      unknownImageOperations: 0,
+      byModel: [{ model: 'nanobanana', billableImageOperations: snapshot.pages.length }],
     })
     expect(provider.submitCalls).toBe(1)
   })
@@ -133,12 +138,13 @@ describe('Presentation Job V2 service', () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
     const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
     const service = new PresentationJobV2Service({
       repository,
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     const created = await service.create(owner, request(), 'presentation-job-reconcile')
     const jobId = created.job.jobId
@@ -155,17 +161,359 @@ describe('Presentation Job V2 service', () => {
     await service.getArtifactOwned(owner, jobId, delivered.artifact!.artifactId)
     expect(await repository.getPresentationJob(jobId)).toEqual(storedBeforeReads)
     expect(delivered).toMatchObject({ status: 'COMPLETED', quality: 'PASSED', artifact: expect.any(Object) })
-    expect(usageBefore).toMatchObject({ status: 'RECONCILING', action: 'WAIT', unknownOperationCount: 1 })
+    expect(usageBefore).toMatchObject({
+      status: 'RECONCILING', action: 'WAIT',
+      billableImageOperations: 0, notChargedImageOperations: 0,
+      unknownImageOperations: snapshot.pages.length,
+    })
 
     await provider.resolveBilling(`${jobId}:provider:1`)
+    clock.advance(1_000)
     await service.tick({ limit: 10 })
 
     expect(await service.getOwned(owner, jobId)).toMatchObject({
       status: 'COMPLETED', quality: 'PASSED', artifact: delivered.artifact,
     })
     expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
-      status: 'FINALIZED', action: 'NONE', unknownOperationCount: 0,
+      status: 'FINALIZED', action: 'NONE',
+      billableImageOperations: snapshot.pages.length,
+      notChargedImageOperations: 0,
+      unknownImageOperations: 0,
     })
     expect(provider.submitCalls).toBe(1)
+  })
+
+  test('preserves a delivered Artifact but does not finalize reconciled usage above the authorization cap', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const inspect = provider.inspect.bind(provider)
+    let returnOverCapUsage = false
+    provider.inspect = async (input) => {
+      const result = await inspect(input)
+      if (!returnOverCapUsage || result.state !== 'COMPLETED') return result
+      const billableImageOperations = snapshot.pages.length * 5 + 1
+      return {
+        ...result,
+        usage: {
+          billableImageOperations,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 0,
+          byModel: [{
+            model: 'nanobanana',
+            billableImageOperations,
+            notChargedImageOperations: 0,
+            unknownImageOperations: 0,
+          }],
+        },
+      }
+    }
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-delivered-cap-exceeded')
+    const jobId = created.job.jobId
+
+    await service.tick({ limit: 10 })
+    await provider.complete(`${jobId}:provider:1`, 'PASSED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    const delivered = await service.getOwned(owner, jobId)
+    const deliveredArtifact = structuredClone(delivered.artifact!)
+    expect(delivered).toMatchObject({ status: 'COMPLETED', artifact: expect.any(Object) })
+
+    returnOverCapUsage = true
+    clock.advance(1_000)
+    await service.tick({ limit: 10 })
+
+    expect(await service.getOwned(owner, jobId)).toMatchObject({
+      status: 'COMPLETED',
+      quality: 'PASSED',
+      artifact: deliveredArtifact,
+    })
+    expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
+      status: 'RECONCILING',
+      action: 'WAIT',
+      billableImageOperations: 0,
+      unknownImageOperations: snapshot.pages.length,
+    })
+    expect(await repository.getPresentationJob(jobId)).toMatchObject({
+      status: 'COMPLETED',
+      artifact: { artifactId: deliveredArtifact.artifactId },
+      usage: { status: 'RECONCILING' },
+      errorCode: 'PROVIDER_USAGE_CAP_EXCEEDED',
+    })
+    expect(await service.getArtifactOwned(owner, jobId, deliveredArtifact.artifactId))
+      .toEqual(expect.objectContaining({ artifactId: deliveredArtifact.artifactId }))
+  })
+
+  test('continues after one Job fails and backs it off before processing the next Job', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const inspect = provider.inspect.bind(provider)
+    let failingJobId: string | null = null
+    provider.inspect = async (input) => {
+      if (input.jobId === failingJobId) throw new Error('PRESENTATION_PROVIDER_TEMPORARY_FAILURE')
+      return inspect(input)
+    }
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const first = await service.create(owner, request(), 'presentation-job-worker-failure-a')
+    const second = await service.create(owner, request(), 'presentation-job-worker-failure-b')
+    await service.tick({ limit: 10 })
+    failingJobId = (await repository.listRunnablePresentationJobs({
+      limit: 1,
+      now: clock.now().toISOString(),
+    }))[0]!.id
+    const otherJobId = failingJobId === first.job.jobId ? second.job.jobId : first.job.jobId
+
+    await expect(service.tick({ limit: 1 })).resolves.toMatchObject({ scannedJobs: 1, failedJobs: 1 })
+    await expect(service.tick({ limit: 1 })).resolves.toMatchObject({ scannedJobs: 1, failedJobs: 0 })
+
+    expect(await service.getOwned(owner, otherJobId)).toMatchObject({ status: 'COMPLETED' })
+    expect(await service.getOwned(owner, failingJobId)).toMatchObject({ status: 'RUNNING' })
+  })
+
+  test('honors the Provider inspection backoff before polling the same Job again', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    provider.inspect = async () => ({ state: 'RUNNING', retryAfterMs: 30_000 })
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-provider-backoff')
+
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+    clock.advance(1_000)
+
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([])
+
+    clock.advance(29_000)
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([expect.objectContaining({ id: created.job.jobId })])
+  })
+
+  test('honors the Provider inspection backoff while terminal usage reconciles', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-reconciliation-backoff')
+
+    await service.tick({ limit: 10 })
+    await provider.complete(`${created.job.jobId}:provider:1`, 'PASSED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    provider.inspect = async () => ({ state: 'RUNNING', retryAfterMs: 30_000 })
+    clock.advance(1_000)
+    await service.tick({ limit: 10 })
+    clock.advance(1_000)
+
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([])
+
+    clock.advance(29_000)
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([expect.objectContaining({ id: created.job.jobId })])
+  })
+
+  test('does not let a reconciling Job starve a newer queued Job', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const waiting = await service.create(owner, request(), 'presentation-job-worker-waiting')
+    await service.tick({ limit: 10 })
+    await provider.complete(`${waiting.job.jobId}:provider:1`, 'PASSED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    expect(await service.getUsageOwned(owner, waiting.job.jobId)).toMatchObject({ status: 'RECONCILING' })
+
+    clock.advance(1)
+    const queued = await service.create(owner, request(), 'presentation-job-worker-queued')
+    await service.tick({ limit: 1 })
+
+    expect(await service.getOwned(owner, queued.job.jobId)).toMatchObject({ status: 'RUNNING' })
+    expect(await service.getUsageOwned(owner, waiting.job.jobId)).toMatchObject({ status: 'RECONCILING' })
+  })
+
+  test('finalizes reconciled usage without changing a failed Job outcome', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const inspect = provider.inspect.bind(provider)
+    let billingResolved = false
+    const clock = new FixedClock()
+    provider.inspect = async (input) => {
+      const result = await inspect(input)
+      if (!billingResolved || result.state !== 'FAILED') return result
+      const notChargedImageOperations = snapshot.pages.length
+      return {
+        ...result,
+        usage: {
+          billableImageOperations: 0,
+          notChargedImageOperations,
+          unknownImageOperations: 0,
+          byModel: [{
+            model: 'nanobanana',
+            billableImageOperations: 0,
+            notChargedImageOperations,
+            unknownImageOperations: 0,
+          }],
+        },
+      }
+    }
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-failed-usage-reconciliation')
+    const jobId = created.job.jobId
+
+    await service.tick({ limit: 10 })
+    await provider.fail(`${jobId}:provider:1`, 'PROVIDER_OPERATION_FAILED', 'UNKNOWN')
+    await service.tick({ limit: 10 })
+    expect(await service.getOwned(owner, jobId)).toMatchObject({ status: 'FAILED', artifact: null })
+    expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
+      status: 'RECONCILING',
+      unknownImageOperations: snapshot.pages.length,
+    })
+
+    billingResolved = true
+    clock.advance(1_000)
+    await service.tick({ limit: 10 })
+
+    expect(await service.getOwned(owner, jobId)).toMatchObject({ status: 'FAILED', artifact: null })
+    expect(await service.getUsageOwned(owner, jobId)).toMatchObject({
+      status: 'FINALIZED',
+      action: 'NONE',
+      billableImageOperations: 0,
+      notChargedImageOperations: snapshot.pages.length,
+      unknownImageOperations: 0,
+    })
+    expect(provider.submitCalls).toBe(1)
+  })
+
+  test('rejects Provider usage above the public per-page operation cap', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const inspect = provider.inspect.bind(provider)
+    provider.inspect = async (input) => {
+      const result = await inspect(input)
+      if (result.state !== 'COMPLETED') return result
+      const billableImageOperations = snapshot.pages.length * 5 + 1
+      return {
+        ...result,
+        usage: {
+          billableImageOperations,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 0,
+          byModel: [{
+            model: 'nanobanana',
+            billableImageOperations,
+            notChargedImageOperations: 0,
+            unknownImageOperations: 0,
+          }],
+        },
+      }
+    }
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock: new FixedClock(),
+    })
+    const created = await service.create(owner, request(), 'presentation-job-cap-exceeded')
+
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+
+    expect(await repository.getPresentationJob(created.job.jobId)).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'PROVIDER_USAGE_CAP_EXCEEDED',
+      artifact: null,
+    })
+  })
+
+  test('rejects a ZIP-shaped artifact that is not a readable PPTX package', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    provider.inspect = async () => ({
+      state: 'COMPLETED',
+      quality: 'PASSED',
+      usage: {
+        billableImageOperations: 0,
+        notChargedImageOperations: 0,
+        unknownImageOperations: 0,
+        byModel: [],
+      },
+      artifact: {
+        bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00]),
+        name: 'invalid.pptx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      },
+    })
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock: new FixedClock(),
+    })
+    const created = await service.create(owner, request(), 'presentation-job-invalid-pptx')
+
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+
+    expect(await repository.getPresentationJob(created.job.jobId)).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'PPTX_ARTIFACT_INVALID',
+      artifact: null,
+    })
   })
 })

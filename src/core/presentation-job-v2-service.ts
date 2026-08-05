@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto'
 import {
   canonicalPresentationJobV2Json,
+  PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE,
+  PRESENTATION_JOB_V2_USAGE_POLICY,
   presentationJobV2CreateRequestSchema,
   presentationJobV2PublicJobSchema,
   presentationJobV2UsageSchema,
   PRESENTATION_JOB_V2_CONTRACT_VERSION,
   type PresentationJobV2CreateRequest,
+  type PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
 import type { ArtifactPort, ClockPort } from './ports'
+import { assertReadablePptxArtifact } from './pptx-artifact-validation'
 import {
   PRESENTATION_JOB_V2_PPTX_MIME_TYPE,
   type PresentationJobV2Artifact,
@@ -22,6 +26,18 @@ import {
 } from './presentation-job-v2-ports'
 
 const MAX_PROVIDER_OPERATIONS_PER_JOB = 1
+const WORKER_RETRY_DELAY_MS = 1_000
+const MIN_PROVIDER_RETRY_DELAY_MS = 100
+const MAX_PROVIDER_RETRY_DELAY_MS = 300_000
+
+function emptyUsage(): PresentationJobV2UsageSummary {
+  return {
+    billableImageOperations: 0,
+    notChargedImageOperations: 0,
+    unknownImageOperations: 0,
+    byModel: [],
+  }
+}
 
 export class PresentationJobV2Error extends Error {
   constructor(readonly status: number, readonly code: string, message = code) {
@@ -40,8 +56,15 @@ function sameOwner(left: PresentationJobV2Owner, right: PresentationJobV2Owner) 
     && left.externalProjectId === right.externalProjectId
 }
 
-function isPptx(bytes: Uint8Array) {
-  return bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b
+function maximumBillableImageOperations(job: PresentationJobV2Record) {
+  return job.request.source.snapshot.pages.length
+    * PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE
+}
+
+function usageOperationCount(usage: PresentationJobV2UsageSummary) {
+  return usage.billableImageOperations
+    + usage.notChargedImageOperations
+    + usage.unknownImageOperations
 }
 
 function publicJob(job: PresentationJobV2Record): PublicPresentationJobV2 {
@@ -51,6 +74,7 @@ function publicJob(job: PresentationJobV2Record): PublicPresentationJobV2 {
     status: job.status,
     phase: job.phase,
     progress: { percent: job.progressPercent },
+    usagePolicy: PRESENTATION_JOB_V2_USAGE_POLICY,
     quality: job.quality,
     artifact: job.artifact,
     createdAt: job.createdAt,
@@ -63,9 +87,13 @@ function publicUsage(job: PresentationJobV2Record): PublicPresentationJobV2Usage
     contractVersion: PRESENTATION_JOB_V2_CONTRACT_VERSION,
     jobId: job.id,
     usageVersion: job.usage.usageVersion,
+    usagePolicy: PRESENTATION_JOB_V2_USAGE_POLICY,
     status: job.usage.status,
     action: job.usage.action,
-    unknownOperationCount: job.usage.unknownOperationCount,
+    billableImageOperations: job.usage.billableImageOperations,
+    notChargedImageOperations: job.usage.notChargedImageOperations,
+    unknownImageOperations: job.usage.unknownImageOperations,
+    byModel: job.usage.byModel,
     finalizedAt: job.usage.finalizedAt,
   })
 }
@@ -105,10 +133,10 @@ export class PresentationJobV2Service {
       artifact: null,
       providerOperations: [],
       usage: {
+        ...emptyUsage(),
         usageVersion: 1,
         status: 'PENDING',
         action: 'WAIT',
-        unknownOperationCount: 0,
         finalizedAt: null,
       },
       errorCode: null,
@@ -142,20 +170,33 @@ export class PresentationJobV2Service {
   }
 
   async tick(input: Readonly<{ limit: number }>) {
-    const jobs = await this.dependencies.repository.listRunnablePresentationJobs(input)
-    for (const job of jobs) await this.advance(job)
-    return { scannedJobs: jobs.length }
+    const jobs = await this.dependencies.repository.listRunnablePresentationJobs({
+      ...input,
+      now: this.dependencies.clock.now().toISOString(),
+    })
+    let failedJobs = 0
+    for (const job of jobs) {
+      try {
+        await this.advance(job)
+      } catch {
+        failedJobs += 1
+        await this.defer(job).catch(() => undefined)
+      }
+    }
+    return { scannedJobs: jobs.length, failedJobs }
   }
 
   private async advance(job: PresentationJobV2Record) {
     if (job.status === 'QUEUED') return await this.submit(job)
     if (job.status === 'RUNNING') return await this.inspect(job)
-    if (job.status === 'COMPLETED' && job.usage.status === 'RECONCILING') return await this.reconcile(job)
+    if (['COMPLETED', 'FAILED'].includes(job.status) && job.usage.status === 'RECONCILING') {
+      return await this.reconcile(job)
+    }
   }
 
   private async submit(job: PresentationJobV2Record) {
     if (job.providerOperations.length >= MAX_PROVIDER_OPERATIONS_PER_JOB) {
-      return await this.fail(job, 'SERVICE_OPERATION_CAP_REACHED', 'SETTLED')
+      return await this.fail(job, 'SERVICE_OPERATION_CAP_REACHED', emptyUsage())
     }
     const idempotencyKey = `${job.id}:provider:1`
     const authorization = await this.dependencies.budget.authorize({
@@ -164,19 +205,20 @@ export class PresentationJobV2Service {
       operationIdempotencyKey: idempotencyKey,
       priorProviderOperations: job.providerOperations.length,
     })
-    if (!authorization.allowed) return await this.fail(job, 'SERVICE_OPERATION_NOT_AUTHORIZED', 'SETTLED')
+    if (!authorization.allowed) return await this.fail(job, 'SERVICE_OPERATION_NOT_AUTHORIZED', emptyUsage())
     const submitted = await this.dependencies.provider.submit({
       jobId: job.id,
       owner: job.owner,
       source: job.request.source,
       idempotencyKey,
+      maximumBillableImageOperations: maximumBillableImageOperations(job),
     })
     const now = this.dependencies.clock.now().toISOString()
     const operation: PresentationJobV2ProviderOperation = {
       idempotencyKey,
       operationId: submitted.operationId,
       status: 'SUBMITTED',
-      billingStatus: 'UNKNOWN',
+      usage: emptyUsage(),
       createdAt: now,
       completedAt: null,
     }
@@ -187,24 +229,37 @@ export class PresentationJobV2Service {
       progressPercent: 25,
       providerOperations: [operation],
       updatedAt: now,
-    })
+    }, now)
   }
 
   private async inspect(job: PresentationJobV2Record) {
     const operation = job.providerOperations.at(-1)
-    if (!operation) return await this.fail(job, 'PROVIDER_OPERATION_MISSING', 'SETTLED')
+    if (!operation) return await this.fail(job, 'PROVIDER_OPERATION_MISSING', emptyUsage())
     const result = await this.dependencies.provider.inspect({
       jobId: job.id,
       operationId: operation.operationId,
       idempotencyKey: operation.idempotencyKey,
     })
     if (result.state === 'RUNNING') {
-      return await this.save({ ...job, progressPercent: 75, updatedAt: this.dependencies.clock.now().toISOString() })
+      const now = this.dependencies.clock.now()
+      return await this.save({
+        ...job,
+        progressPercent: 75,
+        updatedAt: now.toISOString(),
+      }, new Date(now.getTime() + this.providerRetryDelayMs(result.retryAfterMs)).toISOString())
     }
-    if (result.state === 'FAILED') return await this.fail(job, result.errorCode, result.billingStatus)
-    if (result.quality === 'BLOCKING_FAILURE') return await this.fail(job, 'DELIVERY_BLOCKED_BY_QUALITY', result.billingStatus)
-    if (result.artifact.mimeType !== PRESENTATION_JOB_V2_PPTX_MIME_TYPE || !isPptx(result.artifact.bytes)) {
-      return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.billingStatus)
+    if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
+      return await this.fail(job, 'PROVIDER_USAGE_CAP_EXCEEDED', result.usage)
+    }
+    if (result.state === 'FAILED') return await this.fail(job, result.errorCode, result.usage)
+    if (result.quality === 'BLOCKING_FAILURE') return await this.fail(job, 'DELIVERY_BLOCKED_BY_QUALITY', result.usage)
+    if (result.artifact.mimeType !== PRESENTATION_JOB_V2_PPTX_MIME_TYPE) {
+      return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.usage)
+    }
+    try {
+      await assertReadablePptxArtifact(result.artifact.bytes, job.request.source.snapshot.pages.length)
+    } catch {
+      return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.usage)
     }
     const stored = await this.dependencies.artifacts.put({
       tenantId: job.owner.tenantId,
@@ -225,9 +280,10 @@ export class PresentationJobV2Service {
     const completedOperation: PresentationJobV2ProviderOperation = {
       ...operation,
       status: 'COMPLETED',
-      billingStatus: result.billingStatus,
+      usage: result.usage,
       completedAt: now,
     }
+    const usage = this.usage(result.usage, now)
     await this.save({
       ...job,
       status: 'COMPLETED',
@@ -236,32 +292,43 @@ export class PresentationJobV2Service {
       quality: result.quality,
       artifact,
       providerOperations: [completedOperation],
-      usage: this.usage(result.billingStatus, now),
+      usage,
       updatedAt: now,
-    })
+    }, usage.status === 'RECONCILING' ? this.retryAt(now) : null)
   }
 
   private async reconcile(job: PresentationJobV2Record) {
     const operation = job.providerOperations.at(-1)
-    if (!operation || operation.status !== 'COMPLETED') return
+    if (!operation || !['COMPLETED', 'FAILED'].includes(operation.status)) return
     const result = await this.dependencies.provider.inspect({
       jobId: job.id,
       operationId: operation.operationId,
       idempotencyKey: operation.idempotencyKey,
     })
-    if (result.state !== 'COMPLETED' || result.billingStatus === 'UNKNOWN') return
+    if (result.state === 'RUNNING') return await this.defer(job, result.retryAfterMs)
+    if (result.usage.unknownImageOperations > 0) return await this.defer(job)
+    if (job.status === 'COMPLETED' && result.state !== 'COMPLETED') return await this.defer(job)
+    if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
+      const now = this.dependencies.clock.now().toISOString()
+      return await this.save({
+        ...job,
+        errorCode: 'PROVIDER_USAGE_CAP_EXCEEDED',
+        updatedAt: now,
+      }, this.retryAt(now))
+    }
     const now = this.dependencies.clock.now().toISOString()
     await this.save({
       ...job,
-      providerOperations: [{ ...operation, billingStatus: 'SETTLED' }],
-      usage: this.usage('SETTLED', now),
+      providerOperations: [{ ...operation, usage: result.usage }],
+      usage: this.usage(result.usage, now),
       updatedAt: now,
-    })
+    }, null)
   }
 
-  private async fail(job: PresentationJobV2Record, errorCode: string, billingStatus: 'SETTLED' | 'UNKNOWN') {
+  private async fail(job: PresentationJobV2Record, errorCode: string, usage: PresentationJobV2UsageSummary) {
     const now = this.dependencies.clock.now().toISOString()
     const operation = job.providerOperations.at(-1)
+    const resolvedUsage = this.usage(usage, now)
     await this.save({
       ...job,
       status: 'FAILED',
@@ -269,25 +336,46 @@ export class PresentationJobV2Service {
       progressPercent: 100,
       quality: null,
       artifact: null,
-      providerOperations: operation ? [{ ...operation, status: 'FAILED', billingStatus, completedAt: now }] : [],
-      usage: this.usage(billingStatus, now),
+      providerOperations: operation ? [{ ...operation, status: 'FAILED', usage, completedAt: now }] : [],
+      usage: resolvedUsage,
       errorCode,
       updatedAt: now,
-    })
+    }, resolvedUsage.status === 'RECONCILING' ? this.retryAt(now) : null)
   }
 
-  private usage(billingStatus: 'SETTLED' | 'UNKNOWN', now: string) {
-    return billingStatus === 'UNKNOWN'
-      ? { usageVersion: 1 as const, status: 'RECONCILING' as const, action: 'WAIT' as const, unknownOperationCount: 1, finalizedAt: null }
-      : { usageVersion: 1 as const, status: 'FINALIZED' as const, action: 'NONE' as const, unknownOperationCount: 0, finalizedAt: now }
+  private usage(summary: PresentationJobV2UsageSummary, now: string): PresentationJobV2Record['usage'] {
+    return summary.unknownImageOperations > 0
+      ? { ...summary, usageVersion: 1, status: 'RECONCILING', action: 'WAIT', finalizedAt: null }
+      : { ...summary, usageVersion: 1, status: 'FINALIZED', action: 'NONE', finalizedAt: now }
   }
 
-  private async save(job: PresentationJobV2Record) {
+  private async save(job: PresentationJobV2Record, workerEligibleAt: string | null) {
     const current = await this.dependencies.repository.getPresentationJob(job.id)
     if (current?.usage.status === 'FINALIZED' && canonicalPresentationJobV2Json(current.usage) !== canonicalPresentationJobV2Json(job.usage)) {
       throw new PresentationJobV2Error(409, 'PRESENTATION_USAGE_FINALIZED')
     }
-    await this.dependencies.repository.savePresentationJob(job)
+    await this.dependencies.repository.savePresentationJob(job, workerEligibleAt)
+  }
+
+  private retryAt(now: string) {
+    return new Date(Date.parse(now) + WORKER_RETRY_DELAY_MS).toISOString()
+  }
+
+  private providerRetryDelayMs(value: number | undefined) {
+    if (value === undefined || !Number.isFinite(value)) return WORKER_RETRY_DELAY_MS
+    return Math.max(MIN_PROVIDER_RETRY_DELAY_MS, Math.min(MAX_PROVIDER_RETRY_DELAY_MS, Math.ceil(value)))
+  }
+
+  private async defer(job: PresentationJobV2Record, providerRetryAfterMs?: number) {
+    const current = await this.dependencies.repository.getPresentationJob(job.id) ?? job
+    const runnable = current.status === 'QUEUED' || current.status === 'RUNNING'
+      || (['COMPLETED', 'FAILED'].includes(current.status) && current.usage.status === 'RECONCILING')
+    if (!runnable) return
+    const now = this.dependencies.clock.now().toISOString()
+    await this.save({
+      ...current,
+      updatedAt: now,
+    }, new Date(Date.parse(now) + this.providerRetryDelayMs(providerRetryAfterMs)).toISOString())
   }
 
   private async requireOwned(owner: PresentationJobV2Owner, jobId: string) {

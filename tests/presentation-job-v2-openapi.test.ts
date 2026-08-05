@@ -35,7 +35,24 @@ describe('Presentation Job V2 OpenAPI contract', () => {
       required: ['kind', 'artifactVersionId', 'sha256', 'snapshot'],
     })
     expect(document.components.schemas.PresentationJob).toMatchObject({ additionalProperties: false })
-    expect(document.components.schemas.PresentationJobUsage).toMatchObject({ additionalProperties: false })
+    expect(document.components.schemas.PresentationJobUsagePolicy).toMatchObject({
+      additionalProperties: false,
+      required: ['maximumBillableImageOperationsPerPage'],
+      properties: {
+        maximumBillableImageOperationsPerPage: { const: 5 },
+      },
+    })
+    expect(document.components.schemas.PresentationJob!.required).toContain('usagePolicy')
+    expect(document.components.schemas.PresentationJobUsage).toMatchObject({
+      additionalProperties: false,
+      required: expect.arrayContaining([
+        'usagePolicy',
+        'billableImageOperations',
+        'notChargedImageOperations',
+        'unknownImageOperations',
+        'byModel',
+      ]),
+    })
     const source = JSON.stringify(document)
     expect(source).not.toContain('budgetUnits')
     expect(source).not.toContain('maxRevisionRounds')

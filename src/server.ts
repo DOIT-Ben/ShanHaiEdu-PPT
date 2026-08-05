@@ -11,28 +11,35 @@ import {
 import { FallbackCoursewareModel } from './adapters/fallback-courseware-model'
 import { HttpFrameFlowBackend } from './adapters/frameflow-http-backend'
 import { FrameFlowUsageAccountingAdapter } from './adapters/frameflow-usage-accounting'
+import { FrameFlowHostAdapter } from './adapters/frameflow-host'
 import { ExternallyAuthorizedBudgetPort } from './adapters/external-budget'
+import {
+  InternalPresentationJobV2Provider,
+  presentationJobV2InternalTenantId,
+} from './adapters/internal-presentation-job-v2-provider'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { SqlitePresentationJobV2Repository } from './adapters/presentation-job-v2-sqlite-repository'
 import {
   FixedServicePresentationJobBudgetPolicy,
 } from './adapters/presentation-job-v2-ports'
-import { createAgentRuntime, createMockRuntime } from './runtime/mock-runtime'
+import { TenantRoutingBudgetPort } from './adapters/tenant-routing-budget'
+import { MockBudgetPort } from './adapters/mock-ports'
+import { createAgentRuntime, createMockRuntime, SystemClock } from './runtime/mock-runtime'
+import { RunService } from './core/run-service'
 import { createPresentationJobV2ProviderFromEnv } from './runtime/presentation-job-v2-provider-config'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
+import { resolveMainServerConfig } from './runtime/main-server-config'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
-const hostname = process.env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
-if (hostname !== '127.0.0.1' && hostname !== 'localhost' && hostname !== '::1') {
-  throw new Error('PPT_AGENT_HOST_MUST_BE_LOOPBACK')
-}
-const port = Number(process.env.PPT_AGENT_PORT ?? 4310)
-if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error('PPT_AGENT_PORT_INVALID')
-const apiToken = process.env.PPT_AGENT_API_TOKEN?.trim()
-if (!apiToken) throw new Error('PPT_AGENT_API_TOKEN_REQUIRED')
-const adminApiToken = process.env.PPT_AGENT_ADMIN_API_TOKEN?.trim()
+const {
+  hostname,
+  port,
+  apiToken,
+  adminApiToken,
+  presentationJobV2ApiToken,
+} = resolveMainServerConfig(process.env)
 const tenantId = process.env.PPT_AGENT_TENANT_ID?.trim() || 'frameflow'
 const budgetMode = process.env.PPT_AGENT_BUDGET_MODE?.trim() || (tenantId === 'frameflow' ? 'frameflow' : '')
 if (tenantId === 'frameflow' && budgetMode !== 'frameflow') throw new Error('PPT_AGENT_BUDGET_MODE_INVALID')
@@ -41,6 +48,7 @@ const authentication = new ServiceTokenAuthentication([{
   tenantId,
   userToken: apiToken,
   ...(adminApiToken ? { adminToken: adminApiToken } : {}),
+  ...(presentationJobV2ApiToken ? { v2Token: presentationJobV2ApiToken } : {}),
 }])
 function boundedInteger(name: string, fallback: number, minimum: number, maximum: number) {
   const value = Number(process.env[name] ?? fallback)
@@ -51,13 +59,7 @@ const dataRoot = path.resolve(process.env.PPT_AGENT_DATA_ROOT?.trim() || '.priva
 await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
-const presentationJobV2Repository = new SqlitePresentationJobV2Repository(path.join(dataRoot, 'presentation-jobs-v2.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
-const presentationJobV2 = {
-  repository: presentationJobV2Repository,
-  provider: createPresentationJobV2ProviderFromEnv(process.env),
-  budget: new FixedServicePresentationJobBudgetPolicy(1),
-}
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
 const usageV2Runtime = resolveUsageV2RuntimeConfig(process.env, await repository.listRuns())
 if (usageV2Runtime.requiresUsageV2Runtime && tenantId !== 'frameflow') {
@@ -100,6 +102,41 @@ const releaseIdentity = buildIdentity({
   gitSha: process.env.PPT_AGENT_GIT_SHA?.trim() || 'unknown',
   releaseId: process.env.PPT_AGENT_RELEASE_ID?.trim() || 'unversioned',
 })
+const presentationJobV2Clock = new SystemClock()
+const presentationJobV2InternalTenant = presentationJobV2InternalTenantId(tenantId)
+const presentationJobV2Runtime = presentationJobV2ApiToken
+  ? (() => {
+      const presentationJobV2Repository = new SqlitePresentationJobV2Repository(
+        path.join(dataRoot, 'presentation-jobs-v2.sqlite'),
+      )
+      const internalPresentationJobV2Provider = new InternalPresentationJobV2Provider({
+        runs: new RunService({
+          repository,
+          artifacts,
+          clock: presentationJobV2Clock,
+          buildIdentity: releaseIdentity,
+        }),
+        repository,
+        artifacts,
+        internalTenantId: presentationJobV2InternalTenant,
+      })
+      return {
+        repository: presentationJobV2Repository,
+        provider: createPresentationJobV2ProviderFromEnv(process.env, {
+          internalProvider: internalPresentationJobV2Provider,
+        }),
+        budget: new ExternallyAuthorizedBudgetPort(presentationJobV2InternalTenant),
+      }
+    })()
+  : null
+const presentationJobV2 = presentationJobV2Runtime
+  ? {
+      repository: presentationJobV2Runtime.repository,
+      provider: presentationJobV2Runtime.provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+    }
+  : undefined
+const presentationJobV2Budget = presentationJobV2Runtime?.budget
 const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
 // A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
 const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_000, 60 * 60_000)
@@ -142,6 +179,16 @@ const runtime = runtimeMode === 'gateway'
             token: frameFlowInternalToken!,
           })
         : undefined
+      const hostBudget = frameFlowBackend
+        ? new FrameFlowHostAdapter(frameFlowBackend)
+        : new ExternallyAuthorizedBudgetPort(tenantId)
+      const budget = presentationJobV2Budget
+        ? new TenantRoutingBudgetPort({
+            routedTenantId: presentationJobV2InternalTenant,
+            routed: presentationJobV2Budget,
+            fallback: hostBudget,
+          })
+        : hostBudget
       const textModel = process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6'
       const visionModel = process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6'
       const primaryModel = new GatewayCoursewareModel({
@@ -170,7 +217,7 @@ const runtime = runtimeMode === 'gateway'
       return createAgentRuntime({
         repository,
         artifacts,
-        presentationJobV2,
+        ...(presentationJobV2 ? { presentationJobV2 } : {}),
         ...(discovery ? { discovery } : {}),
         ...(discovery ? { candidateReviewer: model } : {}),
         apiToken,
@@ -181,11 +228,8 @@ const runtime = runtimeMode === 'gateway'
         deckReviewer: model,
         revisionPlanner: model,
         revisionApplication: model,
-        ...(frameFlowBackend ? {
-          frameFlowBackend,
-        } : {
-          budget: new ExternallyAuthorizedBudgetPort(tenantId),
-        }),
+        ...(frameFlowBackend ? { frameFlowBackend } : {}),
+        budget,
         defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
         ...(usageV2Runtime.requiresUsageV2Runtime ? {
           usageAccounting: new FrameFlowUsageAccountingAdapter(frameFlowBackend!),
@@ -207,10 +251,18 @@ const runtime = runtimeMode === 'gateway'
       })
     })()
   : createMockRuntime({
-      repository, artifacts, presentationJobV2, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
+      repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
+      ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
       revisionImageModel: revisionImageModel || 'image-2',
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
+      budget: presentationJobV2Budget
+        ? new TenantRoutingBudgetPort({
+            routedTenantId: presentationJobV2InternalTenant,
+            routed: presentationJobV2Budget,
+            fallback: new MockBudgetPort(),
+          })
+        : new MockBudgetPort(),
     })
 let ticking = false
 const timer = setInterval(async () => {
@@ -250,7 +302,7 @@ const stop = () => {
   clearInterval(timer)
   server.stop(true)
   repository.close()
-  presentationJobV2Repository.close()
+  presentationJobV2Runtime?.repository.close()
   process.exit(0)
 }
 process.on('SIGINT', stop)

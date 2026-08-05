@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -51,17 +52,96 @@ async function databasePath() {
 }
 
 describe('SQLite Presentation Job V2 repository', () => {
+  test('conservatively upgrades legacy finalized billing JSON with a submitted operation', async () => {
+    const filename = await databasePath()
+    const initial = new SqlitePresentationJobV2Repository(filename)
+    const provider = new MockPresentationJobV2Provider()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository: initial,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, {
+      source: {
+        kind: 'APPROVED_PAGE_DESIGN', artifactVersionId: 'weather-legacy-v1',
+        sha256: approvedPageDesignSnapshotHash(snapshot), snapshot,
+      },
+    }, 'sqlite-v2-legacy-usage')
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+    const stored = await initial.getPresentationJob(created.job.jobId)
+    if (!stored) throw new Error('expected completed Presentation Job V2 fixture')
+    initial.close()
+
+    const legacyRecord = {
+      ...stored,
+      providerOperations: stored.providerOperations.map((operation) => ({
+        idempotencyKey: operation.idempotencyKey,
+        operationId: operation.operationId,
+        status: operation.status,
+        billingStatus: 'SETTLED' as const,
+        createdAt: operation.createdAt,
+        completedAt: operation.completedAt,
+      })),
+      usage: {
+        usageVersion: 1 as const,
+        status: 'FINALIZED' as const,
+        action: 'NONE' as const,
+        unknownOperationCount: 0,
+        finalizedAt: stored.updatedAt,
+      },
+    }
+    const legacy = new Database(filename, { readwrite: true, strict: true })
+    legacy.query<unknown, [string, string, string, string]>(`
+      UPDATE presentation_jobs_v2
+      SET data = ?, usage_status = ?, next_attempt_at = NULL
+      WHERE id = ? AND status = ?
+    `).run(JSON.stringify(legacyRecord), 'FINALIZED', stored.id, 'COMPLETED')
+    legacy.close(true)
+
+    const reopened = new SqlitePresentationJobV2Repository(filename)
+    expect(await reopened.getPresentationJob(stored.id)).toMatchObject({
+      status: 'COMPLETED',
+      usage: {
+        status: 'RECONCILING',
+        action: 'WAIT',
+        billableImageOperations: 0,
+        notChargedImageOperations: 0,
+        unknownImageOperations: 1,
+        byModel: [{ model: 'unknown', unknownImageOperations: 1 }],
+        finalizedAt: null,
+      },
+      providerOperations: [{
+        usage: {
+          billableImageOperations: 0,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 1,
+        },
+      }],
+    })
+    expect(await reopened.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([expect.objectContaining({ id: stored.id })])
+    reopened.close()
+  })
+
   test('persists a delivered Job and reconciled Usage independently of V1 Run storage', async () => {
     const filename = await databasePath()
     const first = new SqlitePresentationJobV2Repository(filename)
     const provider = new MockPresentationJobV2Provider()
     const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
     const service = new PresentationJobV2Service({
       repository: first,
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     const created = await service.create(owner, {
       source: {
@@ -80,7 +160,7 @@ describe('SQLite Presentation Job V2 repository', () => {
       artifacts,
       provider,
       budget: new FixedServicePresentationJobBudgetPolicy(1),
-      clock: new FixedClock(),
+      clock,
     })
     await resumed.tick({ limit: 10 })
     const stored = await reopened.getPresentationJob(created.job.jobId)
@@ -88,7 +168,10 @@ describe('SQLite Presentation Job V2 repository', () => {
       id: created.job.jobId,
       status: 'COMPLETED',
       owner,
-      usage: { status: 'FINALIZED', unknownOperationCount: 0 },
+      usage: {
+        status: 'FINALIZED', billableImageOperations: snapshot.pages.length,
+        notChargedImageOperations: 0, unknownImageOperations: 0,
+      },
     })
 
     const bestEffort = await resumed.create(owner, {
@@ -116,7 +199,31 @@ describe('SQLite Presentation Job V2 repository', () => {
     expect(await reopened.getPresentationJob(blocked.job.jobId)).toMatchObject({
       status: 'FAILED', quality: null, artifact: null,
     })
-    expect(await reopened.listRunnablePresentationJobs({ limit: 10 })).toEqual([])
+
+    const reconciling = await resumed.create(owner, {
+      source: {
+        kind: 'APPROVED_PAGE_DESIGN', artifactVersionId: 'weather-reconciling-v1',
+        sha256: approvedPageDesignSnapshotHash(snapshot), snapshot,
+      },
+    }, 'sqlite-v2-failed-reconciling')
+    await resumed.tick({ limit: 10 })
+    await provider.fail(`${reconciling.job.jobId}:provider:1`, 'PROVIDER_OPERATION_FAILED', 'UNKNOWN')
+    await resumed.tick({ limit: 10 })
+    expect(await reopened.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([])
+    clock.advance(1_000)
+    expect(await reopened.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([
+      expect.objectContaining({
+        id: reconciling.job.jobId,
+        status: 'FAILED',
+        usage: expect.objectContaining({ status: 'RECONCILING' }),
+      }),
+    ])
     reopened.close()
   })
 })

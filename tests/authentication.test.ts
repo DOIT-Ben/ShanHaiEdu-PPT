@@ -18,9 +18,10 @@ function request(input: Readonly<{
 describe('service token authentication', () => {
   const frameflowUser = 'frameflow-user-token-0001'
   const frameflowAdmin = 'frameflow-admin-token-0001'
+  const frameflowV2 = 'frameflow-v2-service-token-0001'
   const shanhaiUser = 'shanhai-user-token-000001'
   const authentication = new ServiceTokenAuthentication([
-    { tenantId: 'frameflow', userToken: frameflowUser, adminToken: frameflowAdmin },
+    { tenantId: 'frameflow', userToken: frameflowUser, adminToken: frameflowAdmin, v2Token: frameflowV2 },
     { tenantId: 'shanhaiedu', userToken: shanhaiUser },
   ])
 
@@ -44,5 +45,16 @@ describe('service token authentication', () => {
   test('derives administrator role from the administrator token', async () => {
     expect(await authentication.authenticate(request({ token: frameflowAdmin, tenantId: 'frameflow' })))
       .toEqual({ tenantId: 'frameflow', externalUserId: 'teacher-1', role: 'ADMIN' })
+  })
+
+  test('uses the dedicated V2 service token without accepting V1 user or administrator tokens', async () => {
+    const serviceRequest = (token: string) => new Request('http://127.0.0.1:4310/v2/presentation-jobs', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+
+    expect(await authentication.authenticateService(serviceRequest(frameflowV2)))
+      .toEqual({ tenantId: 'frameflow', role: 'USER' })
+    expect(await authentication.authenticateService(serviceRequest(frameflowUser))).toBeNull()
+    expect(await authentication.authenticateService(serviceRequest(frameflowAdmin))).toBeNull()
   })
 })

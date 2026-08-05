@@ -6,6 +6,7 @@ export type ServiceCredential = Readonly<{
   tenantId: string
   userToken: string
   adminToken?: string
+  v2Token?: string
 }>
 
 export type AuthenticatedService = Readonly<{
@@ -49,6 +50,12 @@ export class ServiceTokenAuthentication implements HostAuthenticationPort {
         }
         tokens.add(credential.adminToken)
       }
+      if (credential.v2Token) {
+        if (!validToken(credential.v2Token) || tokens.has(credential.v2Token)) {
+          throw new Error('PPT_AGENT_CREDENTIAL_V2_TOKEN_INVALID')
+        }
+        tokens.add(credential.v2Token)
+      }
     }
     this.credentials = credentials.map((credential) => ({ ...credential }))
   }
@@ -83,6 +90,12 @@ export class ServiceTokenAuthentication implements HostAuthenticationPort {
     const provided = authorization?.startsWith('Bearer ') ? authorization.slice(7) : ''
     if (!provided) return null
     for (const credential of this.credentials) {
+      if (credential.v2Token) {
+        if (matchesToken(provided, credential.v2Token)) {
+          return { tenantId: credential.tenantId, role: 'USER' }
+        }
+        continue
+      }
       const administrator = credential.adminToken ? matchesToken(provided, credential.adminToken) : false
       const user = matchesToken(provided, credential.userToken)
       if (administrator || user) return { tenantId: credential.tenantId, role: administrator ? 'ADMIN' : 'USER' }

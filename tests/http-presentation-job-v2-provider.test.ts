@@ -38,6 +38,24 @@ const source = {
   sha256: approvedPageDesignSnapshotHash(snapshot),
   snapshot,
 }
+const settledUsage = {
+  billableImageOperations: snapshot.pages.length,
+  notChargedImageOperations: 0,
+  unknownImageOperations: 0,
+  byModel: [{
+    model: 'nanobanana', billableImageOperations: snapshot.pages.length,
+    notChargedImageOperations: 0, unknownImageOperations: 0,
+  }],
+}
+const unknownUsage = {
+  billableImageOperations: 0,
+  notChargedImageOperations: 0,
+  unknownImageOperations: snapshot.pages.length,
+  byModel: [{
+    model: 'nanobanana', billableImageOperations: 0,
+    notChargedImageOperations: 0, unknownImageOperations: snapshot.pages.length,
+  }],
+}
 
 describe('HTTP Presentation Job V2 provider', () => {
   test('submits only the immutable provider input and validates a completed PPTX artifact', async () => {
@@ -67,7 +85,7 @@ describe('HTTP Presentation Job V2 provider', () => {
           : Response.json({
               state: 'COMPLETED',
               quality: 'PASSED',
-              billingStatus: 'SETTLED',
+              usage: settledUsage,
               artifact: {
                 name: 'lesson.pptx',
                 mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -78,12 +96,14 @@ describe('HTTP Presentation Job V2 provider', () => {
       },
     })
 
-    const submitted = await provider.submit({
+    const submission = {
       jobId: 'presentation-job-7',
       owner: { tenantId: 'tenant-a', externalUserId: 'private-user', externalProjectId: 'private-project' },
       source,
       idempotencyKey: 'presentation-job-7:provider:1',
-    })
+      maximumBillableImageOperations: 10,
+    }
+    const submitted = await provider.submit(submission)
     const running = await provider.inspect({
       jobId: 'presentation-job-7',
       operationId: submitted.operationId,
@@ -100,7 +120,7 @@ describe('HTTP Presentation Job V2 provider', () => {
     expect(completed).toEqual({
       state: 'COMPLETED',
       quality: 'PASSED',
-      billingStatus: 'SETTLED',
+      usage: settledUsage,
       artifact: {
         bytes: pptxBytes,
         name: 'lesson.pptx',
@@ -111,9 +131,10 @@ describe('HTTP Presentation Job V2 provider', () => {
     expect(requests[0]!.url).toBe('https://provider.example/v1/presentation-operations')
     expect(requests[0]!.headers.get('Idempotency-Key')).toBe('presentation-job-7:provider:1')
     expect(await requests[0]!.clone().json()).toEqual({
-      contractVersion: '1.0',
+      contractVersion: '2.0',
       jobId: 'presentation-job-7',
       source,
+      maximumBillableImageOperations: 10,
     })
     expect(JSON.stringify(await requests[0]!.clone().json())).not.toContain('private-user')
     expect(requests[3]!.url).toBe('https://provider.example/v1/presentation-operations/operation-7/artifact')
@@ -137,7 +158,7 @@ describe('HTTP Presentation Job V2 provider', () => {
             },
           })
         : Response.json({
-            state: 'COMPLETED', quality: 'PASSED', billingStatus: 'UNKNOWN',
+            state: 'COMPLETED', quality: 'PASSED', usage: unknownUsage,
             artifact: {
               name: 'lesson.pptx',
               mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -164,7 +185,7 @@ describe('HTTP Presentation Job V2 provider', () => {
         return Response.json({
           state: 'FAILED',
           errorCode: 'PROVIDER_SAFETY_BLOCKED',
-          billingStatus: 'SETTLED',
+          usage: settledUsage,
         })
       },
     })
@@ -176,7 +197,7 @@ describe('HTTP Presentation Job V2 provider', () => {
     })).toEqual({
       state: 'FAILED',
       errorCode: 'PROVIDER_SAFETY_BLOCKED',
-      billingStatus: 'SETTLED',
+      usage: settledUsage,
     })
     expect(calls).toBe(1)
   })
@@ -192,7 +213,7 @@ describe('HTTP Presentation Job V2 provider', () => {
         return Response.json({
           state: 'COMPLETED',
           quality: 'BLOCKING_FAILURE',
-          billingStatus: 'SETTLED',
+          usage: settledUsage,
           artifact: {
             name: 'blocked.pptx',
             mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -210,7 +231,7 @@ describe('HTTP Presentation Job V2 provider', () => {
     })).resolves.toEqual({
       state: 'FAILED',
       errorCode: 'DELIVERY_BLOCKED_BY_QUALITY',
-      billingStatus: 'SETTLED',
+      usage: settledUsage,
     })
     expect(calls).toBe(1)
   })

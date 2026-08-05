@@ -4,6 +4,10 @@ import {
   PRESENTATION_JOB_V2_PPTX_MIME_TYPE,
   type PresentationJobV2ProviderPort,
 } from '../core/presentation-job-v2-ports'
+import {
+  PRESENTATION_JOB_V2_CONTRACT_VERSION,
+  presentationJobV2UsageSummarySchema,
+} from '../presentation-job-v2-contracts'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
@@ -12,7 +16,6 @@ const DEFAULT_MAXIMUM_ARTIFACT_BYTES = 200 * 1024 * 1024
 
 const operationIdSchema = z.string().trim().min(1).max(512)
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
-const billingStatusSchema = z.enum(['SETTLED', 'UNKNOWN'])
 const inspectionSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('RUNNING'),
@@ -21,12 +24,12 @@ const inspectionSchema = z.discriminatedUnion('state', [
   z.object({
     state: z.literal('FAILED'),
     errorCode: z.string().trim().min(1).max(160),
-    billingStatus: billingStatusSchema,
+    usage: presentationJobV2UsageSummarySchema,
   }).strict(),
   z.object({
     state: z.literal('COMPLETED'),
     quality: z.enum(['PASSED', 'BEST_EFFORT', 'BLOCKING_FAILURE']),
-    billingStatus: billingStatusSchema,
+    usage: presentationJobV2UsageSummarySchema,
     artifact: z.object({
       name: z.string().trim().min(1).max(240),
       mimeType: z.literal(PRESENTATION_JOB_V2_PPTX_MIME_TYPE),
@@ -115,9 +118,10 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
           'Idempotency-Key': input.idempotencyKey,
         },
         body: JSON.stringify({
-          contractVersion: '1.0',
+          contractVersion: PRESENTATION_JOB_V2_CONTRACT_VERSION,
           jobId: input.jobId,
           source: input.source,
+          maximumBillableImageOperations: input.maximumBillableImageOperations,
         }),
         signal: AbortSignal.timeout(this.timeoutMs),
       })
@@ -149,24 +153,39 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
       return {
         state: 'FAILED' as const,
         errorCode: `PRESENTATION_PROVIDER_INSPECT_HTTP_${response.status}`,
-        billingStatus: 'UNKNOWN' as const,
+        usage: {
+          billableImageOperations: 0,
+          notChargedImageOperations: 0,
+          unknownImageOperations: 1,
+          byModel: [{
+            model: 'unknown',
+            billableImageOperations: 0,
+            notChargedImageOperations: 0,
+            unknownImageOperations: 1,
+          }],
+        },
       }
     }
     const parsed = inspectionSchema.safeParse(await response.json().catch(() => null))
     if (!parsed.success) throw new Error('PRESENTATION_PROVIDER_INSPECT_RESPONSE_INVALID')
-    if (parsed.data.state !== 'COMPLETED') return parsed.data
+    if (parsed.data.state === 'RUNNING') {
+      return parsed.data.retryAfterMs === undefined
+        ? { state: 'RUNNING' as const }
+        : { state: 'RUNNING' as const, retryAfterMs: parsed.data.retryAfterMs }
+    }
+    if (parsed.data.state === 'FAILED') return parsed.data
     if (parsed.data.quality === 'BLOCKING_FAILURE') {
       return {
         state: 'FAILED' as const,
         errorCode: 'DELIVERY_BLOCKED_BY_QUALITY',
-        billingStatus: parsed.data.billingStatus,
+        usage: parsed.data.usage,
       }
     }
     const bytes = await this.downloadArtifact(operationId, parsed.data.artifact)
     return {
       state: 'COMPLETED' as const,
       quality: parsed.data.quality,
-      billingStatus: parsed.data.billingStatus,
+      usage: parsed.data.usage,
       artifact: {
         bytes,
         name: parsed.data.artifact.name,

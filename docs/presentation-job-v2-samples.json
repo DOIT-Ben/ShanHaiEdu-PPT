@@ -11,6 +11,7 @@
       "status": "QUEUED",
       "phase": "ACCEPTED",
       "progress": { "percent": 0 },
+      "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
       "quality": null,
       "artifact": null,
       "createdAt": "2026-08-05T00:00:00.000Z",
@@ -26,6 +27,7 @@
       "status": "RUNNING",
       "phase": "GENERATING",
       "progress": { "percent": 75 },
+      "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
       "quality": null,
       "artifact": null,
       "createdAt": "2026-08-05T00:00:00.000Z",
@@ -41,6 +43,7 @@
       "status": "COMPLETED",
       "phase": "COMPLETE",
       "progress": { "percent": 100 },
+      "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
       "quality": "PASSED",
       "artifact": {
         "artifactId": "artifact-completed-01",
@@ -62,6 +65,7 @@
       "status": "COMPLETED",
       "phase": "COMPLETE",
       "progress": { "percent": 100 },
+      "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
       "quality": "BEST_EFFORT",
       "artifact": {
         "artifactId": "artifact-best-effort-01",
@@ -83,6 +87,7 @@
       "status": "FAILED",
       "phase": "FAILED",
       "progress": { "percent": 100 },
+      "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
       "quality": null,
       "artifact": null,
       "createdAt": "2026-08-05T00:00:00.000Z",
@@ -97,9 +102,18 @@
         "contractVersion": "2.0",
         "jobId": "presentation-job-completed-01",
         "usageVersion": 1,
+        "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
         "status": "RECONCILING",
         "action": "WAIT",
-        "unknownOperationCount": 1,
+        "billableImageOperations": 0,
+        "notChargedImageOperations": 0,
+        "unknownImageOperations": 2,
+        "byModel": [{
+          "model": "nanobanana",
+          "billableImageOperations": 0,
+          "notChargedImageOperations": 0,
+          "unknownImageOperations": 2
+        }],
         "finalizedAt": null
       }
     },
@@ -110,9 +124,23 @@
         "contractVersion": "2.0",
         "jobId": "presentation-job-completed-01",
         "usageVersion": 1,
+        "usagePolicy": { "maximumBillableImageOperationsPerPage": 5 },
         "status": "FINALIZED",
         "action": "NONE",
-        "unknownOperationCount": 0,
+        "billableImageOperations": 2,
+        "notChargedImageOperations": 0,
+        "unknownImageOperations": 0,
+        "byModel": [{
+          "model": "nanobanana",
+          "billableImageOperations": 1,
+          "notChargedImageOperations": 0,
+          "unknownImageOperations": 0
+        }, {
+          "model": "image-2",
+          "billableImageOperations": 1,
+          "notChargedImageOperations": 0,
+          "unknownImageOperations": 0
+        }],
         "finalizedAt": "2026-08-05T00:01:00.000Z"
       }
     }

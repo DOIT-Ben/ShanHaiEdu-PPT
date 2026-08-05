@@ -1,6 +1,8 @@
 import type {
   ApprovedPageDesignSnapshotSource,
   PresentationJobV2CreateRequest,
+  PresentationJobV2UsagePolicy,
+  PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
 
 export const PRESENTATION_JOB_V2_PPTX_MIME_TYPE =
@@ -29,16 +31,15 @@ export type PresentationJobV2ProviderOperation = Readonly<{
   idempotencyKey: string
   operationId: string
   status: 'SUBMITTED' | 'COMPLETED' | 'FAILED'
-  billingStatus: 'SETTLED' | 'UNKNOWN'
+  usage: PresentationJobV2UsageSummary
   createdAt: string
   completedAt: string | null
 }>
 
-export type PresentationJobV2UsageRecord = Readonly<{
+export type PresentationJobV2UsageRecord = Readonly<PresentationJobV2UsageSummary & {
   usageVersion: 1
   status: PresentationJobV2UsageStatus
   action: 'WAIT' | 'NONE'
-  unknownOperationCount: number
   finalizedAt: string | null
 }>
 
@@ -66,6 +67,7 @@ export type PublicPresentationJobV2 = Readonly<{
   status: PresentationJobV2Status
   phase: PresentationJobV2Phase
   progress: Readonly<{ percent: number }>
+  usagePolicy: PresentationJobV2UsagePolicy
   quality: PresentationJobV2Quality
   artifact: PresentationJobV2Artifact | null
   createdAt: string
@@ -76,17 +78,24 @@ export type PublicPresentationJobV2Usage = Readonly<{
   contractVersion: '2.0'
   jobId: string
   usageVersion: 1
+  usagePolicy: PresentationJobV2UsagePolicy
   status: PresentationJobV2UsageStatus
   action: 'WAIT' | 'NONE'
-  unknownOperationCount: number
+  billableImageOperations: number
+  notChargedImageOperations: number
+  unknownImageOperations: number
+  byModel: PresentationJobV2UsageSummary['byModel']
   finalizedAt: string | null
 }>
 
 export interface PresentationJobV2Repository {
   createPresentationJob(job: PresentationJobV2Record): Promise<void>
   getPresentationJob(jobId: string): Promise<PresentationJobV2Record | null>
-  savePresentationJob(job: PresentationJobV2Record): Promise<void>
-  listRunnablePresentationJobs(input: Readonly<{ limit: number }>): Promise<readonly PresentationJobV2Record[]>
+  savePresentationJob(job: PresentationJobV2Record, workerEligibleAt: string | null): Promise<void>
+  listRunnablePresentationJobs(input: Readonly<{
+    limit: number
+    now: string
+  }>): Promise<readonly PresentationJobV2Record[]>
 }
 
 export interface PresentationJobV2BudgetPolicy {
@@ -99,7 +108,7 @@ export interface PresentationJobV2BudgetPolicy {
 }
 
 export type PresentationJobV2ProviderResult =
-  | Readonly<{ state: 'RUNNING' }>
+  | Readonly<{ state: 'RUNNING'; retryAfterMs?: number }>
   | Readonly<{
       state: 'COMPLETED'
       artifact: Readonly<{
@@ -108,12 +117,12 @@ export type PresentationJobV2ProviderResult =
         mimeType: typeof PRESENTATION_JOB_V2_PPTX_MIME_TYPE
       }>
       quality: 'PASSED' | 'BEST_EFFORT' | 'BLOCKING_FAILURE'
-      billingStatus: 'SETTLED' | 'UNKNOWN'
+      usage: PresentationJobV2UsageSummary
     }>
   | Readonly<{
       state: 'FAILED'
       errorCode: string
-      billingStatus: 'SETTLED' | 'UNKNOWN'
+      usage: PresentationJobV2UsageSummary
     }>
 
 export interface PresentationJobV2ProviderPort {
@@ -122,6 +131,7 @@ export interface PresentationJobV2ProviderPort {
     owner: PresentationJobV2Owner
     source: ApprovedPageDesignSnapshotSource
     idempotencyKey: string
+    maximumBillableImageOperations: number
   }>): Promise<Readonly<{ operationId: string }>>
 
   inspect(input: Readonly<{

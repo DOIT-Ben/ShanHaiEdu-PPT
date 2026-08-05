@@ -2,7 +2,7 @@
 
 ## 状态
 
-Accepted
+Accepted；运行时装配由 ADR-010 补充
 
 ## 日期
 
@@ -14,17 +14,18 @@ Accepted
 
 ## 决策
 
-- V2 使用独立的 Presentation Job repository、provider port、服务级授权策略和 Artifact 引用，不创建或读取 V1 Run、Step、Event、Delivery 或宿主数据库记录。
+- V2 核心使用独立的 Presentation Job repository、provider port、服务级授权策略和 Artifact 引用，不创建或读取 V1 Run、Step、Event、Delivery 或宿主数据库记录。Provider port 的私有实现可以复用 PPT-Agent 内部执行图，但不得把内部记录投影到 V2 公共合同。
 - V2 核心和 HTTP facade 只理解 tenant、external user、optional external project、不可变来源快照、通用 Provider Operation 与交付质量；它们不导入具体宿主 adapter。
 - 服务凭据决定 tenant。V2 拒绝租户覆盖头；对象所有权不匹配一律返回 404。
 - Provider Operation 在 PPT-Agent 内以稳定幂等键记录，固定服务级操作上限在执行前强制。V2 不调用宿主预算、结算、释放、完成或文档 HTTP callback。
 - Job 交付和 Usage 终态独立。已交付 Job 不能因为后续对账或历史 V1 Event 改为 FAILED；Usage `FINALIZED` 后不能变更。
-- V1 继续使用现有 adapter 和 Run 语义以兼容历史。V2 提供独立进程入口，只构造 V2 SQLite repository、Artifact port、固定服务级预算、服务认证和通用 Provider port；它不通过 `createAgentRuntime` 或 `createMockRuntime` 初始化 V1 执行图。
+- Usage 只公开按模型聚合的可计费、未收费和未知图片操作事实，不包含宿主价格或积分；聚合总数必须与 `byModel` 一致。
+- V1 继续使用现有 adapter 和 Run 语义以兼容历史。V2 提供独立进程入口，只构造 V2 SQLite repository、Artifact port、固定服务级预算、服务认证和通用 Provider port；它不通过 `createAgentRuntime` 或 `createMockRuntime` 初始化内部执行图。主进程如何实现 Provider port 由 ADR-010 约束。
 
 ## 后果
 
 - 新宿主只需提供服务凭据、外部身份范围和已预授权的不可变来源快照；宿主自行决定如何消费 Job/Artifact/Usage。
-- 真实通用 Provider 由独立 V2 provider port 注入；本仓库测试使用本地 Mock Provider，不调用计费模型。
+- 主进程的真实 Provider 实现和独立 V2 进程的 HTTP Provider 都通过同一个 port 注入；本仓库测试使用本地 Mock Provider，不调用计费模型。
 - V2 SQLite 采用专属 `presentation_jobs_v2` 表，避免与 V1 记录发生状态耦合。
 - V2-only 服务使用独立 tenant、Token、监听端口和数据根配置，因此可与 V1 兼容服务并行部署或单独回退。
 

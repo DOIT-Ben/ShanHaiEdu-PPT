@@ -4,6 +4,7 @@ import type {
   PresentationJobV2ProviderPort,
   PresentationJobV2ProviderResult,
 } from '../core/presentation-job-v2-ports'
+import type { PresentationJobV2UsageSummary } from '../presentation-job-v2-contracts'
 
 export class FixedServicePresentationJobBudgetPolicy implements PresentationJobV2BudgetPolicy {
   readonly authorizations: Parameters<PresentationJobV2BudgetPolicy['authorize']>[0][] = []
@@ -38,6 +39,9 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
   }
 
   async submit(input: Parameters<PresentationJobV2ProviderPort['submit']>[0]) {
+    if (input.source.snapshot.pages.length > input.maximumBillableImageOperations) {
+      throw new Error('PRESENTATION_PROVIDER_OPERATION_CAP_INVALID')
+    }
     this.submitRequests.push(structuredClone(input))
     const existing = this.#operations.get(input.idempotencyKey)
     if (existing) return { operationId: existing.operationId }
@@ -63,7 +67,7 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
   async complete(
     idempotencyKey: string,
     quality: 'PASSED' | 'BEST_EFFORT' | 'BLOCKING_FAILURE' = 'PASSED',
-    billingStatus: 'SETTLED' | 'UNKNOWN' = 'SETTLED',
+    billingStatus: 'SETTLED' | 'NOT_CHARGED' | 'UNKNOWN' = 'SETTLED',
   ) {
     const entry = this.#operations.get(idempotencyKey)
     if (!entry) throw new Error('PRESENTATION_OPERATION_NOT_FOUND')
@@ -74,13 +78,13 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
     })
   }
 
-  async fail(idempotencyKey: string, errorCode = 'PROVIDER_FAILURE', billingStatus: 'SETTLED' | 'UNKNOWN' = 'SETTLED') {
+  async fail(idempotencyKey: string, errorCode = 'PROVIDER_FAILURE', billingStatus: 'SETTLED' | 'NOT_CHARGED' | 'UNKNOWN' = 'SETTLED') {
     const entry = this.#operations.get(idempotencyKey)
     if (!entry) throw new Error('PRESENTATION_OPERATION_NOT_FOUND')
     this.#operations.set(entry.idempotencyKey, {
       ...entry,
       inspections: 1,
-      result: { state: 'FAILED', errorCode, billingStatus },
+      result: { state: 'FAILED', errorCode, usage: this.usage(entry.source, billingStatus) },
     })
   }
 
@@ -89,14 +93,14 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
     if (!entry || entry.result.state !== 'COMPLETED') throw new Error('PRESENTATION_OPERATION_NOT_COMPLETED')
     this.#operations.set(entry.idempotencyKey, {
       ...entry,
-      result: { ...entry.result, billingStatus: 'SETTLED' },
+      result: { ...entry.result, usage: this.usage(entry.source, 'SETTLED') },
     })
   }
 
   private async completedResult(
     source: Parameters<PresentationJobV2ProviderPort['submit']>[0]['source'],
     quality: 'PASSED' | 'BEST_EFFORT' | 'BLOCKING_FAILURE',
-    billingStatus: 'SETTLED' | 'UNKNOWN',
+    billingStatus: 'SETTLED' | 'NOT_CHARGED' | 'UNKNOWN',
   ): Promise<Extract<PresentationJobV2ProviderResult, { state: 'COMPLETED' }>> {
     const pptx = new PptxGenJS()
     pptx.layout = 'LAYOUT_WIDE'
@@ -113,7 +117,26 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
         mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       },
       quality,
-      billingStatus,
+      usage: this.usage(source, billingStatus),
+    }
+  }
+
+  private usage(
+    source: Parameters<PresentationJobV2ProviderPort['submit']>[0]['source'],
+    billingStatus: 'SETTLED' | 'NOT_CHARGED' | 'UNKNOWN',
+  ): PresentationJobV2UsageSummary {
+    const count = source.snapshot.pages.length
+    const byModel = {
+      model: 'nanobanana',
+      billableImageOperations: billingStatus === 'SETTLED' ? count : 0,
+      notChargedImageOperations: billingStatus === 'NOT_CHARGED' ? count : 0,
+      unknownImageOperations: billingStatus === 'UNKNOWN' ? count : 0,
+    }
+    return {
+      billableImageOperations: byModel.billableImageOperations,
+      notChargedImageOperations: byModel.notChargedImageOperations,
+      unknownImageOperations: byModel.unknownImageOperations,
+      byModel: [byModel],
     }
   }
 }
