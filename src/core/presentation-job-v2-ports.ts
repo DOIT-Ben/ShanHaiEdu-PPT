@@ -108,7 +108,7 @@ export interface PresentationJobV2BudgetPolicy {
 }
 
 export type PresentationJobV2ProviderResult =
-  | Readonly<{ state: 'RUNNING' }>
+  | Readonly<{ state: 'RUNNING'; retryAfterMs?: number }>
   | Readonly<{
       state: 'COMPLETED'
       artifact: Readonly<{

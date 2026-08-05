@@ -285,6 +285,37 @@ describe('Presentation Job V2 service', () => {
     expect(await service.getOwned(owner, failingJobId)).toMatchObject({ status: 'RUNNING' })
   })
 
+  test('honors the Provider inspection backoff before polling the same Job again', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    provider.inspect = async () => ({ state: 'RUNNING', retryAfterMs: 30_000 })
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-provider-backoff')
+
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+    clock.advance(1_000)
+
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([])
+
+    clock.advance(29_000)
+    expect(await repository.listRunnablePresentationJobs({
+      limit: 10,
+      now: clock.now().toISOString(),
+    })).toEqual([expect.objectContaining({ id: created.job.jobId })])
+  })
+
   test('does not let a reconciling Job starve a newer queued Job', async () => {
     const repository = new InMemoryPresentationJobV2Repository()
     const artifacts = new MockArtifactPort()
@@ -410,6 +441,44 @@ describe('Presentation Job V2 service', () => {
     expect(await repository.getPresentationJob(created.job.jobId)).toMatchObject({
       status: 'FAILED',
       errorCode: 'PROVIDER_USAGE_CAP_EXCEEDED',
+      artifact: null,
+    })
+  })
+
+  test('rejects a ZIP-shaped artifact that is not a readable PPTX package', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    provider.inspect = async () => ({
+      state: 'COMPLETED',
+      quality: 'PASSED',
+      usage: {
+        billableImageOperations: 0,
+        notChargedImageOperations: 0,
+        unknownImageOperations: 0,
+        byModel: [],
+      },
+      artifact: {
+        bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00]),
+        name: 'invalid.pptx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      },
+    })
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock: new FixedClock(),
+    })
+    const created = await service.create(owner, request(), 'presentation-job-invalid-pptx')
+
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+
+    expect(await repository.getPresentationJob(created.job.jobId)).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'PPTX_ARTIFACT_INVALID',
       artifact: null,
     })
   })

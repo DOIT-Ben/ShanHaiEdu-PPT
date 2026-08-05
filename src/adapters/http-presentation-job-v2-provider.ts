@@ -168,7 +168,12 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
     }
     const parsed = inspectionSchema.safeParse(await response.json().catch(() => null))
     if (!parsed.success) throw new Error('PRESENTATION_PROVIDER_INSPECT_RESPONSE_INVALID')
-    if (parsed.data.state !== 'COMPLETED') return parsed.data
+    if (parsed.data.state === 'RUNNING') {
+      return parsed.data.retryAfterMs === undefined
+        ? { state: 'RUNNING' as const }
+        : { state: 'RUNNING' as const, retryAfterMs: parsed.data.retryAfterMs }
+    }
+    if (parsed.data.state === 'FAILED') return parsed.data
     if (parsed.data.quality === 'BLOCKING_FAILURE') {
       return {
         state: 'FAILED' as const,

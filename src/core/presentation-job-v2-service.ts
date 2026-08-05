@@ -11,6 +11,7 @@ import {
   type PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
 import type { ArtifactPort, ClockPort } from './ports'
+import { assertReadablePptxArtifact } from './pptx-artifact-validation'
 import {
   PRESENTATION_JOB_V2_PPTX_MIME_TYPE,
   type PresentationJobV2Artifact,
@@ -26,6 +27,8 @@ import {
 
 const MAX_PROVIDER_OPERATIONS_PER_JOB = 1
 const WORKER_RETRY_DELAY_MS = 1_000
+const MIN_PROVIDER_RETRY_DELAY_MS = 100
+const MAX_PROVIDER_RETRY_DELAY_MS = 300_000
 
 function emptyUsage(): PresentationJobV2UsageSummary {
   return {
@@ -51,10 +54,6 @@ function sameOwner(left: PresentationJobV2Owner, right: PresentationJobV2Owner) 
   return left.tenantId === right.tenantId
     && left.externalUserId === right.externalUserId
     && left.externalProjectId === right.externalProjectId
-}
-
-function isPptx(bytes: Uint8Array) {
-  return bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b
 }
 
 function maximumBillableImageOperations(job: PresentationJobV2Record) {
@@ -247,14 +246,19 @@ export class PresentationJobV2Service {
         ...job,
         progressPercent: 75,
         updatedAt: now.toISOString(),
-      }, new Date(now.getTime() + WORKER_RETRY_DELAY_MS).toISOString())
+      }, new Date(now.getTime() + this.providerRetryDelayMs(result.retryAfterMs)).toISOString())
     }
     if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
       return await this.fail(job, 'PROVIDER_USAGE_CAP_EXCEEDED', result.usage)
     }
     if (result.state === 'FAILED') return await this.fail(job, result.errorCode, result.usage)
     if (result.quality === 'BLOCKING_FAILURE') return await this.fail(job, 'DELIVERY_BLOCKED_BY_QUALITY', result.usage)
-    if (result.artifact.mimeType !== PRESENTATION_JOB_V2_PPTX_MIME_TYPE || !isPptx(result.artifact.bytes)) {
+    if (result.artifact.mimeType !== PRESENTATION_JOB_V2_PPTX_MIME_TYPE) {
+      return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.usage)
+    }
+    try {
+      await assertReadablePptxArtifact(result.artifact.bytes, job.request.source.snapshot.pages.length)
+    } catch {
       return await this.fail(job, 'PPTX_ARTIFACT_INVALID', result.usage)
     }
     const stored = await this.dependencies.artifacts.put({
@@ -354,6 +358,11 @@ export class PresentationJobV2Service {
 
   private retryAt(now: string) {
     return new Date(Date.parse(now) + WORKER_RETRY_DELAY_MS).toISOString()
+  }
+
+  private providerRetryDelayMs(value: number | undefined) {
+    if (value === undefined || !Number.isFinite(value)) return WORKER_RETRY_DELAY_MS
+    return Math.max(MIN_PROVIDER_RETRY_DELAY_MS, Math.min(MAX_PROVIDER_RETRY_DELAY_MS, Math.ceil(value)))
   }
 
   private async defer(job: PresentationJobV2Record) {
