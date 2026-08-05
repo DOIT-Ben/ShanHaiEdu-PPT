@@ -22,7 +22,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - V4 从规划、逐页生成、页级审查、局部修订、整套审查到交付均发射结构化生命周期事件；历史接口与 SSE 使用同一 `AgentEvent` 信封，并以单调 `sequence` 支持断线恢复和去重。
 - 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
 - FrameFlow Agent API Client 与工作台已通过功能开关在生产受控启用；后续宿主继续复用同一公共合同。
-- Presentation Job V2 的公共 Job、Artifact 和 Usage 边界独立于 V1。主进程默认通过内部 Provider 在派生 tenant 下复用完整 `VISUAL_DECK_V4` 智能体链；独立 `presentation-job-v2-server` 只装配 V2 SQLite、Artifact、固定服务级预算和显式 HTTP Provider。
+- Presentation Job V2 的公共 Job、Artifact 和 Usage 边界独立于 V1。主进程配置专用 V2 Token 后，通过内部 Provider 在派生 tenant 下复用完整 `VISUAL_DECK_V4` 智能体链；未配置时只运行 V1，V2 路由返回不可用。独立 `presentation-job-v2-server` 只装配 V2 SQLite、Artifact、固定服务级预算和显式 HTTP Provider，并在发布 Artifact 前校验完整 PPTX 结构。
 
 ## 目录
 
@@ -69,7 +69,7 @@ bun run check
 | `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6` |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
 | `PPT_AGENT_V2_TENANT_ID` | V2-only 服务凭据绑定的宿主租户；无默认值，必须显式配置 |
-| `PPT_AGENT_V2_API_TOKEN` | V2 宿主服务凭据；主进程内部 Provider 和 V2-only 服务都要求它与 V1、管理员及宿主回调 Token 分离 |
+| `PPT_AGENT_V2_API_TOKEN` | V2 宿主服务凭据；主进程仅在配置后启用 V2，V2-only 服务始终必填；必须与 V1、管理员及宿主回调 Token 分离 |
 | `PPT_AGENT_V2_HOST` / `PPT_AGENT_V2_PORT` | V2-only 监听地址，默认 `127.0.0.1:4320`，仅允许回环地址 |
 | `PPT_AGENT_V2_DATA_ROOT` | V2-only SQLite 与不可变 Artifact 根目录 |
 | `PPT_AGENT_V2_PROVIDER_MODE` | 主进程注入内部 Provider 时默认 `internal`；独立 V2 进程必须显式使用 `http`，`deterministic` 仅限测试 |
