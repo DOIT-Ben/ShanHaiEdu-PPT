@@ -1,0 +1,120 @@
+{
+  "contractVersion": "2.0",
+  "hashVector": "approved-page-design-triangle-zh-cn-v1",
+  "created": {
+    "contractVersion": "2.0",
+    "requestId": "request-created-01",
+    "replayed": false,
+    "data": {
+      "contractVersion": "2.0",
+      "jobId": "presentation-job-created-01",
+      "status": "QUEUED",
+      "phase": "ACCEPTED",
+      "progress": { "percent": 0 },
+      "quality": null,
+      "artifact": null,
+      "createdAt": "2026-08-05T00:00:00.000Z",
+      "updatedAt": "2026-08-05T00:00:00.000Z"
+    }
+  },
+  "running": {
+    "contractVersion": "2.0",
+    "requestId": "request-running-01",
+    "data": {
+      "contractVersion": "2.0",
+      "jobId": "presentation-job-running-01",
+      "status": "RUNNING",
+      "phase": "GENERATING",
+      "progress": { "percent": 75 },
+      "quality": null,
+      "artifact": null,
+      "createdAt": "2026-08-05T00:00:00.000Z",
+      "updatedAt": "2026-08-05T00:00:15.000Z"
+    }
+  },
+  "completed": {
+    "contractVersion": "2.0",
+    "requestId": "request-completed-01",
+    "data": {
+      "contractVersion": "2.0",
+      "jobId": "presentation-job-completed-01",
+      "status": "COMPLETED",
+      "phase": "COMPLETE",
+      "progress": { "percent": 100 },
+      "quality": "PASSED",
+      "artifact": {
+        "artifactId": "artifact-completed-01",
+        "name": "presentation.pptx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "sha256": "7b2ab55f0a6b8bc0ea617bbd3a6ff2f87a7b564cf598d0a94340654d3a7637ae",
+        "byteLength": 18240
+      },
+      "createdAt": "2026-08-05T00:00:00.000Z",
+      "updatedAt": "2026-08-05T00:00:30.000Z"
+    }
+  },
+  "bestEffort": {
+    "contractVersion": "2.0",
+    "requestId": "request-best-effort-01",
+    "data": {
+      "contractVersion": "2.0",
+      "jobId": "presentation-job-best-effort-01",
+      "status": "COMPLETED",
+      "phase": "COMPLETE",
+      "progress": { "percent": 100 },
+      "quality": "BEST_EFFORT",
+      "artifact": {
+        "artifactId": "artifact-best-effort-01",
+        "name": "presentation.pptx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "sha256": "284243071fd1127fc351a0c8a5a2345e2201d6b7ec00ab10ced90dfd8cc3ee1d",
+        "byteLength": 17402
+      },
+      "createdAt": "2026-08-05T00:00:00.000Z",
+      "updatedAt": "2026-08-05T00:00:31.000Z"
+    }
+  },
+  "failed": {
+    "contractVersion": "2.0",
+    "requestId": "request-failed-01",
+    "data": {
+      "contractVersion": "2.0",
+      "jobId": "presentation-job-failed-01",
+      "status": "FAILED",
+      "phase": "FAILED",
+      "progress": { "percent": 100 },
+      "quality": null,
+      "artifact": null,
+      "createdAt": "2026-08-05T00:00:00.000Z",
+      "updatedAt": "2026-08-05T00:00:24.000Z"
+    }
+  },
+  "usage": {
+    "reconciling": {
+      "contractVersion": "2.0",
+      "requestId": "request-usage-reconciling-01",
+      "data": {
+        "contractVersion": "2.0",
+        "jobId": "presentation-job-completed-01",
+        "usageVersion": 1,
+        "status": "RECONCILING",
+        "action": "WAIT",
+        "unknownOperationCount": 1,
+        "finalizedAt": null
+      }
+    },
+    "finalized": {
+      "contractVersion": "2.0",
+      "requestId": "request-usage-finalized-01",
+      "data": {
+        "contractVersion": "2.0",
+        "jobId": "presentation-job-completed-01",
+        "usageVersion": 1,
+        "status": "FINALIZED",
+        "action": "NONE",
+        "unknownOperationCount": 0,
+        "finalizedAt": "2026-08-05T00:01:00.000Z"
+      }
+    }
+  }
+}

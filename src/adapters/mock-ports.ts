@@ -339,6 +339,25 @@ export class MockArtifactPort implements ArtifactPort {
     return value ? structuredClone(value) : null
   }
 
+  async open(input: Parameters<ArtifactPort['open']>[0]) {
+    const owner = this.owners.get(input.artifactId)
+    if (owner !== input.tenantId) return null
+    const value = this.artifacts.get(input.artifactId)
+    if (!value) return null
+    const bytes = new Uint8Array(value.bytes)
+    return {
+      mimeType: value.mimeType,
+      byteLength: bytes.length,
+      sha256: value.sha256,
+      stream: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes)
+          controller.close()
+        },
+      }),
+    }
+  }
+
   async getByIdempotencyKey(input: Parameters<ArtifactPort['getByIdempotencyKey']>[0]) {
     const artifactId = this.keys.get(input.idempotencyKey)
     if (!artifactId?.startsWith(`artifact:${input.tenantId}:`)) return null

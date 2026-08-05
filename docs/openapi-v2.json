@@ -1,0 +1,346 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PPT Agent Presentation Job API",
+    "version": "2.0",
+    "description": "Host-neutral Presentation Job contract. A bearer service credential determines the tenant. X-PPT-Agent-Tenant is forbidden on V2 requests; the authenticated caller supplies an external user and optional external project scope."
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/v2/presentation-jobs": {
+      "post": {
+        "operationId": "createPresentationJob",
+        "summary": "Create an idempotent presentation job from an immutable approved-page-design snapshot.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ExternalUserId" },
+          { "$ref": "#/components/parameters/ExternalProjectId" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/PresentationJobCreateRequest" } }
+          }
+        },
+        "responses": {
+          "201": { "$ref": "#/components/responses/PresentationJobCreated" },
+          "200": { "$ref": "#/components/responses/PresentationJobCreated" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v2/presentation-jobs/{jobId}": {
+      "get": {
+        "operationId": "getPresentationJob",
+        "summary": "Read a stable presentation job projection.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ExternalUserId" },
+          { "$ref": "#/components/parameters/ExternalProjectId" },
+          { "$ref": "#/components/parameters/JobId" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/PresentationJob" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v2/presentation-jobs/{jobId}/artifacts/{artifactId}": {
+      "get": {
+        "operationId": "downloadPresentationArtifact",
+        "summary": "Stream an immutable delivered PPTX. Range requests are not supported in V2.0.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ExternalUserId" },
+          { "$ref": "#/components/parameters/ExternalProjectId" },
+          { "$ref": "#/components/parameters/JobId" },
+          { "$ref": "#/components/parameters/ArtifactId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validated PPTX byte stream.",
+            "headers": {
+              "Content-Type": { "schema": { "const": "application/vnd.openxmlformats-officedocument.presentationml.presentation" } },
+              "Content-Length": { "schema": { "type": "integer", "minimum": 1 } },
+              "Content-Disposition": { "schema": { "type": "string" } },
+              "ETag": { "schema": { "type": "string", "pattern": "^\\\"[a-f0-9]{64}\\\"$" } },
+              "X-PPT-Agent-Artifact-ID": { "schema": { "type": "string" } },
+              "X-PPT-Agent-Content-SHA256": { "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+              "X-PPT-Agent-Contract-Version": { "schema": { "const": "2.0" } }
+            },
+            "content": {
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "416": {
+            "description": "Range is unsupported in V2.0.",
+            "headers": {
+              "Content-Range": { "schema": { "type": "string", "pattern": "^bytes \\*/[0-9]+$" } },
+              "Accept-Ranges": { "schema": { "const": "none" } }
+            }
+          }
+        }
+      }
+    },
+    "/v2/presentation-jobs/{jobId}/usage": {
+      "get": {
+        "operationId": "getPresentationJobUsage",
+        "summary": "Read the delivery-independent, versioned usage projection.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ExternalUserId" },
+          { "$ref": "#/components/parameters/ExternalProjectId" },
+          { "$ref": "#/components/parameters/JobId" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/PresentationJobUsage" },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "service credential",
+        "description": "The credential is configured with one tenant. V2 does not accept X-PPT-Agent-Tenant."
+      }
+    },
+    "parameters": {
+      "ExternalUserId": {
+        "name": "X-PPT-Agent-User",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": "Stable external user identifier within the authenticated tenant."
+      },
+      "ExternalProjectId": {
+        "name": "X-PPT-Agent-Project",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": "Optional stable external project identifier within the authenticated user scope."
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": "Scoped by authenticated tenant, external user and optional external project. Reuse with a different normalized request returns a non-retryable conflict."
+      },
+      "JobId": {
+        "name": "jobId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 160 }
+      },
+      "ArtifactId": {
+        "name": "artifactId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "schemas": {
+      "ApprovedEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "text"],
+        "properties": {
+          "type": { "enum": ["FACT", "INFERENCE", "SUGGESTION"] },
+          "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "source": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "allOf": [{
+          "if": { "properties": { "type": { "const": "FACT" } }, "required": ["type"] },
+          "then": { "required": ["source"] }
+        }]
+      },
+      "ApprovedPageDesignPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pageNumber", "title", "teachingPurpose", "editableCopy", "layoutIntent", "visualRequirements", "teacherNotes", "teacherScript", "studentActivity", "animationSequence", "boardPlan", "evidence"],
+        "properties": {
+          "pageNumber": { "type": "integer", "minimum": 1, "maximum": 50 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "teachingPurpose": { "type": "string", "minLength": 1, "maxLength": 900 },
+          "editableCopy": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+          "layoutIntent": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "visualRequirements": { "type": "array", "maxItems": 4, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+          "teacherNotes": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "teacherScript": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "studentActivity": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "animationSequence": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+          "boardPlan": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "evidence": { "type": "array", "maxItems": 50, "items": { "$ref": "#/components/schemas/ApprovedEvidence" } }
+        }
+      },
+      "ApprovedPageDesignSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "title", "subject", "gradeBand", "lessonDurationMinutes", "audience", "objectives", "pages"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "subject": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "gradeBand": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "lessonDurationMinutes": { "type": "integer", "minimum": 1, "maximum": 300 },
+          "audience": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "objectives": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+          "pages": { "type": "array", "minItems": 2, "maxItems": 50, "items": { "$ref": "#/components/schemas/ApprovedPageDesignPage" }, "description": "Ordered pages with pageNumber values continuous from 1." }
+        }
+      },
+      "ApprovedPageDesignSnapshotSource": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "artifactVersionId", "sha256", "snapshot"],
+        "properties": {
+          "kind": { "const": "APPROVED_PAGE_DESIGN" },
+          "artifactVersionId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 of UTF-8 canonical JSON for snapshot: recursively sort object keys, preserve array order, omit undefined values, then JSON serialize." },
+          "snapshot": { "$ref": "#/components/schemas/ApprovedPageDesignSnapshot" }
+        }
+      },
+      "PresentationJobCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source"],
+        "properties": {
+          "source": { "$ref": "#/components/schemas/ApprovedPageDesignSnapshotSource" }
+        }
+      },
+      "PresentationArtifact": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifactId", "name", "mimeType", "sha256", "byteLength"],
+        "properties": {
+          "artifactId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "mimeType": { "const": "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "byteLength": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "PresentationJob": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["contractVersion", "jobId", "status", "phase", "progress", "quality", "artifact", "createdAt", "updatedAt"],
+        "properties": {
+          "contractVersion": { "const": "2.0" },
+          "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "status": { "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED"] },
+          "phase": { "enum": ["ACCEPTED", "GENERATING", "DELIVERING", "COMPLETE", "FAILED"] },
+          "progress": {
+            "type": "object", "additionalProperties": false, "required": ["percent"],
+            "properties": { "percent": { "type": "integer", "minimum": 0, "maximum": 100 } }
+          },
+          "quality": { "enum": ["PASSED", "BEST_EFFORT", null] },
+          "artifact": { "oneOf": [{ "$ref": "#/components/schemas/PresentationArtifact" }, { "type": "null" }] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "COMPLETED" } }, "required": ["status"] },
+            "then": { "properties": { "phase": { "const": "COMPLETE" }, "progress": { "properties": { "percent": { "const": 100 } } }, "quality": { "enum": ["PASSED", "BEST_EFFORT"] }, "artifact": { "$ref": "#/components/schemas/PresentationArtifact" } }, "required": ["artifact"] }
+          },
+          {
+            "if": { "properties": { "status": { "const": "FAILED" } }, "required": ["status"] },
+            "then": { "properties": { "phase": { "const": "FAILED" }, "quality": { "type": "null" }, "artifact": { "type": "null" } } }
+          }
+        ]
+      },
+      "PresentationJobUsage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["contractVersion", "jobId", "usageVersion", "status", "action", "unknownOperationCount", "finalizedAt"],
+        "properties": {
+          "contractVersion": { "const": "2.0" },
+          "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "usageVersion": { "const": 1 },
+          "status": { "enum": ["PENDING", "RECONCILING", "FINALIZED"] },
+          "action": { "enum": ["WAIT", "NONE"] },
+          "unknownOperationCount": { "type": "integer", "minimum": 0 },
+          "finalizedAt": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "status": { "const": "RECONCILING" } }, "required": ["status"] },
+            "then": { "properties": { "action": { "const": "WAIT" }, "unknownOperationCount": { "minimum": 1 }, "finalizedAt": { "type": "null" } } }
+          },
+          {
+            "if": { "properties": { "status": { "const": "FINALIZED" } }, "required": ["status"] },
+            "then": { "properties": { "action": { "const": "NONE" }, "unknownOperationCount": { "const": 0 }, "finalizedAt": { "type": "string", "format": "date-time" } } }
+          }
+        ]
+      },
+      "PresentationJobEnvelope": {
+        "type": "object", "additionalProperties": false,
+        "required": ["contractVersion", "requestId", "data"],
+        "properties": {
+          "contractVersion": { "const": "2.0" },
+          "requestId": { "type": "string" },
+          "data": { "$ref": "#/components/schemas/PresentationJob" },
+          "replayed": { "type": "boolean" }
+        }
+      },
+      "PresentationJobUsageEnvelope": {
+        "type": "object", "additionalProperties": false,
+        "required": ["contractVersion", "requestId", "data"],
+        "properties": {
+          "contractVersion": { "const": "2.0" },
+          "requestId": { "type": "string" },
+          "data": { "$ref": "#/components/schemas/PresentationJobUsage" }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object", "additionalProperties": false,
+        "required": ["contractVersion", "error"],
+        "properties": {
+          "contractVersion": { "const": "2.0" },
+          "error": {
+            "type": "object", "additionalProperties": false,
+            "required": ["code", "message", "retryable", "action", "requestId", "jobId"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "retryable": { "type": "boolean" },
+              "action": { "enum": ["NONE", "WAIT"] },
+              "requestId": { "type": "string" },
+              "jobId": { "oneOf": [{ "type": "string" }, { "type": "null" }] }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "PresentationJobCreated": {
+        "description": "Created or replayed presentation job.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PresentationJobEnvelope" } } }
+      },
+      "PresentationJob": {
+        "description": "Presentation job projection.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PresentationJobEnvelope" } } }
+      },
+      "PresentationJobUsage": {
+        "description": "Usage projection.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PresentationJobUsageEnvelope" } } }
+      },
+      "Error": {
+        "description": "Stable V2 error projection.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      }
+    }
+  }
+}

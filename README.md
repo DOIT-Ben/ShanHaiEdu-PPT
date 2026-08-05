@@ -22,6 +22,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - V4 从规划、逐页生成、页级审查、局部修订、整套审查到交付均发射结构化生命周期事件；历史接口与 SSE 使用同一 `AgentEvent` 信封，并以单调 `sequence` 支持断线恢复和去重。
 - 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
 - FrameFlow Agent API Client 与工作台已通过功能开关在生产受控启用；后续宿主继续复用同一公共合同。
+- Presentation Job V2 通过独立 `presentation-job-v2-server` 进程运行，只装配 V2 SQLite、Artifact、固定服务级预算和通用 Provider port；它不初始化 V1 Run、FrameFlow adapter、宿主文档或信用回调。
 
 ## 目录
 
@@ -33,6 +34,8 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 | `tests/` | 合同、策略、恢复和宿主兼容测试 |
 | `docs/decisions/` | 架构决策 |
 | `docs/ppt-agent-v4-api.md` | 宿主无关的 V4 HTTP、SSE、幂等、批次账务和交付接口文档 |
+| `docs/openapi-v2.json` | 宿主无关 Presentation Job V2 HTTP 合同 |
+| `docs/presentation-job-v2-changelog.md` | Presentation Job V2 兼容性、交付和 Usage 语义 |
 | `docs/frameflow-v4-integration.md` | FrameFlow 作为首个宿主的接入示例与迁移约束 |
 | `docs/deployment-20260723-hardening-plan.md` | 本轮加固的发布、备份、验证与回退 runbook |
 | `docs/deployment-20260723-hardening.md` | 本轮加固正式部署、备份与回退记录 |
@@ -64,8 +67,21 @@ bun run check
 | `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6` |
 | `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6` |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
+| `PPT_AGENT_V2_TENANT_ID` | V2-only 服务凭据绑定的宿主租户；无默认值，必须显式配置 |
+| `PPT_AGENT_V2_API_TOKEN` | V2-only 宿主服务凭据；与 V1、管理员及宿主回调 Token 分离 |
+| `PPT_AGENT_V2_HOST` / `PPT_AGENT_V2_PORT` | V2-only 监听地址，默认 `127.0.0.1:4320`，仅允许回环地址 |
+| `PPT_AGENT_V2_DATA_ROOT` | V2-only SQLite 与不可变 Artifact 根目录 |
+| `PPT_AGENT_V2_PROVIDER_MODE` | 默认 `deterministic`；仅显式设为 `http` 才启用通用 Provider adapter |
 
 完整配置见 `deploy/aliyun/ppt-agent.env.example`。所有 Token 和模型密钥仅保存在权限 `600` 的服务端环境文件中，不进入仓库、请求 body 或日志。
+
+本地启动隔离 V2 Mock/SQLite 服务：
+
+```bash
+PPT_AGENT_V2_TENANT_ID=local-host \
+PPT_AGENT_V2_API_TOKEN=replace-with-local-test-token \
+bun run dev:v2
+```
 
 ## 生产部署
 

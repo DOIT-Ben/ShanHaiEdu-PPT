@@ -31,6 +31,7 @@ describe('local artifact port', () => {
     const first = await artifacts.put(input)
     const replay = await artifacts.put(input)
     const stored = await artifacts.get({ tenantId: 'frameflow', artifactId: first.artifactId })
+    const opened = await artifacts.open({ tenantId: 'frameflow', artifactId: first.artifactId })
     const resolved = await artifacts.getByIdempotencyKey({
       tenantId: 'frameflow',
       idempotencyKey: input.idempotencyKey,
@@ -40,6 +41,8 @@ describe('local artifact port', () => {
     expect(first.artifactId).toMatch(/^artifact-[a-f0-9]{40}$/)
     expect(stored?.bytes).toEqual(bytes)
     expect(stored?.sha256).toBe(first.sha256)
+    expect(opened).toMatchObject({ mimeType: 'image/png', byteLength: bytes.length, sha256: first.sha256 })
+    expect(new Uint8Array(await new Response(opened!.stream).arrayBuffer())).toEqual(bytes)
     expect(resolved).toMatchObject({ artifactId: first.artifactId, mimeType: 'image/png', sha256: first.sha256 })
     expect(resolved?.bytes).toEqual(bytes)
     expect(artifacts.verifyIntegrity({
@@ -65,6 +68,7 @@ describe('local artifact port', () => {
     const stored = await artifacts.put(input)
 
     expect(await artifacts.get({ tenantId: 'shanhaiedu', artifactId: stored.artifactId })).toBeNull()
+    expect(await artifacts.open({ tenantId: 'shanhaiedu', artifactId: stored.artifactId })).toBeNull()
     await expect(artifacts.put({ ...input, bytes: new TextEncoder().encode('pptx-v2') }))
       .rejects.toThrow('ARTIFACT_IDEMPOTENCY_CONFLICT')
   })

@@ -169,7 +169,7 @@ export class PageReviewCoordinator {
     rejected = reviews.filter((result) => result.review && !result.review.approved).length
       + aspectRatioViolations.length
     const approved = reviews.filter((result) => result.review?.approved
-      && !aspectRatioInvalidPageNumbers.has(this.reviewPageNumber(run.id, result.step))).length
+      && !aspectRatioInvalidPageNumbers.has(this.reviewPageNumber(run.id, result.step) ?? -1)).length
     const total = requirements.length + (fullPageRaster ? 0 : blueprint.slides.length)
     const executionFailed = reviews.some((result) => result.review === null) || reviews.length !== total
     if (!executionFailed) {

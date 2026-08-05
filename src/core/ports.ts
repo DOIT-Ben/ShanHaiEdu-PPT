@@ -474,6 +474,17 @@ export interface ArtifactPort {
     sha256: string
   }> | null>
 
+  open(input: Readonly<{
+    tenantId: string
+    artifactId: string
+  }>): Promise<Readonly<{
+    mimeType: string
+    byteLength: number
+    sha256: string
+    stream: ReadableStream<Uint8Array>
+    verifiedBody?: Blob
+  }> | null>
+
   getByIdempotencyKey(input: Readonly<{
     tenantId: string
     idempotencyKey: string

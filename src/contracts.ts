@@ -798,3 +798,5 @@ export type AgentEventEnvelope = AgentEvent
 export type AgentEventHistoryEnvelope = z.infer<typeof agentEventHistoryEnvelopeSchema>
 export type RunEnvelope = z.infer<typeof runEnvelopeSchema>
 export type RunListEnvelope = z.infer<typeof runListEnvelopeSchema>
+
+export * from './presentation-job-v2-contracts'

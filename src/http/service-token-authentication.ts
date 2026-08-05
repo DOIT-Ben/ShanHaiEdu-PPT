@@ -8,6 +8,11 @@ export type ServiceCredential = Readonly<{
   adminToken?: string
 }>
 
+export type AuthenticatedService = Readonly<{
+  tenantId: string
+  role: 'USER' | 'ADMIN'
+}>
+
 function validIdentifier(value: string) {
   return value.length >= 1 && value.length <= 160 && value === value.trim()
 }
@@ -71,6 +76,18 @@ export class ServiceTokenAuthentication implements HostAuthenticationPort {
       role: administrator ? 'ADMIN' : 'USER',
       ...(externalProjectId ? { externalProjectId } : {}),
     }
+  }
+
+  async authenticateService(request: Request): Promise<AuthenticatedService | null> {
+    const authorization = request.headers.get('Authorization')
+    const provided = authorization?.startsWith('Bearer ') ? authorization.slice(7) : ''
+    if (!provided) return null
+    for (const credential of this.credentials) {
+      const administrator = credential.adminToken ? matchesToken(provided, credential.adminToken) : false
+      const user = matchesToken(provided, credential.userToken)
+      if (administrator || user) return { tenantId: credential.tenantId, role: administrator ? 'ADMIN' : 'USER' }
+    }
+    return null
   }
 }
 

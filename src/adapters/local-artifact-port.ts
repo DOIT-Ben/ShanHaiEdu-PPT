@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { createReadStream, readFileSync } from 'node:fs'
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { ArtifactPort } from '../core/ports'
 
@@ -67,6 +67,43 @@ export class LocalArtifactPort implements ArtifactPort {
         throw new Error('ARTIFACT_INTEGRITY_FAILED')
       }
       return { mimeType: metadata.mimeType, bytes, sha256: metadata.sha256 }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  async open(input: Parameters<ArtifactPort['open']>[0]) {
+    if (!/^artifact-[a-f0-9]{40}$/.test(input.artifactId)) return null
+    const directory = path.join(this.rootDirectory, input.artifactId)
+    const metadata = await this.readMetadata(directory)
+    if (!metadata || metadata.tenantHash !== digest(input.tenantId)) return null
+    const filename = path.join(directory, 'content.bin')
+    try {
+      const before = await stat(filename)
+      if (before.size !== metadata.byteLength) throw new Error('ARTIFACT_INTEGRITY_FAILED')
+      const digest = createHash('sha256')
+      let byteLength = 0
+      for await (const chunk of createReadStream(filename)) {
+        byteLength += chunk.byteLength
+        digest.update(chunk)
+      }
+      const after = await stat(filename)
+      if (byteLength !== metadata.byteLength
+        || digest.digest('hex') !== metadata.sha256
+        || after.size !== before.size
+        || after.mtimeMs !== before.mtimeMs
+        || after.ino !== before.ino) {
+        throw new Error('ARTIFACT_INTEGRITY_FAILED')
+      }
+      const verifiedBody = Bun.file(filename)
+      return {
+        mimeType: metadata.mimeType,
+        byteLength: metadata.byteLength,
+        sha256: metadata.sha256,
+        stream: verifiedBody.stream(),
+        verifiedBody,
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
       throw error
