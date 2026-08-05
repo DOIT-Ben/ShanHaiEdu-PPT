@@ -90,7 +90,7 @@ export class SqlitePresentationJobV2Repository implements PresentationJobV2Repos
       SELECT data
       FROM presentation_jobs_v2
       WHERE status IN ('QUEUED', 'RUNNING')
-        OR (status = 'COMPLETED' AND usage_status = 'RECONCILING')
+        OR (status IN ('COMPLETED', 'FAILED') AND usage_status = 'RECONCILING')
       ORDER BY updated_at ASC, id ASC
       LIMIT ?
     `).all(input.limit).map((row) => JSON.parse(row.data) as PresentationJobV2Record)

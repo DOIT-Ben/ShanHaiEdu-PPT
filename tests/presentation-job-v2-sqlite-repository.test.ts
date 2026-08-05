@@ -119,7 +119,23 @@ describe('SQLite Presentation Job V2 repository', () => {
     expect(await reopened.getPresentationJob(blocked.job.jobId)).toMatchObject({
       status: 'FAILED', quality: null, artifact: null,
     })
-    expect(await reopened.listRunnablePresentationJobs({ limit: 10 })).toEqual([])
+
+    const reconciling = await resumed.create(owner, {
+      source: {
+        kind: 'APPROVED_PAGE_DESIGN', artifactVersionId: 'weather-reconciling-v1',
+        sha256: approvedPageDesignSnapshotHash(snapshot), snapshot,
+      },
+    }, 'sqlite-v2-failed-reconciling')
+    await resumed.tick({ limit: 10 })
+    await provider.fail(`${reconciling.job.jobId}:provider:1`, 'PROVIDER_OPERATION_FAILED', 'UNKNOWN')
+    await resumed.tick({ limit: 10 })
+    expect(await reopened.listRunnablePresentationJobs({ limit: 10 })).toEqual([
+      expect.objectContaining({
+        id: reconciling.job.jobId,
+        status: 'FAILED',
+        usage: expect.objectContaining({ status: 'RECONCILING' }),
+      }),
+    ])
     reopened.close()
   })
 })

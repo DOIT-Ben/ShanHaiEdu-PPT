@@ -27,7 +27,7 @@ export class InMemoryPresentationJobV2Repository implements PresentationJobV2Rep
   async listRunnablePresentationJobs(input: Readonly<{ limit: number }>) {
     return [...this.#jobs.values()]
       .filter((job) => job.status === 'QUEUED' || job.status === 'RUNNING'
-        || (job.status === 'COMPLETED' && job.usage.status === 'RECONCILING'))
+        || (['COMPLETED', 'FAILED'].includes(job.status) && job.usage.status === 'RECONCILING'))
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id))
       .slice(0, input.limit)
       .map(clone)

@@ -96,12 +96,14 @@ describe('HTTP Presentation Job V2 provider', () => {
       },
     })
 
-    const submitted = await provider.submit({
+    const submission = {
       jobId: 'presentation-job-7',
       owner: { tenantId: 'tenant-a', externalUserId: 'private-user', externalProjectId: 'private-project' },
       source,
       idempotencyKey: 'presentation-job-7:provider:1',
-    })
+      maximumBillableImageOperations: 10,
+    }
+    const submitted = await provider.submit(submission)
     const running = await provider.inspect({
       jobId: 'presentation-job-7',
       operationId: submitted.operationId,
@@ -132,6 +134,7 @@ describe('HTTP Presentation Job V2 provider', () => {
       contractVersion: '1.0',
       jobId: 'presentation-job-7',
       source,
+      maximumBillableImageOperations: 10,
     })
     expect(JSON.stringify(await requests[0]!.clone().json())).not.toContain('private-user')
     expect(requests[3]!.url).toBe('https://provider.example/v1/presentation-operations/operation-7/artifact')

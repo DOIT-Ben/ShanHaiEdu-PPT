@@ -84,7 +84,8 @@ describe('Presentation Job V2 contract', () => {
     }
     const completed = {
       contractVersion: '2.0', jobId: 'job-a', status: 'COMPLETED', phase: 'COMPLETE',
-      progress: { percent: 100 }, quality: 'PASSED', artifact,
+      progress: { percent: 100 }, usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
+      quality: 'PASSED', artifact,
       createdAt: '2026-08-05T00:00:00.000Z', updatedAt: '2026-08-05T00:00:01.000Z',
     }
     expect(presentationJobV2PublicJobSchema.parse(completed)).toMatchObject(completed)
@@ -92,6 +93,7 @@ describe('Presentation Job V2 contract', () => {
     expect(presentationJobV2PublicJobSchema.safeParse({ ...completed, artifact: null }).success).toBe(false)
     expect(presentationJobV2UsageSchema.safeParse({
       contractVersion: '2.0', jobId: 'job-a', usageVersion: 1, status: 'FINALIZED', action: 'NONE',
+      usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
       billableImageOperations: 2, notChargedImageOperations: 0, unknownImageOperations: 0,
       byModel: [{
         model: 'nanobanana', billableImageOperations: 2,
@@ -101,6 +103,7 @@ describe('Presentation Job V2 contract', () => {
     }).success).toBe(true)
     expect(presentationJobV2UsageSchema.safeParse({
       contractVersion: '2.0', jobId: 'job-a', usageVersion: 1, status: 'FINALIZED', action: 'NONE',
+      usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
       billableImageOperations: 1, notChargedImageOperations: 0, unknownImageOperations: 1,
       byModel: [{
         model: 'nanobanana', billableImageOperations: 1,
@@ -110,6 +113,7 @@ describe('Presentation Job V2 contract', () => {
     }).success).toBe(false)
     expect(presentationJobV2UsageSchema.safeParse({
       contractVersion: '2.0', jobId: 'job-a', usageVersion: 1, status: 'FINALIZED', action: 'NONE',
+      usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
       billableImageOperations: 2, notChargedImageOperations: 0, unknownImageOperations: 0,
       byModel: [{
         model: 'nanobanana', billableImageOperations: 1,

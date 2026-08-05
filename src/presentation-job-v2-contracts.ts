@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 export const PRESENTATION_JOB_V2_CONTRACT_VERSION = '2.0' as const
+export const PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE = 5 as const
+export const PRESENTATION_JOB_V2_USAGE_POLICY = Object.freeze({
+  maximumBillableImageOperationsPerPage: PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE,
+})
 
 const identifierSchema = z.string().trim().min(1).max(160)
 const nonEmptyTextSchema = z.string().trim().min(1)
@@ -102,12 +106,19 @@ export const presentationJobV2ArtifactSchema = z.object({
   byteLength: z.number().int().positive(),
 }).strict()
 
+export const presentationJobV2UsagePolicySchema = z.object({
+  maximumBillableImageOperationsPerPage: z.literal(
+    PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE,
+  ),
+}).strict()
+
 export const presentationJobV2PublicJobSchema = z.object({
   contractVersion: z.literal(PRESENTATION_JOB_V2_CONTRACT_VERSION),
   jobId: identifierSchema,
   status: z.enum(['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED']),
   phase: z.enum(['ACCEPTED', 'GENERATING', 'DELIVERING', 'COMPLETE', 'FAILED']),
   progress: z.object({ percent: z.number().int().min(0).max(100) }).strict(),
+  usagePolicy: presentationJobV2UsagePolicySchema,
   quality: z.enum(['PASSED', 'BEST_EFFORT']).nullable(),
   artifact: presentationJobV2ArtifactSchema.nullable(),
   createdAt: z.string().datetime(),
@@ -159,6 +170,7 @@ export const presentationJobV2UsageSchema = z.object({
   contractVersion: z.literal(PRESENTATION_JOB_V2_CONTRACT_VERSION),
   jobId: identifierSchema,
   usageVersion: z.literal(1),
+  usagePolicy: presentationJobV2UsagePolicySchema,
   status: z.enum(['PENDING', 'RECONCILING', 'FINALIZED']),
   action: z.enum(['WAIT', 'NONE']),
   billableImageOperations: z.number().int().nonnegative(),
@@ -205,6 +217,7 @@ export type ApprovedPageDesignSnapshot = z.infer<typeof approvedPageDesignSnapsh
 export type ApprovedPageDesignSnapshotSource = z.infer<typeof approvedPageDesignSnapshotSourceSchema>
 export type PresentationJobV2CreateRequest = z.infer<typeof presentationJobV2CreateRequestSchema>
 export type PresentationJobV2Artifact = z.infer<typeof presentationJobV2ArtifactSchema>
+export type PresentationJobV2UsagePolicy = z.infer<typeof presentationJobV2UsagePolicySchema>
 export type PresentationJobV2PublicJob = z.infer<typeof presentationJobV2PublicJobSchema>
 export type PresentationJobV2UsageSummary = z.infer<typeof presentationJobV2UsageSummarySchema>
 export type PresentationJobV2Usage = z.infer<typeof presentationJobV2UsageSchema>

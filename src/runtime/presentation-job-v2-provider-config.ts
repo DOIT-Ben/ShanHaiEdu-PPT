@@ -1,5 +1,6 @@
 import { HttpPresentationJobV2Provider } from '../adapters/http-presentation-job-v2-provider'
 import { DeterministicPresentationJobV2Provider } from '../adapters/presentation-job-v2-ports'
+import type { PresentationJobV2ProviderPort } from '../core/presentation-job-v2-ports'
 
 function optionalInteger(
   env: NodeJS.ProcessEnv,
@@ -22,8 +23,17 @@ function required(env: NodeJS.ProcessEnv, name: string) {
   return value
 }
 
-export function createPresentationJobV2ProviderFromEnv(env: NodeJS.ProcessEnv) {
-  const mode = env.PPT_AGENT_V2_PROVIDER_MODE?.trim() || 'deterministic'
+export function createPresentationJobV2ProviderFromEnv(
+  env: NodeJS.ProcessEnv,
+  dependencies: Readonly<{ internalProvider?: PresentationJobV2ProviderPort }> = {},
+) {
+  const mode = env.PPT_AGENT_V2_PROVIDER_MODE?.trim()
+    || (dependencies.internalProvider ? 'internal' : '')
+  if (!mode) throw new Error('PPT_AGENT_V2_PROVIDER_MODE_REQUIRED')
+  if (mode === 'internal') {
+    if (!dependencies.internalProvider) throw new Error('PPT_AGENT_V2_INTERNAL_PROVIDER_REQUIRED')
+    return dependencies.internalProvider
+  }
   if (mode === 'deterministic') return new DeterministicPresentationJobV2Provider()
   if (mode !== 'http') throw new Error('PPT_AGENT_V2_PROVIDER_MODE_INVALID')
   const timeoutMs = optionalInteger(env, 'PPT_AGENT_V2_PROVIDER_TIMEOUT_MS', 100, 600_000)

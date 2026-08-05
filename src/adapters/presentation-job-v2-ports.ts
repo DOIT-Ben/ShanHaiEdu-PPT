@@ -39,6 +39,9 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
   }
 
   async submit(input: Parameters<PresentationJobV2ProviderPort['submit']>[0]) {
+    if (input.source.snapshot.pages.length > input.maximumBillableImageOperations) {
+      throw new Error('PRESENTATION_PROVIDER_OPERATION_CAP_INVALID')
+    }
     this.submitRequests.push(structuredClone(input))
     const existing = this.#operations.get(input.idempotencyKey)
     if (existing) return { operationId: existing.operationId }

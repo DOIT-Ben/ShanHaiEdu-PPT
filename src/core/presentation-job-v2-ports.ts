@@ -1,6 +1,7 @@
 import type {
   ApprovedPageDesignSnapshotSource,
   PresentationJobV2CreateRequest,
+  PresentationJobV2UsagePolicy,
   PresentationJobV2UsageSummary,
 } from '../presentation-job-v2-contracts'
 
@@ -66,6 +67,7 @@ export type PublicPresentationJobV2 = Readonly<{
   status: PresentationJobV2Status
   phase: PresentationJobV2Phase
   progress: Readonly<{ percent: number }>
+  usagePolicy: PresentationJobV2UsagePolicy
   quality: PresentationJobV2Quality
   artifact: PresentationJobV2Artifact | null
   createdAt: string
@@ -76,6 +78,7 @@ export type PublicPresentationJobV2Usage = Readonly<{
   contractVersion: '2.0'
   jobId: string
   usageVersion: 1
+  usagePolicy: PresentationJobV2UsagePolicy
   status: PresentationJobV2UsageStatus
   action: 'WAIT' | 'NONE'
   billableImageOperations: number
@@ -125,6 +128,7 @@ export interface PresentationJobV2ProviderPort {
     owner: PresentationJobV2Owner
     source: ApprovedPageDesignSnapshotSource
     idempotencyKey: string
+    maximumBillableImageOperations: number
   }>): Promise<Readonly<{ operationId: string }>>
 
   inspect(input: Readonly<{

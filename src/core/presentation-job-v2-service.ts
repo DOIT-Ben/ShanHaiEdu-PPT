@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import {
   canonicalPresentationJobV2Json,
+  PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE,
+  PRESENTATION_JOB_V2_USAGE_POLICY,
   presentationJobV2CreateRequestSchema,
   presentationJobV2PublicJobSchema,
   presentationJobV2UsageSchema,
@@ -54,6 +56,17 @@ function isPptx(bytes: Uint8Array) {
   return bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b
 }
 
+function maximumBillableImageOperations(job: PresentationJobV2Record) {
+  return job.request.source.snapshot.pages.length
+    * PRESENTATION_JOB_V2_MAX_BILLABLE_IMAGE_OPERATIONS_PER_PAGE
+}
+
+function usageOperationCount(usage: PresentationJobV2UsageSummary) {
+  return usage.billableImageOperations
+    + usage.notChargedImageOperations
+    + usage.unknownImageOperations
+}
+
 function publicJob(job: PresentationJobV2Record): PublicPresentationJobV2 {
   return presentationJobV2PublicJobSchema.parse({
     contractVersion: PRESENTATION_JOB_V2_CONTRACT_VERSION,
@@ -61,6 +74,7 @@ function publicJob(job: PresentationJobV2Record): PublicPresentationJobV2 {
     status: job.status,
     phase: job.phase,
     progress: { percent: job.progressPercent },
+    usagePolicy: PRESENTATION_JOB_V2_USAGE_POLICY,
     quality: job.quality,
     artifact: job.artifact,
     createdAt: job.createdAt,
@@ -73,6 +87,7 @@ function publicUsage(job: PresentationJobV2Record): PublicPresentationJobV2Usage
     contractVersion: PRESENTATION_JOB_V2_CONTRACT_VERSION,
     jobId: job.id,
     usageVersion: job.usage.usageVersion,
+    usagePolicy: PRESENTATION_JOB_V2_USAGE_POLICY,
     status: job.usage.status,
     action: job.usage.action,
     billableImageOperations: job.usage.billableImageOperations,
@@ -163,7 +178,9 @@ export class PresentationJobV2Service {
   private async advance(job: PresentationJobV2Record) {
     if (job.status === 'QUEUED') return await this.submit(job)
     if (job.status === 'RUNNING') return await this.inspect(job)
-    if (job.status === 'COMPLETED' && job.usage.status === 'RECONCILING') return await this.reconcile(job)
+    if (['COMPLETED', 'FAILED'].includes(job.status) && job.usage.status === 'RECONCILING') {
+      return await this.reconcile(job)
+    }
   }
 
   private async submit(job: PresentationJobV2Record) {
@@ -183,6 +200,7 @@ export class PresentationJobV2Service {
       owner: job.owner,
       source: job.request.source,
       idempotencyKey,
+      maximumBillableImageOperations: maximumBillableImageOperations(job),
     })
     const now = this.dependencies.clock.now().toISOString()
     const operation: PresentationJobV2ProviderOperation = {
@@ -213,6 +231,9 @@ export class PresentationJobV2Service {
     })
     if (result.state === 'RUNNING') {
       return await this.save({ ...job, progressPercent: 75, updatedAt: this.dependencies.clock.now().toISOString() })
+    }
+    if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
+      return await this.fail(job, 'PROVIDER_USAGE_CAP_EXCEEDED', result.usage)
     }
     if (result.state === 'FAILED') return await this.fail(job, result.errorCode, result.usage)
     if (result.quality === 'BLOCKING_FAILURE') return await this.fail(job, 'DELIVERY_BLOCKED_BY_QUALITY', result.usage)
@@ -256,13 +277,17 @@ export class PresentationJobV2Service {
 
   private async reconcile(job: PresentationJobV2Record) {
     const operation = job.providerOperations.at(-1)
-    if (!operation || operation.status !== 'COMPLETED') return
+    if (!operation || !['COMPLETED', 'FAILED'].includes(operation.status)) return
     const result = await this.dependencies.provider.inspect({
       jobId: job.id,
       operationId: operation.operationId,
       idempotencyKey: operation.idempotencyKey,
     })
-    if (result.state !== 'COMPLETED' || result.usage.unknownImageOperations > 0) return
+    if (result.state === 'RUNNING' || result.usage.unknownImageOperations > 0) return
+    if (job.status === 'COMPLETED' && result.state !== 'COMPLETED') return
+    if (usageOperationCount(result.usage) > maximumBillableImageOperations(job)) {
+      return await this.fail(job, 'PROVIDER_USAGE_CAP_EXCEEDED', result.usage)
+    }
     const now = this.dependencies.clock.now().toISOString()
     await this.save({
       ...job,

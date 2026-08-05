@@ -62,7 +62,7 @@ const server = Bun.serve({
 console.log(JSON.stringify({
   event: 'presentation_job_v2_service_started',
   origin: server.url.origin,
-  providerMode: process.env.PPT_AGENT_V2_PROVIDER_MODE?.trim() || 'deterministic',
+  providerMode: process.env.PPT_AGENT_V2_PROVIDER_MODE?.trim(),
 }))
 
 function stop() {

@@ -232,10 +232,18 @@
           "byteLength": { "type": "integer", "minimum": 1 }
         }
       },
+      "PresentationJobUsagePolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maximumBillableImageOperationsPerPage"],
+        "properties": {
+          "maximumBillableImageOperationsPerPage": { "const": 5 }
+        }
+      },
       "PresentationJob": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["contractVersion", "jobId", "status", "phase", "progress", "quality", "artifact", "createdAt", "updatedAt"],
+        "required": ["contractVersion", "jobId", "status", "phase", "progress", "usagePolicy", "quality", "artifact", "createdAt", "updatedAt"],
         "properties": {
           "contractVersion": { "const": "2.0" },
           "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
@@ -245,6 +253,7 @@
             "type": "object", "additionalProperties": false, "required": ["percent"],
             "properties": { "percent": { "type": "integer", "minimum": 0, "maximum": 100 } }
           },
+          "usagePolicy": { "$ref": "#/components/schemas/PresentationJobUsagePolicy" },
           "quality": { "enum": ["PASSED", "BEST_EFFORT", null] },
           "artifact": { "oneOf": [{ "$ref": "#/components/schemas/PresentationArtifact" }, { "type": "null" }] },
           "createdAt": { "type": "string", "format": "date-time" },
@@ -275,11 +284,12 @@
       "PresentationJobUsage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["contractVersion", "jobId", "usageVersion", "status", "action", "billableImageOperations", "notChargedImageOperations", "unknownImageOperations", "byModel", "finalizedAt"],
+        "required": ["contractVersion", "jobId", "usageVersion", "usagePolicy", "status", "action", "billableImageOperations", "notChargedImageOperations", "unknownImageOperations", "byModel", "finalizedAt"],
         "properties": {
           "contractVersion": { "const": "2.0" },
           "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "usageVersion": { "const": 1 },
+          "usagePolicy": { "$ref": "#/components/schemas/PresentationJobUsagePolicy" },
           "status": { "enum": ["PENDING", "RECONCILING", "FINALIZED"] },
           "action": { "enum": ["WAIT", "NONE"] },
           "billableImageOperations": { "type": "integer", "minimum": 0 },

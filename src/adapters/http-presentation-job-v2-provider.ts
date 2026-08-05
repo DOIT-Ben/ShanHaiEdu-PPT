@@ -118,6 +118,7 @@ export class HttpPresentationJobV2Provider implements PresentationJobV2ProviderP
           contractVersion: '1.0',
           jobId: input.jobId,
           source: input.source,
+          maximumBillableImageOperations: input.maximumBillableImageOperations,
         }),
         signal: AbortSignal.timeout(this.timeoutMs),
       })
