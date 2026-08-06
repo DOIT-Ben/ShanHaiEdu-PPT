@@ -72,3 +72,9 @@ Quick-deck 只在主进程 `gateway` 模式配置以下变量后启用：
 | `PPT_AGENT_QUICK_DECK_EVALUATION_TICK_BATCH_SIZE` | 每次 worker 评测扫描数，默认 `10` |
 
 未配置专属 Token 时，接口返回不可用，`GET /v1/capabilities` 中的 `quickDeckEvaluation.available` 为 `false`。启用、禁用或回退均不迁移正式 Run、Usage 或交付数据。
+
+## 真实验收
+
+`scripts/run-quick-deck-real-evaluation.ts` 只调用回环地址的 quick-deck 资源，默认依次执行 `1`、`3`、`10` 页受控测试。它通过 SSE 等到终态，验证模型身份、每页实际像素与 `16:9` 比例，并重新计算 PPTX/预览 SHA-256；结果只写入显式配置的测试输出根，不写入正式 Run 或 Usage 数据。
+
+运行时必须通过环境提供 `QUICK_DECK_EVAL_API_TOKEN`、`QUICK_DECK_EVAL_OUTPUT_ROOT`、`QUICK_DECK_EVAL_TEXT_MODEL` 和 `QUICK_DECK_EVAL_IMAGE_MODEL`。可选 `QUICK_DECK_EVAL_SERVICE_URL`（默认 `http://127.0.0.1:4311`）、`QUICK_DECK_EVAL_PAGE_COUNTS`、`QUICK_DECK_EVAL_POLL_MS`、`QUICK_DECK_EVAL_TIMEOUT_MS` 与 `QUICK_DECK_EVAL_CODE_VERSION` 仅影响本次验收。脚本不会输出 Token、来源正文、内部 Prompt、Provider URL 或 artifact ID。
