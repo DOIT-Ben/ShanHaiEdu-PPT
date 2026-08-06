@@ -18,7 +18,7 @@ function run(status: RunRecord['status'] = 'PLANNING'): RunRecord {
     id: 'run-v4', creationKey: 'create-v4', requestHash: 'hash-v4',
     host: { tenantId: 'frameflow', externalUserId: 'user-v4' },
     source: { kind: 'TEXT', text: '这是用于验证 V4 生命周期事件的完整教材内容。'.repeat(3) },
-    slideCount: 3, visualDirection: '清晰课堂视觉', imageModel: 'image-2',
+    slideCount: 3, visualDirection: '清晰课堂视觉', imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED', presentationMode: 'VISUAL_DECK_V4',
     maxRevisionRounds: 2, revisionRound: 0, qualityScore: null,
     status, resumeState: null, version: 0, budgetUnits: 10, committedBudgetUnits: 0,

@@ -96,7 +96,7 @@ describe('Presentation Job V2 contract', () => {
       usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
       billableImageOperations: 2, notChargedImageOperations: 0, unknownImageOperations: 0,
       byModel: [{
-        model: 'nanobanana', billableImageOperations: 2,
+        model: 'gemini-3-pro-image-preview', billableImageOperations: 2,
         notChargedImageOperations: 0, unknownImageOperations: 0,
       }],
       finalizedAt: '2026-08-05T00:00:02.000Z',
@@ -106,7 +106,7 @@ describe('Presentation Job V2 contract', () => {
       usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
       billableImageOperations: 1, notChargedImageOperations: 0, unknownImageOperations: 1,
       byModel: [{
-        model: 'nanobanana', billableImageOperations: 1,
+        model: 'gemini-3-pro-image-preview', billableImageOperations: 1,
         notChargedImageOperations: 0, unknownImageOperations: 1,
       }],
       finalizedAt: '2026-08-05T00:00:02.000Z',
@@ -116,7 +116,7 @@ describe('Presentation Job V2 contract', () => {
       usagePolicy: { maximumBillableImageOperationsPerPage: 5 },
       billableImageOperations: 2, notChargedImageOperations: 0, unknownImageOperations: 0,
       byModel: [{
-        model: 'nanobanana', billableImageOperations: 1,
+        model: 'gemini-3-pro-image-preview', billableImageOperations: 1,
         notChargedImageOperations: 0, unknownImageOperations: 0,
       }],
       finalizedAt: '2026-08-05T00:00:02.000Z',

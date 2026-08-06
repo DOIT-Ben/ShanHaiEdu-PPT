@@ -6,7 +6,7 @@ const host = { tenantId: 'shanhai', externalUserId: 'task-123' }
 describe('externally authorized budget port', () => {
   test('returns a deterministic reservation for an explicitly configured tenant', async () => {
     const budget = new ExternallyAuthorizedBudgetPort('shanhai')
-    const input = { host, model: 'nanobanana', units: 2, idempotencyKey: 'run-1:slide-1' }
+    const input = { host, model: 'gemini-3-pro-image-preview', units: 2, idempotencyKey: 'run-1:slide-1' }
     const first = await budget.reserve(input)
     const replay = await budget.reserve(input)
 
@@ -20,7 +20,7 @@ describe('externally authorized budget port', () => {
     const budget = new ExternallyAuthorizedBudgetPort('shanhai')
     await expect(budget.reserve({
       host: { tenantId: 'frameflow', externalUserId: 'user-1' },
-      model: 'nanobanana',
+      model: 'gemini-3-pro-image-preview',
       units: 1,
       idempotencyKey: 'cross-tenant',
     })).rejects.toThrow('EXTERNAL_BUDGET_TENANT_MISMATCH')

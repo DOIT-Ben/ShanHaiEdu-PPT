@@ -55,7 +55,7 @@ function contract() {
     ],
     proposal,
     sourceArtifact,
-    editModel: 'image-2',
+    editModel: 'gpt-image-2',
   })
 }
 
@@ -89,7 +89,7 @@ describe('V4 repair contract', () => {
       },
       forbiddenChanges: ['水印', '品牌标志', '不得增加教材外结论', '不得重新设计或重新生成整页幻灯片。'],
       sourceArtifact,
-      editModel: 'image-2',
+      editModel: 'gpt-image-2',
     })
   })
 
@@ -169,7 +169,7 @@ describe('V4 repair contract', () => {
     const compiled = compileV4RepairContract({
       runId: 'run-1', pageNumber: 2, revisionRound: 1,
       issueIds, requiredChanges: ['只修正本页已确认的问题。'],
-      proposal, sourceArtifact, editModel: 'image-2',
+      proposal, sourceArtifact, editModel: 'gpt-image-2',
     })
 
     expect(compiled.issueIds).toEqual(issueIds)
@@ -180,7 +180,7 @@ describe('V4 repair contract', () => {
     const compiled = compileV4RepairContract({
       runId: 'run-1', pageNumber: 2, revisionRound: 2,
       issueIds: ['issue-cumulative'], requiredChanges,
-      proposal, sourceArtifact, editModel: 'image-2',
+      proposal, sourceArtifact, editModel: 'gpt-image-2',
     })
 
     expect(compiled.requiredChanges).toEqual(requiredChanges)

@@ -17,7 +17,7 @@ import {
 } from '../presentation-job-v2-contracts'
 import { storedGenerationBatchSchema } from '../generation-batch-contracts'
 
-const INTERNAL_MODEL = 'nanobanana'
+const INTERNAL_MODEL = 'gemini-3-pro-image-preview'
 
 function digest(...values: readonly string[]) {
   return createHash('sha256').update(values.join('\0')).digest('hex')

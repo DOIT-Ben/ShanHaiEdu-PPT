@@ -22,7 +22,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     source: { kind: 'TEXT', text: '这是用于媒体步骤测试的完整教材内容。' },
     slideCount: 2,
     visualDirection: '课堂信息图',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -51,7 +51,7 @@ const request = {
   slideId: 'slide-1',
   versionId: 'slide-1:v1',
   prompt: 'Classroom science illustration, no text',
-  model: 'image-2',
+  model: 'gpt-image-2',
   budgetUnits: 10,
 } as const
 
@@ -67,7 +67,7 @@ async function fixture(overrides: Partial<RunRecord> = {}) {
 function usageBill(): UsageRunBill {
   return {
     pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
-    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    authorizationCapMilli: 300_000, authorizedModel: 'gpt-image-2', authorizedUnits: 30,
     pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
     generatedOperations: 1, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 1,
     chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 1,
@@ -116,13 +116,13 @@ async function usageFixture(overrides: Partial<RunRecord> = {}) {
   const usage = new MediaUsagePort()
   await repository.createRun(run({
     presentationMode: 'VISUAL_DECK_V4', accountingProtocol: 'FRAMEFLOW_USAGE_V2',
-    imageModel: 'image-2', committedBudgetUnits: 10,
+    imageModel: 'gpt-image-2', committedBudgetUnits: 10,
     ...overrides,
   }))
   const billingCatalog = parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
-    model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
+    model: 'gpt-image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
     costBasis: 'FIXED_PER_OPERATION', costAmountMicros: 40_000, currency: 'USD',
-    providerPricingVersion: 'image-2-2026-08',
+    providerPricingVersion: 'gpt-image-2-2026-08',
   }] }))
   const usageV2 = new UsageV2Coordinator({ repository, usage, billingCatalog, clock })
   const originalSubmit = images.submit.bind(images)
@@ -268,8 +268,8 @@ describe('media step runner', () => {
             schemaVersion: '2', eventId, sequence: 1, eventType: 'OPERATION_OBSERVED', pptRunId: 'run-1',
             batchId: usageRequest.batchReservation.batchId, pageNumber: 1, revisionRound: 0,
             idempotencyKey: usageRequest.idempotencyKey, providerOperationId: 'different-provider-operation',
-            model: 'image-2', status: 'PROCESSING', providerBilling: {
-              result: 'UNKNOWN', estimatedCostAmountMicros: 40_000, currency: 'USD', pricingVersion: 'image-2-2026-08',
+            model: 'gpt-image-2', status: 'PROCESSING', providerBilling: {
+              result: 'UNKNOWN', estimatedCostAmountMicros: 40_000, currency: 'USD', pricingVersion: 'gpt-image-2-2026-08',
             },
             operationCreatedAt: '2026-07-21T00:00:00.000Z', operationCompletedAt: null,
             eventAt: '2026-07-21T00:00:00.000Z',
@@ -513,10 +513,10 @@ describe('media step runner', () => {
             schemaVersion: '2', eventId, sequence: 2, eventType: 'BILLING_RESOLVED', pptRunId: 'run-1',
             batchId: usageRequest.batchReservation.batchId, pageNumber: 1, revisionRound: 0,
             idempotencyKey: `${usageRequest.idempotencyKey}:billing-resolved`,
-            providerOperationId: 'different-provider-operation', model: 'image-2', status: 'COMPLETED',
+            providerOperationId: 'different-provider-operation', model: 'gpt-image-2', status: 'COMPLETED',
             providerBilling: {
               result: 'CHARGED', actualCostAmountMicros: 40_000, currency: 'USD',
-              pricingVersion: 'image-2-2026-08',
+              pricingVersion: 'gpt-image-2-2026-08',
             },
             operationCreatedAt: '2026-07-21T00:00:00.000Z',
             operationCompletedAt: '2026-07-21T00:00:00.000Z', eventAt: '2026-07-21T00:00:00.000Z',
@@ -638,12 +638,12 @@ describe('media step runner', () => {
 
   test('reconciles an accepted image edit after response loss without a second POST', async () => {
     const { repository, images, runner } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     })
     const editRequest = {
       ...request,
       idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'a'.repeat(24)}`,
-      model: 'image-2',
+      model: 'gpt-image-2',
       aspectRatio: '4:3' as const,
       operationMode: 'IMAGE_EDIT' as const,
       repairContractHash: 'b'.repeat(64),
@@ -675,12 +675,12 @@ describe('media step runner', () => {
 
   test('keeps an unknown image edit unresolved without changing model, key or POST count', async () => {
     const { repository, images, runner } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     })
     const editRequest = {
       ...request,
       idempotencyKey: `run-1:slide:1:image:r1:v1:edit:${'d'.repeat(24)}`,
-      model: 'image-2',
+      model: 'gpt-image-2',
       operationMode: 'IMAGE_EDIT' as const,
       repairContractHash: 'e'.repeat(64),
       referenceImage: {
@@ -704,7 +704,7 @@ describe('media step runner', () => {
 
     expect(unknown.step).toMatchObject({
       status: 'SUBMISSION_UNKNOWN',
-      output: { model: 'image-2', operationMode: 'IMAGE_EDIT', repairContractHash: 'e'.repeat(64) },
+      output: { model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', repairContractHash: 'e'.repeat(64) },
     })
     expect(replay.step.status).toBe('SUBMISSION_UNKNOWN')
     expect(images.submitCalls).toBe(1)
@@ -908,7 +908,7 @@ describe('media step runner', () => {
       slideId: request.slideId,
       versionId: request.versionId,
       backgroundMode: 'OPAQUE',
-      model: 'image-2',
+      model: 'gpt-image-2',
       operationMode: 'TEXT_TO_IMAGE',
       aspectRatio: '16:9',
       artifactId: 'artifact-slide-1-v1',

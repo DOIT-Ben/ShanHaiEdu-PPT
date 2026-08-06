@@ -13,7 +13,7 @@ function run(): RunRecord {
     source: { kind: 'TEXT', text: '用于验证技术恢复上限的完整教材内容。' },
     slideCount: 2,
     visualDirection: '清晰课堂信息图',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,

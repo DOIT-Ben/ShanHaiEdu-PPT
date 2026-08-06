@@ -76,7 +76,7 @@ class StaticDocumentPort implements DocumentPort {
 }
 
 describe('PPT Agent mock end-to-end', () => {
-  test('delivers a 12-page approved design sequentially without replanning', async () => {
+  test('delivers a 12-page approved design concurrently without replanning', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock()
     const pageCount = 12
@@ -156,9 +156,9 @@ describe('PPT Agent mock end-to-end', () => {
 
     const media = new MediaStepRunner({ repository, budget, images, clock })
     const generation = new SlideGenerationCoordinator({ repository, media, batchBudget: budget, documents, artifacts, clock })
+    expect(await generation.submitBlueprintImages(runId, 1)).toMatchObject({ submitted: pageCount, total: pageCount })
+    expect(images.operations.size).toBe(pageCount)
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
-      expect(await generation.submitBlueprintImages(runId, 1)).toMatchObject({ submitted: pageNumber, total: pageCount })
-      expect(images.operations.size).toBe(pageNumber)
       const key = `${runId}:slide:${pageNumber}:image:r0:v1`
       const artifact = await artifacts.put({
         tenantId: host.tenantId,
@@ -169,9 +169,8 @@ describe('PPT Agent mock end-to-end', () => {
         idempotencyKey: `${key}:source-artifact`,
       })
       images.complete(key, artifact.artifactId)
-      const refreshed = await generation.refreshBlueprintImages(runId)
-      expect(refreshed.completed).toBe(pageNumber)
     }
+    expect(await generation.refreshBlueprintImages(runId)).toMatchObject({ completed: pageCount, total: pageCount })
     expect(await repository.getRun(runId)).toMatchObject({ status: 'PAGE_REVIEW' })
 
     const visualReviewer = new MockVisualReviewPort({
@@ -333,7 +332,7 @@ describe('PPT Agent mock end-to-end', () => {
     expect(await revisionApplication.apply(runId)).toMatchObject({ status: 'REVISING', requiresMedia: true })
 
     const revisionMedia = new RevisionMediaCoordinator({
-      repository, media, batchBudget: budget, artifacts, clock, revisionImageModel: 'image-2',
+      repository, media, batchBudget: budget, artifacts, clock, revisionImageModel: 'gpt-image-2',
     })
     expect(await revisionMedia.submit(runId, 2)).toMatchObject({ submitted: 1, total: 1 })
     const revisedImageKey = `${runId}:slide:8:image:r1:v1`

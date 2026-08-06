@@ -550,7 +550,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const workerId = input.workerId?.trim() || `worker-${randomUUID()}`
   const workerConcurrency = input.workerConcurrency ?? 2
   const imageConcurrency = input.imageConcurrency ?? 50
-  const revisionImageModel = input.revisionImageModel?.trim() || 'image-2'
+  const revisionImageModel = input.revisionImageModel?.trim() || 'gpt-image-2'
   const runLeaseTtlMs = input.runLeaseTtlMs ?? 60_000
   const v1ExecutionEnabled = input.v1ExecutionEnabled ?? true
   if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency < 1 || workerConcurrency > 8) {

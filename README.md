@@ -65,8 +65,8 @@ bun run check
 | `PPT_AGENT_WORKER_CONCURRENCY` | 同时推进的 Run 数，默认 `2`，最大 `8` |
 | `PPT_AGENT_IMAGE_CONCURRENCY` | V4 整套独立页面图片任务的并发提交上限，默认 `50`，最大 `50` |
 | `PPT_AGENT_REVIEW_CONCURRENCY` | 同时执行的页面视觉审查数，默认 `1`，最大 `8` |
-| `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6` |
-| `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6` |
+| `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6-terra` |
+| `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
 | `PPT_AGENT_V2_TENANT_ID` | V2-only 服务凭据绑定的宿主租户；无默认值，必须显式配置 |
 | `PPT_AGENT_V2_API_TOKEN` | V2 宿主服务凭据；主进程仅在配置后启用 V2，V2-only 服务始终必填；必须与 V1、管理员及宿主回调 Token 分离 |

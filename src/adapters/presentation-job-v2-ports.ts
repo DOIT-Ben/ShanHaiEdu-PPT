@@ -127,7 +127,7 @@ export class DeterministicPresentationJobV2Provider implements PresentationJobV2
   ): PresentationJobV2UsageSummary {
     const count = source.snapshot.pages.length
     const byModel = {
-      model: 'nanobanana',
+      model: 'gemini-3-pro-image-preview',
       billableImageOperations: billingStatus === 'SETTLED' ? count : 0,
       notChargedImageOperations: billingStatus === 'NOT_CHARGED' ? count : 0,
       unknownImageOperations: billingStatus === 'UNKNOWN' ? count : 0,

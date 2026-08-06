@@ -10,7 +10,7 @@ const usageBill = {
   accountingMode: 'USAGE_V2',
   status: 'ACTIVE',
   authorizationCapMilli: 300_000,
-  authorizedModel: 'nanobanana',
+  authorizedModel: 'gemini-3-pro-image-preview',
   authorizedUnits: 30,
   pricingVersion: 'ppt-image-v1',
   unitPriceMilli: 10_000,
@@ -117,7 +117,7 @@ describe('FrameFlow internal source backend', () => {
 
     await expect(backend.reserveCredits({
       externalUserId: 'teacher-1',
-      model: 'image-2',
+      model: 'gpt-image-2',
       units: 1,
       idempotencyKey: 'run-1:slide-1:image-v1',
     })).resolves.toEqual({ reservationId: 'reservation-1' })
@@ -126,7 +126,7 @@ describe('FrameFlow internal source backend', () => {
     expect(request.headers.get('Authorization')).toBe(`Bearer ${token}`)
     expect(request.headers.get('X-PPT-Agent-User')).toBe('teacher-1')
     expect(request.headers.get('Idempotency-Key')).toBe('run-1:slide-1:image-v1')
-    expect(await request.json()).toEqual({ model: 'image-2', units: 1 })
+    expect(await request.json()).toEqual({ model: 'gpt-image-2', units: 1 })
   })
 
   test('distinguishes definite reservation denial from an unknown host result', async () => {
@@ -152,7 +152,7 @@ describe('FrameFlow internal source backend', () => {
     })
 
     const input = {
-      externalUserId: 'teacher-1', model: 'image-2', units: 1, idempotencyKey: 'step-1',
+      externalUserId: 'teacher-1', model: 'gpt-image-2', units: 1, idempotencyKey: 'step-1',
     }
     await expect(denied.reserveCredits(input)).rejects.toMatchObject({
       code: 'INSUFFICIENT_CREDITS',
@@ -264,7 +264,7 @@ describe('FrameFlow internal source backend', () => {
       revisionRound: 0,
       idempotencyKey: 'run-1:slide:1:image:r0:v1',
       providerOperationId: 'imgop_0123456789abcdef0123456789abcdef',
-      model: 'nanobanana',
+      model: 'gemini-3-pro-image-preview',
       status: 'PROCESSING' as const,
       providerBilling: {
         result: 'UNKNOWN' as const,
@@ -283,7 +283,7 @@ describe('FrameFlow internal source backend', () => {
       operationIdempotencyKey: observed.idempotencyKey,
       pageNumber: 1,
       revisionRound: 0,
-      model: 'nanobanana',
+      model: 'gemini-3-pro-image-preview',
     })).resolves.toMatchObject({ allowed: true, permitId: 'permit-1' })
     await expect(backend.ingestUsageEvent({ externalUserId: 'teacher-1', event: observed }))
       .resolves.toMatchObject({ replayed: false, bill: { pptRunId: 'run-1', unknownOperations: 1 } })
@@ -309,7 +309,7 @@ describe('FrameFlow internal source backend', () => {
       operationIdempotencyKey: observed.idempotencyKey,
       pageNumber: 1,
       revisionRound: 0,
-      model: 'nanobanana',
+      model: 'gemini-3-pro-image-preview',
     })
     expect(await requests[1]!.json()).toEqual(observed)
   })
@@ -335,7 +335,7 @@ describe('FrameFlow internal source backend', () => {
     })
     const input = {
       externalUserId: 'teacher-1', runId: 'run-1', operationIdempotencyKey: 'operation-1',
-      pageNumber: 1, revisionRound: 0, model: 'nanobanana',
+      pageNumber: 1, revisionRound: 0, model: 'gemini-3-pro-image-preview',
     }
 
     await expect(denied.authorizeUsageOperation(input)).resolves.toMatchObject({
@@ -358,7 +358,7 @@ describe('FrameFlow internal source backend', () => {
       schemaVersion: '2' as const, eventId: 'event-1', sequence: 1,
       eventType: 'OPERATION_OBSERVED' as const, pptRunId: 'run-1', batchId: 'batch-1',
       pageNumber: 1, revisionRound: 0, idempotencyKey: 'operation-1', providerOperationId: 'provider-1',
-      model: 'nanobanana', status: 'COMPLETED' as const,
+      model: 'gemini-3-pro-image-preview', status: 'COMPLETED' as const,
       providerBilling: {
         result: 'CHARGED' as const, actualCostAmountMicros: 25_000,
         currency: 'USD', pricingVersion: 'provider-v1',
@@ -384,7 +384,7 @@ describe('FrameFlow internal source backend', () => {
       schemaVersion: '2' as const, eventId: 'event-run-binding', sequence: 1,
       eventType: 'OPERATION_OBSERVED' as const, pptRunId: 'run-1', batchId: 'batch-1',
       pageNumber: 1, revisionRound: 0, idempotencyKey: 'operation-1', providerOperationId: 'provider-1',
-      model: 'nanobanana', status: 'COMPLETED' as const,
+      model: 'gemini-3-pro-image-preview', status: 'COMPLETED' as const,
       providerBilling: {
         result: 'CHARGED' as const, actualCostAmountMicros: 25_000,
         currency: 'USD', pricingVersion: 'provider-v1',

@@ -53,7 +53,7 @@ function batchRun(tenantId: string): RunRecord {
     source: { kind: 'TEXT', text: '用于验证批量图片费用归属的完整教材内容。' },
     slideCount: 2,
     visualDirection: '课堂信息图',
-    imageModel: 'nanobanana',
+    imageModel: 'gemini-3-pro-image-preview',
     automationLevel: 'BOUNDED_AUTO',
     presentationMode: 'VISUAL_DECK_V4',
     maxRevisionRounds: 2,
@@ -137,7 +137,7 @@ describe('internal Presentation Job V2 provider', () => {
         notChargedImageOperations: 0,
         unknownImageOperations: 1,
         byModel: [{
-          model: 'nanobanana',
+          model: 'gemini-3-pro-image-preview',
           billableImageOperations: 0,
           notChargedImageOperations: 0,
           unknownImageOperations: 1,

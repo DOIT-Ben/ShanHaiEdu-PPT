@@ -49,7 +49,7 @@ function request(options: Readonly<{ presentationGoal?: string }> = {}) {
     },
     slideCount: 10,
     visualDirection: '成熟清晰的资料驱动课堂视觉叙事',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED' as const,
     budgetUnits: 10,
     ...(options.presentationGoal ? { presentationGoal: options.presentationGoal } : {}),
@@ -832,7 +832,7 @@ describe('visual deck v4 planning runner', () => {
       if (modelInput.operation === 'critique_v4_slide_briefs') {
         criticCalls += 1
         throw new StructuredModelError(
-          'MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-slide-contract-invalid', 200, 'ACCEPTED',
+          'MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-slide-contract-invalid', 200, 'ACCEPTED',
           { layer: 'JSON_SCHEMA', safeIssues: [], responseHash: 'a'.repeat(64), byteLength: 20 },
         )
       }
@@ -874,7 +874,7 @@ describe('visual deck v4 planning runner', () => {
     staged.model.execute = async (modelInput) => {
       if (modelInput.operation === 'critique_v4_slide_briefs') {
         keys.push(modelInput.idempotencyKey)
-        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', null, null, 'UNKNOWN')
+        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', null, null, 'UNKNOWN')
       }
       return execute(modelInput)
     }
@@ -1006,7 +1006,7 @@ describe('visual deck v4 planning runner', () => {
       if (modelInput.operation === 'create_visual_deck_v4_slide_briefs') {
         slideCalls += 1
         if (slideCalls < 5) {
-          throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', `request-slide-${slideCalls}`)
+          throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', `request-slide-${slideCalls}`)
         }
       }
       return execute(modelInput)

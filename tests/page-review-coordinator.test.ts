@@ -28,7 +28,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     source: { kind: 'TEXT', text: '这是用于页面质检聚合测试的完整教材内容。' },
     slideCount: 3,
     visualDirection: '清晰的课堂科学信息图风格',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -813,7 +813,7 @@ describe('page review coordinator', () => {
             retryInstruction: 'Keep the approved copy and simplify the composition.',
           }
         }
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'page-review-2')
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', 'page-review-2')
       },
     }
     const { repository, coordinator } = await fixture({
@@ -855,7 +855,7 @@ describe('page review coordinator', () => {
             retryInstruction: 'Keep the approved copy and simplify the composition.',
           }
         }
-        if (calls === 2) throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'page-review-2')
+        if (calls === 2) throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', 'page-review-2')
         return { approved: true, textDetected: false, visualScore: 90, reasons: [], retryInstruction: null }
       },
     }

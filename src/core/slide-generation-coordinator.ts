@@ -169,22 +169,13 @@ export class SlideGenerationCoordinator {
     const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
     const existingSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
-    const sequentialPageExecution = !isVisualDeckV4(run) && run.source.kind === 'APPROVED_PAGE_DESIGN'
+    const concurrentPageExecution = isVisualDeckV4(run) || run.source.kind === 'APPROVED_PAGE_DESIGN'
     const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status)
       && !(isVisualDeckV4(run) && ['RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
       && !canRetryReleasedV4Submission(run, step))
     if (blockingStep) {
       await this.requireHuman(runId, blockingStep)
       return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
-    }
-    if (sequentialPageExecution && existingSteps.some((step) =>
-      ['WAITING', 'RELEASING'].includes(step.status))) {
-      return {
-        status: run.status,
-        submitted: existingSteps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
-        total: requirements.length,
-        steps: existingSteps,
-      }
     }
     const existingByKey = new Map(existingSteps.map((step) => [step.idempotencyKey, step]))
     const pendingRequirements = requirements.filter((requirement) => {
@@ -213,7 +204,7 @@ export class SlideGenerationCoordinator {
 
     const steps = [...existingSteps]
     const unresolvedRequirements = []
-    const currentRequirements = sequentialPageExecution ? pendingRequirements.slice(0, 1) : pendingRequirements
+    const currentRequirements = pendingRequirements
     for (const requirement of currentRequirements) {
       if (requirement.sourceAssetStrategy !== 'SEARCH_WEB') {
         unresolvedRequirements.push(requirement)
@@ -244,7 +235,7 @@ export class SlideGenerationCoordinator {
       if (!decision.allowed) throw new Error(decision.reason)
     }
 
-    if (isVisualDeckV4(run)) {
+    if (concurrentPageExecution) {
       const outcomes = await mapWithConcurrency(unresolvedRequirements, this.imageConcurrency, async (requirement) => {
         try {
           return { step: await this.submitGeneratedImage(
@@ -280,12 +271,14 @@ export class SlideGenerationCoordinator {
         }
       }
       const latest = await this.dependencies.repository.getRun(runId)
-      await refreshGenerationBatch({
-        repository: this.dependencies.repository,
-        clock: this.dependencies.clock,
-        runId,
-        revisionRound: run.revisionRound,
-      })
+      if (isVisualDeckV4(run)) {
+        await refreshGenerationBatch({
+          repository: this.dependencies.repository,
+          clock: this.dependencies.clock,
+          runId,
+          revisionRound: run.revisionRound,
+        })
+      }
       return {
         status: latest?.status ?? 'FAILED',
         submitted: steps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
@@ -354,7 +347,7 @@ export class SlideGenerationCoordinator {
     const steps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const pendingRefreshes = steps.filter((candidate) => ['WAITING', 'RELEASING'].includes(candidate.status))
-    if (isVisualDeckV4(run)) {
+    if (isVisualDeckV4(run) || run.source.kind === 'APPROVED_PAGE_DESIGN') {
       await mapWithConcurrency(pendingRefreshes, this.imageConcurrency, (step) =>
         this.dependencies.media.refreshSlideImage(runId, step.idempotencyKey))
     } else {

@@ -189,8 +189,8 @@ const runtime = runtimeMode === 'gateway'
             fallback: hostBudget,
           })
         : hostBudget
-      const textModel = process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6'
-      const visionModel = process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6'
+      const textModel = process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6-terra'
+      const visionModel = process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6-terra'
       const primaryModel = new GatewayCoursewareModel({
         baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
         apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
@@ -254,7 +254,7 @@ const runtime = runtimeMode === 'gateway'
       repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
       ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
-      revisionImageModel: revisionImageModel || 'image-2',
+      revisionImageModel: revisionImageModel || 'gpt-image-2',
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
       budget: presentationJobV2Budget
         ? new TenantRoutingBudgetPort({

@@ -12,7 +12,7 @@ function run(): RunRecord {
     source: { kind: 'TEXT', text: '这是用于 Repository 测试的完整教材内容。' },
     slideCount: 2,
     visualDirection: '课堂信息图',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,

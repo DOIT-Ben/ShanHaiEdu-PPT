@@ -35,7 +35,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     id: 'run-1', creationKey: 'create-1', requestHash: 'hash',
     host: { tenantId: 'frameflow', externalUserId: 'user-1' },
     source: { kind: 'TEXT', text: '这是局部重绘协调器使用的完整测试教材。' },
-    slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'image-2',
+    slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED', maxRevisionRounds: 2, revisionRound: 1,
     qualityScore: 72, status: 'REVISING', resumeState: null, version: 8,
     budgetUnits: 100, committedBudgetUnits: 20, qualityOverride: false,
@@ -215,7 +215,7 @@ async function fixture(
       batchBudget: budget,
       artifacts,
       clock,
-      revisionImageModel: inputs.revisionImageModel ?? 'image-2',
+      revisionImageModel: inputs.revisionImageModel ?? 'gpt-image-2',
       ...(inputs.imageConcurrency === undefined ? {} : { imageConcurrency: inputs.imageConcurrency }),
     }),
     generation: new SlideGenerationCoordinator({
@@ -238,7 +238,7 @@ async function fixture(
 function revisionUsageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
   return {
     pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
-    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    authorizationCapMilli: 300_000, authorizedModel: 'gpt-image-2', authorizedUnits: 30,
     pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
     generatedOperations: 0, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 0,
     chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
@@ -294,9 +294,9 @@ async function usageV2RevisionFixture(inputs: Readonly<{
     repository: base.repository,
     usage,
     billingCatalog: parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
-      model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K',
+      model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', resolution: '1K',
       costBasis: 'FIXED_PER_OPERATION', costAmountMicros: 40_000, currency: 'USD',
-      providerPricingVersion: 'image-2-edit-2026-08',
+      providerPricingVersion: 'gpt-image-2-edit-2026-08',
     }] })),
     clock: base.clock,
   })
@@ -305,7 +305,7 @@ async function usageV2RevisionFixture(inputs: Readonly<{
   })
   const coordinator = new RevisionMediaCoordinator({
     repository: base.repository, media, batchBudget: base.budget, artifacts: base.artifacts,
-    clock: base.clock, revisionImageModel: 'image-2', imageConcurrency,
+    clock: base.clock, revisionImageModel: 'gpt-image-2', imageConcurrency,
   })
   return { ...base, usage, media, coordinator }
 }
@@ -317,8 +317,8 @@ describe('revision media coordinator', () => {
     expect(await coordinator.submit('run-1', 5)).toMatchObject({ status: 'REVISING', submitted: 2, total: 2 })
     expect(usage.permits.map(({ pageNumber, revisionRound, model }) => ({ pageNumber, revisionRound, model })))
       .toEqual([
-        { pageNumber: 1, revisionRound: 1, model: 'image-2' },
-        { pageNumber: 2, revisionRound: 1, model: 'image-2' },
+        { pageNumber: 1, revisionRound: 1, model: 'gpt-image-2' },
+        { pageNumber: 2, revisionRound: 1, model: 'gpt-image-2' },
       ])
     expect(budget.reservationRequests).toHaveLength(0)
     expect(budget.batchReservationRequests).toHaveLength(0)
@@ -410,11 +410,11 @@ describe('revision media coordinator', () => {
 
   test('edits the latest controlled V4 page with the configured GPT model before review', async () => {
     const { repository, budget, images, sourceBytes, sourceSha256, coordinator } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     }, {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
-      revisionImageModel: 'image-2',
+      revisionImageModel: 'gpt-image-2',
     })
 
     const submitted = await coordinator.submit('run-1', 5)
@@ -423,27 +423,27 @@ describe('revision media coordinator', () => {
 
     expect(submitted).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
     expect(key).toMatch(/^run-1:slide:2:image:r1:v1:edit:[a-f0-9]{24}$/)
-    expect(request.model).toBe('image-2')
+    expect(request.model).toBe('gpt-image-2')
     expect(request.referenceImage).toEqual({
       mimeType: 'image/png', bytes: sourceBytes, sha256: sourceSha256,
     })
     expect(request.prompt).toContain('在附带的源幻灯片上原位编辑')
     expect(request.prompt).toContain('Remove the inconsistent object')
     expect(step?.output).toMatchObject({
-      model: 'image-2',
+      model: 'gpt-image-2',
       operationMode: 'IMAGE_EDIT',
       referenceImageSha256: sourceSha256,
       repairContractHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       repairContract: {
-        mode: 'IMAGE_EDIT', editModel: 'image-2', issueIds: ['issue-1'],
+        mode: 'IMAGE_EDIT', editModel: 'gpt-image-2', issueIds: ['issue-1'],
         sourceArtifact: { artifactId: 'artifact-r0-2', sha256: sourceSha256, width: 160, height: 90 },
       },
     })
     expect(budget.batchReservationRequests).toHaveLength(1)
-    expect(budget.batchReservationRequests[0]).toMatchObject({ model: 'image-2', units: 5 })
+    expect(budget.batchReservationRequests[0]).toMatchObject({ model: 'gpt-image-2', units: 5 })
     const batchStep = (await repository.listSteps('run-1')).find((candidate) =>
       candidate.idempotencyKey === generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' }))
-    expect(batchStep?.output).toMatchObject({ accountingModel: 'image-2', operationMode: 'IMAGE_EDIT' })
+    expect(batchStep?.output).toMatchObject({ accountingModel: 'gpt-image-2', operationMode: 'IMAGE_EDIT' })
     const publicBatch = await getGenerationBatch(repository, (await repository.getRun('run-1'))!, {
       revisionRound: 1,
       scope: 'REVISION',
@@ -454,11 +454,11 @@ describe('revision media coordinator', () => {
 
   test('keeps the persisted edit model, contract and key after runtime configuration drift', async () => {
     const { repository, budget, images, artifacts, media, clock, coordinator } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     }, {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
-      revisionImageModel: 'image-2',
+      revisionImageModel: 'gpt-image-2',
     })
     await coordinator.submit('run-1', 5)
     const originalKey = await revisionImageKey(repository, 2)
@@ -475,18 +475,18 @@ describe('revision media coordinator', () => {
 
     expect(await revisionImageKey(repository, 2)).toBe(originalKey)
     expect(images.submitCalls).toBe(1)
-    expect(images.requests.get(originalKey)?.model).toBe('image-2')
+    expect(images.requests.get(originalKey)?.model).toBe('gpt-image-2')
     expect(budget.batchReservationRequests).toHaveLength(1)
-    expect(budget.batchReservationRequests[0]?.model).toBe('image-2')
+    expect(budget.batchReservationRequests[0]?.model).toBe('gpt-image-2')
   })
 
   test('accepts a controlled V4 repair source within the three-percent 16:9 tolerance', async () => {
     const { repository, images, artifacts, coordinator } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     }, {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
-      revisionImageModel: 'image-2',
+      revisionImageModel: 'gpt-image-2',
     })
     const bytes = new Uint8Array(await sharp({
       create: { width: 1360, height: 768, channels: 3, background: '#FFFFFF' },
@@ -500,7 +500,7 @@ describe('revision media coordinator', () => {
     })
     const [editKey, editRequest] = [...images.requests.entries()][0]!
     expect(editKey).toContain(':edit:')
-    expect(editRequest?.model).toBe('image-2')
+    expect(editRequest?.model).toBe('gpt-image-2')
     expect(editRequest?.referenceImage?.sha256).toMatch(/^[a-f0-9]{64}$/)
     expect(await revisionImageKey(repository, 2)).toContain(':edit:')
   })
@@ -515,11 +515,11 @@ describe('revision media coordinator', () => {
       ],
     }
     const { repository, images, artifacts, coordinator } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     }, {
       blueprint: visualDeckV4Blueprint(),
       plan,
-      revisionImageModel: 'image-2',
+      revisionImageModel: 'gpt-image-2',
     })
     const bytes = new Uint8Array(await sharp({
       create: { width: 1536, height: 1024, channels: 3, background: '#FFFFFF' },
@@ -532,7 +532,7 @@ describe('revision media coordinator', () => {
       status: 'REVISING', submitted: 2, total: 2,
     })
     expect([...images.requests.entries()].every(([key, request]) =>
-      !key.includes(':edit:') && request.model === 'nano-banana-pro' && !('referenceImage' in request))).toBe(true)
+      !key.includes(':edit:') && request.model === 'gemini-3-pro-image-preview' && !('referenceImage' in request))).toBe(true)
     const rebuiltSteps = (await repository.listSteps('run-1')).filter((step) =>
       step.tool === 'generate_slide_image' && step.idempotencyKey.includes(':r1:v1'))
     expect(rebuiltSteps).toHaveLength(2)
@@ -561,11 +561,11 @@ describe('revision media coordinator', () => {
     }, 'V4_REPAIR_SOURCE_IMAGE_INVALID'],
   ] as const)('rejects a %s controlled source before budget reservation or Provider submission', async (_label, mutate, errorCode) => {
     const { repository, budget, images, artifacts, coordinator } = await fixture({
-      presentationMode: 'VISUAL_DECK_V4', imageModel: 'nano-banana-pro',
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     }, {
       blueprint: visualDeckV4Blueprint(),
       plan: revisionPlan(),
-      revisionImageModel: 'image-2',
+      revisionImageModel: 'gpt-image-2',
     })
     await mutate(artifacts)
 

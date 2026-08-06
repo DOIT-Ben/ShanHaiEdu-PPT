@@ -413,7 +413,7 @@ describe('mock runtime', () => {
     const bill: UsageRunBill = {
       pptRunId: 'usage-v2-terminal-run', authorizationReservationId: 'authorization-1',
       accountingMode: 'USAGE_V2', status: 'SETTLED', authorizationCapMilli: 300_000,
-      authorizedModel: 'image-2', authorizedUnits: 30, pricingVersion: 'ppt-image-v1',
+      authorizedModel: 'gpt-image-2', authorizedUnits: 30, pricingVersion: 'ppt-image-v1',
       unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30, generatedOperations: 1,
       chargedOperations: 1, notChargedOperations: 0, unknownOperations: 0, chargeableMilli: 10_000,
       settledMilli: 10_000, releasedMilli: 290_000, providerCosts: [], lastEventSequence: 1,
@@ -433,7 +433,7 @@ describe('mock runtime', () => {
       id: 'usage-v2-terminal-run', creationKey: 'usage-v2-terminal-create', requestHash: 'usage-v2-terminal-hash',
       host: { tenantId: 'frameflow', externalUserId: 'user-1' },
       source: { kind: 'TEXT', text: '这是用于终态 Usage V2 worker 恢复的完整教材内容。' },
-      slideCount: 2, visualDirection: '课堂信息图', imageModel: 'image-2',
+      slideCount: 2, visualDirection: '课堂信息图', imageModel: 'gpt-image-2',
       accountingProtocol: 'FRAMEFLOW_USAGE_V2', automationLevel: 'BOUNDED_AUTO', presentationMode: 'VISUAL_DECK_V4',
       maxRevisionRounds: 2, revisionRound: 0, qualityScore: null, status: 'CANCELLED', resumeState: null,
       version: 1, budgetUnits: 30, committedBudgetUnits: 0, qualityOverride: false,
@@ -448,8 +448,8 @@ describe('mock runtime', () => {
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
       usageAccounting: usage,
       providerBillingCatalog: parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
-        costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'image-2-2026-08',
+        model: 'gpt-image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
+        costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'gpt-image-2-2026-08',
       }] })),
     })
 
@@ -468,12 +468,12 @@ describe('mock runtime', () => {
     const clock = new FixedClock()
     let metricsTaken = 0
     const model = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async preflightStructuredGeneration() {
         return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
       },
       async execute() {
-        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-runtime-metrics', 200)
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-runtime-metrics', 200)
       },
       takeExecutionMetrics() {
         metricsTaken += 1
@@ -515,7 +515,7 @@ describe('mock runtime', () => {
         },
         slideCount: 2,
         visualDirection: '清晰活泼的儿童课堂信息图',
-        imageModel: 'nanobanana',
+        imageModel: 'gemini-3-pro-image-preview',
         automationLevel: 'BOUNDED_AUTO',
         budgetUnits: 2,
         maxRevisionRounds: 2,
@@ -589,7 +589,7 @@ describe('mock runtime', () => {
         source: { kind: 'HOST_ATTACHMENT', attachmentId: 'lesson-source-1', roleHint: 'CONTENT_SOURCE' },
         slideCount: 2,
         visualDirection: '温暖、清晰、有故事感的小学课堂绘本视觉',
-        imageModel: 'nanobanana',
+        imageModel: 'gemini-3-pro-image-preview',
         automationLevel: 'BOUNDED_AUTO',
         budgetUnits: 2,
         maxRevisionRounds: 2,
@@ -705,7 +705,7 @@ describe('mock runtime', () => {
         },
         slideCount: 3,
         visualDirection: '温暖、清晰、有故事感的小学课堂绘本视觉',
-        imageModel: 'nanobanana',
+        imageModel: 'gemini-3-pro-image-preview',
         automationLevel: 'SUPERVISED',
         budgetUnits: 3,
         maxRevisionRounds: 2,

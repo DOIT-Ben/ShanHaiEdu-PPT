@@ -78,7 +78,7 @@ function run(): RunRecord {
     source,
     slideCount: 2,
     visualDirection: request.visualDirection,
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -606,13 +606,13 @@ describe('planning runner', () => {
     const clock = new FixedClock()
     let calls = 0
     const model = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async preflightStructuredGeneration() {
         return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
       },
       async execute() {
         calls += 1
-        throw new StructuredModelError('MODEL_FORBIDDEN', false, 'gpt-5.6', 'request-model-forbidden')
+        throw new StructuredModelError('MODEL_FORBIDDEN', false, 'gpt-5.6-terra', 'request-model-forbidden')
       },
     }
     await repository.createRun({
@@ -641,11 +641,11 @@ describe('planning runner', () => {
     const executions: Parameters<StructuredModelPort['execute']>[0][] = []
     const delays: number[] = []
     const model: StructuredModelPort = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async execute(input) {
         executions.push(structuredClone(input))
         if (executions.length < 5) {
-          throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', 'request-transient-1')
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', 'request-transient-1')
         }
         return draft()
       },
@@ -676,9 +676,9 @@ describe('planning runner', () => {
   ] as const)('persists retry diagnostics when %s exhausts automatic attempts', async (errorCode) => {
     const repository = new InMemoryAgentRepository()
     const model: StructuredModelPort = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async execute() {
-        throw new StructuredModelError(errorCode, true, 'gpt-5.6', 'request-safe-1')
+        throw new StructuredModelError(errorCode, true, 'gpt-5.6-terra', 'request-safe-1')
       },
     }
     await repository.createRun(run())
@@ -696,7 +696,7 @@ describe('planning runner', () => {
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode })
     expect(issue?.type === 'issue.detected' && issue.payload.planningFailure).toMatchObject({
       errorCode, retryable: true, suggestedAction: 'RETRY', attempt: 5, maxAttempts: 5,
-      requestId: 'request-safe-1', model: 'gpt-5.6', contractVersion: '1',
+      requestId: 'request-safe-1', model: 'gpt-5.6-terra', contractVersion: '1',
     })
   })
 
@@ -704,11 +704,11 @@ describe('planning runner', () => {
     const repository = new InMemoryAgentRepository()
     const executions: Parameters<StructuredModelPort['execute']>[0][] = []
     const model: StructuredModelPort = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async execute(input) {
         executions.push(structuredClone(input))
         if (executions.length === 1) {
-          throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-invalid-json-1')
+          throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-invalid-json-1')
         }
         return draft()
       },
@@ -732,9 +732,9 @@ describe('planning runner', () => {
   test('persists the final malformed-JSON diagnosis after contract repair is exhausted', async () => {
     const repository = new InMemoryAgentRepository()
     const model: StructuredModelPort = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async execute() {
-        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-invalid-json-final')
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-invalid-json-final')
       },
     }
     await repository.createRun(run())
@@ -750,7 +750,7 @@ describe('planning runner', () => {
     expect(diagnostics).toMatchObject({
       errorCode: 'MODEL_JSON_INVALID', terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
       retryable: false, suggestedAction: 'CONTACT_ADMIN', attempt: 5, maxAttempts: 5, fieldPaths: ['blueprint'],
-      requestId: 'request-invalid-json-final', model: 'gpt-5.6',
+      requestId: 'request-invalid-json-final', model: 'gpt-5.6-terra',
     })
   })
 

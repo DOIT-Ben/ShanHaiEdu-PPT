@@ -117,7 +117,7 @@ function run(): RunRecord {
     source,
     slideCount: 2,
     visualDirection: '温暖的儿童绘本课堂视觉',
-    imageModel: 'nano-banana-pro',
+    imageModel: 'gemini-3-pro-image-preview',
     automationLevel: 'BOUNDED_AUTO',
     presentationMode: 'VISUAL_DECK_V4',
     visualDeckV4: v4Config,
@@ -167,7 +167,7 @@ function passingDeckReview() {
 }
 
 describe('V4 GPT revision delivery integration', () => {
-  test('delivers a real PPTX after Nano generation, GPT edit, re-review and atomic batch settlement', async () => {
+  test('delivers a real PPTX after gemini-3-pro-image-preview generation, gpt-image-2 edit, re-review and atomic batch settlement', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock()
     const documents = new StaticDocumentPort()
@@ -200,7 +200,7 @@ describe('V4 GPT revision delivery integration', () => {
     expect(await generation.submitBlueprintImages(runId, 1)).toMatchObject({ submitted: 2, total: 2 })
     const initialRequests = [...images.requests.entries()]
     expect(initialRequests).toHaveLength(2)
-    expect(initialRequests.every(([, request]) => request.model === 'nano-banana-pro' && !request.referenceImage)).toBe(true)
+    expect(initialRequests.every(([, request]) => request.model === 'gemini-3-pro-image-preview' && !request.referenceImage)).toBe(true)
 
     const initialBytes = await Promise.all([
       sharp({ create: { width: 1600, height: 900, channels: 3, background: '#E5484D' } }).png().toBuffer(),
@@ -269,14 +269,14 @@ describe('V4 GPT revision delivery integration', () => {
     expect(applicationPort.requests.size).toBe(0)
 
     const revision = new RevisionMediaCoordinator({
-      repository, media, batchBudget: budget, artifacts, clock, revisionImageModel: 'image-2',
+      repository, media, batchBudget: budget, artifacts, clock, revisionImageModel: 'gpt-image-2',
     })
     expect(await revision.submit(runId, 1)).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
     const editEntry = [...images.requests.entries()].find(([key]) => key.startsWith(`${runId}:slide:2:image:r1:v1:edit:`))
     expect(editEntry).toBeDefined()
     const [editKey, editRequest] = editEntry!
     expect(editRequest).toMatchObject({
-      model: 'image-2',
+      model: 'gpt-image-2',
       referenceImage: { sha256: initialArtifacts[1]!.sha256 },
     })
     expect(editRequest.referenceImage?.bytes).toEqual(new Uint8Array(initialBytes[1]!))
