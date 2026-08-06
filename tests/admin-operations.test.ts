@@ -21,7 +21,7 @@ function run(): RunRecord {
     id: 'run-1', creationKey: 'create-run-1', requestHash: 'hash',
     host: { tenantId: 'frameflow', externalUserId: 'teacher-1' },
     source: { kind: 'TEXT', text: '管理员对账测试教材内容'.repeat(3) }, slideCount: 2,
-    visualDirection: '课堂视觉', imageModel: 'image-2', automationLevel: 'SUPERVISED',
+    visualDirection: '课堂视觉', imageModel: 'gpt-image-2', automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2, revisionRound: 0, qualityScore: null, status: 'NEEDS_HUMAN',
     resumeState: null, version: 1, budgetUnits: 10, committedBudgetUnits: 4,
     qualityOverride: false, qualityOverrideReason: null, qualityOverrideBy: null,
@@ -72,7 +72,7 @@ async function attachRevisionBatch(
     transaction.putRun({
       ...transaction.run,
       presentationMode: 'VISUAL_DECK_V4',
-      imageModel: 'nano-banana-pro',
+      imageModel: 'gemini-3-pro-image-preview',
       revisionRound: 1,
     })
     transaction.putStep({
@@ -82,7 +82,7 @@ async function attachRevisionBatch(
       output: {
         slideId: 'run-1:slide:1',
         versionId: 'run-1:slide:1:r1:v1',
-        model: 'image-2',
+        model: 'gpt-image-2',
         operationMode: 'IMAGE_EDIT',
         repairContractHash: 'c'.repeat(64),
         batchId,
@@ -104,7 +104,7 @@ async function attachRevisionBatch(
         proposalHash: 'd'.repeat(64),
         revisionRound: 1,
         submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS',
-        accountingModel: 'image-2',
+        accountingModel: 'gpt-image-2',
         operationMode: 'IMAGE_EDIT',
         pageCount: 1,
         pages: [{ pageNumber: 1, idempotencyKey: pageKey, promptHash: 'e'.repeat(64) }],
@@ -132,7 +132,7 @@ async function attachRevisionBatch(
 function usageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
   return {
     pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
-    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    authorizationCapMilli: 300_000, authorizedModel: 'gpt-image-2', authorizedUnits: 30,
     pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
     generatedOperations: 1, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 1,
     chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
@@ -183,7 +183,7 @@ async function v2AdminFixture(withBatch = true, withProviderOperation = true) {
     presentationMode: 'VISUAL_DECK_V4',
     accountingProtocol: 'FRAMEFLOW_USAGE_V2',
     automationLevel: 'BOUNDED_AUTO',
-    imageModel: 'nano-banana-pro',
+    imageModel: 'gemini-3-pro-image-preview',
     revisionRound: 1,
   })
   await repository.transact('run-1', (transaction) => {
@@ -192,7 +192,7 @@ async function v2AdminFixture(withBatch = true, withProviderOperation = true) {
       tool: 'generate_slide_image', status: 'RESERVED', budgetUnits: 4,
       budgetReservationId: reservationId, externalOperationId: null, errorCode: null,
       output: {
-        slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r1:v1', model: 'image-2',
+        slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r1:v1', model: 'gpt-image-2',
         operationMode: 'IMAGE_EDIT', aspectRatio: '16:9', backgroundMode: 'OPAQUE', pageNumber: 1, revisionRound: 1,
         batchId,
       },
@@ -204,7 +204,7 @@ async function v2AdminFixture(withBatch = true, withProviderOperation = true) {
       budgetReservationId: reservationId, externalOperationId: null, errorCode: null,
       output: storedGenerationBatchSchema.parse({
         batchId, proposalHash: 'd'.repeat(64), revisionRound: 1,
-        submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', accountingModel: 'image-2', operationMode: 'IMAGE_EDIT',
+        submissionMode: 'GATEWAY_INDIVIDUAL_OPERATIONS', accountingModel: 'gpt-image-2', operationMode: 'IMAGE_EDIT',
         pageCount: 1, pages: [{ pageNumber: 1, idempotencyKey: pageKey, promptHash: 'e'.repeat(64) }],
         accounting: {
           estimatedUnits: 4, committedUnits: 4, settledUnits: 0, releasedUnits: 0,
@@ -217,13 +217,13 @@ async function v2AdminFixture(withBatch = true, withProviderOperation = true) {
     })
   })
   const billingCatalog = parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
-    model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
-    costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'image-2-2026-08',
+    model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
+    costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'gpt-image-2-2026-08',
   }] }))
   const usageV2 = new UsageV2Coordinator({ repository, usage, billingCatalog, clock })
   await usageV2.authorizeMediaOperation({
     runId: 'run-1', mediaStepKey: pageKey, batchId, pageNumber: 1, revisionRound: 1,
-    model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', aspectRatio: '16:9',
+    model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', aspectRatio: '16:9',
   })
   await repository.transact('run-1', (transaction) => {
     const page = transaction.getStep(pageKey)!
@@ -409,16 +409,16 @@ describe('admin operations service', () => {
       budgetReservationId: null,
       output: {
         slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r1:v1',
-        model: 'image-2', operationMode: 'IMAGE_EDIT', repairContractHash: 'b'.repeat(64),
+        model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', repairContractHash: 'b'.repeat(64),
       },
     })
     await repository.transact('run-1', (transaction) => {
-      transaction.putRun({ ...transaction.run, imageModel: 'nano-banana-pro' })
+      transaction.putRun({ ...transaction.run, imageModel: 'gemini-3-pro-image-preview' })
     })
 
     await service.act({ ...base, action: 'MARK_NOT_CHARGED' })
 
-    expect(budget.reservationRequests.at(-1)).toMatchObject({ model: 'image-2' })
+    expect(budget.reservationRequests.at(-1)).toMatchObject({ model: 'gpt-image-2' })
   })
 
   test('classifies an uncharged batch page without creating or releasing a page reservation', async () => {

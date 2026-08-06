@@ -22,7 +22,7 @@ function run(): RunRecord {
     source: { kind: 'TEXT', text: '这是用于整套课件质量评估测试的完整教材内容。' },
     slideCount: 2,
     visualDirection: '清晰的课堂科学信息图风格',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,

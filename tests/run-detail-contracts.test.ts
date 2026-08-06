@@ -49,7 +49,7 @@ const completedRunDetail = {
   visualDirection: '清晰、克制的课堂信息图风格',
   targetAudience: null,
   presentationGoal: null,
-  imageModel: 'image-2',
+  imageModel: 'gpt-image-2',
   automationLevel: 'SUPERVISED' as const,
   version: 8,
   slideCount: 2,

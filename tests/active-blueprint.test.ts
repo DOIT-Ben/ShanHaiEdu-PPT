@@ -9,7 +9,7 @@ function run(): RunRecord {
     id: 'run-1', creationKey: 'create-1', requestHash: 'hash',
     host: { tenantId: 'frameflow', externalUserId: 'user-1' },
     source: { kind: 'TEXT', text: '这是当前有效蓝图读取器的完整测试教材。' },
-    slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'image-2',
+    slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED', maxRevisionRounds: 2, revisionRound: 1,
     qualityScore: 70, status: 'REVISING', resumeState: null, version: 5,
     budgetUnits: 100, committedBudgetUnits: 20, qualityOverride: false,

@@ -10,7 +10,7 @@
 启用 `PPT_AGENT_FRAMEFLOW_ACCOUNTING_PROTOCOL=FRAMEFLOW_USAGE_V2` 前必须同时满足：
 
 1. FrameFlow 生产已提供 permit、event、bill 和 Run finalize 四个 Usage V2 端点。
-2. 一个 Run 的父授权能够接受初稿 Nano Banana 与返修 `image-2`，或二者被宿主归入同一稳定计价族。
+2. 一个 Run 的父授权能够接受初稿 `gemini-3-pro-image-preview` 与返修 `gpt-image-2`，或二者被宿主归入同一稳定计价族。
 3. FrameFlow 允许没有任何 `OPERATION_OBSERVED` 的终态 Run安全释放整单父授权；Agent 不会伪造 Provider 操作。
 4. `PPT_AGENT_PROVIDER_BILLING_CATALOG_JSON` 包含所有初稿和返修模型的固定单次成本、币种和 Provider
    定价版本；不允许用用户积分价格代替 Provider 成本。

@@ -7,7 +7,7 @@ function run(id: string, status: RunRecord['status'], user: string): RunRecord {
   return {
     id, creationKey: `create-${id}`, requestHash: `hash-${id}`,
     host: { tenantId: 'frameflow', externalUserId: user }, source: { kind: 'TEXT', text: '测试教材内容'.repeat(5) },
-    slideCount: 2, visualDirection: '课堂视觉', imageModel: 'image-2', automationLevel: 'SUPERVISED',
+    slideCount: 2, visualDirection: '课堂视觉', imageModel: 'gpt-image-2', automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2, revisionRound: 0, qualityScore: null, status, resumeState: null, version: 2,
     budgetUnits: 10, committedBudgetUnits: status === 'COMPLETED' ? 0 : 2,
     qualityOverride: false, qualityOverrideReason: null, qualityOverrideBy: null,

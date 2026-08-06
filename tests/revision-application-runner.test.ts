@@ -17,7 +17,7 @@ function run(): RunRecord {
     id: 'run-1', creationKey: 'create-1', requestHash: 'hash',
     host: { tenantId: 'frameflow', externalUserId: 'user-1' },
     source: { kind: 'TEXT', text: '这是局部修订执行器使用的完整测试教材。' },
-    slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'image-2',
+    slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED', maxRevisionRounds: 2, revisionRound: 1,
     qualityScore: 72, status: 'REVISING', resumeState: null, version: 8,
     budgetUnits: 100, committedBudgetUnits: 20, qualityOverride: false,

@@ -43,7 +43,7 @@ const settledUsage = {
   notChargedImageOperations: 0,
   unknownImageOperations: 0,
   byModel: [{
-    model: 'nanobanana', billableImageOperations: snapshot.pages.length,
+    model: 'gemini-3-pro-image-preview', billableImageOperations: snapshot.pages.length,
     notChargedImageOperations: 0, unknownImageOperations: 0,
   }],
 }
@@ -52,7 +52,7 @@ const unknownUsage = {
   notChargedImageOperations: 0,
   unknownImageOperations: snapshot.pages.length,
   byModel: [{
-    model: 'nanobanana', billableImageOperations: 0,
+    model: 'gemini-3-pro-image-preview', billableImageOperations: 0,
     notChargedImageOperations: 0, unknownImageOperations: snapshot.pages.length,
   }],
 }

@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { resolveUsageV2RuntimeConfig } from '../src/runtime/usage-v2-runtime-config'
 
 const catalog = JSON.stringify({ schemaVersion: '1', entries: [{
-  model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
-  costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'image-2-2026-08',
+  model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
+  costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: 'gpt-image-2-2026-08',
 }] })
 
 describe('Usage V2 runtime configuration', () => {
@@ -22,8 +22,8 @@ describe('Usage V2 runtime configuration', () => {
     }, [])
 
     expect(resolved.providerBillingCatalog?.snapshot({
-      model: 'image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', aspectRatio: '16:9',
-    })).toMatchObject({ costAmountMicros: 40_000, providerPricingVersion: 'image-2-2026-08' })
+      model: 'gpt-image-2', operationMode: 'IMAGE_EDIT', resolution: '1K', aspectRatio: '16:9',
+    })).toMatchObject({ costAmountMicros: 40_000, providerPricingVersion: 'gpt-image-2-2026-08' })
     expect(resolved).toMatchObject({
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2', requiresUsageV2Runtime: true,
       providerBillingCatalog: expect.any(Object),

@@ -7,7 +7,7 @@ const host = { tenantId: 'frameflow', externalUserId: 'teacher-1' }
 function bill(status: UsageRunBill['status'] = 'ACTIVE'): UsageRunBill {
   return {
     pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status,
-    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    authorizationCapMilli: 300_000, authorizedModel: 'gpt-image-2', authorizedUnits: 30,
     pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
     generatedOperations: 1, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 1,
     chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 1,
@@ -20,7 +20,7 @@ function bill(status: UsageRunBill['status'] = 'ACTIVE'): UsageRunBill {
 const observed: UsageOperationEventV2 = {
   schemaVersion: '2', eventId: 'event-1', sequence: 1, eventType: 'OPERATION_OBSERVED',
   pptRunId: 'run-1', batchId: 'batch-1', pageNumber: 1, revisionRound: 0,
-  idempotencyKey: 'operation-1', providerOperationId: 'provider-1', model: 'image-2', status: 'PROCESSING',
+  idempotencyKey: 'operation-1', providerOperationId: 'provider-1', model: 'gpt-image-2', status: 'PROCESSING',
   providerBilling: {
     result: 'UNKNOWN', estimatedCostAmountMicros: 40_000, currency: 'USD', pricingVersion: 'provider-v1',
   },
@@ -51,7 +51,7 @@ describe('FrameFlow Usage V2 accounting adapter', () => {
     })
 
     await adapter.authorizeOperation({
-      host, runId: 'run-1', operationIdempotencyKey: 'operation-1', pageNumber: 1, revisionRound: 0, model: 'image-2',
+      host, runId: 'run-1', operationIdempotencyKey: 'operation-1', pageNumber: 1, revisionRound: 0, model: 'gpt-image-2',
     })
     await adapter.ingestEvent({ host, event: observed })
     await adapter.getRunBill({ host, runId: 'run-1' })
@@ -60,7 +60,7 @@ describe('FrameFlow Usage V2 accounting adapter', () => {
     expect(calls).toEqual([
       { method: 'permit', input: {
         externalUserId: 'teacher-1', runId: 'run-1', operationIdempotencyKey: 'operation-1',
-        pageNumber: 1, revisionRound: 0, model: 'image-2',
+        pageNumber: 1, revisionRound: 0, model: 'gpt-image-2',
       } },
       { method: 'event', input: { externalUserId: 'teacher-1', event: observed } },
       { method: 'bill', input: { externalUserId: 'teacher-1', runId: 'run-1' } },

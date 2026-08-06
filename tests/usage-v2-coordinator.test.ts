@@ -19,7 +19,7 @@ function run(): RunRecord {
   return {
     id: 'run-1', creationKey: 'create-1', requestHash: 'request-1', host,
     source: { kind: 'TEXT', text: '这是用于 Usage V2 协调器测试的完整教材内容。' },
-    slideCount: 10, visualDirection: '课堂信息图', imageModel: 'nanobanana',
+    slideCount: 10, visualDirection: '课堂信息图', imageModel: 'gemini-3-pro-image-preview',
     accountingProtocol: 'FRAMEFLOW_USAGE_V2', automationLevel: 'BOUNDED_AUTO', presentationMode: 'VISUAL_DECK_V4',
     maxRevisionRounds: 2, revisionRound: 0, qualityScore: null, status: 'EXECUTING', resumeState: null,
     version: 0, budgetUnits: 30, committedBudgetUnits: 10, qualityOverride: false,
@@ -37,7 +37,7 @@ function mediaStep(pageNumber: number): StepRecord {
     errorCode: null,
     output: {
       slideId: `run-1:slide:${pageNumber}`, versionId: `run-1:slide:${pageNumber}:r0:v1`,
-      model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9', backgroundMode: 'OPAQUE',
+      model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9', backgroundMode: 'OPAQUE',
       batchId: 'genbatch_0123456789abcdef0123456789abcdef', pageNumber, revisionRound: 0,
     },
     createdAt: '2026-08-03T07:00:00.000Z', updatedAt: '2026-08-03T07:00:00.000Z',
@@ -47,7 +47,7 @@ function mediaStep(pageNumber: number): StepRecord {
 function bill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
   return {
     pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
-    authorizationCapMilli: 300_000, authorizedModel: 'nanobanana', authorizedUnits: 30,
+    authorizationCapMilli: 300_000, authorizedModel: 'gemini-3-pro-image-preview', authorizedUnits: 30,
     pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
     generatedOperations: 0, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 0,
     chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
@@ -98,9 +98,9 @@ class RecordingUsagePort implements UsageAccountingPort {
 
 function catalog(costAmountMicros: number) {
   return parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
-    model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
+    model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
     costBasis: 'FIXED_PER_OPERATION', costAmountMicros, currency: 'USD',
-    providerPricingVersion: `nano-${costAmountMicros}`,
+    providerPricingVersion: `gemini-3-pro-image-preview-${costAmountMicros}`,
   }] }))
 }
 
@@ -128,7 +128,7 @@ async function authorizeAndAttachOperation(
   await coordinator.authorizeMediaOperation({
     runId: 'run-1', mediaStepKey: key,
     batchId: 'genbatch_0123456789abcdef0123456789abcdef', pageNumber, revisionRound: 0,
-    model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', aspectRatio: '16:9',
+    model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', aspectRatio: '16:9',
   })
   const operationId = `imgop_${String(pageNumber).padStart(32, '0')}`
   await repository.transact('run-1', (transaction) => {
@@ -442,7 +442,7 @@ describe('Usage V2 coordinator', () => {
     await coordinator.authorizeMediaOperation({
       runId: 'run-1', mediaStepKey: key,
       batchId: 'genbatch_0123456789abcdef0123456789abcdef', pageNumber: 1, revisionRound: 0,
-      model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', aspectRatio: '16:9',
+      model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', aspectRatio: '16:9',
     })
     await repository.transact('run-1', (transaction) => {
       const step = transaction.getStep(key)!
@@ -458,7 +458,7 @@ describe('Usage V2 coordinator', () => {
 
     expect(usage.acceptedEvents[0]).toMatchObject({
       providerBilling: {
-        result: 'CHARGED', actualCostAmountMicros: 25_000, pricingVersion: 'nano-25000',
+        result: 'CHARGED', actualCostAmountMicros: 25_000, pricingVersion: 'gemini-3-pro-image-preview-25000',
       },
     })
   })
@@ -565,7 +565,7 @@ describe('Usage V2 coordinator', () => {
     await expect(coordinator.authorizeMediaOperation({
       runId: 'run-1', mediaStepKey: 'run-1:slide:1:image:r0:v1',
       batchId: 'genbatch_0123456789abcdef0123456789abcdef', pageNumber: 2, revisionRound: 0,
-      model: 'nanobanana', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', aspectRatio: '16:9',
+      model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE', resolution: '1K', aspectRatio: '16:9',
     })).rejects.toThrow('USAGE_V2_MEDIA_IDENTITY_CONFLICT')
     expect(usage.permits).toHaveLength(0)
   })

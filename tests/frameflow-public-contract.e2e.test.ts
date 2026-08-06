@@ -34,7 +34,7 @@ const frameFlowV4Request = {
   },
   slideCount: 2,
   visualDirection: '明亮清晰的儿童课堂信息图',
-  imageModel: 'nanobanana',
+  imageModel: 'gemini-3-pro-image-preview',
   automationLevel: 'BOUNDED_AUTO',
   budgetUnits: 2,
   maxRevisionRounds: 0,
@@ -224,7 +224,7 @@ function settledBill(runId: string): UsageRunBill {
     accountingMode: 'USAGE_V2',
     status: 'SETTLED',
     authorizationCapMilli: 20_000,
-    authorizedModel: 'nanobanana',
+    authorizedModel: 'gemini-3-pro-image-preview',
     authorizedUnits: 2,
     pricingVersion: 'ppt-image-v1',
     unitPriceMilli: 10_000,
@@ -337,13 +337,13 @@ class TerminalFinalizeUsage implements UsageAccountingPort {
 const billingCatalog = parseProviderBillingCatalog(JSON.stringify({
   schemaVersion: '1',
   entries: [{
-    model: 'nanobanana',
+    model: 'gemini-3-pro-image-preview',
     operationMode: 'TEXT_TO_IMAGE',
     resolution: '1K',
     costBasis: 'FIXED_PER_OPERATION',
     costAmountMicros: 25_000,
     currency: 'USD',
-    providerPricingVersion: 'nano-v1',
+    providerPricingVersion: 'gemini-3-pro-image-preview-v1',
   }],
 }))
 

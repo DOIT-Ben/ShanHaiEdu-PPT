@@ -85,15 +85,15 @@ Agent 冻结规划，并自行向视觉 Provider 受控并发提交页面。宿�
 
 ## 图片生成与自动返修
 
-V4 初始页面仍使用 Run 请求中的图片模型（生产默认 Nano Banana）整页生成。页审或套审确认需要返修时，
+V4 初始页面仍使用 Run 请求中的图片模型（生产默认 `gemini-3-pro-image-preview`）整页生成。页审或套审确认需要返修时，
 Agent 读取该页最新一版受控 16:9 图片，并使用服务端配置
-`PPT_AGENT_V4_REVISION_IMAGE_MODEL=image-2` 调用 `/images/edits` 做局部编辑；规划模型不能指定或改写
+`PPT_AGENT_V4_REVISION_IMAGE_MODEL=gpt-image-2` 调用 `/images/edits` 做局部编辑；规划模型不能指定或改写
 Provider 模型。该配置在 gateway 模式为必填，修改只影响尚未创建返修批次的新 Run。
 
 每个返修页在冻结预算前生成严格 Repair Contract，绑定问题 ID、局部修改、冻结文案、事实/数量/公式、
 原图 Artifact/SHA、返修模型和模式。内部图片 Key 固定为
 `<runId>:slide:<page>:image:r<round>:v1:edit:<24hex>`；旧 `:rN:v1` Key 继续可读。Repair Contract、
-图片 Key、原图字节和模型任一变化都会触发幂等冲突，不会静默整页重生或切回 Nano。
+图片 Key、原图字节和模型任一变化都会触发幂等冲突，不会静默整页重生或切回 `gemini-3-pro-image-preview`。
 
 初稿与返修都按一张图片一个 Agent 图片单位计量，宿主仍负责把图片单位换算为积分。10 页 Run 在管理员
 允许 2 轮返修时，理论最大值是 `10 + 10 + 10 = 30` 图片单位；按宿主当前 10 积分/图即为 300 积分
@@ -130,7 +130,7 @@ Content-Type: application/json
   "operationIdempotencyKey": "<providerOperationKey>",
   "pageNumber": 3,
   "revisionRound": 1,
-  "model": "image-2"
+  "model": "gpt-image-2"
 }
 ```
 

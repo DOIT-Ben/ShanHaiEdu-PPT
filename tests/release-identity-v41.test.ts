@@ -27,7 +27,12 @@ describe('PPT Agent V4.3 release identity', () => {
       'utf8',
     )
     expect(environmentExample).toContain(`PPT_AGENT_SOFTWARE_VERSION=${PPT_AGENT_SOFTWARE_VERSION}`)
-    expect(environmentExample).toContain('PPT_AGENT_V4_REVISION_IMAGE_MODEL=image-2')
+    expect(environmentExample).toContain('PPT_AGENT_V4_REVISION_IMAGE_MODEL=gpt-image-2')
+    expect(environmentExample).toContain('"model":"gemini-3-pro-image-preview"')
+    expect(environmentExample).not.toContain('PPT_AGENT_V4_REVISION_IMAGE_MODEL=image-2')
+    expect(environmentExample).not.toContain('"model":"image-2"')
+    expect(environmentExample).not.toContain('"model":"nano-banana-pro"')
+    expect(environmentExample).not.toContain('nanobanana')
     expect(environmentExample).not.toContain('PPT_AGENT_SOFTWARE_VERSION=4.0.0')
   })
 })

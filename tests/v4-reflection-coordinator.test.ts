@@ -81,7 +81,7 @@ async function setup(
     source: data.source,
     slideCount: 3,
     visualDirection: '清晰活泼的课堂信息图',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     budgetUnits: 3,
     presentationMode: 'VISUAL_DECK_V4',

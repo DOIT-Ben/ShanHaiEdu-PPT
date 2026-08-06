@@ -98,7 +98,7 @@ describe('Presentation Job V2 service', () => {
       billableImageOperations: snapshot.pages.length,
       notChargedImageOperations: 0,
       unknownImageOperations: 0,
-      byModel: [{ model: 'nanobanana', billableImageOperations: snapshot.pages.length }],
+      byModel: [{ model: 'gemini-3-pro-image-preview', billableImageOperations: snapshot.pages.length }],
     })
     expect(provider.submitCalls).toBe(1)
   })
@@ -200,7 +200,7 @@ describe('Presentation Job V2 service', () => {
           notChargedImageOperations: 0,
           unknownImageOperations: 0,
           byModel: [{
-            model: 'nanobanana',
+            model: 'gemini-3-pro-image-preview',
             billableImageOperations,
             notChargedImageOperations: 0,
             unknownImageOperations: 0,
@@ -394,7 +394,7 @@ describe('Presentation Job V2 service', () => {
           notChargedImageOperations,
           unknownImageOperations: 0,
           byModel: [{
-            model: 'nanobanana',
+            model: 'gemini-3-pro-image-preview',
             billableImageOperations: 0,
             notChargedImageOperations,
             unknownImageOperations: 0,
@@ -452,7 +452,7 @@ describe('Presentation Job V2 service', () => {
           notChargedImageOperations: 0,
           unknownImageOperations: 0,
           byModel: [{
-            model: 'nanobanana',
+            model: 'gemini-3-pro-image-preview',
             billableImageOperations,
             notChargedImageOperations: 0,
             unknownImageOperations: 0,

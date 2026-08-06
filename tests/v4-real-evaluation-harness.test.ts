@@ -21,7 +21,7 @@ function request() {
     source: { kind: 'TEXT', name: '教材.txt', text: '这是用于真实评测脚本合同测试的完整教材内容。'.repeat(4) },
     slideCount: 10,
     visualDirection: '适合课堂投影的清晰视觉风格',
-    imageModel: 'nanobanana',
+    imageModel: 'gemini-3-pro-image-preview',
     automationLevel: 'BOUNDED_AUTO',
     budgetUnits: 30,
     maxRevisionRounds: 2,

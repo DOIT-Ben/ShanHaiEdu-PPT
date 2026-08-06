@@ -254,7 +254,7 @@ const runtime = runtimeMode === 'gateway'
       repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
       ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
-      revisionImageModel: revisionImageModel || 'image-2',
+      revisionImageModel: revisionImageModel || 'gpt-image-2',
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
       budget: presentationJobV2Budget
         ? new TenantRoutingBudgetPort({

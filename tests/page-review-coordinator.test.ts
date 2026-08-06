@@ -28,7 +28,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     source: { kind: 'TEXT', text: '这是用于页面质检聚合测试的完整教材内容。' },
     slideCount: 3,
     visualDirection: '清晰的课堂科学信息图风格',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,

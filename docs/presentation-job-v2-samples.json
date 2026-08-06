@@ -109,7 +109,7 @@
         "notChargedImageOperations": 0,
         "unknownImageOperations": 2,
         "byModel": [{
-          "model": "nanobanana",
+          "model": "gemini-3-pro-image-preview",
           "billableImageOperations": 0,
           "notChargedImageOperations": 0,
           "unknownImageOperations": 2
@@ -131,12 +131,12 @@
         "notChargedImageOperations": 0,
         "unknownImageOperations": 0,
         "byModel": [{
-          "model": "nanobanana",
+          "model": "gemini-3-pro-image-preview",
           "billableImageOperations": 1,
           "notChargedImageOperations": 0,
           "unknownImageOperations": 0
         }, {
-          "model": "image-2",
+          "model": "gpt-image-2",
           "billableImageOperations": 1,
           "notChargedImageOperations": 0,
           "unknownImageOperations": 0

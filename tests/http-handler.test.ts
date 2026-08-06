@@ -18,7 +18,7 @@ const createBody = {
   source: { kind: 'TEXT', name: '教材.txt', text: '这是用于 HTTP 合同测试的完整教材内容。'.repeat(5) },
   slideCount: 2,
   visualDirection: '清晰的课堂信息图风格',
-  imageModel: 'image-2',
+  imageModel: 'gpt-image-2',
   automationLevel: 'SUPERVISED',
   budgetUnits: 100,
 } as const

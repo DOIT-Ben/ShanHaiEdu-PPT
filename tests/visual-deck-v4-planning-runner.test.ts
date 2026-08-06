@@ -49,7 +49,7 @@ function request(options: Readonly<{ presentationGoal?: string }> = {}) {
     },
     slideCount: 10,
     visualDirection: '成熟清晰的资料驱动课堂视觉叙事',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED' as const,
     budgetUnits: 10,
     ...(options.presentationGoal ? { presentationGoal: options.presentationGoal } : {}),

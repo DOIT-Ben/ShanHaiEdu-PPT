@@ -13,7 +13,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     id: 'run-1', creationKey: 'create-run-1', requestHash: 'request-hash',
     host: { tenantId: 'frameflow', externalUserId: 'user-1' },
     source: { kind: 'TEXT', text: '用于验证终态账务聚合的完整教材内容。'.repeat(3) },
-    slideCount: 12, visualDirection: '清晰课堂视觉', imageModel: 'image-2',
+    slideCount: 12, visualDirection: '清晰课堂视觉', imageModel: 'gpt-image-2',
     automationLevel: 'BOUNDED_AUTO', presentationMode: 'VISUAL_DECK_V4',
     maxRevisionRounds: 2, revisionRound: 2, qualityScore: 72,
     status: 'DECK_REVIEW', resumeState: null, version: 10,

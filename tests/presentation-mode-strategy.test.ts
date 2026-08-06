@@ -38,7 +38,7 @@ describe('presentation mode strategy', () => {
       source: { kind: 'TEXT', name: '教材.txt', text: '这是用于验证V4执行隔离的教材内容。'.repeat(4) },
       slideCount: 12,
       visualDirection: '资料驱动的叙事型视觉幻灯片',
-      imageModel: 'image-2',
+      imageModel: 'gpt-image-2',
       automationLevel: 'SUPERVISED',
       budgetUnits: 100,
       presentationMode: 'VISUAL_DECK_V4',

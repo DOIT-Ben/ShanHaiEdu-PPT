@@ -10,7 +10,7 @@ function run(): RunRecord {
     id: 'run-10-pages', creationKey: 'create-10-pages', requestHash: 'hash',
     host: { tenantId: 'frameflow', externalUserId: 'user-1' },
     source: { kind: 'TEXT', text: '十页课件计费上限测试材料。'.repeat(5) },
-    slideCount: 10, visualDirection: '课堂信息图', imageModel: 'nano-banana-pro',
+    slideCount: 10, visualDirection: '课堂信息图', imageModel: 'gemini-3-pro-image-preview',
     presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO',
     maxRevisionRounds: 2, revisionRound: 0, qualityScore: null, status: 'EXECUTING', resumeState: null,
     version: 1, budgetUnits: 30, committedBudgetUnits: 0, qualityOverride: false,
@@ -35,7 +35,7 @@ function requirements(round: number, edit: boolean) {
 }
 
 describe('V4 image-unit ceiling', () => {
-  test('ten initial Nano pages plus two complete GPT edit rounds allocate exactly 30 image units', async () => {
+  test('ten initial gemini-3-pro-image-preview pages plus two complete gpt-image-2 edit rounds allocate exactly 30 image units', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock()
     const initialRun = run()
@@ -43,14 +43,14 @@ describe('V4 image-unit ceiling', () => {
 
     await ensureGenerationBatch({
       repository, clock, run: initialRun, blueprint, requirements: requirements(0, false),
-      unitBudgetUnits: 1, accountingModel: 'nano-banana-pro', operationMode: 'TEXT_TO_IMAGE',
+      unitBudgetUnits: 1, accountingModel: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE',
       identity: { revisionRound: 0, scope: 'INITIAL' },
     })
     for (const revisionRound of [1, 2]) {
       await ensureGenerationBatch({
         repository, clock, run: { ...initialRun, revisionRound }, blueprint,
         requirements: requirements(revisionRound, true), unitBudgetUnits: 1,
-        accountingModel: 'image-2', operationMode: 'IMAGE_EDIT',
+        accountingModel: 'gpt-image-2', operationMode: 'IMAGE_EDIT',
         identity: { revisionRound, scope: 'REVISION' },
       })
     }
@@ -59,9 +59,9 @@ describe('V4 image-unit ceiling', () => {
     expect(batches).toHaveLength(3)
     expect(batches.reduce((total, step) => total + step.budgetUnits, 0)).toBe(30)
     expect(batches.map((step) => step.output)).toEqual([
-      expect.objectContaining({ accountingModel: 'nano-banana-pro', operationMode: 'TEXT_TO_IMAGE' }),
-      expect.objectContaining({ accountingModel: 'image-2', operationMode: 'IMAGE_EDIT' }),
-      expect.objectContaining({ accountingModel: 'image-2', operationMode: 'IMAGE_EDIT' }),
+      expect.objectContaining({ accountingModel: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE' }),
+      expect.objectContaining({ accountingModel: 'gpt-image-2', operationMode: 'IMAGE_EDIT' }),
+      expect.objectContaining({ accountingModel: 'gpt-image-2', operationMode: 'IMAGE_EDIT' }),
     ])
   })
 })

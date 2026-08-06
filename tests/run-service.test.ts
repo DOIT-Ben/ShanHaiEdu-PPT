@@ -21,12 +21,12 @@ const request = {
   source: { kind: 'TEXT', name: '教材.txt', text: '这是用于创建独立 PPT Agent Run 的完整教材内容。'.repeat(4) },
   slideCount: 2,
   visualDirection: '清晰的课堂科学信息图风格',
-  imageModel: 'image-2',
+  imageModel: 'gpt-image-2',
   automationLevel: 'SUPERVISED',
   budgetUnits: 100,
 } as const
 
-function usageV2Catalog(model = 'image-2') {
+function usageV2Catalog(model = 'gpt-image-2') {
   return parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
     model, operationMode: 'TEXT_TO_IMAGE', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
     costAmountMicros: 40_000, currency: 'USD', providerPricingVersion: `${model}-2026-08`,
@@ -221,7 +221,7 @@ function settledUsageV2Bill(runId: string): UsageRunBill {
     accountingMode: 'USAGE_V2',
     status: 'SETTLED',
     authorizationCapMilli: 20_000,
-    authorizedModel: 'image-2',
+    authorizedModel: 'gpt-image-2',
     authorizedUnits: 2,
     pricingVersion: 'ppt-image-v1',
     unitPriceMilli: 10_000,

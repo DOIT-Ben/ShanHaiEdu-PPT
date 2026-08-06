@@ -136,7 +136,7 @@ Content-Type: application/json
   "visualDirection": "清晰、克制、适合课堂投影的视觉叙事",
   "targetAudience": "小学六年级学生",
   "presentationGoal": "让学生理解百分数的含义并能在生活情境中比较",
-  "imageModel": "nano-banana-pro",
+  "imageModel": "gemini-3-pro-image-preview",
   "automationLevel": "BOUNDED_AUTO",
   "budgetUnits": 100,
   "maxRevisionRounds": 2,
@@ -259,11 +259,11 @@ FrameFlow 不需要也不应该重建或解释这五个内部工件。可在生�
 
 V4 的五个规划阶段完成后，Agent 自动冻结规划并进入 `EXECUTING`，随后在图片 Provider 允许的
 并发范围内提交独立页面任务。
-FrameFlow 不需要也不能自行调用 Nano Banana；图片任务的幂等、计费、轮询和断点恢复由 Agent 负责。
+FrameFlow 不需要也不能自行调用 `gemini-3-pro-image-preview`；图片任务的幂等、计费、轮询和断点恢复由 Agent 负责。
 
 ### 批次并发与统一计费
 
-Agent 进入执行阶段时会冻结完整规划，并建立一个持久化的 `generationBatch`。当前 Nano Banana 网关提供的是
+Agent 进入执行阶段时会冻结完整规划，并建立一个持久化的 `generationBatch`。当前 `gemini-3-pro-image-preview` 网关提供的是
 逐页 `image-task` 操作，而不是网关原生 batch API，因此 `generationBatch.submissionMode` 固定为
 `GATEWAY_INDIVIDUAL_OPERATIONS`：它是 **PPT Agent 的业务批次**，不是伪造的 Provider `batchId`。
 
@@ -544,7 +544,7 @@ GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=sources
 - [ ] 规划完成时读取 `GET /v1/runs/{runId}`，向用户展示 `generationPlan`。
 - [ ] 使用事件 `sequence` 去重；断线先读 `events/history`，再从 `after` 打开 SSE。
 - [ ] 不在 FrameFlow 生成 Deck Plan、Slide Brief、Visual Contract 或图片 Prompt。
-- [ ] 不自行调用 Nano Banana、不轮询未知的 Provider 任务、不重复扣费。
+- [ ] 不自行调用 `gemini-3-pro-image-preview`、不轮询未知的 Provider 任务、不重复扣费。
 - [ ] 展示 `release` 作为唯一版本身份，记录 `gitSha` 和 `releaseId` 以便问题追溯。
 - [ ] 对 `RECOVERING` 显示自动恢复状态；标准 V4 的质量/技术失败按 `FAILED` 展示，不提供普通用户质量放行入口。
 - [ ] 将 `generationBatch` 作为整单进度和账务汇总展示，不将内部页级 reservation 映射为多次用户扣费。

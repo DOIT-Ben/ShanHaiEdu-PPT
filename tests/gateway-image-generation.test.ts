@@ -37,7 +37,7 @@ describe('gateway image generation adapter', () => {
       tenantId: 'frameflow',
       prompt: 'A child-friendly group of three apples supporting the number three lesson',
       negativePrompt: 'text, numbers, logos',
-      model: 'image-2',
+      model: 'gpt-image-2',
       aspectRatio: '1:1',
       backgroundMode: 'TRANSPARENT',
       idempotencyKey: 'run-1:asset:apples:r0:v1',
@@ -58,7 +58,7 @@ describe('gateway image generation adapter', () => {
     expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/image-tasks')
     expect(new Headers(request.init.headers).get('Idempotency-Key')).toBe('run-1:asset:apples:r0:v1')
     expect(JSON.parse(String(request.init.body))).toMatchObject({
-      model: 'image-2', size: '1:1', resolution: '1K', n: 1,
+      model: 'gpt-image-2', size: '1:1', resolution: '1K', n: 1,
     })
     expect(String(JSON.parse(String(request.init.body)).prompt)).toContain('透明背景中的独立主体')
   })
@@ -71,7 +71,7 @@ describe('gateway image generation adapter', () => {
       fetchImpl: async () => Response.json({ error: { code: 'INVALID_IMAGE_REQUEST' } }, { status: 422 }),
     })
     await expect(rejected.submit({
-      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toMatchObject({
       submissionState: 'NOT_SUBMITTED',
@@ -87,11 +87,11 @@ describe('gateway image generation adapter', () => {
       fetchImpl: async () => { throw new Error('private network detail') },
     })
     await expect(unknown.submit({
-      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toBeInstanceOf(MediaSubmissionError)
     await expect(unknown.submit({
-      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'GATEWAY_SUBMISSION_UNKNOWN' })
 
@@ -101,7 +101,7 @@ describe('gateway image generation adapter', () => {
       fetchImpl: async () => Response.json({ error: { code: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' } }, { status: 409 }),
     })
     await expect(submissionUnknown.submit({
-      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' })
   })
@@ -121,7 +121,7 @@ describe('gateway image generation adapter', () => {
     })
 
     await expect(adapter.submit({
-      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'image-2',
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).resolves.toEqual({ operationId, state: 'QUEUED' })
     expect(requests).toEqual([
@@ -221,7 +221,7 @@ describe('gateway image generation adapter', () => {
 
     await adapter.submit({
       tenantId: 'frameflow', prompt: 'Create a lesson illustration based on the exact supplied textbook leaf',
-      model: 'image-2', aspectRatio: '1:1', idempotencyKey: 'run-1:asset:leaf-reference:r0:v1',
+      model: 'gpt-image-2', aspectRatio: '1:1', idempotencyKey: 'run-1:asset:leaf-reference:r0:v1',
       referenceImage: { mimeType: 'image/png', bytes: new Uint8Array(reference), sha256: 'a'.repeat(64) },
     })
 
@@ -230,7 +230,7 @@ describe('gateway image generation adapter', () => {
     expect(new Headers(request.init.headers).has('Content-Type')).toBe(false)
     expect(request.init.body).toBeInstanceOf(FormData)
     const form = request.init.body as FormData
-    expect(form.get('model')).toBe('image-2')
+    expect(form.get('model')).toBe('gpt-image-2')
     expect(form.get('prompt')).toContain('exact supplied textbook leaf')
     expect(form.get('image')).toBeInstanceOf(Blob)
     expect((form.get('image') as Blob).size).toBe(reference.length)

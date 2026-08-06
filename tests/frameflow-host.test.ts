@@ -213,7 +213,7 @@ describe('FrameFlow host adapter', () => {
     }))
     const reservation = await adapter.reserve({
       host,
-      model: 'image-2',
+      model: 'gpt-image-2',
       units: 10,
       idempotencyKey: 'run-1:slide-1',
     })
@@ -262,7 +262,7 @@ describe('FrameFlow host adapter', () => {
     })).rejects.toThrow('FRAMEFLOW_TENANT_REQUIRED')
     await expect(adapter.reserve({
       host: shanhaiHost,
-      model: 'image-2',
+      model: 'gpt-image-2',
       units: 1,
       idempotencyKey: 'shanhai-budget-1',
     })).rejects.toThrow('FRAMEFLOW_TENANT_REQUIRED')

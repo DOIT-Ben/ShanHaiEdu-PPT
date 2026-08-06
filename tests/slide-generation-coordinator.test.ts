@@ -33,7 +33,7 @@ function run(budgetUnits = 100): RunRecord {
     source: { kind: 'TEXT', text: '这是用于批量页面生成测试的完整教材内容。' },
     slideCount: 3,
     visualDirection: '清晰的课堂科学信息图风格',
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -164,7 +164,7 @@ candidateReviewer?: AssetCandidateReviewPort) {
 function usageBill(overrides: Partial<UsageRunBill> = {}): UsageRunBill {
   return {
     pptRunId: 'run-1', authorizationReservationId: 'authorization-1', accountingMode: 'USAGE_V2', status: 'ACTIVE',
-    authorizationCapMilli: 300_000, authorizedModel: 'image-2', authorizedUnits: 30,
+    authorizationCapMilli: 300_000, authorizedModel: 'gpt-image-2', authorizedUnits: 30,
     pricingVersion: 'ppt-image-v1', unitPriceMilli: 10_000, providerSpendSafetyCapOperations: 30,
     generatedOperations: 0, chargedOperations: 0, notChargedOperations: 0, unknownOperations: 0,
     chargeableMilli: 0, settledMilli: 0, releasedMilli: 0, providerCosts: [], lastEventSequence: 0,
@@ -216,9 +216,9 @@ async function usageV2Fixture() {
     repository: base.repository,
     usage,
     billingCatalog: parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
-      model: 'image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
+      model: 'gpt-image-2', operationMode: 'TEXT_TO_IMAGE', resolution: '1K',
       costBasis: 'FIXED_PER_OPERATION', costAmountMicros: 40_000, currency: 'USD',
-      providerPricingVersion: 'image-2-2026-08',
+      providerPricingVersion: 'gpt-image-2-2026-08',
     }] })),
     clock: base.clock,
   })
@@ -420,15 +420,15 @@ describe('slide generation coordinator', () => {
     expect(result.steps.map((step) => step.output)).toEqual([
       {
         slideId: 'run-1:slide:1', versionId: 'run-1:slide:1:r0:v1', backgroundMode: 'OPAQUE',
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
+        model: 'gpt-image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
       },
       {
         slideId: 'run-1:slide:2', versionId: 'run-1:slide:2:r0:v1', backgroundMode: 'OPAQUE',
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
+        model: 'gpt-image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
       },
       {
         slideId: 'run-1:slide:3', versionId: 'run-1:slide:3:r0:v1', backgroundMode: 'OPAQUE',
-        model: 'image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
+        model: 'gpt-image-2', operationMode: 'TEXT_TO_IMAGE', aspectRatio: '16:9',
       },
     ])
   })

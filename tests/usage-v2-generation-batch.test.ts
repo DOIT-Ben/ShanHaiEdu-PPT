@@ -18,7 +18,7 @@ function run(identity: GenerationBatchIdentity): RunRecord {
     id: 'run-1', creationKey: 'create-1', requestHash: 'request-1',
     host: { tenantId: 'frameflow', externalUserId: 'teacher-1' },
     source: { kind: 'TEXT', text: '这是用于 Usage V2 批次归约测试的完整教材内容。' },
-    slideCount: 2, visualDirection: '课堂信息图', imageModel: identity.scope === 'INITIAL' ? 'nanobanana' : 'image-2',
+    slideCount: 2, visualDirection: '课堂信息图', imageModel: identity.scope === 'INITIAL' ? 'gemini-3-pro-image-preview' : 'gpt-image-2',
     accountingProtocol: 'FRAMEFLOW_USAGE_V2', automationLevel: 'BOUNDED_AUTO', presentationMode: 'VISUAL_DECK_V4',
     maxRevisionRounds: 2, revisionRound: identity.revisionRound, qualityScore: null,
     status: identity.scope === 'INITIAL' ? 'EXECUTING' : 'REVISING', resumeState: null,
@@ -78,7 +78,7 @@ function observedStep(input: Readonly<{
         eventType: 'OPERATION_OBSERVED', pptRunId: 'run-1', batchId: input.batchId,
         pageNumber: input.pageNumber, revisionRound: input.identity.revisionRound,
         idempotencyKey: input.operationKey, providerOperationId: operationId,
-        model: input.identity.scope === 'INITIAL' ? 'nanobanana' : 'image-2', status: 'COMPLETED',
+        model: input.identity.scope === 'INITIAL' ? 'gemini-3-pro-image-preview' : 'gpt-image-2', status: 'COMPLETED',
         providerBilling: {
           result: 'CHARGED', actualCostAmountMicros: 25_000, currency: 'USD', pricingVersion: 'provider-v1',
         },

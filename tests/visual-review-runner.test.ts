@@ -26,7 +26,7 @@ function run(): RunRecord {
     source: { kind: 'TEXT', text: '这是用于视觉质检测试的完整教材内容。' },
     slideCount: 2,
     visualDirection: request.visualDirection,
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,

@@ -78,7 +78,7 @@ function run(): RunRecord {
     source,
     slideCount: 2,
     visualDirection: request.visualDirection,
-    imageModel: 'image-2',
+    imageModel: 'gpt-image-2',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
