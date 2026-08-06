@@ -26,3 +26,29 @@ export function resolveMainServerConfig(env: Environment = process.env) {
     ...(presentationJobV2ApiToken ? { presentationJobV2ApiToken } : {}),
   }
 }
+
+export function resolveGatewayCoursewareModelsConfig(env: Environment = process.env) {
+  const fallbackModelValue = env.PPT_AGENT_FALLBACK_MODEL_ENABLED?.trim()
+  if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !== 'false') {
+    throw new Error('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
+  }
+  const baseUrl = env.MODEL_GATEWAY_BASE_URL?.trim() || ''
+  const apiKey = env.MODEL_GATEWAY_TEXT_KEY?.trim() || ''
+  return {
+    primary: {
+      baseUrl,
+      apiKey,
+      textModel: env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6-terra',
+      visionModel: env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6-terra',
+    },
+    ...(fallbackModelValue === 'true' ? {
+      fallback: {
+        baseUrl,
+        apiKey,
+        textModel: env.PPT_AGENT_FALLBACK_TEXT_MODEL?.trim() || 'MiniMax-M3',
+        visionModel: env.PPT_AGENT_FALLBACK_VISION_MODEL?.trim() || 'MiniMax-M3',
+        transport: 'CHAT_COMPLETIONS' as const,
+      },
+    } : {}),
+  }
+}

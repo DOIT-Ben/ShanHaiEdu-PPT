@@ -30,7 +30,10 @@ import { createPresentationJobV2ProviderFromEnv } from './runtime/presentation-j
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
-import { resolveMainServerConfig } from './runtime/main-server-config'
+import {
+  resolveGatewayCoursewareModelsConfig,
+  resolveMainServerConfig,
+} from './runtime/main-server-config'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
 const {
@@ -88,11 +91,6 @@ if (usageV2Runtime.providerBillingCatalog && revisionImageModel) {
   }
 }
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
-const fallbackModelValue = process.env.PPT_AGENT_FALLBACK_MODEL_ENABLED?.trim()
-if (fallbackModelValue && fallbackModelValue !== 'true' && fallbackModelValue !== 'false') {
-  throw new Error('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
-}
-const fallbackModelEnabled = fallbackModelValue === 'true'
 const visualDeckV4Transport = visualDeckV4TextTransport(process.env.PPT_AGENT_V4_TEXT_TRANSPORT)
 const appVersion = process.env.PPT_AGENT_SOFTWARE_VERSION?.trim()
   || process.env.PPT_AGENT_APP_VERSION?.trim()
@@ -189,28 +187,21 @@ const runtime = runtimeMode === 'gateway'
             fallback: hostBudget,
           })
         : hostBudget
-      const textModel = process.env.PPT_AGENT_TEXT_MODEL?.trim() || 'gpt-5.6-terra'
-      const visionModel = process.env.PPT_AGENT_VISION_MODEL?.trim() || 'gpt-5.6-terra'
+      const coursewareModels = resolveGatewayCoursewareModelsConfig(process.env)
       const primaryModel = new GatewayCoursewareModel({
-        baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
-        apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
-        textModel,
-        visionModel,
+        ...coursewareModels.primary,
         artifacts,
-        profile: gatewayCoursewareModelProfile({ textModel, visionModel }),
+        profile: gatewayCoursewareModelProfile(coursewareModels.primary),
         visualDeckV4Transport,
       })
-      const model = fallbackModelEnabled
+      const model = coursewareModels.fallback
         ? new FallbackCoursewareModel({
             primary: primaryModel,
             fallback: new GatewayCoursewareModel({
-              baseUrl: process.env.MINIMAX_BASE_URL?.trim() || 'https://api.minimaxi.com/v1',
-              apiKey: process.env.MINIMAX_API_KEY?.trim() || '',
-              textModel: process.env.MINIMAX_TEXT_MODEL?.trim() || 'MiniMax-M3',
-              visionModel: process.env.MINIMAX_VISION_MODEL?.trim() || 'MiniMax-M3',
+              ...coursewareModels.fallback,
               artifacts,
               profile: 'MINIMAX_M3',
-              visualDeckV4Transport,
+              visualDeckV4Transport: coursewareModels.fallback.transport,
             }),
           })
         : primaryModel

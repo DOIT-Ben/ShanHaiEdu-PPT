@@ -68,6 +68,11 @@ bun run check
 | `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
+| `MODEL_GATEWAY_BASE_URL` | 文本、视觉和图片模型共用的统一网关 API 根地址 |
+| `MODEL_GATEWAY_TEXT_KEY` | 文本与视觉模型的网关业务 Key；启用兜底时其模型白名单必须同时包含主模型和兜底模型 |
+| `MODEL_GATEWAY_IMAGE_KEY` | 图片生成与返修模型的独立网关业务 Key |
+| `PPT_AGENT_FALLBACK_MODEL_ENABLED` | 是否启用统一网关内的文本与视觉兜底，默认关闭 |
+| `PPT_AGENT_FALLBACK_TEXT_MODEL` / `PPT_AGENT_FALLBACK_VISION_MODEL` | 统一网关内的兜底模型 ID，默认均为 `MiniMax-M3`；MiniMax 兜底固定使用 Chat Completions |
 | `PPT_AGENT_V2_TENANT_ID` | V2-only 服务凭据绑定的宿主租户；无默认值，必须显式配置 |
 | `PPT_AGENT_V2_API_TOKEN` | V2 宿主服务凭据；主进程仅在配置后启用 V2，V2-only 服务始终必填；必须与 V1、管理员及宿主回调 Token 分离 |
 | `PPT_AGENT_V2_HOST` / `PPT_AGENT_V2_PORT` | V2-only 监听地址，默认 `127.0.0.1:4320`，仅允许回环地址 |

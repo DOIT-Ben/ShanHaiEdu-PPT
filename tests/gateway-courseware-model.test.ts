@@ -1301,13 +1301,16 @@ describe('gateway courseware model', () => {
       create: { width: 120, height: 80, channels: 3, background: '#F4F7FA' },
     }).png().toBuffer())
     let requestBody: Record<string, unknown> | null = null
+    const requestUrls: string[] = []
     const original = console.error
     console.error = () => undefined
     try {
       const model = new GatewayCoursewareModel({
-        baseUrl: 'https://api.minimaxi.com/v1', apiKey: 'test-minimax-key', textModel: 'MiniMax-M3',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'MiniMax-M3',
         visionModel: 'MiniMax-M3', artifacts: new MockArtifactPort(), profile: 'MINIMAX_M3',
-        fetchImpl: async (_url, init) => {
+        visualDeckV4Transport: 'CHAT_COMPLETIONS',
+        fetchImpl: async (url, init) => {
+          requestUrls.push(String(url))
           requestBody = JSON.parse(String(init?.body))
           return Response.json({ error: { type: 'upstream_error' } }, {
             status: 503,
@@ -1343,6 +1346,7 @@ describe('gateway courseware model', () => {
       reasoning_split: boolean
       messages: { content: unknown }[]
     }
+    expect(requestUrls).toEqual(['https://newapi.doitbenai.cloud/v1/chat/completions'])
     expect(body.thinking).toEqual({ type: 'disabled' })
     expect(body.reasoning_split).toBe(true)
     const content = body.messages[1]!.content as { image_url?: { detail: string } }[]

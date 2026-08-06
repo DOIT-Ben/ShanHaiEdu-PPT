@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { resolveMainServerConfig } from '../src/runtime/main-server-config'
+import { readFileSync } from 'node:fs'
+import {
+  resolveGatewayCoursewareModelsConfig,
+  resolveMainServerConfig,
+} from '../src/runtime/main-server-config'
 
 describe('main PPT Agent server configuration', () => {
   test('allows a V1-only process without a V2 credential', () => {
@@ -17,5 +21,59 @@ describe('main PPT Agent server configuration', () => {
       PPT_AGENT_API_TOKEN: 'v1-server-token-0001',
       PPT_AGENT_V2_API_TOKEN: 'v2-server-token-0001',
     }).presentationJobV2ApiToken).toBe('v2-server-token-0001')
+  })
+
+  test('routes the optional MiniMax fallback through the unified model gateway', () => {
+    const config = resolveGatewayCoursewareModelsConfig({
+      MODEL_GATEWAY_BASE_URL: 'https://newapi.doitbenai.cloud/v1',
+      MODEL_GATEWAY_TEXT_KEY: 'gateway-text-key-0001',
+      PPT_AGENT_TEXT_MODEL: 'gpt-5.6-terra',
+      PPT_AGENT_VISION_MODEL: 'gpt-5.6-terra',
+      PPT_AGENT_FALLBACK_MODEL_ENABLED: 'true',
+      PPT_AGENT_FALLBACK_TEXT_MODEL: 'MiniMax-M3',
+      PPT_AGENT_FALLBACK_VISION_MODEL: 'MiniMax-M3',
+      MINIMAX_BASE_URL: 'https://api.minimaxi.com/v1',
+      MINIMAX_API_KEY: 'legacy-direct-key-must-be-ignored',
+    })
+
+    expect(config.primary).toEqual({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1',
+      apiKey: 'gateway-text-key-0001',
+      textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra',
+    })
+    expect(config.fallback).toEqual({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1',
+      apiKey: 'gateway-text-key-0001',
+      textModel: 'MiniMax-M3',
+      visionModel: 'MiniMax-M3',
+      transport: 'CHAT_COMPLETIONS',
+    })
+    expect(JSON.stringify(config)).not.toContain('api.minimaxi.com')
+    expect(JSON.stringify(config)).not.toContain('legacy-direct-key-must-be-ignored')
+  })
+
+  test('keeps the shared-gateway fallback disabled by default and validates the flag', () => {
+    expect(resolveGatewayCoursewareModelsConfig({
+      MODEL_GATEWAY_BASE_URL: 'https://newapi.doitbenai.cloud/v1',
+      MODEL_GATEWAY_TEXT_KEY: 'gateway-text-key-0001',
+    }).fallback).toBeUndefined()
+    expect(() => resolveGatewayCoursewareModelsConfig({
+      PPT_AGENT_FALLBACK_MODEL_ENABLED: 'sometimes',
+    })).toThrow('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
+  })
+
+  test('documents only unified-gateway credentials for the MiniMax fallback', () => {
+    const environmentExample = readFileSync(
+      new URL('../deploy/aliyun/ppt-agent.env.example', import.meta.url),
+      'utf8',
+    )
+    expect(environmentExample).toContain('PPT_AGENT_FALLBACK_TEXT_MODEL=MiniMax-M3')
+    expect(environmentExample).toContain('PPT_AGENT_FALLBACK_VISION_MODEL=MiniMax-M3')
+    expect(environmentExample).not.toContain('MINIMAX_BASE_URL')
+    expect(environmentExample).not.toContain('MINIMAX_API_KEY')
+    expect(environmentExample).not.toContain('MINIMAX_TEXT_MODEL')
+    expect(environmentExample).not.toContain('MINIMAX_VISION_MODEL')
+    expect(environmentExample).not.toContain('api.minimaxi.com')
   })
 })
