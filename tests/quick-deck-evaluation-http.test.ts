@@ -186,6 +186,25 @@ describe('quick-deck evaluation HTTP facade', () => {
     expect((await handle(request(`/v1/evaluations/quick-decks/${firstBody.data.jobId}`, {}, secondEvaluationToken))).status).toBe(404)
   })
 
+  test('rejects an oversized streaming evaluation request before JSON parsing', async () => {
+    const { handle } = fixture()
+    const response = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: { text: 'x'.repeat(1_048_577) } }),
+    }))
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toMatchObject({
+      error: { code: 'EVALUATION_REQUEST_TOO_LARGE', category: 'REQUEST', retryable: false, action: 'NONE' },
+    })
+
+    const nullBody = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'null',
+    }))
+    expect(nullBody.status).toBe(400)
+  })
+
   test('streams ordered events and serves a verified completed PPTX without buffering', async () => {
     const { handle, service } = fixture()
     const created = await handle(request('/v1/evaluations/quick-decks', {

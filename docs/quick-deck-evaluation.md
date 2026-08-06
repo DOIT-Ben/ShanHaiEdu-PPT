@@ -4,7 +4,7 @@ Quick-deck 是用于验证 PPT Agent V4 创意规划、真实出图、像素比�
 
 ## 边界
 
-- 只接受受控 `TEXT` 资料，页数为 `1-10`，比例固定 `16:9`。
+- 只接受受控 `TEXT` 资料，页数为 `1-10`，比例固定 `16:9`；原始 JSON 请求体上限为 `1 MiB`，超限返回 `413 EVALUATION_REQUEST_TOO_LARGE`。
 - 每个任务只执行一次 `CreativeManuscript` Responses JSON Schema 调用，再并行提交真实异步图片任务并读取实际像素；只有全部页面为 `16:9` 才会封装 PPTX。
 - 不创建 V1 Run，不写 Usage V2，不调用预算、审查、返修、自动恢复或宿主回调。
 - 所有任务使用专属 SQLite、专属 artifact 根和专属 evaluator Token。过期时先删除每页图片、预览和 PPTX，再把任务公开为 `EXPIRED`。

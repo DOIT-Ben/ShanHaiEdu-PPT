@@ -227,7 +227,7 @@
     "/v1/evaluations/quick-decks": {
       "post": {
         "operationId": "createQuickDeckEvaluation",
-        "description": "Creates one isolated V4 quick-deck experiment from controlled text. The evaluator Bearer credential determines the tenant; X-PPT-Agent-Tenant is rejected. Idempotency-Key is intentionally not used: a timeout retry creates a new experiment. This resource never creates a V1 Run or Usage, budget, review, revision, or recovery record.",
+        "description": "Creates one isolated V4 quick-deck experiment from controlled text. The evaluator Bearer credential determines the tenant; X-PPT-Agent-Tenant is rejected. Idempotency-Key is intentionally not used: a timeout retry creates a new experiment. The raw JSON body is limited to 1 MiB. This resource never creates a V1 Run or Usage, budget, review, revision, or recovery record.",
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuickDeckEvaluationRequest" } } }
@@ -243,6 +243,7 @@
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuickDeckEvaluationEnvelope" } } }
           },
           "401": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
           "422": { "$ref": "#/components/responses/Error" },
           "429": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }

@@ -11,6 +11,7 @@ import { QuickDeckEvaluationEventBroker, DEFAULT_QUICK_DECK_EVENT_BATCH_LIMIT } 
 
 const OPENAPI_PATH = '/openapi/v1.json'
 const OPENAPI_LINK = `<${OPENAPI_PATH}>; rel="service-desc"; type="application/vnd.oai.openapi+json"`
+const MAX_QUICK_DECK_EVALUATION_REQUEST_BYTES = 1_048_576
 
 export interface QuickDeckEvaluationAuthenticationPort {
   authenticateQuickDeckEvaluation(request: Request): Promise<Readonly<{ tenantId: string }> | null>
@@ -51,9 +52,50 @@ function errorSemantics(status: number, code: string): Readonly<{
   if (status === 429) return { category: 'REQUEST', retryable: true, action: 'WAIT' }
   if (status === 409) return { category: 'DELIVERY', retryable: true, action: 'WAIT' }
   if (status === 410) return { category: 'DELIVERY', retryable: false, action: 'NONE' }
+  if (status === 413) return { category: 'REQUEST', retryable: false, action: 'NONE' }
   if (status === 422) return { category: 'CONTRACT', retryable: false, action: 'MODIFY_REQUEST' }
   if (status >= 400 && status < 500) return { category: 'CONTRACT', retryable: false, action: 'NONE' }
   return { category: 'INTERNAL', retryable: true, action: 'RETRY' }
+}
+
+type BoundedJsonBody =
+  | Readonly<{ kind: 'VALID'; value: unknown }>
+  | Readonly<{ kind: 'INVALID' }>
+  | Readonly<{ kind: 'TOO_LARGE' }>
+
+async function readBoundedJsonBody(request: Request): Promise<BoundedJsonBody> {
+  const declaredLength = request.headers.get('Content-Length')
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > MAX_QUICK_DECK_EVALUATION_REQUEST_BYTES) {
+    try { await request.body?.cancel() } catch {}
+    return { kind: 'TOO_LARGE' }
+  }
+  if (!request.body) return { kind: 'INVALID' }
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let byteLength = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      byteLength += next.value.byteLength
+      if (byteLength > MAX_QUICK_DECK_EVALUATION_REQUEST_BYTES) {
+        await reader.cancel()
+        return { kind: 'TOO_LARGE' }
+      }
+      chunks.push(next.value)
+    }
+    const bytes = new Uint8Array(byteLength)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+    return value ? { kind: 'VALID', value } : { kind: 'INVALID' }
+  } catch {
+    return { kind: 'INVALID' }
+  }
 }
 
 function errorResponse(status: number, code: string, requestId: string) {
@@ -188,9 +230,10 @@ export function createQuickDeckEvaluationRequestHandler(dependencies: QuickDeckE
     const jobId = parts[3]
     try {
       if (parts.length === 3 && request.method === 'POST') {
-        const body = await request.json().catch(() => null)
-        if (!body) return errorResponse(400, 'INVALID_JSON', requestId)
-        const job = await dependencies.service.create(owner.tenantId, body)
+        const body = await readBoundedJsonBody(request)
+        if (body.kind === 'TOO_LARGE') return errorResponse(413, 'EVALUATION_REQUEST_TOO_LARGE', requestId)
+        if (body.kind === 'INVALID') return errorResponse(400, 'INVALID_JSON', requestId)
+        const job = await dependencies.service.create(owner.tenantId, body.value)
         return response(quickDeckEvaluationEnvelopeSchema.parse({
           schemaVersion: CONTRACT_VERSION,
           requestId,
