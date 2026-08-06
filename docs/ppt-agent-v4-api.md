@@ -8,10 +8,10 @@ PPT Agent V4 是独立服务。宿主只提供经认证的用户身份、源资�
 
 | 字段 | 固定值 | 用途 |
 | --- | --- | --- |
-| 软件版本 | `4.3.1` | 部署与故障定位 |
+| 软件版本 | `4.4.0` | 部署与故障定位 |
 | 演示模式 | `VISUAL_DECK_V4` | NotebookLM 风格整页视觉链路 |
 | HTTP/SSE 合同 | `"1"` | 公共 API 数据格式 |
-| V4 编译器 | `visual-deck-v4-chain-3` | 一轮 Critic/Optimizer 规划身份；旧 `chain-1/chain-2` Run 仍按持久化身份恢复 |
+| V4 编译器 | `visual-deck-v4-chain-4` | 语义文稿加确定性编译身份；旧 `chain-1/chain-2/chain-3` Run 仍按持久化身份恢复 |
 
 无认证 `GET /health/live` 只表示 HTTP 进程存活；无认证 `GET /health/ready` 以 `200 READY` 或
 `503 NOT_READY` 表示 worker 是否可接单。两者的 `release` 返回软件版本、合同版本、Git SHA 与 release ID，
@@ -34,6 +34,8 @@ Run 详情的 `release` 另外冻结本次 Run 的模式和编译器版本。两
 | 历史进度 | `GET /v1/runs/{runId}/events/history?after={sequence}` | 按 `sequence` 断线续传 |
 | 下载交付 | `GET /v1/runs/{runId}/deliveries/{deliveryId}/content?format=pptx` | 无 |
 
+快速真实评测使用独立的 [`quick-deck-evaluation.md`](./quick-deck-evaluation.md) 资源，不能替代本表的正式宿主 Run 合同。
+
 除健康检查外，调用由服务端携带 Bearer 凭据和宿主身份头：
 
 ```http
@@ -53,28 +55,18 @@ payload variant，只有枚举外的新类型才进入 forward-compatible 分支
 
 ## 自动执行的规划
 
-正常 V4 规划使用三次生成调用和两个质量 Critic：
+正常 V4 新 Run 使用两个小型语义文稿调用，控制字段由程序确定：
 
 ```text
-Source Understanding + Presentation Spec
--> Deck Plan + Visual Contract 初稿
--> Deck/Visual Critic
--> 仅发现问题时：Deck/Visual Optimizer
--> Slide Briefs 初稿
--> Slide Briefs Critic
--> 仅发现问题时：Slide Briefs Optimizer
--> 确定性 Proposal 校验和图片提示词编译
+CreativeManuscript
+-> ReviewManuscript
+-> ManuscriptCompiler + SourceEvidenceResolver + V4PlanCompiler
+-> 确定性 Proposal、页面槽位和图片提示词编译
 ```
 
-无质量问题时共 5 次文本调用；两个 Critic 都发现问题时最多 7 次。每个节点最多执行 1 次 Critic 和
-1 次可选 Optimizer，不存在 Critic repair、Optimizer repair 或第三轮业务调用。Critic 只返回问题，
-Optimizer 只返回被授权字段的局部新值；候选哈希、冻结字段、Patch 合并和确定性复验由 Agent 后端负责。
+模型只返回标题、叙事、用户可见文案、事实表述、视觉说明、来源证据摘录和修订建议。页码、页面角色、章节、来源 chunk ID、模型/协议、哈希、预算、状态、时间和交付身份均由 Agent 后端生成；模型不得提交完整 Proposal、Blueprint、字段路径或业务 Patch。语义载荷不合法时最多进行一次内容槽位补全，不将完整业务合同回传给模型反复修复。
 
-页数、连续页码、公式、来源、冻结文案和 Proposal 合法性属于程序硬校验，失败会阻断规划。审美、表达、
-构图和叙事属于可降级质量反射：Critic 合同/Provider 失败或 Optimizer Patch 无效时记录
-`REFLECTION_SKIPPED`，沿用反射前已验证方案继续出图，不进入五轮技术恢复，也不伪造“已通过”。
-请求结果未知时，同一业务调用最多用同一输入、协议和 Idempotency-Key 恢复 1 次。内部问题、候选哈希、
-Slide Brief 和模型原始输出不属于宿主公共 UI 合同。
+页数、连续页码、公式、来源、冻结文案和 Proposal 合法性属于程序硬校验，失败会阻断规划。请求结果未知时，同一业务调用最多用同一输入、协议和 Idempotency-Key 恢复 1 次。内部问题、候选哈希、Slide Brief 和模型原始输出不属于宿主公共 UI 合同。
 
 V4 规划完成后自动进入 `EXECUTING`。详情中的 `generationPlan` 是生成进度页的唯一内容源，宿主应
 展示标题、受众、页数、叙事流程、每页标题/内容/视觉说明、整体风格与“整页图片型 PPTX，不可编辑”的

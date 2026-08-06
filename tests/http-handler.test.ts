@@ -171,7 +171,7 @@ describe('HTTP v1 handler', () => {
     expect(openapi.headers.get('X-Request-ID')).toBe(openapiRequestId)
     expect(await openapi.json()).toMatchObject({
       openapi: '3.1.0',
-      info: { title: 'PPT Agent API', version: '4.3.1' },
+      info: { title: 'PPT Agent API', version: '4.4.0' },
       paths: {
         '/health/live': { get: { operationId: 'getLiveness' } },
         '/v1/runs/{runId}': { get: { operationId: 'getRun' } },

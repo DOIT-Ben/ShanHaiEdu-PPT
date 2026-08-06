@@ -14,7 +14,7 @@
 
 | 字段 | 语义 |
 | --- | --- |
-| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.3.1` |
+| `softwareVersion` | PPT Agent 软件发布版本，当前为 `4.4.0` |
 | `presentationMode` | 本次 Run 的能力模式，V4 固定为 `VISUAL_DECK_V4` |
 | `compilerVersion` | V4 链式规划与整页图片编译器版本 |
 | `contractVersion` | HTTP/SSE 数据合同版本，当前为 `"1"` |
@@ -425,7 +425,7 @@ V4 事件的 `payload` 至少包含：`stage`、`completed`、`total`、`pageNum
 质量反射的非法 JSON、Schema 不匹配或局部 Patch 无效不会阻断主链，而是记录跳过并沿用已经通过硬合同
 校验的候选。只有提交结果未知时才允许用原反射键恢复一次，不从 Source 阶段重新提交，也不创建新 Run。
 未知计费或提交状态时，Agent 会保留原幂等键等待恢复；FrameFlow 不得通过换键强制重新扣费。
-`maxRevisionRounds=0` 表示不返修，不表示发现质量建议后失败。4.3.1 对非阻断质量问题保留当前图片，记录
+`maxRevisionRounds=0` 表示不返修，不表示发现质量建议后失败。4.4.0 对非阻断质量问题保留当前图片，记录
 `*_REJECTED` 和 `issue.resolved(ACCEPTED)`，继续套审与交付；来源、蓝图、图片素材、Provider、账务、
 安全和文件合法性等硬问题仍然阻断。
 

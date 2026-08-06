@@ -10,7 +10,7 @@ import {
 
 describe('PPT Agent V4 release identity', () => {
   test('keeps chain-1/2/3 recovery identities while new runs use the semantic compiler', () => {
-    expect(PPT_AGENT_SOFTWARE_VERSION).toBe('4.3.1')
+    expect(PPT_AGENT_SOFTWARE_VERSION).toBe('4.4.0')
     expect(packageMetadata.version).toBe(PPT_AGENT_SOFTWARE_VERSION)
     expect(VISUAL_DECK_V4_COMPILER_VERSION).toBe('visual-deck-v4-chain-4')
     expect(SUPPORTED_VISUAL_DECK_V4_COMPILER_VERSIONS).toEqual([

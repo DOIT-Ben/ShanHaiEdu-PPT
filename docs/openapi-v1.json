@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "PPT Agent API",
-    "version": "4.3.1",
+    "version": "4.4.0",
     "description": "Host-independent API for durable PPT Agent runs. Bearer credentials are tenant-bound; user and administrator credentials are distinct, and host identity headers are canonicalized by the service."
   },
   "servers": [{ "url": "/" }],
@@ -220,6 +220,123 @@
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilitiesEnvelope" } } }
           },
           "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/evaluations/quick-decks": {
+      "post": {
+        "operationId": "createQuickDeckEvaluation",
+        "description": "Creates one isolated V4 quick-deck experiment from controlled text. The evaluator Bearer credential determines the tenant; X-PPT-Agent-Tenant is rejected. Idempotency-Key is intentionally not used: a timeout retry creates a new experiment. This resource never creates a V1 Run or Usage, budget, review, revision, or recovery record.",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuickDeckEvaluationRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Independent evaluation accepted",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuickDeckEvaluationEnvelope" } } }
+          },
+          "401": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/evaluations/quick-decks/{jobId}": {
+      "get": {
+        "operationId": "getQuickDeckEvaluation",
+        "description": "Returns the evaluator-tenant-scoped state, actual pixel dimensions, ratio result, selected models, duration, and completed artifact digests. It never exposes prompts, source text, internal blueprint fields, artifact identifiers, or Provider configuration.",
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Evaluation state",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuickDeckEvaluationEnvelope" } } }
+          },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/evaluations/quick-decks/{jobId}/events": {
+      "get": {
+        "operationId": "streamQuickDeckEvaluationEvents",
+        "description": "Replays bounded, durable quick-deck events after the cursor and then polls live state. Each SSE data field is a QuickDeckEvaluationEvent. The stream closes at evaluation.failed, packaging.completed, or evaluation.expired; reconnect with Last-Event-ID or after and ignore already-applied sequence values.",
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          { "name": "after", "in": "query", "schema": { "type": "integer", "minimum": 0 } },
+          { "name": "Last-Event-ID", "in": "header", "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persistent replay followed by live polling; closes at the quick-deck terminal event",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/evaluations/quick-decks/{jobId}/content": {
+      "get": {
+        "operationId": "downloadQuickDeckEvaluationContent",
+        "description": "Streams a completed evaluator-owned PPTX or preview. The server verifies immutable artifact metadata before opening the body. EXPIRED content is gone from the public contract; Range requests are rejected.",
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } },
+          { "name": "format", "in": "query", "schema": { "enum": ["pptx", "preview"], "default": "pptx" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified immutable evaluation artifact",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-PPT-Agent-Artifact-ID": { "schema": { "type": "string" } },
+              "X-PPT-Agent-Content-SHA256": { "schema": { "type": "string", "pattern": "^[a-f0-9]{64}$" } },
+              "ETag": { "schema": { "type": "string" } }
+            },
+            "content": {
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation": { "schema": { "type": "string", "format": "binary" } },
+              "image/png": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "410": { "$ref": "#/components/responses/Error" },
+          "416": {
+            "description": "Range requests are not supported",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "Accept-Ranges": { "schema": { "const": "none" } },
+              "Content-Range": { "schema": { "type": "string" } }
+            }
+          },
+          "422": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -2245,6 +2362,139 @@
           "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "data": { "$ref": "#/components/schemas/PptAgentCapabilities" }
         }
+      },
+      "QuickDeckEvaluationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "source", "slideCount", "visualDirection", "imageModel"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "text"],
+            "properties": {
+              "kind": { "const": "TEXT" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 240 },
+              "text": { "type": "string", "minLength": 20, "maxLength": 200000 }
+            }
+          },
+          "slideCount": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
+          "imageModel": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "audience": { "type": "string", "minLength": 3, "maxLength": 500 }
+        }
+      },
+      "QuickDeckEvaluationArtifact": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mimeType", "sha256", "byteLength"],
+        "properties": {
+          "mimeType": { "enum": ["application/vnd.openxmlformats-officedocument.presentationml.presentation", "image/png"] },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "byteLength": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "QuickDeckEvaluationPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pageNumber", "status", "width", "height", "aspectRatioValidated", "sha256"],
+        "properties": {
+          "pageNumber": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "status": { "enum": ["PENDING", "SUBMITTED", "PROCESSING", "COMPLETED", "FAILED"] },
+          "width": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
+          "height": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
+          "aspectRatioValidated": { "type": "boolean" },
+          "sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" }
+        }
+      },
+      "QuickDeckEvaluation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "jobId", "status", "phase", "slideCount", "aspectRatio", "models", "progress", "pages", "artifacts", "quality", "failure", "createdAt", "startedAt", "completedAt", "expiresAt", "durationMs"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "status": { "enum": ["QUEUED", "PLANNING", "SUBMITTING_IMAGES", "GENERATING", "PACKAGING", "COMPLETED", "FAILED", "EXPIRED"] },
+          "phase": { "enum": ["ACCEPTED", "CREATIVE_PLANNING", "IMAGE_GENERATION", "PPTX_PACKAGING", "COMPLETE", "FAILED", "EXPIRED"] },
+          "slideCount": { "type": "integer", "minimum": 1, "maximum": 10 },
+          "aspectRatio": { "const": "16:9" },
+          "models": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "image"],
+            "properties": {
+              "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+              "image": { "type": "string", "minLength": 1, "maxLength": 120 }
+            }
+          },
+          "progress": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["planned", "submittedPages", "completedPages", "totalPages"],
+            "properties": {
+              "planned": { "type": "boolean" },
+              "submittedPages": { "type": "integer", "minimum": 0, "maximum": 10 },
+              "completedPages": { "type": "integer", "minimum": 0, "maximum": 10 },
+              "totalPages": { "type": "integer", "minimum": 1, "maximum": 10 }
+            }
+          },
+          "pages": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "$ref": "#/components/schemas/QuickDeckEvaluationPage" } },
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pptx", "preview"],
+            "properties": {
+              "pptx": { "oneOf": [{ "$ref": "#/components/schemas/QuickDeckEvaluationArtifact" }, { "type": "null" }] },
+              "preview": { "oneOf": [{ "$ref": "#/components/schemas/QuickDeckEvaluationArtifact" }, { "type": "null" }] }
+            }
+          },
+          "quality": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "score", "rubric"],
+            "properties": { "state": { "const": "NOT_ASSESSED" }, "score": { "type": "null" }, "rubric": { "type": "null" } }
+          },
+          "failure": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code"],
+                "properties": { "code": { "enum": ["EVALUATION_INTERRUPTED", "EVALUATION_MODEL_PROTOCOL_INVALID", "EVALUATION_PLANNING_FAILED", "EVALUATION_IMAGE_SUBMISSION_FAILED", "EVALUATION_IMAGE_TASK_FAILED", "EVALUATION_IMAGE_RATIO_INVALID", "EVALUATION_IMAGE_ARTIFACT_INVALID", "EVALUATION_PACKAGING_FAILED"] } }
+              }
+            ]
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": ["string", "null"], "format": "date-time" },
+          "completedAt": { "type": ["string", "null"], "format": "date-time" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "durationMs": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      },
+      "QuickDeckEvaluationEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/QuickDeckEvaluation" }
+        }
+      },
+      "QuickDeckEvaluationEvent": {
+        "oneOf": [
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "evaluation.accepted" }, "payload": { "type": "object", "additionalProperties": false, "required": ["slideCount"], "properties": { "slideCount": { "type": "integer", "minimum": 1, "maximum": 10 } } } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "planning.started" }, "payload": { "type": "object", "additionalProperties": false } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "planning.completed" }, "payload": { "type": "object", "additionalProperties": false, "required": ["slideCount"], "properties": { "slideCount": { "type": "integer", "minimum": 1, "maximum": 10 } } } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "images.submitted" }, "payload": { "type": "object", "additionalProperties": false, "required": ["submittedPages", "totalPages"], "properties": { "submittedPages": { "type": "integer", "minimum": 0, "maximum": 10 }, "totalPages": { "type": "integer", "minimum": 1, "maximum": 10 } } } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "images.progress" }, "payload": { "type": "object", "additionalProperties": false, "required": ["completedPages", "totalPages"], "properties": { "completedPages": { "type": "integer", "minimum": 0, "maximum": 10 }, "totalPages": { "type": "integer", "minimum": 1, "maximum": 10 } } } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "packaging.started" }, "payload": { "type": "object", "additionalProperties": false } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "packaging.completed" }, "payload": { "type": "object", "additionalProperties": false } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "evaluation.failed" }, "payload": { "type": "object", "additionalProperties": false, "required": ["code"], "properties": { "code": { "enum": ["EVALUATION_INTERRUPTED", "EVALUATION_MODEL_PROTOCOL_INVALID", "EVALUATION_PLANNING_FAILED", "EVALUATION_IMAGE_SUBMISSION_FAILED", "EVALUATION_IMAGE_TASK_FAILED", "EVALUATION_IMAGE_RATIO_INVALID", "EVALUATION_IMAGE_ARTIFACT_INVALID", "EVALUATION_PACKAGING_FAILED"] } } } } },
+          { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "jobId", "sequence", "eventId", "occurredAt", "type", "payload"], "properties": { "schemaVersion": { "const": "1" }, "jobId": { "type": "string", "minLength": 1, "maxLength": 160 }, "sequence": { "type": "integer", "minimum": 1 }, "eventId": { "type": "string", "minLength": 1, "maxLength": 160 }, "occurredAt": { "type": "string", "format": "date-time" }, "type": { "const": "evaluation.expired" }, "payload": { "type": "object", "additionalProperties": false } } }
+        ]
       },
       "RunDetail": {
         "description": "Strict public Run detail. AVAILABLE requires status COMPLETED and exactly one readable public DeliveryRecord; that record's runId must equal RunDetail.id, its id must equal deliveryAvailability.deliveryId, and its revisionRound must equal RunDetail.revisionRound. UNAVAILABLE exposes no DeliveryRecord.",

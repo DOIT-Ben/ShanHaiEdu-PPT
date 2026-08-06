@@ -23,6 +23,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 - 已增加参考 ShanHaiEdu 页合同的图片文字 V1 渲染与宿主锚定交付边界；正式山海 Adapter 尚未进入山海仓库。
 - FrameFlow Agent API Client 与工作台已通过功能开关在生产受控启用；后续宿主继续复用同一公共合同。
 - Presentation Job V2 的公共 Job、Artifact 和 Usage 边界独立于 V1。主进程配置专用 V2 Token 后，通过内部 Provider 在派生 tenant 下复用完整 `VISUAL_DECK_V4` 智能体链；未配置时只运行 V1，V2 路由返回不可用。独立 `presentation-job-v2-server` 只装配 V2 SQLite、Artifact、固定服务级预算和显式 HTTP Provider，并在发布 Artifact 前校验完整 PPTX 结构。
+- Quick-deck 评测资源以独立 Token、SQLite 和 TTL 制品根验证真实 V4 创意规划、异步出图、像素比例与 PPTX 封装；它不创建 Run，不计入预算或 Usage，也不构成质量认证。
 
 ## 目录
 
@@ -34,9 +35,11 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 | `tests/` | 合同、策略、恢复和宿主兼容测试 |
 | `docs/decisions/` | 架构决策 |
 | `docs/ppt-agent-v4-api.md` | 宿主无关的 V4 HTTP、SSE、幂等、批次账务和交付接口文档 |
+| `docs/quick-deck-evaluation.md` | 隔离 quick-deck 真实评测的认证、接口、TTL 和结果边界 |
 | `docs/openapi-v2.json` | 宿主无关 Presentation Job V2 HTTP 合同 |
 | `docs/presentation-job-v2-changelog.md` | Presentation Job V2 兼容性、交付和 Usage 语义 |
 | `docs/decisions/ADR-010-presentation-job-v2-internal-agent-provider.md` | V2 内部智能体 Provider、预算隔离和操作硬上限 |
+| `docs/decisions/ADR-011-quick-deck-evaluation-isolation.md` | 快速评测的独立鉴权、数据和清理决策 |
 | `docs/frameflow-v4-integration.md` | FrameFlow 作为首个宿主的接入示例与迁移约束 |
 | `docs/deployment-20260723-hardening-plan.md` | 本轮加固的发布、备份、验证与回退 runbook |
 | `docs/deployment-20260723-hardening.md` | 本轮加固正式部署、备份与回退记录 |
@@ -70,6 +73,11 @@ bun run check
 | `PPT_AGENT_V4_INITIAL_IMAGE_MODELS` | `GET /v1/capabilities` 公布的初始 V4 图片模型清单，逗号分隔，默认 `gemini-3-pro-image-preview` |
 | `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | V4 局部图片返修模型，默认 `gpt-image-2` |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN` | 启用 quick-deck 的独立 evaluator Token；不可与 V1、管理员、V2 或 FrameFlow Token 复用 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT` | 位于 `PPT_AGENT_DATA_ROOT` 内的 quick-deck SQLite/制品根；TTL 后物理删除，不进入正式备份 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL` / `PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS` | V4 公布白名单内的实际评测模型；图片模型为初始 V4 图片模型的子集 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_MAX_ACTIVE_JOBS` / `PPT_AGENT_QUICK_DECK_EVALUATION_MAX_DAILY_JOBS` | 每个 evaluator tenant 的并发与 UTC 日实验额度，默认 `2` / `10` |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS` / `PPT_AGENT_QUICK_DECK_EVALUATION_TICK_BATCH_SIZE` | 短期制品 TTL（默认 `24` 小时）和每 tick 扫描数（默认 `10`） |
 | `MODEL_GATEWAY_BASE_URL` | 文本、视觉和图片模型共用的统一网关 API 根地址 |
 | `MODEL_GATEWAY_TEXT_KEY` | 文本与视觉模型的网关业务 Key；启用兜底时其模型白名单必须同时包含主模型和兜底模型 |
 | `MODEL_GATEWAY_IMAGE_KEY` | 图片生成与返修模型的独立网关业务 Key |
@@ -96,7 +104,7 @@ bun run dev:v2
 
 - 发布目录：`/opt/ppt-agent/releases/<timestamp>`，当前版本由 `/opt/ppt-agent/current` 原子软链接指向。
 - 持久化目录：`/opt/ppt-agent/shared/data`，环境文件为 `/opt/ppt-agent/shared/ppt-agent.env`，权限 `600`。
-- `ppt-agent-backup.timer` 通过 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs` 每日一致性备份 `agent.sqlite`、存在时的 `presentation-jobs-v2.sqlite` 与受控产物到 `/opt/ppt-agent/shared/data-backups`；脚本以固定 WAL 读快照分页复制 SQLite，不把整库载入 JavaScript 内存，再以流式 gzip、每个数据库的 SHA-256 和产物 SHA-256 清单压缩落盘。备份前按“两份原始 SQLite 总量 + 产物 + 5 GiB 低水位”检查空间，默认保留 14 天且不受应用版本回退影响。
+- `ppt-agent-backup.timer` 通过 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs` 每日一致性备份 `agent.sqlite`、存在时的 `presentation-jobs-v2.sqlite` 与受控产物到 `/opt/ppt-agent/shared/data-backups`；脚本以固定 WAL 读快照分页复制 SQLite，不把整库载入 JavaScript 内存，再以流式 gzip、每个数据库的 SHA-256 和产物 SHA-256 清单压缩落盘。quick-deck 评测 SQLite 与其 TTL 制品不属于该备份集。备份前按“两份原始 SQLite 总量 + 产物 + 5 GiB 低水位”检查空间，默认保留 14 天且不受应用版本回退影响。
 - 每次安装备份 unit 时必须同时把同一 release 的 `scripts/backup-ppt-agent-data.mjs` 安装到 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs`；unit 以 `ExecStartPre` 明确拒绝缺失脚本，并通过 `flock` 防止并发执行。
 - 恢复前先执行 `bun /opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs --verify <backup>`；该命令在权限 `0700/0600` 的临时目录流式解压，校验数据库/产物 SHA-256、SQLite 完整性和外键后删除副本。真正恢复必须另建暂存文件、复核 SHA-256、停服务后原子替换，并先备份当前生产数据；禁止原位解压覆盖生产数据库。
 - 服务只监听 `127.0.0.1:4310`，由 FrameFlow 服务端调用，不经 Nginx 暴露公网。

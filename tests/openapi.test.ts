@@ -8,6 +8,10 @@ import {
   publicErrorCategorySchema,
   runStatusSchema,
 } from '../src/contracts'
+import {
+  quickDeckEvaluationEventSchema,
+  quickDeckEvaluationStatusSchema,
+} from '../src/quick-deck-evaluation-contracts'
 
 const filename = new URL('../docs/openapi-v1.json', import.meta.url)
 
@@ -29,6 +33,31 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.slideCount.minimum).toBe(1)
     expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.flow.minItems).toBe(1)
     expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.pages.minItems).toBe(1)
+  })
+
+  test('keeps quick-deck evaluation resources isolated and aligned with their Zod contract', async () => {
+    const document = JSON.parse(await readFile(filename, 'utf8')) as any
+    const create = document.paths['/v1/evaluations/quick-decks'].post
+    const job = document.components.schemas.QuickDeckEvaluation
+    const request = document.components.schemas.QuickDeckEvaluationRequest
+    const events = document.components.schemas.QuickDeckEvaluationEvent.oneOf
+
+    expect(create.parameters).toBeUndefined()
+    expect(create.description).toContain('Idempotency-Key is intentionally not used')
+    expect(request.properties.source.properties.kind.const).toBe('TEXT')
+    expect(request.properties.source.properties.text.maxLength).toBe(200_000)
+    expect(request.properties.slideCount).toMatchObject({ minimum: 1, maximum: 10 })
+    expect(job.properties.status.enum).toEqual(quickDeckEvaluationStatusSchema.options)
+    expect(job.properties.artifacts.properties.pptx.oneOf).toEqual(expect.arrayContaining([
+      { $ref: '#/components/schemas/QuickDeckEvaluationArtifact' },
+      { type: 'null' },
+    ]))
+    expect(JSON.stringify(job)).not.toContain('artifactId')
+    expect(JSON.stringify(job)).not.toContain('visualPrompt')
+    expect(events.map((event: any) => event.properties.type.const).sort())
+      .toEqual(quickDeckEvaluationEventSchema.options.map((event) => event.shape.type.value).sort())
+    expect(document.paths['/v1/evaluations/quick-decks/{jobId}/content'].get.responses['416'].headers)
+      .toMatchObject({ 'Accept-Ranges': { schema: { const: 'none' } } })
   })
 
   test('keeps release presentationMode consistency in parity with Zod for every mode', async () => {
@@ -193,7 +222,7 @@ describe('OpenAPI v1 contract', () => {
     }
 
     expect(document.openapi).toBe('3.1.0')
-    expect(document.info.version).toBe('4.3.1')
+    expect(document.info.version).toBe('4.4.0')
     expect(document.security).toEqual([{ bearerAuth: [] }])
     expect(Object.keys(document.paths).sort()).toEqual([
       '/health/live',
@@ -204,6 +233,10 @@ describe('OpenAPI v1 contract', () => {
       '/v1/admin/planning-failures',
       '/v1/admin/settings/revision-rounds',
       '/v1/capabilities',
+      '/v1/evaluations/quick-decks',
+      '/v1/evaluations/quick-decks/{jobId}',
+      '/v1/evaluations/quick-decks/{jobId}/content',
+      '/v1/evaluations/quick-decks/{jobId}/events',
       '/v1/runs',
       '/v1/runs/{runId}',
       '/v1/runs/{runId}/actions',
@@ -228,6 +261,10 @@ describe('OpenAPI v1 contract', () => {
     expect(document.paths['/v1/admin/settings/revision-rounds']?.get).toBeDefined()
     expect(document.paths['/v1/admin/settings/revision-rounds']?.patch).toBeDefined()
     expect(document.paths['/v1/capabilities']?.get).toBeDefined()
+    expect(document.paths['/v1/evaluations/quick-decks']?.post).toBeDefined()
+    expect(document.paths['/v1/evaluations/quick-decks/{jobId}']?.get).toBeDefined()
+    expect(document.paths['/v1/evaluations/quick-decks/{jobId}/events']?.get).toBeDefined()
+    expect(document.paths['/v1/evaluations/quick-decks/{jobId}/content']?.get).toBeDefined()
     expect(document.paths['/v1/runs/{runId}/plan']?.get).toBeDefined()
     expect(document.paths['/v1/runs/{runId}/sources']?.get).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
@@ -445,6 +482,10 @@ describe('OpenAPI v1 contract', () => {
       ['/v1/runs', 'post', '201'],
       ['/v1/runs', 'get', '200'],
       ['/v1/capabilities', 'get', '200'],
+      ['/v1/evaluations/quick-decks', 'post', '201'],
+      ['/v1/evaluations/quick-decks/{jobId}', 'get', '200'],
+      ['/v1/evaluations/quick-decks/{jobId}/events', 'get', '200'],
+      ['/v1/evaluations/quick-decks/{jobId}/content', 'get', '200'],
       ['/v1/runs/{runId}', 'get', '200'],
       ['/v1/runs/{runId}/plan', 'get', '200'],
       ['/v1/runs/{runId}/sources', 'get', '200'],
