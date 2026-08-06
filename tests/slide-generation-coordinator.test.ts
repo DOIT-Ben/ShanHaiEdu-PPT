@@ -114,7 +114,7 @@ function blueprint() {
 async function fixture(budgetUnits = 100, blueprintValue: ReturnType<typeof blueprint> | Record<string, unknown> = blueprint(), documentResult: DocumentResult = {
   name: 'source', chunks: [], assets: [], isComplete: true, missingRanges: [],
 }, discovery?: AssetDiscoveryPort, assetAcquisitionPolicy: RunRecord['assetAcquisitionPolicy'] = 'AI_FIRST',
-candidateReviewer?: AssetCandidateReviewPort) {
+candidateReviewer?: AssetCandidateReviewPort, imageConcurrency = 50) {
   const repository = new InMemoryAgentRepository()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
@@ -157,6 +157,7 @@ candidateReviewer?: AssetCandidateReviewPort) {
     clock,
     ...(discovery ? { discovery } : {}),
     ...(webReviewer ? { candidateReviewer: webReviewer } : {}),
+    imageConcurrency,
   })
   return { repository, budget, images, artifacts, media, coordinator, candidateReviewer: webReviewer, clock }
 }
@@ -523,7 +524,7 @@ describe('slide generation coordinator', () => {
     }
   })
 
-  test('recovers the current approved page from reserved and submitting without starting the next page', async () => {
+  test('recovers approved pages from reserved and submitting while submitting the remaining pages', async () => {
     for (const crashStatus of ['RESERVED', 'SUBMITTING'] as const) {
       const { repository, images, media, coordinator } = await fixture()
       await repository.transact('run-1', (transaction) => {
@@ -563,10 +564,10 @@ describe('slide generation coordinator', () => {
 
       const recovered = await coordinator.submitBlueprintImages('run-1', 10)
 
-      expect(recovered).toMatchObject({ submitted: 1, total: 3 })
-      expect(images.operations.size).toBe(1)
+      expect(recovered).toMatchObject({ submitted: 3, total: 3 })
+      expect(images.operations.size).toBe(3)
       expect((await repository.listSteps('run-1')).filter((step) => step.tool === 'generate_slide_image'))
-        .toHaveLength(1)
+        .toHaveLength(3)
     }
   })
 
@@ -753,6 +754,21 @@ describe('slide generation coordinator', () => {
     expect(images.maxConcurrentInspections).toBe(3)
   })
 
+  test('polls approved page design images with configured bounded concurrency', async () => {
+    const { repository, images, coordinator } = await fixture(100, blueprint(), undefined, undefined, 'AI_FIRST', undefined, 2)
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, source: approvedRunSource() })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    for (const [index, key] of [...images.operations.keys()].entries()) images.complete(key, `artifact-${index + 1}`)
+    images.inspectionDelayMs = 10
+
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
+      status: 'PAGE_REVIEW', completed: 3, total: 3,
+    })
+    expect(images.maxConcurrentInspections).toBe(2)
+  })
+
   test('recovers a V4 batch settlement with its original reservation and idempotency key', async () => {
     const { repository, images, budget, coordinator, clock } = await fixture()
     await repository.transact('run-1', (transaction) => {
@@ -926,8 +942,8 @@ describe('slide generation coordinator', () => {
     )
   })
 
-  test('submits approved page designs one page at a time and waits for completion before the next page', async () => {
-    const { repository, images, coordinator } = await fixture()
+  test('submits approved page designs with configured bounded concurrency', async () => {
+    const { repository, images, coordinator } = await fixture(100, blueprint(), undefined, undefined, 'AI_FIRST', undefined, 2)
     await repository.transact('run-1', (transaction) => {
       transaction.putRun({
         ...transaction.run,
@@ -935,16 +951,10 @@ describe('slide generation coordinator', () => {
       })
     })
 
-    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 1, total: 3 })
-    expect(images.operations.size).toBe(1)
-    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 1, total: 3 })
-    expect(images.operations.size).toBe(1)
-
-    const firstKey = [...images.operations.keys()][0]!
-    images.complete(firstKey, 'artifact-1')
-    await coordinator.refreshBlueprintImages('run-1')
-    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 2, total: 3 })
-    expect(images.operations.size).toBe(2)
+    images.submissionDelayMs = 10
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({ submitted: 3, total: 3 })
+    expect(images.operations.size).toBe(3)
+    expect(images.maxConcurrentSubmissions).toBe(2)
   })
 
   test('counts only current revision image steps when a recovered run preserves completed history', async () => {
@@ -994,18 +1004,15 @@ describe('slide generation coordinator', () => {
       }
     })
 
-    for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1) {
-      expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({
-        status: 'EXECUTING', submitted: pageNumber, total: 3,
-      })
-      const key = `run-1:slide:${pageNumber}:image:r1:v1`
-      images.complete(key, `artifact-r1-${pageNumber}`)
-      expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
-        status: pageNumber === 3 ? 'PAGE_REVIEW' : 'EXECUTING',
-        completed: pageNumber,
-        total: 3,
-      })
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({
+      status: 'EXECUTING', submitted: 3, total: 3,
+    })
+    for (const [index, key] of [...images.operations.keys()].entries()) {
+      if (key.includes(':r1:')) images.complete(key, `artifact-r1-${index + 1}`)
     }
+    expect(await coordinator.refreshBlueprintImages('run-1')).toMatchObject({
+      status: 'PAGE_REVIEW', completed: 3, total: 3,
+    })
 
     expect(images.operations.size).toBe(3)
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 60 })
