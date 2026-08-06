@@ -89,7 +89,7 @@ bun run dev:v2
 
 - 发布目录：`/opt/ppt-agent/releases/<timestamp>`，当前版本由 `/opt/ppt-agent/current` 原子软链接指向。
 - 持久化目录：`/opt/ppt-agent/shared/data`，环境文件为 `/opt/ppt-agent/shared/ppt-agent.env`，权限 `600`。
-- `ppt-agent-backup.timer` 通过 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs` 每日一致性备份 SQLite 与受控产物到 `/opt/ppt-agent/shared/data-backups`；脚本以固定 WAL 读快照分页复制 SQLite，不把整库载入 JavaScript 内存，再以流式 gzip、数据库 SHA-256 和产物 SHA-256 清单压缩落盘。备份前按“原始库两倍 + 产物 + 5 GiB 低水位”检查空间，默认保留 14 天且不受应用版本回退影响。
+- `ppt-agent-backup.timer` 通过 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs` 每日一致性备份 `agent.sqlite`、存在时的 `presentation-jobs-v2.sqlite` 与受控产物到 `/opt/ppt-agent/shared/data-backups`；脚本以固定 WAL 读快照分页复制 SQLite，不把整库载入 JavaScript 内存，再以流式 gzip、每个数据库的 SHA-256 和产物 SHA-256 清单压缩落盘。备份前按“两份原始 SQLite 总量 + 产物 + 5 GiB 低水位”检查空间，默认保留 14 天且不受应用版本回退影响。
 - 每次安装备份 unit 时必须同时把同一 release 的 `scripts/backup-ppt-agent-data.mjs` 安装到 `/opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs`；unit 以 `ExecStartPre` 明确拒绝缺失脚本，并通过 `flock` 防止并发执行。
 - 恢复前先执行 `bun /opt/ppt-agent/shared/ops/backup-ppt-agent-data.mjs --verify <backup>`；该命令在权限 `0700/0600` 的临时目录流式解压，校验数据库/产物 SHA-256、SQLite 完整性和外键后删除副本。真正恢复必须另建暂存文件、复核 SHA-256、停服务后原子替换，并先备份当前生产数据；禁止原位解压覆盖生产数据库。
 - 服务只监听 `127.0.0.1:4310`，由 FrameFlow 服务端调用，不经 Nginx 暴露公网。

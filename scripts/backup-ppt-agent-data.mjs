@@ -27,6 +27,7 @@ const execFileAsync = promisify(execFile)
 const FINAL_BACKUP_PATTERN = /^ppt-agent-\d{8}T\d{6}Z$/
 const TEMPORARY_BACKUP_PATTERN = /^ppt-agent-\d{8}T\d{6}Z\.tmp-(\d+)$/
 const DEFAULT_LOW_WATER_BYTES = 5 * 1024 * 1024 * 1024
+const PRESENTATION_JOB_V2_DATABASE_FILE = 'presentation-jobs-v2.sqlite'
 const SQLITE_BACKUP_PROGRAM = String.raw`
 import os
 import sqlite3
@@ -232,20 +233,30 @@ async function restoreDatabase(compressedPath, destination, metadata) {
   }
 }
 
+function isCompressedDatabaseMetadata(value, databaseFile) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && value.databaseFile === databaseFile
+    && value.databaseCompression === 'gzip'
+    && Number.isSafeInteger(value.databaseBytes) && value.databaseBytes >= 1
+    && Number.isSafeInteger(value.compressedDatabaseBytes) && value.compressedDatabaseBytes >= 1
+    && typeof value.databaseSha256 === 'string' && /^[a-f0-9]{64}$/.test(value.databaseSha256))
+}
+
 function parseMetadata(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || value.schemaVersion !== 2
-    || value.databaseFile !== 'agent.sqlite.gz'
-    || value.databaseCompression !== 'gzip'
-    || !Number.isSafeInteger(value.databaseBytes) || value.databaseBytes < 1
-    || !Number.isSafeInteger(value.compressedDatabaseBytes) || value.compressedDatabaseBytes < 1
-    || typeof value.databaseSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.databaseSha256)
+    || (value.schemaVersion !== 2 && value.schemaVersion !== 3)
+    || !isCompressedDatabaseMetadata(value, 'agent.sqlite.gz')
     || value.artifactManifestFile !== 'artifacts.json'
     || typeof value.artifactManifestSha256 !== 'string'
     || !/^[a-f0-9]{64}$/.test(value.artifactManifestSha256)
     || !Number.isSafeInteger(value.artifactFiles) || value.artifactFiles < 0
     || !Number.isSafeInteger(value.artifactBytes) || value.artifactBytes < 0
     || value.integrity !== 'ok' || value.foreignKeyViolations !== 0) {
+    throw new Error('Backup metadata is invalid')
+  }
+  if (value.schemaVersion === 2) return { ...value, presentationJobV2Database: null }
+  if (value.presentationJobV2Database !== null
+    && !isCompressedDatabaseMetadata(value.presentationJobV2Database, `${PRESENTATION_JOB_V2_DATABASE_FILE}.gz`)) {
     throw new Error('Backup metadata is invalid')
   }
   return value
@@ -259,6 +270,14 @@ async function verifyBackup(backupPath) {
   const compressedPath = join(backupPath, metadata.databaseFile)
   if ((await stat(compressedPath)).size !== metadata.compressedDatabaseBytes) {
     throw new Error('Compressed SQLite backup size is invalid')
+  }
+  const presentationJobV2Database = metadata.presentationJobV2Database
+  const presentationJobV2CompressedPath = presentationJobV2Database
+    ? join(backupPath, presentationJobV2Database.databaseFile)
+    : null
+  if (presentationJobV2Database
+    && (await stat(presentationJobV2CompressedPath)).size !== presentationJobV2Database.compressedDatabaseBytes) {
+    throw new Error('Presentation Job V2 SQLite backup size is invalid')
   }
   const manifestPath = join(backupPath, metadata.artifactManifestFile)
   const manifestStat = await stat(manifestPath)
@@ -280,6 +299,13 @@ async function verifyBackup(backupPath) {
   await chmod(verificationRoot, 0o700)
   try {
     await restoreDatabase(compressedPath, join(verificationRoot, 'agent.sqlite'), metadata)
+    if (presentationJobV2Database) {
+      await restoreDatabase(
+        presentationJobV2CompressedPath,
+        join(verificationRoot, PRESENTATION_JOB_V2_DATABASE_FILE),
+        presentationJobV2Database,
+      )
+    }
   } finally {
     await rm(verificationRoot, { recursive: true, force: true })
   }
@@ -289,7 +315,19 @@ async function verifyBackup(backupPath) {
     databaseBytes: metadata.databaseBytes,
     artifactFiles: metadata.artifactFiles,
     artifactBytes: metadata.artifactBytes,
+    presentationJobV2Database: Boolean(presentationJobV2Database),
   }))
+}
+
+async function optionalRegularFile(path) {
+  try {
+    const info = await stat(path)
+    if (!info.isFile()) throw new Error('Expected SQLite database is not a regular file')
+    return info
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
 }
 
 async function processExists(pid) {
@@ -311,6 +349,7 @@ async function removeStaleTemporaryBackups(backupRoot) {
 async function createBackup() {
   const dataRoot = resolve(process.env.PPT_AGENT_DATA_ROOT || '/opt/ppt-agent/shared/data')
   const databasePath = join(dataRoot, 'agent.sqlite')
+  const presentationJobV2Path = join(dataRoot, PRESENTATION_JOB_V2_DATABASE_FILE)
   const sourceArtifactRoot = join(dataRoot, 'artifacts')
   const backupRoot = resolve(process.env.PPT_AGENT_BACKUP_ROOT || '/opt/ppt-agent/shared/data-backups')
   const retentionDays = integerEnvironment('PPT_AGENT_BACKUP_RETENTION_DAYS', 14, 1, 90)
@@ -329,11 +368,13 @@ async function createBackup() {
   await chmod(backupRoot, 0o700)
   await removeStaleTemporaryBackups(backupRoot)
   const sourceDatabaseBytes = (await stat(databasePath)).size
+  const presentationJobV2Info = await optionalRegularFile(presentationJobV2Path)
   const sourceArtifacts = await filesUnder(sourceArtifactRoot)
   const sourceArtifactBytes = sourceArtifacts.reduce((total, item) => total + item.size, 0)
   const filesystem = await statfs(backupRoot)
   const availableBytes = Number(filesystem.bavail) * Number(filesystem.bsize)
-  const requiredBytes = sourceDatabaseBytes * 2 + sourceArtifactBytes + lowWaterBytes
+  const requiredBytes = (sourceDatabaseBytes + (presentationJobV2Info?.size ?? 0)) * 2
+    + sourceArtifactBytes + lowWaterBytes
   if (!Number.isSafeInteger(requiredBytes) || availableBytes < requiredBytes) {
     throw new Error('PPT_AGENT_BACKUP_DISK_LOW')
   }
@@ -347,6 +388,20 @@ async function createBackup() {
     await copyDatabase(databasePath, copiedDatabase)
     await chmod(copiedDatabase, 0o600)
     validateDatabase(copiedDatabase)
+
+    let presentationJobV2Database = null
+    if (presentationJobV2Info) {
+      const copiedPresentationJobV2Database = join(temporaryPath, PRESENTATION_JOB_V2_DATABASE_FILE)
+      await copyDatabase(presentationJobV2Path, copiedPresentationJobV2Database)
+      await chmod(copiedPresentationJobV2Database, 0o600)
+      validateDatabase(copiedPresentationJobV2Database)
+      const details = await compressDatabase(copiedPresentationJobV2Database)
+      presentationJobV2Database = {
+        databaseFile: `${PRESENTATION_JOB_V2_DATABASE_FILE}.gz`,
+        databaseCompression: 'gzip',
+        ...details,
+      }
+    }
 
     const expectedArtifacts = await artifactManifest(sourceArtifactRoot)
     const copiedArtifactRoot = join(temporaryPath, 'artifacts')
@@ -366,7 +421,7 @@ async function createBackup() {
 
     const { databaseBytes, databaseSha256, compressedDatabaseBytes } = await compressDatabase(copiedDatabase)
     const metadata = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       createdAt: new Date().toISOString(),
       databaseBytes,
       databaseFile: 'agent.sqlite.gz',
@@ -377,6 +432,7 @@ async function createBackup() {
       artifactManifestSha256,
       artifactFiles: copiedArtifacts.length,
       artifactBytes,
+      presentationJobV2Database,
       integrity: 'ok',
       foreignKeyViolations: 0,
       retentionDays,
