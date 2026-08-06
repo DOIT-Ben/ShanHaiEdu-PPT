@@ -10,6 +10,9 @@ const generationBatchShape = {
     pageNumber: z.number().int().positive().max(50),
     idempotencyKey: z.string().min(1).max(160),
     promptHash: z.string().regex(/^[a-f0-9]{64}$/),
+    // Optional so in-flight batches created before V4 controlled raster support
+    // retain their original all-provider execution route on recovery.
+    renderStrategy: z.enum(['FULL_GENERATIVE', 'CONTROLLED_RASTER']).optional(),
   }).strict()).min(1).max(50),
   accounting: z.object({
     estimatedUnits: z.number().int().nonnegative(),

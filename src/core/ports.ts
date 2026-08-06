@@ -24,6 +24,7 @@ import type {
   UsagePermit,
   UsageRunBill,
 } from '../usage-accounting-contracts'
+import type { ExactDiagramSpec } from './v4-constraint-compiler'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -225,6 +226,24 @@ export interface ImageGenerationPort {
         technicalFailure: TechnicalFailure
       }>
   >
+}
+
+/** Renders compiler-owned exact diagrams without sending a Provider request. */
+export interface ControlledRasterPort {
+  render(input: Readonly<{
+    tenantId: string
+    runId: string
+    pageNumber: number
+    title: string
+    visibleCopy: readonly string[]
+    diagram: ExactDiagramSpec
+    idempotencyKey: string
+  }>): Promise<Readonly<{
+    artifactId: string
+    sha256: string
+    width: number
+    height: number
+  }>>
 }
 
 export type AssetLicense = 'PUBLIC_DOMAIN' | 'CC0' | 'CC_BY'

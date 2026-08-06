@@ -26,6 +26,8 @@ type Requirement = Readonly<{
   pageNumber: number
   idempotencyKey: string
   prompt: string
+  budgetUnits?: number
+  renderStrategy?: 'FULL_GENERATIVE' | 'CONTROLLED_RASTER'
 }>
 
 export type GenerationBatchScope = 'INITIAL' | 'REVISION'
@@ -76,6 +78,31 @@ function batchInputHash(input: Readonly<{
   requirements: readonly Requirement[]
   accountingModel?: string
   operationMode?: StoredGenerationBatch['operationMode']
+  includeRenderStrategy?: boolean
+}>) {
+  return hashInput({
+    proposalHash: input.proposalHash,
+    unitBudgetUnits: input.unitBudgetUnits,
+    pages: input.requirements.map((item) => ({
+      pageNumber: item.pageNumber,
+      key: item.idempotencyKey,
+      promptHash: hashInput(item.prompt),
+      budgetUnits: requirementBudgetUnits(item, input.unitBudgetUnits),
+      ...(input.includeRenderStrategy === false ? {} : { renderStrategy: item.renderStrategy ?? 'FULL_GENERATIVE' }),
+    })),
+    ...(input.accountingModel ? { accountingModel: input.accountingModel } : {}),
+    ...(input.operationMode ? { operationMode: input.operationMode } : {}),
+  })
+}
+
+// Batches created before controlled raster support must retain their original
+// provider route during recovery. Their hash omitted per-page cost and route.
+function legacyBatchInputHash(input: Readonly<{
+  proposalHash: string
+  unitBudgetUnits: number
+  requirements: readonly Requirement[]
+  accountingModel?: string
+  operationMode?: StoredGenerationBatch['operationMode']
 }>) {
   return hashInput({
     proposalHash: input.proposalHash,
@@ -88,6 +115,12 @@ function batchInputHash(input: Readonly<{
     ...(input.accountingModel ? { accountingModel: input.accountingModel } : {}),
     ...(input.operationMode ? { operationMode: input.operationMode } : {}),
   })
+}
+
+function requirementBudgetUnits(requirement: Requirement, fallback: number) {
+  const units = requirement.budgetUnits ?? fallback
+  if (!Number.isSafeInteger(units) || units < 0) throw new Error('GENERATION_BATCH_REQUIREMENT_BUDGET_INVALID')
+  return units
 }
 
 function initialBatch(
@@ -113,9 +146,11 @@ function initialBatch(
       pageNumber: requirement.pageNumber,
       idempotencyKey: requirement.idempotencyKey,
       promptHash: hashInput(requirement.prompt),
+      renderStrategy: requirement.renderStrategy ?? 'FULL_GENERATIVE',
     })),
     accounting: {
-      estimatedUnits: requirements.length * unitBudgetUnits,
+      estimatedUnits: requirements.reduce((total, requirement) =>
+        total + requirementBudgetUnits(requirement, unitBudgetUnits), 0),
       committedUnits: 0,
       settledUnits: 0,
       releasedUnits: 0,
@@ -150,8 +185,16 @@ export async function ensureGenerationBatch(input: Readonly<{
     requirements: input.requirements,
     accountingModel: input.accountingModel,
     operationMode: input.operationMode,
+    includeRenderStrategy: true,
   })
-  const legacyInputHash = batchInputHash({
+  const previousInputHash = legacyBatchInputHash({
+    proposalHash: proposal,
+    unitBudgetUnits: input.unitBudgetUnits,
+    requirements: input.requirements,
+    accountingModel: input.accountingModel,
+    operationMode: input.operationMode,
+  })
+  const previousLegacyInputHash = legacyBatchInputHash({
     proposalHash: proposal,
     unitBudgetUnits: input.unitBudgetUnits,
     requirements: input.requirements,
@@ -160,7 +203,9 @@ export async function ensureGenerationBatch(input: Readonly<{
     const existing = transaction.getStep(key)
     if (existing) {
       if (existing.tool !== 'generate_image_batch'
-        || (existing.inputHash !== currentInputHash && existing.inputHash !== legacyInputHash)) {
+        || (existing.inputHash !== currentInputHash
+          && existing.inputHash !== previousInputHash
+          && existing.inputHash !== previousLegacyInputHash)) {
         throw new Error('GENERATION_BATCH_IDEMPOTENCY_CONFLICT')
       }
       const stored = storedGenerationBatchSchema.parse(existing.output)
@@ -312,6 +357,10 @@ function usageV2BatchReservationId(batch: Pick<StoredGenerationBatch, 'batchId'>
   return `usage-v2:${batch.batchId}`
 }
 
+function controlledRasterBatchReservationId(batch: Pick<StoredGenerationBatch, 'batchId'>) {
+  return `controlled-raster:${batch.batchId}`
+}
+
 type BatchFinalization = Readonly<{
   batch: StoredGenerationBatch
   settledUnits: number
@@ -351,6 +400,33 @@ export async function reserveGenerationBatch(input: Readonly<{
   })
   const run = await input.repository.getRun(input.runId)
   if (!run) throw new Error('RUN_NOT_FOUND')
+  const controlledRasterReservation = await input.repository.transact(input.runId, (transaction) => {
+    const step = requireBatchStep(transaction, key)
+    const batch = storedGenerationBatchSchema.parse(step.output)
+    if (batch.accounting.estimatedUnits !== 0) return null
+    const reservationId = controlledRasterBatchReservationId(batch)
+    if (step.budgetReservationId) {
+      if (step.budgetReservationId !== reservationId) throw new Error('GENERATION_BATCH_RESERVATION_CONFLICT')
+      return { batchId: batch.batchId, reservationId }
+    }
+    const now = input.clock.now().toISOString()
+    const next = updatedBatch(batch, {
+      ...batch.accounting,
+      committedUnits: 0,
+      authorization: 'RESERVED',
+      settlement: 'PENDING',
+    }, now, 'PROCESSING')
+    transaction.putStep({
+      ...step,
+      status: 'RUNNING',
+      budgetReservationId: reservationId,
+      output: next,
+      updatedAt: now,
+    })
+    appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
+    return { batchId: batch.batchId, reservationId }
+  })
+  if (controlledRasterReservation) return controlledRasterReservation
   if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') {
     return input.repository.transact(input.runId, (transaction) => {
       const step = requireBatchStep(transaction, key)
@@ -506,6 +582,11 @@ export async function preflightGenerationBatchFinalization(input: Readonly<{
 }>): Promise<boolean> {
   const run = await input.repository.getRun(input.runId)
   if (!run) throw new Error('RUN_NOT_FOUND')
+  const batch = await getGenerationBatch(input.repository, run, {
+    revisionRound: input.revisionRound,
+    scope: input.scope ?? 'INITIAL',
+  })
+  if (batch?.accounting.estimatedUnits === 0) return true
   if (accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2') return true
   try {
     await input.budget.preflightBatchFinalization({ host: run.host })
@@ -629,6 +710,22 @@ async function finalizeUsageV2GenerationBatch(input: Readonly<{
     const step = requireBatchStep(transaction, input.key)
     const batch = storedGenerationBatchSchema.parse(step.output)
     if (['SETTLED', 'RELEASED'].includes(batch.accounting.settlement)) return true
+    if (step.budgetReservationId === controlledRasterBatchReservationId(batch)) {
+      const finalization = batchFinalization(batch, transaction.listSteps(), transaction.run)
+      if (!finalization) return false
+      const now = input.clock.now().toISOString()
+      const next = updatedBatch(batch, {
+        ...batch.accounting,
+        committedUnits: 0,
+        settledUnits: 0,
+        releasedUnits: 0,
+        reconciliationUnits: 0,
+        settlement: 'RELEASED',
+      }, now, 'COMPLETED')
+      transaction.putStep({ ...step, status: 'COMPLETED', output: next, updatedAt: now })
+      appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, input.scope === 'INITIAL')
+      return true
+    }
     if (step.budgetReservationId !== usageV2BatchReservationId(batch)) return false
     const steps = transaction.listSteps()
     const finalization = batchFinalization(batch, steps, transaction.run)
@@ -684,6 +781,27 @@ export async function finalizeGenerationBatch(input: Readonly<{
       scope: input.scope ?? 'INITIAL',
     })
   }
+  const controlledRasterFinalized = await input.repository.transact(input.runId, (transaction) => {
+    const step = requireBatchStep(transaction, key)
+    const batch = storedGenerationBatchSchema.parse(step.output)
+    if (step.budgetReservationId !== controlledRasterBatchReservationId(batch)) return null
+    if (['SETTLED', 'RELEASED'].includes(batch.accounting.settlement)) return true
+    const finalization = batchFinalization(batch, transaction.listSteps(), transaction.run)
+    if (!finalization) return false
+    const now = input.clock.now().toISOString()
+    const next = updatedBatch(batch, {
+      ...batch.accounting,
+      committedUnits: 0,
+      settledUnits: 0,
+      releasedUnits: 0,
+      reconciliationUnits: 0,
+      settlement: 'RELEASED',
+    }, now, 'COMPLETED')
+    transaction.putStep({ ...step, status: 'COMPLETED', output: next, updatedAt: now })
+    appendGenerationBatchEvent(transaction, 'generation.batch.updated', next, (input.scope ?? 'INITIAL') === 'INITIAL')
+    return true
+  })
+  if (controlledRasterFinalized !== null) return controlledRasterFinalized
   const pending = await input.repository.transact(input.runId, (transaction) => {
     const step = requireBatchStep(transaction, key)
     const batch = storedGenerationBatchSchema.parse(step.output)

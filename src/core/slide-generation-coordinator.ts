@@ -1,7 +1,8 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { storedGenerationBatchSchema } from '../generation-batch-contracts'
 import { slideVisualReviewSchema, type PresentationBlueprint, type SlideVisualReview } from '../presentation-contracts'
 import { getActiveBlueprint } from './active-blueprint'
-import { blueprintImageRequirements } from './blueprint-assets'
+import { blueprintImageRequirements, hasVisualDeckV4AspectRatio } from './blueprint-assets'
 import { mapWithConcurrency } from './concurrency'
 import {
   ensureGenerationBatch,
@@ -30,6 +31,7 @@ import type {
   BatchBudgetPort,
   AssetDiscoveryPort,
   ClockPort,
+  ControlledRasterPort,
   DocumentPort,
   RunRecord,
   SourceAsset,
@@ -43,6 +45,7 @@ import {
   reconcileVisualDeckV4TerminalState,
   v4LifecyclePayload,
 } from './v4-lifecycle'
+import { resolveV4RenderStrategy, type V4RenderStrategy } from './v4-render-strategy'
 
 export type SubmitBlueprintImagesResult = Readonly<{
   status: RunRecord['status']
@@ -75,6 +78,7 @@ export class SlideGenerationCoordinator {
     batchBudget: BatchBudgetPort
     documents: DocumentPort
     artifacts: ArtifactPort
+    controlledRaster?: ControlledRasterPort
     discovery?: AssetDiscoveryPort
     candidateReviewer?: AssetCandidateReviewPort
     clock: ClockPort
@@ -84,6 +88,45 @@ export class SlideGenerationCoordinator {
     if (!Number.isSafeInteger(this.imageConcurrency) || this.imageConcurrency < 1 || this.imageConcurrency > 50) {
       throw new Error('IMAGE_CONCURRENCY_INVALID')
     }
+  }
+
+  private v4RenderStrategies(
+    blueprint: PresentationBlueprint,
+    requirements: ReturnType<typeof blueprintImageRequirements>,
+    existingBatchStep?: StepRecord,
+  ) {
+    const fullGenerative = new Map<string, V4RenderStrategy>(requirements.map((requirement) => [
+      requirement.idempotencyKey,
+      { kind: 'FULL_GENERATIVE' },
+    ]))
+    if (blueprint.renderMode !== 'VISUAL_DECK_V4') return fullGenerative
+
+    const persisted = existingBatchStep?.tool === 'generate_image_batch'
+      ? storedGenerationBatchSchema.parse(existingBatchStep.output)
+      : null
+    // The optional field deliberately marks old batches. Do not migrate an
+    // in-flight provider batch into a different rendering/accounting route.
+    if (persisted?.pages.some((page) => page.renderStrategy === undefined)) return fullGenerative
+    const persistedByKey = new Map((persisted?.pages ?? []).map((page) => [page.idempotencyKey, page.renderStrategy]))
+    const strategies = new Map<string, V4RenderStrategy>()
+    for (const requirement of requirements) {
+      const stored = persistedByKey.get(requirement.idempotencyKey)
+      if (stored === 'FULL_GENERATIVE') {
+        strategies.set(requirement.idempotencyKey, { kind: 'FULL_GENERATIVE' })
+        continue
+      }
+      const resolved = resolveV4RenderStrategy(blueprint, requirement.pageNumber)
+      if (stored === 'CONTROLLED_RASTER' && resolved.kind !== 'CONTROLLED_RASTER') {
+        throw new Error('CONTROLLED_RASTER_CONTRACT_MISSING')
+      }
+      if (resolved.kind === 'CONTROLLED_RASTER' && !this.dependencies.controlledRaster) {
+        if (stored === 'CONTROLLED_RASTER') throw new Error('CONTROLLED_RASTER_PORT_REQUIRED')
+        strategies.set(requirement.idempotencyKey, { kind: 'FULL_GENERATIVE' })
+        continue
+      }
+      strategies.set(requirement.idempotencyKey, resolved)
+    }
+    return strategies
   }
 
   async submitBlueprintImages(runId: string, unitBudgetUnits: number): Promise<SubmitBlueprintImagesResult> {
@@ -103,13 +146,26 @@ export class SlideGenerationCoordinator {
     })
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
     const requirements = blueprintImageRequirements(run, blueprint)
+    const existingV4BatchStep = isVisualDeckV4(run)
+      ? (await this.dependencies.repository.listSteps(runId))
+        .find((step) => step.idempotencyKey === `${runId}:generation-batch:r${run.revisionRound}`)
+      : undefined
+    const renderStrategies = this.v4RenderStrategies(blueprint, requirements, existingV4BatchStep)
+    const batchRequirements = requirements.map((requirement) => {
+      const strategy = renderStrategies.get(requirement.idempotencyKey) ?? { kind: 'FULL_GENERATIVE' as const }
+      return {
+        ...requirement,
+        budgetUnits: strategy.kind === 'CONTROLLED_RASTER' ? 0 : unitBudgetUnits,
+        renderStrategy: strategy.kind,
+      }
+    })
     if (isVisualDeckV4(run)) {
       await ensureGenerationBatch({
         repository: this.dependencies.repository,
         clock: this.dependencies.clock,
         run,
         blueprint,
-        requirements,
+        requirements: batchRequirements,
         unitBudgetUnits,
         accountingModel: run.imageModel,
         operationMode: 'TEXT_TO_IMAGE',
@@ -117,7 +173,7 @@ export class SlideGenerationCoordinator {
       const batchStep = (await this.dependencies.repository.listSteps(runId))
         .find((step) => step.idempotencyKey === `${runId}:generation-batch:r${run.revisionRound}`)
       if (!batchStep) throw new Error('GENERATION_BATCH_STEP_NOT_FOUND')
-      if (!batchStep.budgetReservationId) {
+      if (!batchStep.budgetReservationId && batchStep.budgetUnits > 0) {
         const supported = await preflightGenerationBatchFinalization({
           repository: this.dependencies.repository,
           budget: this.dependencies.batchBudget,
@@ -140,7 +196,7 @@ export class SlideGenerationCoordinator {
       const decision = evaluateBudget(run, batchStep.budgetUnits)
       const needsInitialBudgetCheck = !batchStep.budgetReservationId
         && !['RESERVED', 'RESERVATION_UNKNOWN'].includes(batchStep.status)
-      if (needsInitialBudgetCheck && !decision.allowed) {
+      if (needsInitialBudgetCheck && batchStep.budgetUnits > 0 && !decision.allowed) {
         if (decision.reason === 'BUDGET_EXCEEDED') {
           const paused = await this.pauseForBudget(run, batchStep.budgetUnits)
           return { status: paused.status, submitted: 0, total: requirements.length, steps: [] }
@@ -226,7 +282,7 @@ export class SlideGenerationCoordinator {
       (!existingByKey.has(requirement.idempotencyKey)
         || canRetryReleasedV4Submission(run, existingByKey.get(requirement.idempotencyKey)))
       && requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL').length
-    if (chargeableCount > 0) {
+    if (!isVisualDeckV4(run) && chargeableCount > 0) {
       const decision = evaluateBudget(run, chargeableCount * unitBudgetUnits)
       if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
         const paused = await this.pauseForBudget(run, chargeableCount * unitBudgetUnits)
@@ -238,14 +294,17 @@ export class SlideGenerationCoordinator {
     if (concurrentPageExecution) {
       const outcomes = await mapWithConcurrency(unresolvedRequirements, this.imageConcurrency, async (requirement) => {
         try {
-          return { step: await this.submitGeneratedImage(
-            run,
-            requirement,
-            unitBudgetUnits,
-            undefined,
-            existingByKey.get(requirement.idempotencyKey),
-            batchReservation,
-          ) }
+          const strategy = renderStrategies.get(requirement.idempotencyKey)
+          return { step: strategy?.kind === 'CONTROLLED_RASTER'
+            ? await this.completeControlledRaster(run, blueprint, requirement, strategy)
+            : await this.submitGeneratedImage(
+                run,
+                requirement,
+                unitBudgetUnits,
+                undefined,
+                existingByKey.get(requirement.idempotencyKey),
+                batchReservation,
+              ) }
         } catch (error) {
           // Keep dispatching the approved batch; a later recovery pass can reconcile already submitted operations.
           return { error }
@@ -503,6 +562,83 @@ export class SlideGenerationCoordinator {
       } } : {}),
     })
     return result.step
+  }
+
+  private async completeControlledRaster(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    requirement: ReturnType<typeof blueprintImageRequirements>[number],
+    strategy: Extract<V4RenderStrategy, { kind: 'CONTROLLED_RASTER' }>,
+  ) {
+    const renderer = this.dependencies.controlledRaster
+    if (!renderer) throw new Error('CONTROLLED_RASTER_PORT_REQUIRED')
+    const brief = blueprint.visualDeckV4Proposal?.slideBriefs.find((candidate) => candidate.pageNumber === requirement.pageNumber)
+    if (!brief) throw new Error('CONTROLLED_RASTER_BRIEF_MISSING')
+    const versionId = `${run.id}:slide:${requirement.pageNumber}:r${run.revisionRound}:v1`
+    const inputHash = hashInput({
+      tool: 'render_controlled_raster',
+      slideId: requirement.slideId,
+      versionId,
+      title: brief.title,
+      visibleCopy: brief.lockedCopy,
+      diagram: strategy.diagram,
+    })
+    const artifact = await renderer.render({
+      tenantId: run.host.tenantId,
+      runId: run.id,
+      pageNumber: requirement.pageNumber,
+      title: brief.title,
+      visibleCopy: brief.lockedCopy,
+      diagram: strategy.diagram,
+      idempotencyKey: requirement.idempotencyKey,
+    })
+    if (!hasVisualDeckV4AspectRatio(artifact.width, artifact.height)) {
+      throw new Error('CONTROLLED_RASTER_ASPECT_RATIO_INVALID')
+    }
+    return this.dependencies.repository.transact(run.id, (transaction) => {
+      const existing = transaction.getStep(requirement.idempotencyKey)
+      if (existing) {
+        if (existing.inputHash !== inputHash || existing.tool !== 'generate_slide_image') {
+          throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+        }
+        if (existing.status === 'COMPLETED') return existing
+        if (existing.status !== 'RESERVED' || existing.externalOperationId) {
+          throw new Error('CONTROLLED_RASTER_STEP_NOT_REPLACEABLE')
+        }
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      const step: StepRecord = {
+        id: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
+        runId: run.id,
+        idempotencyKey: requirement.idempotencyKey,
+        inputHash,
+        tool: 'generate_slide_image',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: {
+          slideId: requirement.slideId,
+          versionId,
+          artifactId: artifact.artifactId,
+          aspectRatio: '16:9',
+          renderStrategy: 'CONTROLLED_RASTER',
+          diagramHash: hashInput(strategy.diagram),
+          imageWidth: artifact.width,
+          imageHeight: artifact.height,
+        },
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      }
+      transaction.putStep(step)
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: step.id, summary: '已用受控图示完成精确数量页面' },
+      })
+      return step
+    })
   }
 
   private async completeSourceAssetReuse(

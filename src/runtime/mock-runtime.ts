@@ -11,6 +11,7 @@ export { ServiceTokenAuthentication, SharedTokenAuthentication } from '../http/s
 import { FrameFlowHostAdapter, type FrameFlowBackendClient } from '../adapters/frameflow-host'
 import type { ProviderBillingCatalog } from '../adapters/provider-billing-catalog'
 import { SharpPptxPresentationRenderer } from '../adapters/presentation-renderer'
+import { SharpControlledRasterPort } from '../adapters/v4-controlled-raster'
 import { DeckReviewRunner } from '../core/deck-review-runner'
 import { AdminOperationsService } from '../core/admin-operations'
 import { AdminRevisionRoundsSettingsService } from '../core/admin-revision-rounds-settings'
@@ -40,6 +41,7 @@ import type {
   BatchBudgetPort,
   BudgetPort,
   ClockPort,
+  ControlledRasterPort,
   DeckReviewPort,
   DocumentPort,
   ImageGenerationPort,
@@ -515,6 +517,7 @@ type RuntimeInput = Readonly<{
   revisionPlanner: RevisionPlanningPort
   revisionApplication: RevisionApplicationPort
   renderer?: PresentationRendererPort
+  controlledRaster?: ControlledRasterPort
   images?: ImageGenerationPort
   clock?: ClockPort
   frameFlowBackend?: FrameFlowBackendClient
@@ -619,6 +622,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     : disabledV1Ports
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
+  const controlledRaster = input.controlledRaster ?? new SharpControlledRasterPort({ artifacts: input.artifacts })
   if (Boolean(input.usageAccounting) !== Boolean(input.providerBillingCatalog)) {
     throw new Error('USAGE_V2_RUNTIME_DEPENDENCIES_INCOMPLETE')
   }
@@ -684,6 +688,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     batchBudget: budget,
     documents,
     artifacts: input.artifacts,
+    controlledRaster,
     ...(input.discovery ? { discovery: input.discovery } : {}),
     ...(candidateReviewer ? { candidateReviewer } : {}),
     clock,

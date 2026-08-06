@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
 import { PublicAssetDiscoveryPort } from './adapters/public-asset-discovery'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
+import { SharpControlledRasterPort } from './adapters/v4-controlled-raster'
 import {
   GatewayCoursewareModel,
   gatewayCoursewareModelProfile,
@@ -63,6 +64,7 @@ await mkdir(dataRoot, { recursive: true, mode: 0o700 })
 
 const repository = new SqliteAgentRepository(path.join(dataRoot, 'agent.sqlite'))
 const artifacts = new LocalArtifactPort(path.join(dataRoot, 'artifacts'))
+const controlledRaster = new SharpControlledRasterPort({ artifacts })
 const runtimeMode = process.env.PPT_AGENT_RUNTIME_MODE?.trim() || 'mock'
 const usageV2Runtime = resolveUsageV2RuntimeConfig(process.env, await repository.listRuns())
 if (usageV2Runtime.requiresUsageV2Runtime && tenantId !== 'frameflow') {
@@ -208,6 +210,7 @@ const runtime = runtimeMode === 'gateway'
       return createAgentRuntime({
         repository,
         artifacts,
+        controlledRaster,
         ...(presentationJobV2 ? { presentationJobV2 } : {}),
         ...(discovery ? { discovery } : {}),
         ...(discovery ? { candidateReviewer: model } : {}),
@@ -243,6 +246,7 @@ const runtime = runtimeMode === 'gateway'
     })()
   : createMockRuntime({
       repository, artifacts, apiToken, appVersion, buildIdentity: releaseIdentity, heartbeatStaleMs, tickStaleMs, waitingSlaMs, stepSlaMs,
+      controlledRaster,
       ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
       revisionImageModel: revisionImageModel || 'gpt-image-2',
