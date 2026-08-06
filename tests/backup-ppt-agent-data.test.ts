@@ -46,6 +46,13 @@ describe('PPT Agent data backup', () => {
     database.run("INSERT INTO sample VALUES ('row-1', 'preserved')")
     database.close()
 
+    const presentationJobs = new Database(join(dataRoot, 'presentation-jobs-v2.sqlite'), { create: true, strict: true })
+    presentationJobs.run('PRAGMA foreign_keys = ON')
+    presentationJobs.run('PRAGMA journal_mode = WAL')
+    presentationJobs.run('CREATE TABLE sample_jobs (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    presentationJobs.run("INSERT INTO sample_jobs VALUES ('job-1', 'preserved-v2')")
+    presentationJobs.close()
+
     const expired = join(backupRoot, 'ppt-agent-20200101T000000Z')
     await mkdir(expired, { recursive: true })
     const staleTemporary = join(backupRoot, 'ppt-agent-20200101T000000Z.tmp-999999')
@@ -90,6 +97,10 @@ describe('PPT Agent data backup', () => {
       integrity: string
       databaseFile: string
       databaseSha256: string
+      presentationJobV2Database: {
+        databaseFile: string
+        databaseSha256: string
+      }
     }
 
     expect(metadata).toMatchObject({
@@ -97,6 +108,10 @@ describe('PPT Agent data backup', () => {
       integrity: 'ok',
       databaseFile: 'agent.sqlite.gz',
       databaseSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      presentationJobV2Database: {
+        databaseFile: 'presentation-jobs-v2.sqlite.gz',
+        databaseSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
     })
     expect((await stat(expired).catch(() => null))).toBeNull()
     expect((await stat(staleTemporary).catch(() => null))).toBeNull()
@@ -106,6 +121,9 @@ describe('PPT Agent data backup', () => {
       .toEqual(Buffer.from([1, 2, 3]))
     expect(await stat(join(metadata.backupDirectory, 'agent.sqlite')).catch(() => null)).toBeNull()
     expect((await stat(join(metadata.backupDirectory, metadata.databaseFile))).mode & 0o777).toBe(0o600)
+    expect(await stat(join(metadata.backupDirectory, 'presentation-jobs-v2.sqlite')).catch(() => null)).toBeNull()
+    expect((await stat(join(metadata.backupDirectory, metadata.presentationJobV2Database.databaseFile))).mode & 0o777)
+      .toBe(0o600)
     expect((await readdir(backupRoot)).some((name) => name.includes('.tmp-'))).toBeFalse()
 
     const verification = Bun.spawn([
@@ -128,6 +146,17 @@ describe('PPT Agent data backup', () => {
     const copied = new Database(restoredPath, { readonly: true, strict: true })
     expect(copied.query('SELECT value FROM sample WHERE id = ?').get('row-1')).toEqual({ value: 'preserved' })
     copied.close()
+
+    const restoredPresentationJobsPath = join(root, 'restored-presentation-jobs-v2.sqlite')
+    await pipeline(
+      createReadStream(join(metadata.backupDirectory, metadata.presentationJobV2Database.databaseFile)),
+      createGunzip(),
+      createWriteStream(restoredPresentationJobsPath, { mode: 0o600 }),
+    )
+    const copiedPresentationJobs = new Database(restoredPresentationJobsPath, { readonly: true, strict: true })
+    expect(copiedPresentationJobs.query('SELECT value FROM sample_jobs WHERE id = ?').get('job-1'))
+      .toEqual({ value: 'preserved-v2' })
+    copiedPresentationJobs.close()
 
     await writeFile(join(metadata.backupDirectory, 'artifacts', 'artifact-1', 'content.bin'), new Uint8Array([1, 2, 4]))
     const tampered = Bun.spawn([
