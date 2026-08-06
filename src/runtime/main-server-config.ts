@@ -18,12 +18,14 @@ export function resolveMainServerConfig(env: Environment = process.env) {
   const apiToken = required(env, 'PPT_AGENT_API_TOKEN')
   const adminApiToken = env.PPT_AGENT_ADMIN_API_TOKEN?.trim()
   const presentationJobV2ApiToken = env.PPT_AGENT_V2_API_TOKEN?.trim() || undefined
+  const quickDeckEvaluationApiToken = env.PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN?.trim() || undefined
   return {
     hostname,
     port,
     apiToken,
     ...(adminApiToken ? { adminApiToken } : {}),
     ...(presentationJobV2ApiToken ? { presentationJobV2ApiToken } : {}),
+    ...(quickDeckEvaluationApiToken ? { quickDeckEvaluationApiToken } : {}),
   }
 }
 
@@ -63,6 +65,70 @@ function configuredModelList(value: string | undefined, fallback: readonly strin
     throw new Error(`${name}_INVALID`)
   }
   return models
+}
+
+function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number, name: string) {
+  const parsed = Number(value?.trim() || fallback)
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`${name}_INVALID`)
+  return parsed
+}
+
+export function resolveQuickDeckEvaluationConfig(
+  env: Environment,
+  input: Readonly<{
+    textModels: readonly string[]
+    imageModels: readonly string[]
+  }>,
+) {
+  const apiToken = required(env, 'PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN')
+  const dataRoot = required(env, 'PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT')
+  const textModel = env.PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL?.trim() || input.textModels[0]
+  if (!textModel || !input.textModels.includes(textModel)) {
+    throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL_NOT_ALLOWED')
+  }
+  const allowedImageModels = configuredModelList(
+    env.PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS,
+    input.imageModels,
+    'PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS',
+  )
+  if (allowedImageModels.some((model) => !input.imageModels.includes(model))) {
+    throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODEL_NOT_ALLOWED')
+  }
+  const ttlHours = boundedInteger(
+    env.PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS,
+    24,
+    1,
+    30 * 24,
+    'PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS',
+  )
+  return {
+    apiToken,
+    dataRoot,
+    textModel,
+    allowedImageModels,
+    maxActiveJobs: boundedInteger(
+      env.PPT_AGENT_QUICK_DECK_EVALUATION_MAX_ACTIVE_JOBS,
+      2,
+      1,
+      50,
+      'PPT_AGENT_QUICK_DECK_EVALUATION_MAX_ACTIVE_JOBS',
+    ),
+    maxDailyJobs: boundedInteger(
+      env.PPT_AGENT_QUICK_DECK_EVALUATION_MAX_DAILY_JOBS,
+      10,
+      1,
+      10_000,
+      'PPT_AGENT_QUICK_DECK_EVALUATION_MAX_DAILY_JOBS',
+    ),
+    ttlMs: ttlHours * 60 * 60_000,
+    tickBatchSize: boundedInteger(
+      env.PPT_AGENT_QUICK_DECK_EVALUATION_TICK_BATCH_SIZE,
+      10,
+      1,
+      100,
+      'PPT_AGENT_QUICK_DECK_EVALUATION_TICK_BATCH_SIZE',
+    ),
+  }
 }
 
 /** Public model names are tenant-safe capability data, never credentials or route details. */
