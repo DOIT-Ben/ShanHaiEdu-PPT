@@ -20,6 +20,7 @@ import {
 } from './adapters/internal-presentation-job-v2-provider'
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { SqlitePresentationJobV2Repository } from './adapters/presentation-job-v2-sqlite-repository'
+import { SqliteQuickDeckEvaluationRepository } from './adapters/quick-deck-evaluation-sqlite-repository'
 import {
   FixedServicePresentationJobBudgetPolicy,
 } from './adapters/presentation-job-v2-ports'
@@ -36,6 +37,7 @@ import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
   resolvePublicV4CapabilitiesConfig,
+  resolveQuickDeckEvaluationConfig,
 } from './runtime/main-server-config'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
@@ -45,6 +47,7 @@ const {
   apiToken,
   adminApiToken,
   presentationJobV2ApiToken,
+  quickDeckEvaluationApiToken,
 } = resolveMainServerConfig(process.env)
 const tenantId = process.env.PPT_AGENT_TENANT_ID?.trim() || 'frameflow'
 const budgetMode = process.env.PPT_AGENT_BUDGET_MODE?.trim() || (tenantId === 'frameflow' ? 'frameflow' : '')
@@ -55,6 +58,7 @@ const authentication = new ServiceTokenAuthentication([{
   userToken: apiToken,
   ...(adminApiToken ? { adminToken: adminApiToken } : {}),
   ...(presentationJobV2ApiToken ? { v2Token: presentationJobV2ApiToken } : {}),
+  ...(quickDeckEvaluationApiToken ? { evaluationToken: quickDeckEvaluationApiToken } : {}),
 }])
 function boundedInteger(name: string, fallback: number, minimum: number, maximum: number) {
   const value = Number(process.env[name] ?? fallback)
@@ -151,16 +155,52 @@ const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000
 const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
 const runActionRateLimitPerMinute = boundedInteger('PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE', 60, 1, 10_000)
 if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
+if (quickDeckEvaluationApiToken && runtimeMode !== 'gateway') {
+  throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_RUNTIME_REQUIRED')
+}
 const gatewayCoursewareModels = runtimeMode === 'gateway'
   ? resolveGatewayCoursewareModelsConfig(process.env)
   : null
-const publicCapabilities = gatewayCoursewareModels
-  ? createPublicCapabilities(resolvePublicV4CapabilitiesConfig(
+const publicV4CapabilitiesConfig = gatewayCoursewareModels
+  ? resolvePublicV4CapabilitiesConfig(
       process.env,
       gatewayCoursewareModels,
       revisionImageModel!,
-    ))
+    )
+  : null
+const quickDeckEvaluationConfig = quickDeckEvaluationApiToken
+  ? resolveQuickDeckEvaluationConfig(process.env, {
+      textModels: publicV4CapabilitiesConfig!.textModels,
+      imageModels: publicV4CapabilitiesConfig!.imageModels,
+    })
+  : null
+const publicCapabilities = publicV4CapabilitiesConfig
+  ? createPublicCapabilities({
+      ...publicV4CapabilitiesConfig,
+      quickDeckAvailable: Boolean(quickDeckEvaluationConfig),
+    })
   : undefined
+const quickDeckEvaluationDataRoot = quickDeckEvaluationConfig
+  ? path.resolve(quickDeckEvaluationConfig.dataRoot)
+  : null
+if (quickDeckEvaluationDataRoot && !quickDeckEvaluationDataRoot.startsWith(`${dataRoot}${path.sep}`)) {
+  throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT_OUTSIDE_DATA_ROOT')
+}
+if (quickDeckEvaluationDataRoot) await mkdir(quickDeckEvaluationDataRoot, { recursive: true, mode: 0o700 })
+const quickDeckEvaluationRuntime = quickDeckEvaluationDataRoot
+  ? (() => {
+      const artifacts = new LocalArtifactPort(path.join(quickDeckEvaluationDataRoot, 'artifacts'))
+      return {
+        artifacts,
+        repository: new SqliteQuickDeckEvaluationRepository(path.join(quickDeckEvaluationDataRoot, 'evaluations.sqlite')),
+        images: new GatewayImageGenerationPort({
+          baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+          apiKey: process.env.MODEL_GATEWAY_IMAGE_KEY?.trim() || '',
+          artifacts,
+        }),
+      }
+    })()
+  : null
 function loopbackProxy(value: string | undefined) {
   if (!value) return undefined
   const url = new URL(value)
@@ -218,11 +258,35 @@ const runtime = runtimeMode === 'gateway'
             }),
           })
         : primaryModel
+      const quickDeckEvaluationModel = quickDeckEvaluationRuntime && quickDeckEvaluationConfig
+        ? new GatewayCoursewareModel({
+            ...gatewayCoursewareModels!.primary,
+            textModel: quickDeckEvaluationConfig.textModel,
+            artifacts: quickDeckEvaluationRuntime.artifacts,
+            profile: gatewayCoursewareModelProfile({ textModel: quickDeckEvaluationConfig.textModel }),
+            visualDeckV4Transport: 'RESPONSES',
+          })
+        : undefined
       return createAgentRuntime({
         repository,
         artifacts,
         controlledRaster,
         ...(presentationJobV2 ? { presentationJobV2 } : {}),
+        ...(quickDeckEvaluationRuntime && quickDeckEvaluationConfig && quickDeckEvaluationModel ? {
+          quickDeckEvaluation: {
+            repository: quickDeckEvaluationRuntime.repository,
+            artifacts: quickDeckEvaluationRuntime.artifacts,
+            images: quickDeckEvaluationRuntime.images,
+            authentication,
+            model: quickDeckEvaluationModel,
+            textModel: quickDeckEvaluationConfig.textModel,
+            allowedImageModels: quickDeckEvaluationConfig.allowedImageModels,
+            maxActiveJobs: quickDeckEvaluationConfig.maxActiveJobs,
+            maxDailyJobs: quickDeckEvaluationConfig.maxDailyJobs,
+            ttlMs: quickDeckEvaluationConfig.ttlMs,
+            tickBatchSize: quickDeckEvaluationConfig.tickBatchSize,
+          },
+        } : {}),
         ...(discovery ? { discovery } : {}),
         ...(discovery ? { candidateReviewer: model } : {}),
         apiToken,
@@ -270,7 +334,8 @@ const runtime = runtimeMode === 'gateway'
             fallback: new MockBudgetPort(),
           })
         : new MockBudgetPort(),
-    })
+  })
+await runtime.initialize()
 let ticking = false
 const timer = setInterval(async () => {
   runtime.health.heartbeat()
@@ -310,6 +375,7 @@ const stop = () => {
   server.stop(true)
   repository.close()
   presentationJobV2Runtime?.repository.close()
+  quickDeckEvaluationRuntime?.repository.close()
   process.exit(0)
 }
 process.on('SIGINT', stop)

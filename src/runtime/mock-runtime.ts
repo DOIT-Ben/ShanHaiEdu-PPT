@@ -61,6 +61,8 @@ import type {
   PresentationJobV2ProviderPort,
   PresentationJobV2Repository,
 } from '../core/presentation-job-v2-ports'
+import type { QuickDeckEvaluationRepository } from '../core/quick-deck-evaluation-ports'
+import { QuickDeckEvaluationService } from '../core/quick-deck-evaluation-service'
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
@@ -71,6 +73,7 @@ import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../o
 import { buildIdentity, type BuildIdentity } from '../release-identity'
 import type { PublicCapabilities } from '../run-query-contracts'
 import type { UsageAccountingProtocol } from '../usage-accounting-contracts'
+import type { QuickDeckEvaluationAuthenticationPort } from '../http/quick-deck-evaluation-handler'
 
 export class SystemClock implements ClockPort {
   now() { return new Date() }
@@ -578,6 +581,19 @@ type RuntimeInput = Readonly<{
     provider: PresentationJobV2ProviderPort
     budget: PresentationJobV2BudgetPolicy
   }>
+  quickDeckEvaluation?: Readonly<{
+    repository: QuickDeckEvaluationRepository
+    artifacts: ArtifactPort
+    images: ImageGenerationPort
+    authentication: QuickDeckEvaluationAuthenticationPort
+    model?: StructuredModelPort
+    textModel: string
+    allowedImageModels: readonly string[]
+    maxActiveJobs: number
+    maxDailyJobs: number
+    ttlMs: number
+    tickBatchSize: number
+  }>
 }>
 
 export function createAgentRuntime(input: RuntimeInput) {
@@ -655,6 +671,23 @@ export function createAgentRuntime(input: RuntimeInput) {
   const images = input.images ?? new LocalMockImageGeneration(input.artifacts)
   const renderer = input.renderer ?? new SharpPptxPresentationRenderer()
   const controlledRaster = input.controlledRaster ?? new SharpControlledRasterPort({ artifacts: input.artifacts })
+  const quickDeckEvaluations = input.quickDeckEvaluation
+    ? new QuickDeckEvaluationService({
+        repository: input.quickDeckEvaluation.repository,
+        artifacts: input.quickDeckEvaluation.artifacts,
+        model: input.quickDeckEvaluation.model
+          ? { execute: trackedCall(input.quickDeckEvaluation.model.execute.bind(input.quickDeckEvaluation.model)) }
+          : model,
+        images: input.quickDeckEvaluation.images,
+        renderer,
+        clock,
+        textModel: input.quickDeckEvaluation.textModel,
+        allowedImageModels: input.quickDeckEvaluation.allowedImageModels,
+        maxActiveJobs: input.quickDeckEvaluation.maxActiveJobs,
+        maxDailyJobs: input.quickDeckEvaluation.maxDailyJobs,
+        ttlMs: input.quickDeckEvaluation.ttlMs,
+      })
+    : null
   if (Boolean(input.usageAccounting) !== Boolean(input.providerBillingCatalog)) {
     throw new Error('USAGE_V2_RUNTIME_DEPENDENCIES_INCOMPLETE')
   }
@@ -880,10 +913,29 @@ export function createAgentRuntime(input: RuntimeInput) {
       presentationJobs.tick({ limit: workerConcurrency }))
   }
 
+  const tickQuickDeckEvaluations = async () => {
+    if (!quickDeckEvaluations || !input.quickDeckEvaluation) return { scannedJobs: 0 }
+    return await health.trackTickOperation('quick-deck-evaluations', () =>
+      quickDeckEvaluations.tick({ limit: input.quickDeckEvaluation!.tickBatchSize }))
+  }
+
+  const initialize = async () => {
+    if (!quickDeckEvaluations) return { interruptedQuickDeckEvaluations: 0 }
+    const interruptedQuickDeckEvaluations = await health.trackTickOperation(
+      'quick-deck-evaluations:initialize',
+      () => quickDeckEvaluations.initialize(),
+    )
+    return { interruptedQuickDeckEvaluations }
+  }
+
   const tick = () => health.runTick(async () => {
     if (!v1ExecutionEnabled) {
       const v2 = await tickPresentationJobs()
-      return { scannedRuns: v2.scannedJobs, activeRuns: v2.scannedJobs }
+      const quickDeck = await tickQuickDeckEvaluations()
+      return {
+        scannedRuns: v2.scannedJobs + quickDeck.scannedJobs,
+        activeRuns: v2.scannedJobs + quickDeck.scannedJobs,
+      }
     }
     const candidates = await input.repository.listRunnableRuns({
       now: clock.now().toISOString(),
@@ -930,9 +982,11 @@ export function createAgentRuntime(input: RuntimeInput) {
       .find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failure) throw failure.reason
     const v2 = await tickPresentationJobs()
+    const quickDeck = await tickQuickDeckEvaluations()
     return {
-      scannedRuns: candidates.length + pendingMediaIds.length + v2.scannedJobs,
-      activeRuns: runnableResults.filter((result) => result.status === 'fulfilled' && result.value).length + v2.scannedJobs,
+      scannedRuns: candidates.length + pendingMediaIds.length + v2.scannedJobs + quickDeck.scannedJobs,
+      activeRuns: runnableResults.filter((result) => result.status === 'fulfilled' && result.value).length
+        + v2.scannedJobs + quickDeck.scannedJobs,
     }
   })
 
@@ -961,8 +1015,17 @@ export function createAgentRuntime(input: RuntimeInput) {
           authentication: presentationJobAuthentication,
         },
       } : {}),
+      ...(quickDeckEvaluations && input.quickDeckEvaluation ? {
+        quickDeckEvaluation: {
+          service: quickDeckEvaluations,
+          artifacts: input.quickDeckEvaluation.artifacts,
+          repository: input.quickDeckEvaluation.repository,
+          authentication: input.quickDeckEvaluation.authentication,
+        },
+      } : {}),
     }),
     tick,
+    initialize,
     health,
   }
 }
