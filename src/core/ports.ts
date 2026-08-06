@@ -215,6 +215,7 @@ export interface ImageGenerationPort {
     tenantId: string
     operationId: string
     idempotencyKey?: string
+    aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
     backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
   }>): Promise<
     | Readonly<{ state: 'QUEUED' | 'PROCESSING'; retryAfterMs?: number }>

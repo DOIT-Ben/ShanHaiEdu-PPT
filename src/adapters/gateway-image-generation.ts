@@ -18,6 +18,17 @@ const imageOperationSchema = z.object({
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
+const GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE = 0.03
+
+class GatewayImageAspectRatioError extends Error {
+  readonly code = 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID'
+
+  constructor() {
+    super('gateway image pixels do not match the requested aspect ratio')
+    this.name = 'GatewayImageAspectRatioError'
+  }
+}
+
 function normalizedBaseUrl(value: string) {
   const url = new URL(value)
   const loopback = ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
@@ -53,6 +64,24 @@ function decodedImage(value: string) {
     && bytes.subarray(8, 12).toString('ascii') === 'WEBP'
   if (!png && !jpeg && !webp) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
   return { bytes: new Uint8Array(bytes), mimeType: png ? 'image/png' : jpeg ? 'image/jpeg' : 'image/webp' }
+}
+
+function expectedAspectRatio(value: Parameters<ImageGenerationPort['submit']>[0]['aspectRatio']) {
+  switch (value) {
+    case '16:9': return 16 / 9
+    case '4:3': return 4 / 3
+    case '1:1': return 1
+    case '3:4': return 3 / 4
+  }
+}
+
+async function assertImageAspectRatio(image: Uint8Array, aspectRatio: Parameters<ImageGenerationPort['submit']>[0]['aspectRatio']) {
+  const metadata = await sharp(image).metadata()
+  if (!metadata.width || !metadata.height) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
+  const ratio = metadata.width / metadata.height
+  if (Math.abs(ratio / expectedAspectRatio(aspectRatio) - 1) > GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE) {
+    throw new GatewayImageAspectRatioError()
+  }
 }
 
 function operationState(status: z.infer<typeof imageOperationSchema>['status']) {
@@ -198,12 +227,15 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     try {
       const artifact = await this.storeOutput(input, gatewayResponseSchema.parse(payload))
       return { operationId: `gateway-image:${artifact.artifactId}`, state: 'COMPLETED' as const }
-    } catch {
+    } catch (error) {
+      const errorCode = error instanceof GatewayImageAspectRatioError ? error.code : 'GATEWAY_OUTPUT_INVALID'
       throw new MediaSubmissionError(
-        'GATEWAY_OUTPUT_INVALID',
+        errorCode,
         'UNKNOWN',
         'gateway returned an invalid image result',
-        providerTechnicalFailure('GATEWAY_OUTPUT_INVALID'),
+        providerTechnicalFailure(errorCode, error instanceof GatewayImageAspectRatioError
+          ? { category: 'CONTRACT', disposition: 'NON_RETRYABLE' }
+          : {}),
       )
     }
   }
@@ -279,15 +311,19 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         const artifact = await this.storeOutput({
           tenantId: input.tenantId,
           idempotencyKey: input.idempotencyKey ?? input.operationId,
+          aspectRatio: input.aspectRatio,
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
         }, operation.result)
         return { state: 'COMPLETED' as const, artifactId: artifact.artifactId }
-      } catch {
+      } catch (error) {
+        const errorCode = error instanceof GatewayImageAspectRatioError ? error.code : 'GATEWAY_OUTPUT_INVALID'
         return {
           state: 'FAILED' as const,
-          errorCode: 'GATEWAY_OUTPUT_INVALID',
+          errorCode,
           billingState: 'CHARGED' as const,
-          technicalFailure: providerTechnicalFailure('GATEWAY_OUTPUT_INVALID'),
+          technicalFailure: providerTechnicalFailure(errorCode, error instanceof GatewayImageAspectRatioError
+            ? { category: 'CONTRACT', disposition: 'NON_RETRYABLE' }
+            : {}),
         }
       }
     }
@@ -379,10 +415,11 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
   }
 
   private async storeOutput(
-    input: Pick<Parameters<ImageGenerationPort['submit']>[0], 'tenantId' | 'idempotencyKey' | 'backgroundMode'>,
+    input: Pick<Parameters<ImageGenerationPort['submit']>[0], 'tenantId' | 'idempotencyKey' | 'aspectRatio' | 'backgroundMode'>,
     result: z.infer<typeof gatewayResponseSchema>,
   ) {
     const image = decodedImage(result.data[0]!.b64_json)
+    await assertImageAspectRatio(image.bytes, input.aspectRatio)
     const bytes = input.backgroundMode === 'TRANSPARENT'
       ? await removeConnectedNeutralBackdrop(image.bytes)
       : image.bytes

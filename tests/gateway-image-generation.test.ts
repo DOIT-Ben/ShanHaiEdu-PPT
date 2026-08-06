@@ -46,7 +46,7 @@ describe('gateway image generation adapter', () => {
     expect(submitted).toEqual({ operationId, state: 'QUEUED' })
     const inspected = await adapter.inspect({
       tenantId: 'frameflow', operationId: submitted.operationId,
-      idempotencyKey: 'run-1:asset:apples:r0:v1', backgroundMode: 'TRANSPARENT',
+      idempotencyKey: 'run-1:asset:apples:r0:v1', aspectRatio: '1:1', backgroundMode: 'TRANSPARENT',
     })
     expect(inspected).toMatchObject({ state: 'COMPLETED' })
     const stored = inspected.state === 'COMPLETED' ? artifacts.artifacts.get(inspected.artifactId) : null
@@ -61,6 +61,43 @@ describe('gateway image generation adapter', () => {
       model: 'gpt-image-2', size: '1:1', resolution: '1K', n: 1,
     })
     expect(String(JSON.parse(String(request.init.body)).prompt)).toContain('透明背景中的独立主体')
+  })
+
+  test('rejects a completed gateway image whose actual pixels violate the requested ratio', async () => {
+    const artifacts = new MockArtifactPort()
+    const square = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: '#DDE7F7' },
+    }).png().toBuffer()
+    const operationId = 'imgop_11111111111111111111111111111111'
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url) => String(url).endsWith('/image-tasks')
+        ? Response.json({ id: operationId, status: 'QUEUED', submission_state: 'SUBMITTED' }, { status: 202 })
+        : Response.json({
+            id: operationId,
+            status: 'COMPLETED',
+            submission_state: 'SUBMITTED',
+            result: { data: [{ b64_json: square.toString('base64') }] },
+          }),
+    })
+    const submitted = await adapter.submit({
+      tenantId: 'frameflow', prompt: 'A complete 16 by 9 classroom slide', model: 'gpt-image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:slide:1:image:r0:v1',
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow', operationId: submitted.operationId,
+      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
+    })).resolves.toEqual({
+      state: 'FAILED',
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      billingState: 'CHARGED',
+      technicalFailure: {
+        category: 'CONTRACT', disposition: 'NON_RETRYABLE', diagnosticCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      },
+    })
+    expect(artifacts.artifacts.size).toBe(0)
   })
 
   test('classifies validation rejection as not submitted and network failure as unknown', async () => {
@@ -140,7 +177,7 @@ describe('gateway image generation adapter', () => {
     await expect(adapter.inspect({
       tenantId: 'frameflow',
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
-      idempotencyKey: 'run-1:slide:1:image:r0:v1',
+      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
     })).resolves.toMatchObject({ state: 'PROCESSING', retryAfterMs: 2_000 })
   })
 
@@ -157,6 +194,7 @@ describe('gateway image generation adapter', () => {
     await expect(adapter.inspect({
       tenantId: 'frameflow',
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      aspectRatio: '16:9',
     })).resolves.toEqual({ state: 'PROCESSING', retryAfterMs: 7_000 })
   })
 
@@ -170,6 +208,7 @@ describe('gateway image generation adapter', () => {
     await expect(adapter.inspect({
       tenantId: 'frameflow',
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      aspectRatio: '16:9',
     })).resolves.toEqual({
       state: 'FAILED',
       errorCode: 'MODEL_FORBIDDEN',
@@ -195,6 +234,7 @@ describe('gateway image generation adapter', () => {
     await expect(adapter.inspect({
       tenantId: 'frameflow',
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      aspectRatio: '16:9',
     })).resolves.toEqual({
       state: 'FAILED',
       errorCode: 'INVALID_REQUEST',

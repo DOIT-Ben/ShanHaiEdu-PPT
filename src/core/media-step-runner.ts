@@ -353,6 +353,7 @@ export class MediaStepRunner {
       tenantId: run.host.tenantId,
       operationId: step.externalOperationId,
       idempotencyKey,
+      aspectRatio: mediaInput.aspectRatio ?? '16:9',
       ...(mediaInput.backgroundMode ? { backgroundMode: mediaInput.backgroundMode } : {}),
     })
     if (status.state === 'QUEUED' || status.state === 'PROCESSING') {
