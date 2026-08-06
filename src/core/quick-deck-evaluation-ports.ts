@@ -2,6 +2,7 @@ import type { PresentationBlueprint } from '../presentation-contracts'
 import type {
   QuickDeckEvaluationArtifact,
   QuickDeckEvaluationEvent,
+  QuickDeckEvaluationEventInput,
   QuickDeckEvaluationFailureCode,
   QuickDeckEvaluationPhase,
   QuickDeckEvaluationRequest,
@@ -54,7 +55,7 @@ export type QuickDeckEvaluationRecord = Readonly<{
 export interface QuickDeckEvaluationRepository {
   create(input: Readonly<{
     record: QuickDeckEvaluationRecord
-    event: Omit<QuickDeckEvaluationEvent, 'sequence'>
+    event: QuickDeckEvaluationEventInput
     maxActiveJobs: number
     maxDailyJobs: number
     dayStart: string
@@ -62,7 +63,7 @@ export interface QuickDeckEvaluationRepository {
   get(jobId: string): Promise<QuickDeckEvaluationRecord | null>
   save(input: Readonly<{
     record: QuickDeckEvaluationRecord
-    event?: Omit<QuickDeckEvaluationEvent, 'sequence'>
+    event?: QuickDeckEvaluationEventInput
   }>): Promise<void>
   listRunnable(input: Readonly<{ now: string; limit: number }>): Promise<readonly QuickDeckEvaluationRecord[]>
   listExpired(input: Readonly<{ now: string; limit: number }>): Promise<readonly QuickDeckEvaluationRecord[]>

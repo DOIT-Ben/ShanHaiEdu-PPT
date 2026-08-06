@@ -156,6 +156,8 @@ export const quickDeckEvaluationEventSchema = z.discriminatedUnion('type', [
 
 export const quickDeckContentFormatSchema = z.enum(['pptx', 'preview'])
 
+type WithoutSequence<T> = T extends unknown ? Omit<T, 'sequence'> : never
+
 export type QuickDeckEvaluationRequest = z.output<typeof quickDeckEvaluationRequestSchema>
 export type QuickDeckEvaluationStatus = z.output<typeof quickDeckEvaluationStatusSchema>
 export type QuickDeckEvaluationPhase = z.output<typeof quickDeckEvaluationPhaseSchema>
@@ -164,3 +166,5 @@ export type QuickDeckEvaluationPage = z.output<typeof quickDeckEvaluationPageSch
 export type QuickDeckEvaluationArtifact = z.output<typeof quickDeckEvaluationArtifactSchema>
 export type QuickDeckEvaluationPublicJob = z.output<typeof quickDeckEvaluationPublicJobSchema>
 export type QuickDeckEvaluationEvent = z.output<typeof quickDeckEvaluationEventSchema>
+export type QuickDeckEvaluationEventInput = WithoutSequence<QuickDeckEvaluationEvent>
+export type QuickDeckContentFormat = z.output<typeof quickDeckContentFormatSchema>

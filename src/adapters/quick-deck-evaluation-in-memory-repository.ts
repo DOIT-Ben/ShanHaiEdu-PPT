@@ -1,5 +1,5 @@
 import type { QuickDeckEvaluationRepository, QuickDeckEvaluationRecord } from '../core/quick-deck-evaluation-ports'
-import type { QuickDeckEvaluationEvent } from '../quick-deck-evaluation-contracts'
+import { quickDeckEvaluationEventSchema, type QuickDeckEvaluationEvent } from '../quick-deck-evaluation-contracts'
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -23,7 +23,7 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
     }
     if (this.#records.has(input.record.id)) throw new Error('QUICK_DECK_EVALUATION_ALREADY_EXISTS')
     this.#records.set(input.record.id, clone(input.record))
-    this.#events.set(input.record.id, [clone({ ...input.event, sequence: 1 })])
+    this.#events.set(input.record.id, [clone(quickDeckEvaluationEventSchema.parse({ ...input.event, sequence: 1 }))])
     return 'CREATED' as const
   }
 
@@ -37,7 +37,7 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
     this.#records.set(input.record.id, clone(input.record))
     if (!input.event) return
     const events = this.#events.get(input.record.id) ?? []
-    events.push(clone({ ...input.event, sequence: events.length + 1 }))
+    events.push(clone(quickDeckEvaluationEventSchema.parse({ ...input.event, sequence: events.length + 1 })))
     this.#events.set(input.record.id, events)
   }
 
