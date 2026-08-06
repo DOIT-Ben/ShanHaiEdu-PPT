@@ -35,6 +35,7 @@ following actions:
 | `repair-dev-ownership` | PPT-Agent source, Git metadata, and `dist` sharing metadata |
 | `check-dev-ownership` | Read-only ownership summary |
 | `prepare-test-candidate <name>` | A validated directory below `/opt/ppt-agent-test/candidates` |
+| `prepare-evaluation-reports` | Only the quick-deck report directory; grants `codex-dev` traversal to its parents, never other service data |
 | `service-status <allowlisted-unit>` | Read-only state for PPT-Agent service units |
 | `restart-test-service` | Only `ppt-agent-test.service` |
 

@@ -8,6 +8,11 @@ umask 0002
 
 readonly REPOSITORY_ROOT=/srv/codex-workspace/PPT-Agent
 readonly TEST_CANDIDATES_ROOT=/opt/ppt-agent-test/candidates
+readonly TEST_SHARED_ROOT=/opt/ppt-agent-test/shared
+readonly TEST_DATA_ROOT="$TEST_SHARED_ROOT/data"
+readonly TEST_EVALUATION_REPORTS_ROOT="$TEST_DATA_ROOT/quick-deck-reports"
+readonly TEST_SERVICE_USER=ppt-agent-test
+readonly DEV_USER=codex-dev
 readonly DEV_GROUP=codex-dev
 
 die() {
@@ -105,6 +110,24 @@ prepare_test_candidate() {
   printf '%s\n' "PPT_AGENT_ADMIN_OK: test candidate prepared: $name"
 }
 
+prepare_evaluation_reports() {
+  require_no_extra_arguments "$@"
+  assert_physical_directory "$TEST_SHARED_ROOT"
+  assert_physical_directory "$TEST_DATA_ROOT"
+
+  # Permit traversal to the one report directory without exposing service data.
+  /usr/bin/setfacl --physical -m "u:${DEV_USER}:--x",m::rwx -- "$TEST_SHARED_ROOT" "$TEST_DATA_ROOT"
+
+  if [ ! -e "$TEST_EVALUATION_REPORTS_ROOT" ]; then
+    /usr/bin/install -d -o "$TEST_SERVICE_USER" -g "$DEV_GROUP" -m 2770 -- "$TEST_EVALUATION_REPORTS_ROOT"
+  fi
+  assert_physical_directory "$TEST_EVALUATION_REPORTS_ROOT"
+  /usr/bin/chown --no-dereference "$TEST_SERVICE_USER":"$DEV_GROUP" -- "$TEST_EVALUATION_REPORTS_ROOT"
+  /usr/bin/chmod 2770 -- "$TEST_EVALUATION_REPORTS_ROOT"
+  /usr/bin/setfacl --physical -m u::rwx,g::rwx,o::---,m::rwx,d:u::rwx,d:g::rwx,d:o::---,d:m::rwx -- "$TEST_EVALUATION_REPORTS_ROOT"
+  printf '%s\n' 'PPT_AGENT_ADMIN_OK: evaluation reports prepared'
+}
+
 service_status() {
   local unit="$1"
   case "$unit" in
@@ -135,6 +158,9 @@ case "$action" in
   prepare-test-candidate)
     [ "$#" -eq 1 ] || die 'candidate name is required'
     prepare_test_candidate "$1"
+    ;;
+  prepare-evaluation-reports)
+    prepare_evaluation_reports "$@"
     ;;
   service-status)
     [ "$#" -eq 1 ] || die 'service name is required'
