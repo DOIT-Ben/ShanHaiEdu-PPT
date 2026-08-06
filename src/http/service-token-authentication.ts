@@ -7,6 +7,7 @@ export type ServiceCredential = Readonly<{
   userToken: string
   adminToken?: string
   v2Token?: string
+  evaluationToken?: string
 }>
 
 export type AuthenticatedService = Readonly<{
@@ -56,6 +57,12 @@ export class ServiceTokenAuthentication implements HostAuthenticationPort {
         }
         tokens.add(credential.v2Token)
       }
+      if (credential.evaluationToken) {
+        if (!validToken(credential.evaluationToken) || tokens.has(credential.evaluationToken)) {
+          throw new Error('PPT_AGENT_CREDENTIAL_EVALUATION_TOKEN_INVALID')
+        }
+        tokens.add(credential.evaluationToken)
+      }
     }
     this.credentials = credentials.map((credential) => ({ ...credential }))
   }
@@ -99,6 +106,18 @@ export class ServiceTokenAuthentication implements HostAuthenticationPort {
       const administrator = credential.adminToken ? matchesToken(provided, credential.adminToken) : false
       const user = matchesToken(provided, credential.userToken)
       if (administrator || user) return { tenantId: credential.tenantId, role: administrator ? 'ADMIN' : 'USER' }
+    }
+    return null
+  }
+
+  async authenticateQuickDeckEvaluation(request: Request): Promise<Readonly<{ tenantId: string }> | null> {
+    const authorization = request.headers.get('Authorization')
+    const provided = authorization?.startsWith('Bearer ') ? authorization.slice(7) : ''
+    if (!provided) return null
+    for (const credential of this.credentials) {
+      if (credential.evaluationToken && matchesToken(provided, credential.evaluationToken)) {
+        return { tenantId: credential.tenantId }
+      }
     }
     return null
   }

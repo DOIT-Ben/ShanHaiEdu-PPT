@@ -61,6 +61,10 @@ import {
   handlePresentationJobV2Request,
   type PresentationJobV2HandlerDependencies,
 } from './presentation-job-v2-handler'
+import {
+  createQuickDeckEvaluationRequestHandler,
+  type QuickDeckEvaluationHandlerDependencies,
+} from './quick-deck-evaluation-handler'
 import { OPENAPI_DOCUMENT_JSON, OPENAPI_V2_DOCUMENT_JSON } from './openapi-document'
 
 const OPENAPI_PATH = '/openapi/v1.json'
@@ -85,6 +89,7 @@ type HandlerDependencies = Readonly<{
   revisionRoundsSettings?: AdminRevisionRoundsSettingsPort
   rateLimiter?: PrincipalRateLimiterPort
   presentationJobV2?: PresentationJobV2HandlerDependencies
+  quickDeckEvaluation?: QuickDeckEvaluationHandlerDependencies
   capabilities?: PublicCapabilities
 }>
 
@@ -595,6 +600,9 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
     repository: dependencies.repository,
     pollMs: dependencies.eventPollMs ?? 500,
   })
+  const quickDeckEvaluationHandler = dependencies.quickDeckEvaluation
+    ? createQuickDeckEvaluationRequestHandler(dependencies.quickDeckEvaluation)
+    : null
   async function handleRequest(request: Request, requestId: string): Promise<Response> {
     let correlatedRunId: string | null = null
     try {
@@ -617,6 +625,12 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           return errorResponse(503, 'PRESENTATION_JOB_V2_UNAVAILABLE', 'presentation jobs are unavailable', requestId)
         }
         return await handlePresentationJobV2Request(dependencies.presentationJobV2, request, requestId)
+      }
+      if (url.pathname === '/v1/evaluations/quick-decks' || url.pathname.startsWith('/v1/evaluations/quick-decks/')) {
+        if (!quickDeckEvaluationHandler) {
+          return errorResponse(503, 'QUICK_DECK_EVALUATION_UNAVAILABLE', 'quick deck evaluations are unavailable', requestId)
+        }
+        return await quickDeckEvaluationHandler(request, requestId)
       }
       const host = await dependencies.authentication.authenticate(request)
       if (!host) return errorResponse(401, 'UNAUTHENTICATED', 'authentication is required', requestId)
