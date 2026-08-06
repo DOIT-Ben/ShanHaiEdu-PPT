@@ -61,7 +61,10 @@ import type {
   PresentationJobV2ProviderPort,
   PresentationJobV2Repository,
 } from '../core/presentation-job-v2-ports'
-import type { QuickDeckEvaluationRepository } from '../core/quick-deck-evaluation-ports'
+import type {
+  QuickDeckEvaluationArtifactCleanupPort,
+  QuickDeckEvaluationRepository,
+} from '../core/quick-deck-evaluation-ports'
 import { QuickDeckEvaluationService } from '../core/quick-deck-evaluation-service'
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
@@ -586,6 +589,7 @@ type RuntimeInput = Readonly<{
     artifacts: ArtifactPort
     images: ImageGenerationPort
     authentication: QuickDeckEvaluationAuthenticationPort
+    artifactCleanup?: QuickDeckEvaluationArtifactCleanupPort
     model?: StructuredModelPort
     textModel: string
     allowedImageModels: readonly string[]
@@ -681,6 +685,7 @@ export function createAgentRuntime(input: RuntimeInput) {
         images: input.quickDeckEvaluation.images,
         renderer,
         clock,
+        ...(input.quickDeckEvaluation.artifactCleanup ? { artifactCleanup: input.quickDeckEvaluation.artifactCleanup } : {}),
         textModel: input.quickDeckEvaluation.textModel,
         allowedImageModels: input.quickDeckEvaluation.allowedImageModels,
         maxActiveJobs: input.quickDeckEvaluation.maxActiveJobs,

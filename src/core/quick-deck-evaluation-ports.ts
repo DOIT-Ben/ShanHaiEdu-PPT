@@ -30,6 +30,13 @@ export type QuickDeckEvaluationArtifactRecord = Readonly<{
   byteLength: number
 }>
 
+export interface QuickDeckEvaluationArtifactCleanupPort {
+  remove(input: Readonly<{
+    tenantId: string
+    artifactId: string
+  }>): Promise<void>
+}
+
 export type QuickDeckEvaluationRecord = Readonly<{
   id: string
   tenantId: string

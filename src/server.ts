@@ -21,6 +21,7 @@ import {
 import { SqliteAgentRepository } from './adapters/sqlite-repository'
 import { SqlitePresentationJobV2Repository } from './adapters/presentation-job-v2-sqlite-repository'
 import { SqliteQuickDeckEvaluationRepository } from './adapters/quick-deck-evaluation-sqlite-repository'
+import { LocalQuickDeckEvaluationArtifactCleanupPort } from './adapters/quick-deck-evaluation-local-artifact-cleanup'
 import {
   FixedServicePresentationJobBudgetPolicy,
 } from './adapters/presentation-job-v2-ports'
@@ -192,6 +193,7 @@ const quickDeckEvaluationRuntime = quickDeckEvaluationDataRoot
       const artifacts = new LocalArtifactPort(path.join(quickDeckEvaluationDataRoot, 'artifacts'))
       return {
         artifacts,
+        artifactCleanup: new LocalQuickDeckEvaluationArtifactCleanupPort(path.join(quickDeckEvaluationDataRoot, 'artifacts')),
         repository: new SqliteQuickDeckEvaluationRepository(path.join(quickDeckEvaluationDataRoot, 'evaluations.sqlite')),
         images: new GatewayImageGenerationPort({
           baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
@@ -278,6 +280,7 @@ const runtime = runtimeMode === 'gateway'
             artifacts: quickDeckEvaluationRuntime.artifacts,
             images: quickDeckEvaluationRuntime.images,
             authentication,
+            artifactCleanup: quickDeckEvaluationRuntime.artifactCleanup,
             model: quickDeckEvaluationModel,
             textModel: quickDeckEvaluationConfig.textModel,
             allowedImageModels: quickDeckEvaluationConfig.allowedImageModels,

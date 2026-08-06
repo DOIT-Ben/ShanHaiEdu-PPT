@@ -23,6 +23,7 @@ import {
 } from '../visual-deck-v4-contracts'
 import type {
   QuickDeckEvaluationArtifactRecord,
+  QuickDeckEvaluationArtifactCleanupPort,
   QuickDeckEvaluationRecord,
   QuickDeckEvaluationRepository,
 } from './quick-deck-evaluation-ports'
@@ -206,6 +207,7 @@ export class QuickDeckEvaluationService {
     images: ImageGenerationPort
     renderer: PresentationRendererPort
     clock: ClockPort
+    artifactCleanup?: QuickDeckEvaluationArtifactCleanupPort
     textModel: string
     allowedImageModels: readonly string[]
     maxActiveJobs: number
@@ -584,6 +586,16 @@ export class QuickDeckEvaluationService {
   }
 
   private async expire(record: QuickDeckEvaluationRecord, now: string) {
+    const artifactIds = new Set([
+      ...record.pages.flatMap((page) => page.artifactId ? [page.artifactId] : []),
+      ...(record.pptx ? [record.pptx.artifactId] : []),
+      ...(record.preview ? [record.preview.artifactId] : []),
+    ])
+    if (this.dependencies.artifactCleanup) {
+      for (const artifactId of artifactIds) {
+        await this.dependencies.artifactCleanup.remove({ tenantId: record.tenantId, artifactId })
+      }
+    }
     const expired: QuickDeckEvaluationRecord = {
       ...record,
       status: 'EXPIRED',

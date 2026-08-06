@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import sharp from 'sharp'
 import { LocalArtifactPort } from '../src/adapters/local-artifact-port'
 import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-renderer'
+import { LocalQuickDeckEvaluationArtifactCleanupPort } from '../src/adapters/quick-deck-evaluation-local-artifact-cleanup'
 import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-deck-evaluation-in-memory-repository'
 import type { ImageGenerationPort, StructuredModelPort } from '../src/core/ports'
 import { QuickDeckEvaluationError, QuickDeckEvaluationService } from '../src/core/quick-deck-evaluation-service'
@@ -82,26 +83,33 @@ class AsyncImages implements ImageGenerationPort {
   }
 }
 
-async function fixture(imageSize: Readonly<{ width: number; height: number }> = { width: 1600, height: 900 }) {
+async function fixture(
+  imageSize: Readonly<{ width: number; height: number }> = { width: 1600, height: 900 },
+  removeExpiredArtifacts = false,
+) {
   const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-service-'))
   const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+  const repository = new InMemoryQuickDeckEvaluationRepository()
   const clock = new ControlledClock()
   const model = new CreativeModel()
   const images = new AsyncImages(artifacts, imageSize.width, imageSize.height)
   const service = new QuickDeckEvaluationService({
-    repository: new InMemoryQuickDeckEvaluationRepository(),
+    repository,
     artifacts,
     model,
     images,
     renderer: new SharpPptxPresentationRenderer(),
     clock,
+    ...(removeExpiredArtifacts ? {
+      artifactCleanup: new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts')),
+    } : {}),
     textModel: 'gpt-5.6-terra',
     allowedImageModels: ['gemini-3-pro-image-preview'],
     maxActiveJobs: 2,
     maxDailyJobs: 3,
     ttlMs: 60_000,
   })
-  return { directory, artifacts, clock, model, images, service }
+  return { directory, artifacts, repository, clock, model, images, service }
 }
 
 function request(slideCount = 2) {
@@ -187,6 +195,30 @@ describe('quick-deck evaluation service', () => {
       expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'EXPIRED', phase: 'EXPIRED' })
       await expect(service.getContentOwned('evaluation-tenant', created.jobId, 'pptx'))
         .rejects.toMatchObject({ code: 'EVALUATION_CONTENT_EXPIRED' })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('physically removes dedicated page, preview and PPTX artifacts before publishing expiry', async () => {
+    const { directory, artifacts, repository, clock, service } = await fixture(undefined, true)
+    try {
+      const created = await service.create('evaluation-tenant', request(2))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+      const stored = await repository.get(created.jobId)
+      const artifactIds = [
+        ...stored!.pages.flatMap((page) => page.artifactId ? [page.artifactId] : []),
+        stored!.pptx!.artifactId,
+        stored!.preview!.artifactId,
+      ]
+      clock.advance(60_001)
+      await service.tick({ limit: 10 })
+
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'EXPIRED' })
+      for (const artifactId of artifactIds) {
+        expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
+      }
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
