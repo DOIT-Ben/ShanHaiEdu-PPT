@@ -348,6 +348,27 @@ export const runActionSchema = z.discriminatedUnion('type', [
   }).strict(),
 ])
 
+export const runActionTypeSchema = z.enum([
+  'APPROVE_BLUEPRINT',
+  'RETRY_PLANNING',
+  'RETRY_DELIVERY',
+  'REPLAN',
+  'REQUEST_BLUEPRINT_REVISION',
+  'PAUSE',
+  'RESUME',
+  'CANCEL',
+  'ADD_BUDGET',
+  'APPROVE_REVISION',
+  'SUBMIT_LIMITED_REVISION',
+  'REJECT_REVISION',
+  'ACCEPT_WITH_OVERRIDE',
+])
+
+export const allowedRunActionSchema = z.object({
+  type: runActionTypeSchema,
+  expectedVersion: z.number().int().nonnegative(),
+}).strict()
+
 export const planningFailureSchema = z.object({
   errorCode: z.enum([
     'SOURCE_INCOMPLETE',
@@ -785,6 +806,8 @@ export type CoverDesignMode = z.infer<typeof coverDesignModeSchema>
 export type AssetAcquisitionPolicy = z.infer<typeof assetAcquisitionPolicySchema>
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>
 export type RunAction = z.infer<typeof runActionSchema>
+export type RunActionType = z.infer<typeof runActionTypeSchema>
+export type AllowedRunAction = z.infer<typeof allowedRunActionSchema>
 export type PlanningFailure = z.infer<typeof planningFailureSchema>
 export type DeliveryUnavailableReason = z.infer<typeof deliveryUnavailableReasonSchema>
 export type DeliveryAvailability = z.infer<typeof deliveryAvailabilitySchema>

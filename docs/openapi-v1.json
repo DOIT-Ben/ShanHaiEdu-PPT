@@ -200,6 +200,30 @@
         }
       }
     },
+    "/v1/capabilities": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
+      "get": {
+        "operationId": "getCapabilities",
+        "description": "Returns the authenticated tenant's public V4 feature surface. It lists model identifiers and protocol guarantees, never gateway URLs, credentials, prompts, or Provider-private configuration.",
+        "responses": {
+          "200": {
+            "description": "Public V4 capabilities",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CapabilitiesEnvelope" } } }
+          },
+          "4XX": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/runs": {
       "parameters": [
         { "$ref": "#/components/parameters/TenantId" },
@@ -278,6 +302,56 @@
               "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
             },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunDetailEnvelope" } } }
+          },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/runs/{runId}/plan": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
+      "get": {
+        "operationId": "getRunPlan",
+        "description": "Returns the compiled user-facing V4 generation plan when it is ready. Non-V4 and not-yet-compiled Runs return an explicit NOT_READY state rather than Provider prompts or internal planning artifacts.",
+        "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+        "responses": {
+          "200": {
+            "description": "V4 plan state",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunPlanEnvelope" } } }
+          },
+          "404": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/runs/{runId}/sources": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TenantId" },
+        { "$ref": "#/components/parameters/ExternalUserId" },
+        { "$ref": "#/components/parameters/ExternalProjectId" }
+      ],
+      "get": {
+        "operationId": "getRunSources",
+        "description": "Returns source and image-asset metadata plus page reference IDs after a Blueprint is ready. Raw source text, OCR text, attachment bytes, and internal prompts are never returned.",
+        "parameters": [{ "$ref": "#/components/parameters/RunId" }],
+        "responses": {
+          "200": {
+            "description": "Run source state",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunSourcesEnvelope" } } }
           },
           "404": { "$ref": "#/components/responses/Error" },
           "500": { "$ref": "#/components/responses/Error" }
@@ -1960,6 +2034,218 @@
           }
         }
       },
+      "AllowedRunAction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "expectedVersion"],
+        "properties": {
+          "type": { "enum": ["APPROVE_BLUEPRINT", "RETRY_PLANNING", "RETRY_DELIVERY", "REPLAN", "REQUEST_BLUEPRINT_REVISION", "PAUSE", "RESUME", "CANCEL", "ADD_BUDGET", "APPROVE_REVISION", "SUBMIT_LIMITED_REVISION", "REJECT_REVISION", "ACCEPT_WITH_OVERRIDE"] },
+          "expectedVersion": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "PublicBlueprintProjection": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Strongly typed public Blueprint projection. Provider prompts, negative prompts, OCR text, raw source text, and renderer instructions are excluded.",
+        "required": ["id", "title", "renderMode", "visualDirection", "curriculum", "slides", "createdAt"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "renderMode": { "enum": ["SLIDE_IMAGE_V2", "SLIDE_IMAGE_V2_1", "LAYERED_COURSEWARE_V3", "VISUAL_DECK_V4"] },
+          "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
+          "coverDesignMode": { "enum": ["INDEPENDENT", "FOLLOW_TEMPLATE"] },
+          "curriculum": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["subject", "grade", "lessonTitle", "learningObjectives", "scopeBoundaries", "prohibitedExtensions", "sourceChunkIds", "sourceAssetIds"],
+            "properties": {
+              "subject": { "type": ["string", "null"], "maxLength": 100 },
+              "grade": { "type": ["string", "null"], "maxLength": 100 },
+              "lessonTitle": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "learningObjectives": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+              "scopeBoundaries": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+              "prohibitedExtensions": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+              "sourceChunkIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+              "sourceAssetIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } }
+            }
+          },
+          "slides": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pageNumber", "title", "body", "layout", "visualIntent", "sourceChunkIds", "sourceAssetIds"],
+              "properties": {
+                "pageNumber": { "type": "integer", "minimum": 1, "maximum": 50 },
+                "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+                "body": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+                "layout": { "enum": ["HERO", "SPLIT", "EDITORIAL", "STATEMENT", "IMAGE_FULL"] },
+                "visualIntent": { "type": "string", "minLength": 10, "maxLength": 1000 },
+                "sourceChunkIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+                "sourceAssetIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } }
+              }
+            }
+          },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "RunPlanProjection": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "reason"],
+            "properties": {
+              "state": { "const": "NOT_READY" },
+              "reason": { "enum": ["V4_REQUIRED", "V4_PLAN_NOT_READY"] }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "plan"],
+            "properties": {
+              "state": { "const": "AVAILABLE" },
+              "plan": { "$ref": "#/components/schemas/VisualDeckV4GenerationPlan" }
+            }
+          }
+        ]
+      },
+      "RunPlanEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/RunPlanProjection" }
+        }
+      },
+      "RunSourcesProjection": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "reason"],
+            "properties": { "state": { "const": "NOT_READY" }, "reason": { "const": "BLUEPRINT_NOT_READY" } }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["state", "sources", "assets", "pageReferences"],
+            "properties": {
+              "state": { "const": "AVAILABLE" },
+              "sources": {
+                "type": "array", "maxItems": 7,
+                "items": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["id", "name", "kind", "status"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                    "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "kind": { "enum": ["TEXT", "IMAGE", "PDF", "MARKDOWN"] },
+                    "mimeType": { "type": "string", "minLength": 1, "maxLength": 160 },
+                    "pageCount": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "status": { "enum": ["READY", "FAILED"] },
+                    "failureCode": { "type": "string", "minLength": 1, "maxLength": 160 }
+                  }
+                }
+              },
+              "assets": {
+                "type": "array", "maxItems": 200,
+                "items": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["id", "sourceId", "name", "mimeType", "byteLength", "sha256", "width", "height"],
+                  "properties": {
+                    "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                    "sourceId": { "type": "string", "minLength": 1, "maxLength": 160 },
+                    "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "mimeType": { "enum": ["image/png", "image/jpeg", "image/webp"] },
+                    "byteLength": { "type": "integer", "minimum": 1, "maximum": 25165824 },
+                    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "width": { "type": "integer", "minimum": 1, "maximum": 20000 },
+                    "height": { "type": "integer", "minimum": 1, "maximum": 20000 },
+                    "pageNumber": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "region": {
+                      "type": "object", "additionalProperties": false,
+                      "required": ["x", "y", "width", "height"],
+                      "properties": {
+                        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "width": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+                        "height": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+                      }
+                    }
+                  }
+                }
+              },
+              "pageReferences": {
+                "type": "array", "minItems": 1, "maxItems": 50,
+                "items": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["pageNumber", "sourceChunkIds", "sourceAssetIds"],
+                  "properties": {
+                    "pageNumber": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "sourceChunkIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
+                    "sourceAssetIds": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 160 } }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "RunSourcesEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/RunSourcesProjection" }
+        }
+      },
+      "PptAgentCapabilities": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["visualDeckV4", "quickDeckEvaluation"],
+        "properties": {
+          "visualDeckV4": {
+            "type": "object", "additionalProperties": false,
+            "required": ["sourceModes", "sourceKinds", "slideCount", "aspectRatios", "models", "imageGeneration", "delivery"],
+            "properties": {
+              "sourceModes": { "type": "array", "minItems": 1, "maxItems": 2, "items": { "enum": ["SOURCE_GROUNDED", "OPEN_KNOWLEDGE"] } },
+              "sourceKinds": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "enum": ["TEXT", "HOST_ATTACHMENT", "SOURCE_PACKAGE", "APPROVED_PAGE_DESIGN"] } },
+              "slideCount": { "type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": { "minimum": { "const": 1 }, "maximum": { "const": 50 } } },
+              "aspectRatios": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "const": "16:9" } },
+              "models": {
+                "type": "object", "additionalProperties": false, "required": ["text", "vision", "image", "imageEdit"],
+                "properties": {
+                  "text": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
+                  "vision": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
+                  "image": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
+                  "imageEdit": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } }
+                }
+              },
+              "imageGeneration": { "type": "object", "additionalProperties": false, "required": ["asynchronous", "protocol", "validatesActualPixels"], "properties": { "asynchronous": { "const": true }, "protocol": { "const": "IMAGE_TASK" }, "validatesActualPixels": { "const": true } } },
+              "delivery": { "type": "object", "additionalProperties": false, "required": ["formats", "rasterSlides"], "properties": { "formats": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "enum": ["PPTX", "PREVIEW_PNG", "SOURCES_JSON"] } }, "rasterSlides": { "const": true } } }
+            }
+          },
+          "quickDeckEvaluation": { "type": "object", "additionalProperties": false, "required": ["available", "slideCount", "isolatedFromRuns"], "properties": { "available": { "type": "boolean" }, "slideCount": { "type": "object", "additionalProperties": false, "required": ["minimum", "maximum"], "properties": { "minimum": { "const": 1 }, "maximum": { "const": 10 } } }, "isolatedFromRuns": { "const": true } } }
+        }
+      },
+      "CapabilitiesEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/PptAgentCapabilities" }
+        }
+      },
       "RunDetail": {
         "description": "Strict public Run detail. AVAILABLE requires status COMPLETED and exactly one readable public DeliveryRecord; that record's runId must equal RunDetail.id, its id must equal deliveryAvailability.deliveryId, and its revisionRound must equal RunDetail.revisionRound. UNAVAILABLE exposes no DeliveryRecord.",
         "oneOf": [
@@ -1968,10 +2254,10 @@
               { "$ref": "#/components/schemas/PublicRun" },
               {
                 "type": "object",
-                "required": ["blueprint", "generationPlan", "deliveries", "deliveryAvailability", "issues", "progress"],
+                "required": ["blueprint", "generationPlan", "deliveries", "deliveryAvailability", "issues", "progress", "allowedActions"],
                 "properties": {
                   "status": { "const": "COMPLETED" },
-                  "blueprint": { "type": ["object", "null"] },
+                  "blueprint": { "oneOf": [{ "$ref": "#/components/schemas/PublicBlueprintProjection" }, { "type": "null" }] },
                   "generationPlan": {
                     "oneOf": [
                       { "$ref": "#/components/schemas/VisualDeckV4GenerationPlan" },
@@ -1984,7 +2270,8 @@
                     "maxItems": 1,
                     "items": { "$ref": "#/components/schemas/DeliveryRecord" }
                   },
-                  "deliveryAvailability": { "$ref": "#/components/schemas/AvailableDeliveryAvailability" }
+                  "deliveryAvailability": { "$ref": "#/components/schemas/AvailableDeliveryAvailability" },
+                  "allowedActions": { "type": "array", "maxItems": 13, "items": { "$ref": "#/components/schemas/AllowedRunAction" } }
                 }
               }
             ]
@@ -1994,9 +2281,9 @@
               { "$ref": "#/components/schemas/PublicRun" },
               {
                 "type": "object",
-                "required": ["blueprint", "generationPlan", "deliveries", "deliveryAvailability", "issues", "progress"],
+                "required": ["blueprint", "generationPlan", "deliveries", "deliveryAvailability", "issues", "progress", "allowedActions"],
                 "properties": {
-                  "blueprint": { "type": ["object", "null"] },
+                  "blueprint": { "oneOf": [{ "$ref": "#/components/schemas/PublicBlueprintProjection" }, { "type": "null" }] },
                   "generationPlan": {
                     "oneOf": [
                       { "$ref": "#/components/schemas/VisualDeckV4GenerationPlan" },
@@ -2008,7 +2295,8 @@
                     "maxItems": 0,
                     "items": { "$ref": "#/components/schemas/DeliveryRecord" }
                   },
-                  "deliveryAvailability": { "$ref": "#/components/schemas/UnavailableDeliveryAvailability" }
+                  "deliveryAvailability": { "$ref": "#/components/schemas/UnavailableDeliveryAvailability" },
+                  "allowedActions": { "type": "array", "maxItems": 13, "items": { "$ref": "#/components/schemas/AllowedRunAction" } }
                 }
               }
             ]

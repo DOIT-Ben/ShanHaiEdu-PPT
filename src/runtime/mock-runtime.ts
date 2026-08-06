@@ -69,6 +69,7 @@ import { resumeTechnicalRecovery } from '../core/technical-recovery'
 import { UsageV2Coordinator } from '../core/usage-v2-coordinator'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 import { buildIdentity, type BuildIdentity } from '../release-identity'
+import type { PublicCapabilities } from '../run-query-contracts'
 import type { UsageAccountingProtocol } from '../usage-accounting-contracts'
 
 export class SystemClock implements ClockPort {
@@ -109,6 +110,8 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
     const visualDeckV4Stage = [
       'create_visual_deck_v4_source_spec',
       'create_visual_deck_v4_deck_visual',
+      'create_visual_deck_v4_creative_manuscript',
+      'review_visual_deck_v4_manuscript',
       'reflect_and_revise_deck_visual',
       'create_visual_deck_v4_slide_briefs',
       'reflect_and_revise_slide_briefs',
@@ -119,6 +122,13 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
       'optimize_v4_slide_briefs',
     ].includes(input.operation)
     if (visualDeckV4Stage) {
+      if (input.operation === 'review_visual_deck_v4_manuscript') {
+        const creativeManuscript = (input.payload as { creativeManuscript?: unknown }).creativeManuscript
+        if (!creativeManuscript || typeof creativeManuscript !== 'object') {
+          throw new Error('MOCK_V4_CREATIVE_MANUSCRIPT_REQUIRED')
+        }
+        return { ...(creativeManuscript as Record<string, unknown>), revisionSuggestions: [] }
+      }
       if (input.operation === 'critique_v4_deck_consistency') return { issues: [] }
       if (input.operation === 'critique_v4_slide_briefs') {
         return this.reflectionFailureMode === 'INVALID_SLIDE_CRITIC'
@@ -208,6 +218,9 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
           chunks: { id: string; sourceId?: string; text: string; sha256: string }[]
           missingRanges: string[]
         }
+        trustedEvidence?: {
+          sourceChunks: { text: string }[]
+        }
       }
       const source = {
         kind: 'SOURCE_PACKAGE' as const,
@@ -240,6 +253,24 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
         createdAt: new Date(0).toISOString(),
       })
       const { compilerVersion: _compilerVersion, ...draft } = proposal
+      if (input.operation === 'create_visual_deck_v4_creative_manuscript') {
+        const excerpt = (payload.trustedEvidence?.sourceChunks ?? payload.document.chunks)
+          .map((chunk) => chunk.text.trim())
+          .find((text) => text.length >= 6)
+          ?.slice(0, 1_200)
+        return {
+          title: draft.deckPlan.title,
+          narrative: draft.deckPlan.narrativeArc,
+          slides: draft.slideBriefs.map((slide) => ({
+            title: slide.title,
+            narrative: slide.keyClaim,
+            userVisibleCopy: slide.lockedCopy,
+            factualStatements: slide.facts,
+            visualDescription: slide.visualMetaphor,
+            sourceEvidence: excerpt ? [{ excerpt }] : [],
+          })),
+        }
+      }
       if (input.operation === 'create_visual_deck_v4_source_spec') {
         return { sourceUnderstanding: draft.sourceUnderstanding, presentationSpec: draft.presentationSpec }
       }
@@ -540,6 +571,7 @@ type RuntimeInput = Readonly<{
   defaultAccountingProtocol?: UsageAccountingProtocol
   usageAccounting?: UsageAccountingPort
   providerBillingCatalog?: ProviderBillingCatalog
+  capabilities?: PublicCapabilities
   v1ExecutionEnabled?: boolean
   presentationJobV2?: Readonly<{
     repository: PresentationJobV2Repository
@@ -919,6 +951,7 @@ export function createAgentRuntime(input: RuntimeInput) {
       operations,
       revisionRoundsSettings,
       rateLimiter,
+      ...(input.capabilities ? { capabilities: input.capabilities } : {}),
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
       ...(presentationJobs && presentationJobAuthentication ? {

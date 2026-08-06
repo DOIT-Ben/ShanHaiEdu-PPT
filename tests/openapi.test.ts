@@ -203,12 +203,15 @@ describe('OpenAPI v1 contract', () => {
       '/v1/admin/operations/{runId}/actions',
       '/v1/admin/planning-failures',
       '/v1/admin/settings/revision-rounds',
+      '/v1/capabilities',
       '/v1/runs',
       '/v1/runs/{runId}',
       '/v1/runs/{runId}/actions',
       '/v1/runs/{runId}/deliveries/{deliveryId}/content',
       '/v1/runs/{runId}/events',
       '/v1/runs/{runId}/events/history',
+      '/v1/runs/{runId}/plan',
+      '/v1/runs/{runId}/sources',
     ])
     expect(document.paths['/v1/runs/{runId}/events']?.get).toBeDefined()
     expect(document.paths['/v1/runs/{runId}/events/history']?.get).toBeDefined()
@@ -224,6 +227,9 @@ describe('OpenAPI v1 contract', () => {
       .toContain('finalize:<runId>')
     expect(document.paths['/v1/admin/settings/revision-rounds']?.get).toBeDefined()
     expect(document.paths['/v1/admin/settings/revision-rounds']?.patch).toBeDefined()
+    expect(document.paths['/v1/capabilities']?.get).toBeDefined()
+    expect(document.paths['/v1/runs/{runId}/plan']?.get).toBeDefined()
+    expect(document.paths['/v1/runs/{runId}/sources']?.get).toBeDefined()
     expect(document.paths['/health/live']?.get).toBeDefined()
     expect(document.paths['/health/ready']?.get).toBeDefined()
     const healthResponseHeaders = (path: '/health/live' | '/health/ready', status: '200' | '503') => {
@@ -364,6 +370,21 @@ describe('OpenAPI v1 contract', () => {
     expect(runDetailContract).toContain('"maxItems":0')
     expect(JSON.stringify(document.components.schemas.RunDetailEnvelope))
       .toContain('#/components/schemas/RunDetail')
+    expect(document.components.schemas.AllowedRunAction?.required).toEqual(['type', 'expectedVersion'])
+    expect(JSON.stringify(document.components.schemas.RunDetail)).toContain('#/components/schemas/AllowedRunAction')
+    const publicBlueprint = JSON.stringify(document.components.schemas.PublicBlueprintProjection)
+    expect(publicBlueprint).toContain('visualIntent')
+    expect(publicBlueprint).not.toContain('visualPrompt')
+    expect(publicBlueprint).not.toContain('negativePrompt')
+    expect(publicBlueprint).not.toContain('ocrText')
+    expect(document.components.schemas.RunPlanEnvelope).toBeDefined()
+    expect(document.components.schemas.RunSourcesEnvelope).toBeDefined()
+    expect(document.components.schemas.CapabilitiesEnvelope).toBeDefined()
+    const capabilitiesContract = JSON.stringify(document.components.schemas.PptAgentCapabilities)
+    expect(capabilitiesContract).toContain('IMAGE_TASK')
+    expect(capabilitiesContract).toContain('validatesActualPixels')
+    expect(capabilitiesContract).not.toContain('baseUrl')
+    expect(capabilitiesContract).not.toContain('apiKey')
     expect(document.components.schemas.DeliveryAvailability).toBeDefined()
     expect(document.components.schemas.DeliveryUnavailableReason?.enum).toContain('ACCOUNTING_FAILED')
     expect(JSON.stringify(document.paths['/v1/runs/{runId}']?.get))
@@ -423,7 +444,10 @@ describe('OpenAPI v1 contract', () => {
     for (const [path, method, status] of [
       ['/v1/runs', 'post', '201'],
       ['/v1/runs', 'get', '200'],
+      ['/v1/capabilities', 'get', '200'],
       ['/v1/runs/{runId}', 'get', '200'],
+      ['/v1/runs/{runId}/plan', 'get', '200'],
+      ['/v1/runs/{runId}/sources', 'get', '200'],
       ['/v1/runs/{runId}/actions', 'post', '200'],
       ['/v1/admin/operations/{runId}/actions', 'post', '200'],
       ['/v1/runs/{runId}/events', 'get', '200'],

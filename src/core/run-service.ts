@@ -2,10 +2,14 @@ import { createHash } from 'node:crypto'
 import {
   CONTRACT_VERSION,
   MAX_PLANNING_RETRIES,
+  allowedRunActionSchema,
   createRunRequestSchema,
   runActionSchema,
+  runActionTypeSchema,
   type HostContext,
+  type AllowedRunAction,
   type RunAction,
+  type RunActionType,
 } from '../contracts'
 import { presentationBlueprintSchema, revisionPlanSchema } from '../presentation-contracts'
 import { revisionBlueprintStepKey } from './active-blueprint'
@@ -29,7 +33,7 @@ import type {
   RunRecord,
   StepRecord,
 } from './ports'
-import { applyRunAction, PolicyError, recoverV4QualityFailure } from './policy'
+import { applyRunAction, canTransition, isTerminalStatus, PolicyError, recoverV4QualityFailure } from './policy'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { buildIdentity, releaseIdentityForMode, type BuildIdentity } from '../release-identity'
@@ -221,6 +225,98 @@ export class RunService {
 
   async listOwnedPage(host: HostContext, input: Readonly<{ after: RunListCursor | null; limit: number }>) {
     return this.dependencies.repository.listOwnedRuns({ host, ...input })
+  }
+
+  /**
+   * Returns only actions whose static and persisted prerequisites are currently
+   * satisfied. The expectedVersion makes the read safely stale after any Run
+   * transition without forcing clients to infer state-machine rules.
+   */
+  async getAllowedActions(runId: string, host: HostContext): Promise<readonly AllowedRunAction[]> {
+    const run = await this.getOwned(runId, host)
+    const [steps, events] = await Promise.all([
+      this.dependencies.repository.listSteps(run.id),
+      this.dependencies.repository.listEvents(run.id),
+    ])
+    const actions = new Set<RunActionType>()
+    const add = (type: RunActionType) => actions.add(type)
+    const activeBlueprintStep = steps.find((step) => step.idempotencyKey === (run.revisionRound === 0
+      ? planningStepKey(run.id, run.planningAttempt ?? 0)
+      : revisionBlueprintStepKey(run.id, run.revisionRound)))
+    const hasActiveBlueprint = activeBlueprintStep?.status === 'COMPLETED'
+      && presentationBlueprintSchema.safeParse(activeBlueprintStep.output).success
+    const planningStep = steps.find((step) => step.idempotencyKey === planningStepKey(run.id, run.planningAttempt ?? 0))
+    const hasFailedPlanning = planningStep?.status === 'FAILED'
+    const deliveryStep = steps.find((step) => step.idempotencyKey === deliveryStepKey(run))
+    const targetRevisionRound = run.revisionRound + 1
+    const revisionPlan = revisionPlanSchema.safeParse(
+      steps.find((step) => step.idempotencyKey === revisionPlanStepKey(run.id, targetRevisionRound))?.output,
+    )
+    const hasRevisionPlan = revisionPlan.success && revisionPlan.data.revisionRound === targetRevisionRound
+
+    if (['EXECUTING', 'PAGE_REVIEW', 'DECK_REVIEW', 'AWAITING_REVISION_APPROVAL', 'REVISING'].includes(run.status)) {
+      add('PAUSE')
+    }
+    if (run.status === 'PAUSED' && run.resumeState !== null) add('RESUME')
+    if (!isTerminalStatus(run.status)) {
+      add('CANCEL')
+      add('ADD_BUDGET')
+    }
+    if (canTransition(run.status, 'PLANNING', run.resumeState)) add('REQUEST_BLUEPRINT_REVISION')
+
+    if (run.status === 'AWAITING_BLUEPRINT_APPROVAL'
+      && planningStep?.status === 'COMPLETED'
+      && presentationBlueprintSchema.safeParse(planningStep.output).success
+      && getPresentationModeStrategy(run.presentationMode ?? 'SLIDE_IMAGE_V2').executionAvailability === 'AVAILABLE') {
+      add('APPROVE_BLUEPRINT')
+    }
+
+    if (run.status === 'NEEDS_HUMAN' && hasFailedPlanning) {
+      if (isVisualDeckV4(run) || (run.planningAttempt ?? 0) < MAX_PLANNING_RETRIES) add('RETRY_PLANNING')
+      if ((run.planningAttempt ?? 0) < MAX_PLANNING_RETRIES) add('REPLAN')
+    }
+
+    if (run.status === 'NEEDS_HUMAN' && deliveryStep?.tool === 'deliver_presentation' && deliveryStep.status === 'FAILED') {
+      add('RETRY_DELIVERY')
+    }
+    if (run.status === 'FAILED') {
+      try {
+        if (await this.assertV4QualityFailureArtifactsAvailable(run.id, host, run.version)) add('RETRY_DELIVERY')
+      } catch {
+        // The public action surface is deliberately conservative when an
+        // artifact integrity check cannot prove quality-failure recovery.
+      }
+    }
+
+    if (run.status === 'AWAITING_REVISION_APPROVAL' && hasRevisionPlan) {
+      add('APPROVE_REVISION')
+      add('REJECT_REVISION')
+    }
+
+    if (run.status === 'NEEDS_HUMAN' && hasActiveBlueprint && run.revisionRound < run.maxRevisionRounds) {
+      add('SUBMIT_LIMITED_REVISION')
+    }
+
+    if (run.status === 'NEEDS_HUMAN' && hasActiveBlueprint) {
+      const openIssues = new Map<string, Extract<(typeof events)[number], { type: 'issue.detected' }>['payload']>()
+      for (const event of events) {
+        if (event.type === 'issue.detected') openIssues.set(event.payload.id, event.payload)
+        if (event.type === 'issue.resolved') openIssues.delete(event.payload.issueId)
+      }
+      const adminOnly = [...openIssues.values()].some((issue) => issue.severity === 'CRITICAL'
+        && (ADMIN_ONLY_CRITICAL_CATEGORIES.has(issue.category) || issue.repairDomain === 'KNOWLEDGE'))
+      const administrator = (host.role ?? 'USER') === 'ADMIN'
+      if (openIssues.size > 0 && (!isVisualDeckV4(run) || administrator) && (!adminOnly || administrator)) {
+        add('ACCEPT_WITH_OVERRIDE')
+      }
+    }
+
+    return allowedRunActionSchema.array().max(13).parse(
+      runActionTypeSchema.options.filter((type) => actions.has(type)).map((type) => ({
+        type,
+        expectedVersion: run.version,
+      })),
+    )
   }
 
   async act(runId: string, host: HostContext, request: unknown, idempotencyKey: string) {

@@ -1,14 +1,17 @@
 import { z } from 'zod'
-import { CONTRACT_VERSION, runSnapshotSchema } from './contracts'
+import { CONTRACT_VERSION, allowedRunActionSchema, runSnapshotSchema } from './contracts'
 import { publicDeliveryRecordSchema } from './presentation-contracts'
+import { publicBlueprintProjectionSchema } from './run-query-contracts'
+import { visualDeckV4GenerationPlanSchema } from './visual-deck-v4-generation-plan'
 
 export const runDetailSchema = runSnapshotSchema.safeExtend({
-  blueprint: runSnapshotSchema.shape.blueprint.unwrap(),
-  generationPlan: runSnapshotSchema.shape.generationPlan.unwrap(),
+  blueprint: publicBlueprintProjectionSchema.nullable(),
+  generationPlan: visualDeckV4GenerationPlanSchema.nullable(),
   deliveries: z.array(publicDeliveryRecordSchema).max(1),
   deliveryAvailability: runSnapshotSchema.shape.deliveryAvailability.unwrap(),
   issues: runSnapshotSchema.shape.issues.unwrap(),
   progress: runSnapshotSchema.shape.progress.unwrap(),
+  allowedActions: z.array(allowedRunActionSchema).max(13),
 }).superRefine((value, context) => {
   if (value.deliveryAvailability.state === 'UNAVAILABLE') {
     if (value.deliveries.length !== 0) {

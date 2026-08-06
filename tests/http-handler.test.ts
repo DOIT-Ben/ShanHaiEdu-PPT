@@ -6,6 +6,8 @@ import { AdminOperationsService } from '../src/core/admin-operations'
 import { AdminRevisionRoundsSettingsService } from '../src/core/admin-revision-rounds-settings'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { RunService } from '../src/core/run-service'
+import { planningStepKey } from '../src/core/planning-runner'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
 import { InMemoryPrincipalRateLimiter } from '../src/http/principal-rate-limiter'
@@ -191,6 +193,135 @@ describe('HTTP v1 handler', () => {
     expect(firstBody.data.leaseToken).toBeUndefined()
     expect(replay.status).toBe(200)
     expect((await replay.json() as { replayed: boolean }).replayed).toBe(true)
+  })
+
+  test('publishes authenticated capabilities, read-only plan and source states, and server-derived actions', async () => {
+    const { handle } = fixture()
+    const unauthenticated = await handle(new Request('http://ppt-agent.test/v1/capabilities'))
+    const capabilities = await handle(request('/v1/capabilities'))
+    const created = await createRun(handle, 'http-query-contracts-0001')
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    const detail = await handle(request(`/v1/runs/${runId}`))
+    const plan = await handle(request(`/v1/runs/${runId}/plan`))
+    const sources = await handle(request(`/v1/runs/${runId}/sources`))
+
+    expect(unauthenticated.status).toBe(401)
+    expect(capabilities.status).toBe(200)
+    expect(capabilities.headers.get('X-PPT-Agent-Contract-Version')).toBe(CONTRACT_VERSION)
+    expect(await capabilities.json()).toMatchObject({
+      schemaVersion: CONTRACT_VERSION,
+      requestId: expect.any(String),
+      data: {
+        visualDeckV4: {
+          slideCount: { minimum: 1, maximum: 50 },
+          imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+        },
+        quickDeckEvaluation: { available: false, isolatedFromRuns: true },
+      },
+    })
+    expect(await detail.json()).toMatchObject({
+      data: { blueprint: null, allowedActions: [{ type: 'CANCEL', expectedVersion: 0 }, { type: 'ADD_BUDGET', expectedVersion: 0 }] },
+    })
+    expect(await plan.json()).toMatchObject({ data: { state: 'NOT_READY', reason: 'V4_REQUIRED' } })
+    expect(await sources.json()).toMatchObject({ data: { state: 'NOT_READY', reason: 'BLUEPRINT_NOT_READY' } })
+  })
+
+  test('projects a ready one-page V4 plan and sources without exposing its worker prompt', async () => {
+    const { handle, repository } = fixture()
+    const source = {
+      kind: 'TEXT' as const,
+      name: '水循环教材.txt',
+      text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4),
+    }
+    const visualDeckV4 = {
+      instruction: '制作一张解释水循环核心关系的视觉演示页',
+      sourceMode: 'SOURCE_GROUNDED' as const,
+      deckOptions: {
+        deckType: 'PRESENTER_SLIDES' as const, language: 'zh-CN', length: { slideCount: 1 }, aspectRatio: '16:9' as const,
+        audience: '小学高年级学生', focus: '水循环的核心关系', styleHint: '清晰的自然科学信息图',
+      },
+    }
+    const created = await handle(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'http-v4-query-contracts-0001' },
+      body: JSON.stringify({
+        ...createBody,
+        source,
+        slideCount: 1,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4,
+      }),
+    }))
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    const blueprint = createVisualDeckV4Blueprint({
+      runId,
+      inputHash: 'v4-query-contracts',
+      source,
+      document: {
+        name: source.name,
+        sources: [{ id: 'source-water-cycle', name: source.name, kind: 'TEXT', status: 'READY' }],
+        chunks: [{ id: 'chunk-water-cycle', sourceId: 'source-water-cycle', text: source.text, sha256: 'a'.repeat(64) }],
+        isComplete: true,
+        missingRanges: [],
+      },
+      config: visualDeckV4,
+      slideCount: 1,
+      visualDirection: createBody.visualDirection,
+      createdAt: '2026-08-07T00:00:00.000Z',
+    })
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'AWAITING_BLUEPRINT_APPROVAL' })
+      transaction.putStep({
+        id: 'step-v4-query-blueprint', runId, idempotencyKey: planningStepKey(runId), inputHash: 'v4-query-contracts',
+        tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: null, output: blueprint,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const detail = await handle(request(`/v1/runs/${runId}`))
+    const plan = await handle(request(`/v1/runs/${runId}/plan`))
+    const sources = await handle(request(`/v1/runs/${runId}/sources`))
+    const detailBody = await detail.json() as { data: { blueprint: unknown; allowedActions: { type: string }[] } }
+
+    expect(detail.status).toBe(200)
+    expect(detailBody.data.allowedActions.map((action) => action.type)).toEqual(expect.arrayContaining([
+      'APPROVE_BLUEPRINT', 'REQUEST_BLUEPRINT_REVISION', 'CANCEL', 'ADD_BUDGET',
+    ]))
+    expect(JSON.stringify(detailBody.data.blueprint)).not.toContain('visualPrompt')
+    expect(JSON.stringify(detailBody.data.blueprint)).not.toContain('negativePrompt')
+    expect(await plan.json()).toMatchObject({
+      data: { state: 'AVAILABLE', plan: { slideCount: 1, aspectRatio: '16:9', pages: [{ pageNumber: 1 }] } },
+    })
+    expect(await sources.json()).toMatchObject({
+      data: {
+        state: 'AVAILABLE',
+        sources: [{ id: 'source-water-cycle', name: '水循环教材.txt' }],
+        pageReferences: [{ pageNumber: 1, sourceChunkIds: ['chunk-water-cycle'] }],
+      },
+    })
+
+    await repository.transact(runId, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 7 })
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-v4-knowledge', category: 'FACTUAL_RISK', severity: 'CRITICAL',
+          summary: '知识事实需要管理员确认。', slideIds: [`${runId}:slide:1`], sourceChunkIds: ['chunk-water-cycle'],
+          status: 'OPEN', repairDomain: 'KNOWLEDGE',
+        },
+      })
+    })
+    const userDetail = await handle(request(`/v1/runs/${runId}`))
+    const administratorDetail = await handle(request(`/v1/runs/${runId}`, { headers: { 'X-Test-Role': 'ADMIN' } }))
+    const userActions = (await userDetail.json() as { data: { allowedActions: { type: string }[] } }).data.allowedActions
+    const administratorActions = (await administratorDetail.json() as {
+      data: { allowedActions: { type: string; expectedVersion: number }[] }
+    }).data.allowedActions
+
+    expect(userActions.map((action) => action.type)).not.toContain('ACCEPT_WITH_OVERRIDE')
+    expect(administratorActions).toContainEqual({ type: 'ACCEPT_WITH_OVERRIDE', expectedVersion: 7 })
   })
 
   test('normalizes pending quality provenance until review finishes', async () => {

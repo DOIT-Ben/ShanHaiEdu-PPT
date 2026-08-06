@@ -45,6 +45,15 @@ import {
   runDetailEnvelopeSchema,
   runDetailSchema,
 } from '../run-detail-contracts'
+import {
+  capabilitiesEnvelopeSchema,
+  DEFAULT_PUBLIC_CAPABILITIES,
+  publicBlueprintProjection,
+  publicRunSources,
+  runPlanEnvelopeSchema,
+  runSourcesEnvelopeSchema,
+  type PublicCapabilities,
+} from '../run-query-contracts'
 import { visualDeckV4GenerationPlan } from '../visual-deck-v4-generation-plan'
 import type { PrincipalRateLimiterPort, PrincipalRateLimitScope } from './principal-rate-limiter'
 import { DEFAULT_EVENT_BATCH_BYTES, DEFAULT_EVENT_BATCH_LIMIT, RunEventBroker } from './run-event-broker'
@@ -76,6 +85,7 @@ type HandlerDependencies = Readonly<{
   revisionRoundsSettings?: AdminRevisionRoundsSettingsPort
   rateLimiter?: PrincipalRateLimiterPort
   presentationJobV2?: PresentationJobV2HandlerDependencies
+  capabilities?: PublicCapabilities
 }>
 
 async function publicRunError(repository: AgentRepository, run: RunRecord): Promise<PublicError | null> {
@@ -493,10 +503,17 @@ async function projectDelivery(
   }
 }
 
-async function runDetail(repository: AgentRepository, artifacts: ArtifactPort, run: RunRecord) {
-  const [snapshot, generationBatch] = await Promise.all([
+async function runDetail(
+  repository: AgentRepository,
+  artifacts: ArtifactPort,
+  runs: RunService,
+  run: RunRecord,
+  host: HostContext,
+) {
+  const [snapshot, generationBatch, allowedActions] = await Promise.all([
     repository.getRunEventSnapshot(run.id),
     getGenerationBatch(repository, run),
+    runs.getAllowedActions(run.id, host),
   ])
   const blueprint = await getActiveBlueprint(repository, run.id, run.revisionRound).catch(() => null)
   const deliveryProjection = await projectDelivery(repository, artifacts, run, blueprint)
@@ -505,13 +522,14 @@ async function runDetail(repository: AgentRepository, artifacts: ArtifactPort, r
     : null
   return runDetailSchema.parse({
     ...(await publicRun(repository, run)),
-    blueprint,
+    blueprint: blueprint ? publicBlueprintProjection(blueprint, run.presentationMode ?? 'SLIDE_IMAGE_V2') : null,
     generationPlan,
     ...(generationBatch ? { generationBatch } : {}),
     deliveries: deliveryProjection.deliveries,
     deliveryAvailability: deliveryProjection.deliveryAvailability,
     issues: snapshot.openIssues,
     progress: snapshot.progress,
+    allowedActions,
   })
 }
 
@@ -730,6 +748,14 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         })
       }
 
+      if (parts.length === 2 && parts[1] === 'capabilities' && request.method === 'GET') {
+        return json(capabilitiesEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: dependencies.capabilities ?? DEFAULT_PUBLIC_CAPABILITIES,
+        }))
+      }
+
       if (parts[1] !== 'runs') return errorResponse(404, 'NOT_FOUND', 'resource was not found', requestId)
 
       if (parts.length === 2 && request.method === 'POST') {
@@ -743,7 +769,7 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
           return errorResponse(403, 'HOST_CONTEXT_MISMATCH', 'request host does not match authenticated principal', requestId)
         }
         const created = await dependencies.runs.create({ ...body, host: { ...body.host, ...host } }, idempotencyKey)
-        const detail = await runDetail(dependencies.repository, dependencies.artifacts, created.run)
+        const detail = await runDetail(dependencies.repository, dependencies.artifacts, dependencies.runs, created.run, host)
         return json(createRunEnvelopeSchema.parse({
           schemaVersion: CONTRACT_VERSION,
           requestId,
@@ -780,7 +806,28 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
         return json(runDetailEnvelopeSchema.parse({
           schemaVersion: CONTRACT_VERSION,
           requestId,
-          data: await runDetail(dependencies.repository, dependencies.artifacts, run),
+          data: await runDetail(dependencies.repository, dependencies.artifacts, dependencies.runs, run, host),
+        }))
+      }
+
+      if (parts.length === 4 && parts[3] === 'plan' && request.method === 'GET') {
+        const run = await dependencies.runs.getOwned(runId, host)
+        const blueprint = await getActiveBlueprint(dependencies.repository, run.id, run.revisionRound).catch(() => null)
+        const data = run.presentationMode !== 'VISUAL_DECK_V4'
+          ? { state: 'NOT_READY' as const, reason: 'V4_REQUIRED' as const }
+          : blueprint?.visualDeckV4Proposal
+            ? { state: 'AVAILABLE' as const, plan: visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal) }
+            : { state: 'NOT_READY' as const, reason: 'V4_PLAN_NOT_READY' as const }
+        return json(runPlanEnvelopeSchema.parse({ schemaVersion: CONTRACT_VERSION, requestId, data }))
+      }
+
+      if (parts.length === 4 && parts[3] === 'sources' && request.method === 'GET') {
+        const run = await dependencies.runs.getOwned(runId, host)
+        const blueprint = await getActiveBlueprint(dependencies.repository, run.id, run.revisionRound).catch(() => null)
+        return json(runSourcesEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: publicRunSources(blueprint),
         }))
       }
 

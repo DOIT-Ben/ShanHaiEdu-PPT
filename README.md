@@ -67,6 +67,8 @@ bun run check
 | `PPT_AGENT_REVIEW_CONCURRENCY` | 同时执行的页面视觉审查数，默认 `1`，最大 `8` |
 | `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6-terra` |
+| `PPT_AGENT_V4_INITIAL_IMAGE_MODELS` | `GET /v1/capabilities` 公布的初始 V4 图片模型清单，逗号分隔，默认 `gemini-3-pro-image-preview` |
+| `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | V4 局部图片返修模型，默认 `gpt-image-2` |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
 | `MODEL_GATEWAY_BASE_URL` | 文本、视觉和图片模型共用的统一网关 API 根地址 |
 | `MODEL_GATEWAY_TEXT_KEY` | 文本与视觉模型的网关业务 Key；启用兜底时其模型白名单必须同时包含主模型和兜底模型 |

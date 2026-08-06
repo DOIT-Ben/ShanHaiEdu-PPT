@@ -67,6 +67,7 @@ const completedRunDetail = {
   error: null,
   blueprint: null,
   generationPlan: null,
+  allowedActions: [],
   deliveries: [publicDelivery],
   deliveryAvailability: {
     state: 'AVAILABLE' as const,

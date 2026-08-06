@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
+  resolvePublicV4CapabilitiesConfig,
 } from '../src/runtime/main-server-config'
 
 describe('main PPT Agent server configuration', () => {
@@ -61,6 +62,37 @@ describe('main PPT Agent server configuration', () => {
     expect(() => resolveGatewayCoursewareModelsConfig({
       PPT_AGENT_FALLBACK_MODEL_ENABLED: 'sometimes',
     })).toThrow('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
+  })
+
+  test('derives public model names from unified-gateway configuration without route or credential fields', () => {
+    const env = {
+      MODEL_GATEWAY_BASE_URL: 'https://newapi.doitbenai.cloud/v1',
+      MODEL_GATEWAY_TEXT_KEY: 'gateway-text-key-0001',
+      PPT_AGENT_TEXT_MODEL: 'gpt-5.6-terra',
+      PPT_AGENT_VISION_MODEL: 'deepseek-v3.2',
+      PPT_AGENT_FALLBACK_MODEL_ENABLED: 'true',
+      PPT_AGENT_FALLBACK_TEXT_MODEL: 'MiniMax-M3',
+      PPT_AGENT_FALLBACK_VISION_MODEL: 'MiniMax-M3',
+      PPT_AGENT_V4_INITIAL_IMAGE_MODELS: 'gemini-3-pro-image-preview, gpt-image-2',
+    }
+    const capabilities = resolvePublicV4CapabilitiesConfig(
+      env,
+      resolveGatewayCoursewareModelsConfig(env),
+      'gpt-image-2',
+    )
+
+    expect(capabilities).toEqual({
+      textModels: ['gpt-5.6-terra', 'MiniMax-M3'],
+      visionModels: ['deepseek-v3.2', 'MiniMax-M3'],
+      imageModels: ['gemini-3-pro-image-preview', 'gpt-image-2'],
+      imageEditModels: ['gpt-image-2'],
+    })
+    expect(JSON.stringify(capabilities)).not.toContain('newapi.doitbenai.cloud')
+    expect(JSON.stringify(capabilities)).not.toContain('gateway-text-key-0001')
+    expect(() => resolvePublicV4CapabilitiesConfig({
+      ...env,
+      PPT_AGENT_V4_INITIAL_IMAGE_MODELS: 'gemini-3-pro-image-preview,gemini-3-pro-image-preview',
+    }, resolveGatewayCoursewareModelsConfig(env), 'gpt-image-2')).toThrow('PPT_AGENT_V4_INITIAL_IMAGE_MODELS_INVALID')
   })
 
   test('documents only unified-gateway credentials for the MiniMax fallback', () => {

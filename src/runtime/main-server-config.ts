@@ -52,3 +52,46 @@ export function resolveGatewayCoursewareModelsConfig(env: Environment = process.
     } : {}),
   }
 }
+
+function configuredModelList(value: string | undefined, fallback: readonly string[], name: string) {
+  const models = (value?.trim() ? value : fallback.join(','))
+    .split(',')
+    .map((model) => model.trim())
+  if (models.length < 1 || models.length > 20
+    || models.some((model) => model.length < 1 || model.length > 120)
+    || new Set(models).size !== models.length) {
+    throw new Error(`${name}_INVALID`)
+  }
+  return models
+}
+
+/** Public model names are tenant-safe capability data, never credentials or route details. */
+export function resolvePublicV4CapabilitiesConfig(
+  env: Environment,
+  coursewareModels: ReturnType<typeof resolveGatewayCoursewareModelsConfig>,
+  revisionImageModel: string,
+) {
+  const unique = (models: readonly string[]) => [...new Set(models)]
+  const textModels = unique([
+    coursewareModels.primary.textModel,
+    ...(coursewareModels.fallback ? [coursewareModels.fallback.textModel] : []),
+  ])
+  const visionModels = unique([
+    coursewareModels.primary.visionModel,
+    ...(coursewareModels.fallback ? [coursewareModels.fallback.visionModel] : []),
+  ])
+  return {
+    textModels: configuredModelList(textModels.join(','), ['gpt-5.6-terra'], 'PPT_AGENT_CAPABILITY_TEXT_MODELS'),
+    visionModels: configuredModelList(visionModels.join(','), ['gpt-5.6-terra'], 'PPT_AGENT_CAPABILITY_VISION_MODELS'),
+    imageModels: configuredModelList(
+      env.PPT_AGENT_V4_INITIAL_IMAGE_MODELS,
+      ['gemini-3-pro-image-preview'],
+      'PPT_AGENT_V4_INITIAL_IMAGE_MODELS',
+    ),
+    imageEditModels: configuredModelList(
+      revisionImageModel,
+      ['gpt-image-2'],
+      'PPT_AGENT_V4_REVISION_IMAGE_MODEL',
+    ),
+  }
+}

@@ -31,9 +31,11 @@ import { createPresentationJobV2ProviderFromEnv } from './runtime/presentation-j
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
+import { createPublicCapabilities } from './run-query-contracts'
 import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
+  resolvePublicV4CapabilitiesConfig,
 } from './runtime/main-server-config'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
@@ -149,6 +151,16 @@ const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000
 const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
 const runActionRateLimitPerMinute = boundedInteger('PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE', 60, 1, 10_000)
 if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
+const gatewayCoursewareModels = runtimeMode === 'gateway'
+  ? resolveGatewayCoursewareModelsConfig(process.env)
+  : null
+const publicCapabilities = gatewayCoursewareModels
+  ? createPublicCapabilities(resolvePublicV4CapabilitiesConfig(
+      process.env,
+      gatewayCoursewareModels,
+      revisionImageModel!,
+    ))
+  : undefined
 function loopbackProxy(value: string | undefined) {
   if (!value) return undefined
   const url = new URL(value)
@@ -189,21 +201,20 @@ const runtime = runtimeMode === 'gateway'
             fallback: hostBudget,
           })
         : hostBudget
-      const coursewareModels = resolveGatewayCoursewareModelsConfig(process.env)
       const primaryModel = new GatewayCoursewareModel({
-        ...coursewareModels.primary,
+        ...gatewayCoursewareModels!.primary,
         artifacts,
-        profile: gatewayCoursewareModelProfile(coursewareModels.primary),
+        profile: gatewayCoursewareModelProfile(gatewayCoursewareModels!.primary),
         visualDeckV4Transport,
       })
-      const model = coursewareModels.fallback
+      const model = gatewayCoursewareModels!.fallback
         ? new FallbackCoursewareModel({
             primary: primaryModel,
             fallback: new GatewayCoursewareModel({
-              ...coursewareModels.fallback,
+              ...gatewayCoursewareModels!.fallback,
               artifacts,
               profile: 'MINIMAX_M3',
-              visualDeckV4Transport: coursewareModels.fallback.transport,
+              visualDeckV4Transport: gatewayCoursewareModels!.fallback.transport,
             }),
           })
         : primaryModel
@@ -242,6 +253,7 @@ const runtime = runtimeMode === 'gateway'
         runLeaseTtlMs,
         createRunRateLimitPerMinute,
         runActionRateLimitPerMinute,
+        ...(publicCapabilities ? { capabilities: publicCapabilities } : {}),
       })
     })()
   : createMockRuntime({

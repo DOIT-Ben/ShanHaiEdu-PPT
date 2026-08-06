@@ -283,6 +283,12 @@ async function runQualityPolicyScenario(scenario: QualityPolicyScenario) {
   const runId = (await created.json() as { data: { id: string } }).data.id
 
   await runtime.tick()
+  expect((await repository.listSteps(runId))
+    .filter((step) => ['compile_v4_creative_manuscript', 'review_v4_manuscript'].includes(step.tool))
+    .map((step) => ({ tool: step.tool, status: step.status }))).toEqual([
+      { tool: 'compile_v4_creative_manuscript', status: 'COMPLETED' },
+      { tool: 'review_v4_manuscript', status: 'COMPLETED' },
+    ])
   await runtime.tick()
   expect(await repository.getRun(runId)).toMatchObject({
     status: 'PAGE_REVIEW',
@@ -462,7 +468,7 @@ describe('mock runtime', () => {
       .toMatchObject({ status: 'COMPLETED', output: { bill: { status: 'SETTLED' } } })
   })
 
-  test('forwards structured-model metrics into a failed V4 stage audit without raw content', async () => {
+  test('forwards structured-model metrics for the bounded chain-4 slot completion without raw content', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
     const clock = new FixedClock()
@@ -535,22 +541,15 @@ describe('mock runtime', () => {
     await runtime.tick()
 
     const audit = (await repository.listSteps(runId)).find((step) =>
-      step.tool === 'audit_v4_planning_stage' && step.idempotencyKey.includes(':v4:source-spec:'))
-    expect(metricsTaken).toBe(1)
+      step.tool === 'audit_v4_planning_stage' && step.idempotencyKey.includes(':v4:creative-manuscript:'))
+    expect(metricsTaken).toBe(2)
     expect(audit).toMatchObject({
       output: {
-        attempts: [expect.objectContaining({
-          outcome: 'FAILED',
-          requestId: 'request-runtime-metrics',
-          status: 200,
-          responseAccepted: true,
-          sseEventCount: 4_219,
-          lastActivityAt: '2026-08-03T00:00:01.000Z',
-          durationMs: 12_345,
-          inputTokens: 17_996,
-          outputTokens: 4_781,
-          totalTokens: 22_777,
-        })],
+        attempts: Array.from({ length: 2 }, () => expect.objectContaining({
+          outcome: 'FAILED', requestId: 'request-runtime-metrics', status: 200, responseAccepted: true,
+          sseEventCount: 4_219, lastActivityAt: '2026-08-03T00:00:01.000Z', durationMs: 12_345,
+          inputTokens: 17_996, outputTokens: 4_781, totalTokens: 22_777,
+        })),
       },
     })
     const serialized = JSON.stringify(audit?.output)
@@ -687,12 +686,10 @@ describe('mock runtime', () => {
     })).toThrow('IMAGE_CONCURRENCY_INVALID')
   })
 
-  test('delivers a notebooklm-style v4 pptx after an invalid quality reflection is skipped', async () => {
+  test('delivers a notebooklm-style v4 pptx through chain-4 semantic manuscripts', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
-    const runtime = createMockRuntime({
-      repository, artifacts, apiToken: token, reflectionFailureMode: 'INVALID_SLIDE_CRITIC',
-    })
+    const runtime = createMockRuntime({ repository, artifacts, apiToken: token })
     const created = await runtime.handler(request('/v1/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-create-v4-chain-0001' },
@@ -734,7 +731,7 @@ describe('mock runtime', () => {
       }
     } }
     const runId = createdPayload.data.id
-    expect(runSnapshotSchema.parse(createdPayload.data)).toMatchObject({
+    expect(runDetailSchema.parse(createdPayload.data)).toMatchObject({
       schemaVersion: CONTRACT_VERSION,
       id: runId,
       status: 'PLANNING',
@@ -743,7 +740,7 @@ describe('mock runtime', () => {
     expect(createdPayload.data.release).toEqual({
       softwareVersion: PPT_AGENT_SOFTWARE_VERSION,
       presentationMode: 'VISUAL_DECK_V4',
-      compilerVersion: 'visual-deck-v4-chain-3',
+      compilerVersion: 'visual-deck-v4-chain-4',
       contractVersion: PPT_AGENT_CONTRACT_VERSION,
       gitSha: 'development',
       releaseId: 'development',
@@ -760,7 +757,7 @@ describe('mock runtime', () => {
       status: string
       version: number
       release: { softwareVersion: string; presentationMode: string; contractVersion: string }
-      blueprint?: { visualDeckV4Proposal?: { slideBriefs: unknown[] } }
+      blueprint?: { slides: unknown[] }
       generationPlan?: { title: string; slideCount: number; pages: unknown[]; output: { editable: boolean } }
       deliveryAvailability?: unknown
     } }
@@ -778,7 +775,8 @@ describe('mock runtime', () => {
       presentationMode: 'VISUAL_DECK_V4',
       contractVersion: PPT_AGENT_CONTRACT_VERSION,
     })
-    expect(planned.data.blueprint?.visualDeckV4Proposal?.slideBriefs).toHaveLength(3)
+    expect(planned.data.blueprint?.slides).toHaveLength(3)
+    expect(JSON.stringify(planned.data.blueprint)).not.toContain('visualPrompt')
     expect(planned.data.generationPlan).toMatchObject({ slideCount: 3, output: { editable: false } })
     expect(planned.data.generationPlan?.pages).toHaveLength(3)
     const prematureDeliveryId = `${runId}:delivery:r0`
@@ -790,17 +788,19 @@ describe('mock runtime', () => {
       schemaVersion: CONTRACT_VERSION,
       error: { code: 'DELIVERY_NOT_AVAILABLE', details: { reason: 'RUN_NOT_COMPLETED' } },
     })
-    expect((await repository.listSteps(runId)).find((step) =>
-      step.tool === 'record_v4_slide_briefs_reflection')?.output).toMatchObject({
-        status: 'REFLECTION_SKIPPED', reason: 'CONTRACT_INVALID',
-        criticCallCount: 1, optimizerCallCount: 0,
-      })
+    const manuscriptSteps = await repository.listSteps(runId)
+    const creativeManuscript = manuscriptSteps.find((step) => step.tool === 'compile_v4_creative_manuscript')
+    const reviewManuscript = manuscriptSteps.find((step) => step.tool === 'review_v4_manuscript')
+    expect(creativeManuscript).toMatchObject({ status: 'COMPLETED' })
+    expect(reviewManuscript).toMatchObject({ status: 'COMPLETED' })
+    expect(creativeManuscript?.output).not.toHaveProperty('slides.0.pageNumber')
+    expect(reviewManuscript?.output).not.toHaveProperty('slides.0.sourceChunkId')
 
     for (let index = 0; index < 4; index += 1) await runtime.tick()
 
     const completedRun = (await repository.getRun(runId))!
     expect(completedRun).toMatchObject({
-      status: 'COMPLETED', presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 3, qualityScore: 90,
+      status: 'COMPLETED', presentationMode: 'VISUAL_DECK_V4', committedBudgetUnits: 0, qualityScore: 90,
       qualityDisposition: 'REVIEW_PASSED',
     })
     const events = await repository.listEvents(runId)
@@ -826,7 +826,7 @@ describe('mock runtime', () => {
     const generationProgress = events.find((event) => event.type === 'generation.progress')
     expect(generationProgress?.payload).toMatchObject({
       presentationMode: 'VISUAL_DECK_V4', stage: 'GENERATION', completed: 3, total: 3,
-      pageNumbers: [1, 2, 3], budgetUnits: 3, committedBudgetUnits: 3,
+      pageNumbers: [1, 2, 3], budgetUnits: 3, committedBudgetUnits: 0,
     })
     const terminal = events.at(-1)
     expect(terminal).toMatchObject({
@@ -852,11 +852,14 @@ describe('mock runtime', () => {
     expect(reviewSteps).toHaveLength(3)
     const completedSteps = await repository.listSteps(runId)
     expect(completedSteps.filter((step) => step.tool === 'generate_image_batch')).toEqual([
-      expect.objectContaining({ status: 'COMPLETED', budgetUnits: 3 }),
+      expect.objectContaining({ status: 'COMPLETED', budgetUnits: 0 }),
     ])
     const imageSteps = completedSteps.filter((step) => step.tool === 'generate_slide_image')
     expect(imageSteps).toHaveLength(3)
     expect(new Set(imageSteps.map((step) => step.idempotencyKey)).size).toBe(3)
+    expect(imageSteps.every((step) => step.budgetUnits === 0
+      && step.externalOperationId === null
+      && (step.output as { renderStrategy?: string }).renderStrategy === 'CONTROLLED_RASTER')).toBe(true)
     const delivery = (await repository.listDeliveries(runId))[0]!
     const deliveredBlueprint = await getActiveBlueprint(repository, runId, completedRun.revisionRound)
     expect(delivery).toMatchObject({
