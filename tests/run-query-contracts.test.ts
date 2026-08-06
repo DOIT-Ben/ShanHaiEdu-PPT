@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { presentationBlueprintSchema } from '../src/presentation-contracts'
 import {
   DEFAULT_PUBLIC_CAPABILITIES,
+  createPublicCapabilities,
   publicBlueprintProjection,
   publicRunSources,
 } from '../src/run-query-contracts'
@@ -73,7 +74,7 @@ describe('public run query contracts', () => {
       visualDeckV4: {
         slideCount: { minimum: 1, maximum: 50 },
         aspectRatios: ['16:9'],
-        models: { image: ['gemini-3-pro-image-preview'], imageEdit: ['gpt-image-2'] },
+        models: { image: ['gemini-3-pro-image-preview'], imageEdit: [] },
         imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
         delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },
       },
@@ -81,5 +82,6 @@ describe('public run query contracts', () => {
     })
     expect(serialized).not.toContain('baseUrl')
     expect(serialized).not.toContain('apiKey')
+    expect(createPublicCapabilities({ imageEditModels: [] }).visualDeckV4.models.imageEdit).toEqual([])
   })
 })

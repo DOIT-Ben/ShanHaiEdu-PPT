@@ -181,6 +181,8 @@ export const runSourcesEnvelopeSchema = z.object({
 
 const uniqueModelListSchema = z.array(modelNameSchema).min(1).max(20)
   .refine((models) => new Set(models).size === models.length, 'models must be unique')
+const optionalUniqueModelListSchema = z.array(modelNameSchema).max(20)
+  .refine((models) => new Set(models).size === models.length, 'models must be unique')
 
 export const publicCapabilitiesSchema = z.object({
   visualDeckV4: z.object({
@@ -192,7 +194,7 @@ export const publicCapabilitiesSchema = z.object({
       text: uniqueModelListSchema,
       vision: uniqueModelListSchema,
       image: uniqueModelListSchema,
-      imageEdit: uniqueModelListSchema,
+      imageEdit: optionalUniqueModelListSchema,
     }).strict(),
     imageGeneration: z.object({
       asynchronous: z.literal(true),
@@ -230,7 +232,7 @@ export function createPublicCapabilities(input: Readonly<{
         text: input.textModels ?? ['gpt-5.6-terra'],
         vision: input.visionModels ?? ['gpt-5.6-terra'],
         image: input.imageModels ?? ['gemini-3-pro-image-preview'],
-        imageEdit: input.imageEditModels ?? ['gpt-image-2'],
+        imageEdit: input.imageEditModels ?? [],
       },
       imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
       delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },

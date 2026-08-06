@@ -39,6 +39,7 @@ import {
   resolveMainServerConfig,
   resolvePublicV4CapabilitiesConfig,
   resolveQuickDeckEvaluationConfig,
+  resolveV4RevisionImageModel,
 } from './runtime/main-server-config'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
@@ -80,8 +81,7 @@ if (usageV2Runtime.requiresUsageV2Runtime && tenantId !== 'frameflow') {
 if (usageV2Runtime.requiresUsageV2Runtime && runtimeMode !== 'gateway') {
   throw new Error('USAGE_V2_GATEWAY_RUNTIME_REQUIRED')
 }
-const revisionImageModel = process.env.PPT_AGENT_V4_REVISION_IMAGE_MODEL?.trim()
-if (runtimeMode === 'gateway' && !revisionImageModel) throw new Error('PPT_AGENT_V4_REVISION_IMAGE_MODEL_REQUIRED')
+const revisionImageModel = resolveV4RevisionImageModel(process.env)
 if (usageV2Runtime.providerBillingCatalog && revisionImageModel) {
   usageV2Runtime.providerBillingCatalog.snapshot({
     model: revisionImageModel,
@@ -166,7 +166,7 @@ const publicV4CapabilitiesConfig = gatewayCoursewareModels
   ? resolvePublicV4CapabilitiesConfig(
       process.env,
       gatewayCoursewareModels,
-      revisionImageModel!,
+      revisionImageModel,
     )
   : null
 const quickDeckEvaluationConfig = quickDeckEvaluationApiToken
@@ -315,7 +315,7 @@ const runtime = runtimeMode === 'gateway'
         stepSlaMs,
         workerConcurrency,
         imageConcurrency,
-        revisionImageModel: revisionImageModel!,
+        revisionImageModel,
         reviewConcurrency,
         runLeaseTtlMs,
         createRunRateLimitPerMinute,
@@ -328,7 +328,7 @@ const runtime = runtimeMode === 'gateway'
       controlledRaster,
       ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
-      revisionImageModel: revisionImageModel || 'gpt-image-2',
+      revisionImageModel,
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
       budget: presentationJobV2Budget
         ? new TenantRoutingBudgetPort({

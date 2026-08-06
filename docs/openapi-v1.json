@@ -1060,7 +1060,7 @@
                 "properties": {
                   "type": { "const": "run.failed" },
                   "payload": {
-                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID", "USAGE_V2_FINALIZATION_REJECTED"] }, "error": { "$ref": "#/components/schemas/PublicError" }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
+                    "allOf": [{ "$ref": "#/components/schemas/V4LifecyclePayload" }, { "required": ["errorCode"], "properties": { "stage": { "const": "RUN" }, "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "IMAGE_EDIT_UNAVAILABLE", "TECHNICAL_CONTRACT_INVALID", "USAGE_V2_FINALIZATION_REJECTED"] }, "error": { "$ref": "#/components/schemas/PublicError" }, "terminalAccounting": { "$ref": "#/components/schemas/TerminalAccounting" } } }],
                     "unevaluatedProperties": false
                   }
                 }
@@ -1746,7 +1746,7 @@
         "additionalProperties": false,
         "required": ["errorCode", "reason", "requestedAt"],
         "properties": {
-          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "TECHNICAL_CONTRACT_INVALID", "USAGE_V2_FINALIZATION_REJECTED"] },
+          "errorCode": { "enum": ["WORKER_FATAL", "QUALITY_REMEDIATION_EXHAUSTED", "QUALITY_ISSUE_STATE_INCONSISTENT", "TECHNICAL_RECOVERY_EXHAUSTED", "TECHNICAL_CONFIGURATION_REQUIRED", "IMAGE_EDIT_UNAVAILABLE", "TECHNICAL_CONTRACT_INVALID", "USAGE_V2_FINALIZATION_REJECTED"] },
           "reason": { "enum": ["BUDGET_INSUFFICIENT", "PROVIDER_TEMPORARILY_UNAVAILABLE", "REVISION_LIMIT_REACHED", "USER_CONFIRMATION_REQUIRED", "PLANNING_FAILED", "PAGE_REVIEW_REJECTED", "PAGE_REVIEW_FAILED", "DECK_REVIEW_REJECTED", "DECK_REVIEW_FAILED", "REVISION_FAILED", "REVISION_REJECTED_BY_USER", "DELIVERY_FAILED", "INTERNAL_FAILURE", "PAUSED_BY_USER", "CANCELLED_BY_USER"] },
           "category": { "$ref": "#/components/schemas/PublicErrorCategory" },
           "requestedAt": { "type": "string", "format": "date-time" }
@@ -2344,7 +2344,7 @@
                   "text": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
                   "vision": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
                   "image": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
-                  "imageEdit": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } }
+                  "imageEdit": { "type": "array", "minItems": 0, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } }
                 }
               },
               "imageGeneration": { "type": "object", "additionalProperties": false, "required": ["asynchronous", "protocol", "validatesActualPixels"], "properties": { "asynchronous": { "const": true }, "protocol": { "const": "IMAGE_TASK" }, "validatesActualPixels": { "const": true } } },

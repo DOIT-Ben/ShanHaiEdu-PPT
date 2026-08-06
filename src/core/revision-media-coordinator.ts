@@ -97,6 +97,17 @@ type RevisionTarget = Readonly<{
   renderStrategy?: V4RenderStrategy
 }>
 
+type RevisionRoute = Readonly<{
+  model: string
+  operationMode: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
+}>
+
+class V4ImageEditUnavailableError extends Error {
+  constructor(readonly total: number) {
+    super('V4_IMAGE_EDIT_UNAVAILABLE')
+  }
+}
+
 function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefined) {
   return isVisualDeckV4(run)
     && step?.status === 'FAILED'
@@ -161,14 +172,15 @@ export class RevisionMediaCoordinator {
     artifacts: ArtifactPort
     controlledRaster?: ControlledRasterPort
     clock: ClockPort
-    revisionImageModel: string
+    revisionImageModel: string | null
     imageConcurrency?: number
   }>) {
     this.imageConcurrency = dependencies.imageConcurrency ?? 50
     if (!Number.isSafeInteger(this.imageConcurrency) || this.imageConcurrency < 1 || this.imageConcurrency > 50) {
       throw new Error('IMAGE_CONCURRENCY_INVALID')
     }
-    if (!dependencies.revisionImageModel.trim() || dependencies.revisionImageModel.length > 120) {
+    if (dependencies.revisionImageModel !== null
+      && (!dependencies.revisionImageModel.trim() || dependencies.revisionImageModel.length > 120)) {
       throw new Error('REVISION_IMAGE_MODEL_INVALID')
     }
   }
@@ -178,7 +190,15 @@ export class RevisionMediaCoordinator {
     const run = await this.requireRun(runId)
     if (run.status === 'PAUSED' || run.status === 'NEEDS_HUMAN' || run.status === 'RECOVERING') return this.summary(run)
     if (run.status !== 'REVISING') throw new Error('RUN_NOT_REVISING')
-    const targets = await this.targets(run)
+    let targets: readonly RevisionTarget[]
+    try {
+      targets = await this.targets(run)
+    } catch (error) {
+      if (error instanceof V4ImageEditUnavailableError) {
+        return this.failV4ImageEditUnavailable(run, error.total)
+      }
+      throw error
+    }
     if (targets.length === 0) throw new Error('REVISION_MEDIA_NOT_REQUIRED')
     const steps = await this.currentSteps(run, targets)
     const stepsByKey = new Map(steps.map((step) => [step.idempotencyKey, step]))
@@ -308,6 +328,9 @@ export class RevisionMediaCoordinator {
 
   async refresh(runId: string): Promise<RevisionMediaResult> {
     const run = await this.requireRun(runId)
+    if (['FAILED', 'CANCELLED', 'COMPLETED', 'RECOVERING'].includes(run.status)) {
+      return { status: run.status, completed: 0, submitted: 0, total: 0 }
+    }
     const targets = await this.targets(run)
     const initialSteps = await this.currentSteps(run, targets)
     const initialFailure = initialSteps.find((step) => isRevisionMediaFailure(run, step))
@@ -498,12 +521,18 @@ export class RevisionMediaCoordinator {
         v4RenderStrategies.set(pageNumber, resolved)
       }
     }
-    let revisionRoute = blueprint.renderMode === 'VISUAL_DECK_V4'
+    let revisionRoute: RevisionRoute | null = blueprint.renderMode === 'VISUAL_DECK_V4'
       ? this.persistedRevisionRoute(run, steps)
       : { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+    const requiresProviderRevision = pageEntries.some(([pageNumber]) =>
+      blueprint.renderMode !== 'VISUAL_DECK_V4'
+        || v4RenderStrategies.get(pageNumber)?.kind !== 'CONTROLLED_RASTER')
+    if (revisionRoute === null && requiresProviderRevision) {
+      throw new V4ImageEditUnavailableError(pageEntries.length)
+    }
     const v4EditSources = new Map<number, Awaited<ReturnType<RevisionMediaCoordinator['controlledSource']>>>()
     if (blueprint.renderMode === 'VISUAL_DECK_V4'
-      && revisionRoute.operationMode === 'IMAGE_EDIT'
+      && revisionRoute?.operationMode === 'IMAGE_EDIT'
       && !this.hasPersistedV4RevisionRoute(run, steps)) {
       const requirements = blueprintImageRequirements(run, blueprint)
       for (const pageNumber of byPage.keys()) {
@@ -519,6 +548,10 @@ export class RevisionMediaCoordinator {
         // An image edit inherits its source frame. Rebuild the complete planned set instead of cropping it.
         revisionRoute = { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
       }
+    }
+    const targetRevisionRoute: RevisionRoute = revisionRoute ?? {
+      model: run.imageModel,
+      operationMode: 'TEXT_TO_IMAGE',
     }
     return Promise.all(pageEntries.map(async ([pageNumber, instructions]) => {
       const slide = blueprint.slides[pageNumber - 1]
@@ -553,7 +586,7 @@ export class RevisionMediaCoordinator {
             renderStrategy,
           }
         }
-        if (revisionRoute.operationMode === 'TEXT_TO_IMAGE') {
+        if (targetRevisionRoute.operationMode === 'TEXT_TO_IMAGE') {
           return {
             pageNumber,
             elementId: null,
@@ -566,7 +599,7 @@ export class RevisionMediaCoordinator {
             negativePrompt: VISUAL_DECK_V4_NEGATIVE_PROMPT,
             aspectRatio: '16:9' as const,
             backgroundMode: 'OPAQUE' as const,
-            model: revisionRoute.model,
+            model: targetRevisionRoute.model,
             operationMode: 'TEXT_TO_IMAGE' as const,
           }
         }
@@ -599,7 +632,7 @@ export class RevisionMediaCoordinator {
           const repairContractHash = v4RepairContractHash(repairContract)
           if (persistedOutput?.repairContractHash !== repairContractHash
             || v4RepairImageKey(repairContract, repairContractHash) !== existing[0]!.idempotencyKey
-            || repairContract.editModel !== revisionRoute.model
+            || repairContract.editModel !== targetRevisionRoute.model
             || repairContract.sourceArtifact.artifactId !== sourceArtifactId
             || repairContract.sourceArtifact.sha256 !== source.sha256
             || repairContract.sourceArtifact.mimeType !== source.mimeType
@@ -624,7 +657,7 @@ export class RevisionMediaCoordinator {
             width: source.width,
             height: source.height,
           },
-          editModel: revisionRoute.model,
+          editModel: targetRevisionRoute.model,
         })
         const repairContractHash = v4RepairContractHash(repairContract)
         return this.v4Target(run, pageNumber, repairContract, repairContractHash, source)
@@ -657,7 +690,7 @@ export class RevisionMediaCoordinator {
     }))
   }
 
-  private persistedRevisionRoute(run: RunRecord, steps: readonly StepRecord[]) {
+  private persistedRevisionRoute(run: RunRecord, steps: readonly StepRecord[]): RevisionRoute | null {
     const currentPageSteps = steps.filter((step) => {
       const identity = visualDeckPageImageIdentity(step.idempotencyKey)
       const output = step.output && typeof step.output === 'object'
@@ -697,7 +730,9 @@ export class RevisionMediaCoordinator {
       }
       return { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
     }
-    return { model: this.dependencies.revisionImageModel, operationMode: 'IMAGE_EDIT' as const }
+    return this.dependencies.revisionImageModel
+      ? { model: this.dependencies.revisionImageModel, operationMode: 'IMAGE_EDIT' as const }
+      : null
   }
 
   private hasPersistedV4RevisionRoute(run: RunRecord, steps: readonly StepRecord[]) {
@@ -949,6 +984,29 @@ export class RevisionMediaCoordinator {
         reconcileVisualDeckV4TerminalState(transaction, this.dependencies.clock)
       }
     })
+  }
+
+  private async failV4ImageEditUnavailable(run: RunRecord, total: number): Promise<RevisionMediaResult> {
+    const details = await this.details(run)
+    await this.dependencies.repository.transact(run.id, (transaction) => {
+      if (transaction.run.status !== 'REVISING') return
+      appendV4LifecycleEvent(transaction, 'revision.completed', {
+        completed: 0,
+        total,
+        ...details,
+        reason: 'REVISION_FAILED',
+        retryable: false,
+      })
+      failVisualDeckV4Transaction({
+        transaction,
+        clock: this.dependencies.clock,
+        errorCode: 'IMAGE_EDIT_UNAVAILABLE',
+        reason: 'REVISION_FAILED',
+        category: 'PROVIDER',
+      })
+    })
+    const latest = await this.requireRun(run.id)
+    return { status: latest.status, completed: 0, submitted: 0, total }
   }
 
   private imageKey(run: RunRecord, pageNumber: number) {

@@ -40,6 +40,7 @@ FrameFlow 是第一个验证宿主，不是核心依赖。ShanHaiEdu 后续通�
 | `docs/presentation-job-v2-changelog.md` | Presentation Job V2 兼容性、交付和 Usage 语义 |
 | `docs/decisions/ADR-010-presentation-job-v2-internal-agent-provider.md` | V2 内部智能体 Provider、预算隔离和操作硬上限 |
 | `docs/decisions/ADR-011-quick-deck-evaluation-isolation.md` | 快速评测的独立鉴权、数据和清理决策 |
+| `docs/decisions/ADR-012-v4-image-edit-capability-gate.md` | V4 图片编辑的真实验收门禁与恢复边界 |
 | `docs/frameflow-v4-integration.md` | FrameFlow 作为首个宿主的接入示例与迁移约束 |
 | `docs/deployment-20260723-hardening-plan.md` | 本轮加固的发布、备份、验证与回退 runbook |
 | `docs/deployment-20260723-hardening.md` | 本轮加固正式部署、备份与回退记录 |
@@ -71,7 +72,8 @@ bun run check
 | `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_V4_INITIAL_IMAGE_MODELS` | `GET /v1/capabilities` 公布的初始 V4 图片模型清单，逗号分隔，默认 `gemini-3-pro-image-preview` |
-| `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | V4 局部图片返修模型，默认 `gpt-image-2` |
+| `PPT_AGENT_V4_IMAGE_EDIT_ENABLED` | V4 局部图片编辑总开关，默认 `false`；只有完成真实请求和像素比例验收后才可开启 |
+| `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | 仅在图片编辑开关为 `true` 时必填的已验收编辑模型；关闭时不会出现在能力接口中 |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN` | 启用 quick-deck 的独立 evaluator Token；不可与 V1、管理员、V2 或 FrameFlow Token 复用 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT` | 位于 `PPT_AGENT_DATA_ROOT` 内的 quick-deck SQLite/制品根；TTL 后物理删除，不进入正式备份 |

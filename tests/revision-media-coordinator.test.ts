@@ -191,7 +191,7 @@ async function fixture(
     blueprint?: unknown
     plan?: ReturnType<typeof revisionPlan>
     imageConcurrency?: number
-    revisionImageModel?: string
+    revisionImageModel?: string | null
   }> = {},
 ) {
   const repository = new InMemoryAgentRepository()
@@ -243,7 +243,7 @@ async function fixture(
       batchBudget: budget,
       artifacts,
       clock,
-      revisionImageModel: inputs.revisionImageModel ?? 'gpt-image-2',
+      revisionImageModel: inputs.revisionImageModel === undefined ? 'gpt-image-2' : inputs.revisionImageModel,
       ...(inputs.imageConcurrency === undefined ? {} : { imageConcurrency: inputs.imageConcurrency }),
     }),
     generation: new SlideGenerationCoordinator({
@@ -342,6 +342,7 @@ describe('revision media coordinator', () => {
   test('re-renders a verified exact-count V4 revision without a Provider image operation', async () => {
     const base = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
       blueprint: exactCountVisualDeckV4Blueprint(),
+      revisionImageModel: null,
     })
     const coordinator = new RevisionMediaCoordinator({
       repository: base.repository,
@@ -553,6 +554,27 @@ describe('revision media coordinator', () => {
     expect(publicBatch).not.toHaveProperty('operationMode')
   })
 
+  test('fails closed before budget reservation or Provider submission when V4 image edit is disabled', async () => {
+    const { repository, budget, images, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+      revisionImageModel: null,
+    })
+
+    const result = await coordinator.submit('run-1', 5)
+    const latest = await repository.getRun('run-1')
+    const events = await repository.listEvents('run-1')
+
+    expect(result).toMatchObject({ completed: 0, submitted: 0, total: 1 })
+    expect(['FAILED', 'RECOVERING']).toContain(result.status)
+    expect(images.requests.size).toBe(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+    expect(latest?.pendingTerminalFailure?.errorCode
+      ?? events.find((event) => event.type === 'run.failed')?.payload.errorCode).toBe('IMAGE_EDIT_UNAVAILABLE')
+  })
+
   test('keeps the persisted edit model, contract and key after runtime configuration drift', async () => {
     const { repository, budget, images, artifacts, media, clock, coordinator } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
@@ -569,7 +591,7 @@ describe('revision media coordinator', () => {
       batchBudget: budget,
       artifacts,
       clock,
-      revisionImageModel: 'image-3-new-default',
+      revisionImageModel: null,
     })
 
     await expect(drifted.submit('run-1', 5)).resolves.toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })

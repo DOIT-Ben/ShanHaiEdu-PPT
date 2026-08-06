@@ -5,6 +5,7 @@ import {
   resolveMainServerConfig,
   resolvePublicV4CapabilitiesConfig,
   resolveQuickDeckEvaluationConfig,
+  resolveV4RevisionImageModel,
 } from '../src/runtime/main-server-config'
 
 describe('main PPT Agent server configuration', () => {
@@ -109,6 +110,22 @@ describe('main PPT Agent server configuration', () => {
     })).toThrow('PPT_AGENT_FALLBACK_MODEL_ENABLED_INVALID')
   })
 
+  test('fails closed for V4 image edits until an operator explicitly enables a verified model', () => {
+    expect(resolveV4RevisionImageModel({
+      PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'gpt-image-2',
+    })).toBeNull()
+    expect(resolveV4RevisionImageModel({
+      PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
+      PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'verified-image-edit-model',
+    })).toBe('verified-image-edit-model')
+    expect(() => resolveV4RevisionImageModel({
+      PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'invalid',
+    })).toThrow('PPT_AGENT_V4_IMAGE_EDIT_ENABLED_INVALID')
+    expect(() => resolveV4RevisionImageModel({
+      PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
+    })).toThrow('PPT_AGENT_V4_REVISION_IMAGE_MODEL_REQUIRED')
+  })
+
   test('derives public model names from unified-gateway configuration without route or credential fields', () => {
     const env = {
       MODEL_GATEWAY_BASE_URL: 'https://newapi.doitbenai.cloud/v1',
@@ -138,6 +155,11 @@ describe('main PPT Agent server configuration', () => {
       ...env,
       PPT_AGENT_V4_INITIAL_IMAGE_MODELS: 'gemini-3-pro-image-preview,gemini-3-pro-image-preview',
     }, resolveGatewayCoursewareModelsConfig(env), 'gpt-image-2')).toThrow('PPT_AGENT_V4_INITIAL_IMAGE_MODELS_INVALID')
+    expect(resolvePublicV4CapabilitiesConfig(
+      env,
+      resolveGatewayCoursewareModelsConfig(env),
+      null,
+    ).imageEditModels).toEqual([])
   })
 
   test('documents only unified-gateway credentials for the MiniMax fallback', () => {
@@ -147,6 +169,7 @@ describe('main PPT Agent server configuration', () => {
     )
     expect(environmentExample).toContain('PPT_AGENT_FALLBACK_TEXT_MODEL=MiniMax-M3')
     expect(environmentExample).toContain('PPT_AGENT_FALLBACK_VISION_MODEL=MiniMax-M3')
+    expect(environmentExample).toContain('PPT_AGENT_V4_IMAGE_EDIT_ENABLED=false')
     expect(environmentExample).not.toContain('MINIMAX_BASE_URL')
     expect(environmentExample).not.toContain('MINIMAX_API_KEY')
     expect(environmentExample).not.toContain('MINIMAX_TEXT_MODEL')

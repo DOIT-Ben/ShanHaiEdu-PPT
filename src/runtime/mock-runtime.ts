@@ -567,7 +567,7 @@ type RuntimeInput = Readonly<{
   workerId?: string
   workerConcurrency?: number
   imageConcurrency?: number
-  revisionImageModel?: string
+  revisionImageModel?: string | null
   reviewConcurrency?: number
   runLeaseTtlMs?: number
   createRunRateLimitPerMinute?: number
@@ -605,7 +605,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const workerId = input.workerId?.trim() || `worker-${randomUUID()}`
   const workerConcurrency = input.workerConcurrency ?? 2
   const imageConcurrency = input.imageConcurrency ?? 50
-  const revisionImageModel = input.revisionImageModel?.trim() || 'gpt-image-2'
+  const revisionImageModel = input.revisionImageModel?.trim() || null
   const runLeaseTtlMs = input.runLeaseTtlMs ?? 60_000
   const v1ExecutionEnabled = input.v1ExecutionEnabled ?? true
   if (!Number.isSafeInteger(workerConcurrency) || workerConcurrency < 1 || workerConcurrency > 8) {
@@ -868,8 +868,8 @@ export function createAgentRuntime(input: RuntimeInput) {
       } else if (run.status === 'REVISING') {
         const applied = await revisionApplication.apply(run.id)
         if (applied.status === 'REVISING' && applied.requiresMedia) {
-          await revisionMedia.submit(run.id, 1)
-          await revisionMedia.refresh(run.id)
+          const submitted = await revisionMedia.submit(run.id, 1)
+          if (submitted.status === 'REVISING') await revisionMedia.refresh(run.id)
         }
       } else if (run.status === 'DELIVERING') {
         await delivery.deliver(run.id)
@@ -1049,10 +1049,12 @@ export function createMockRuntime(input: Omit<RuntimeInput,
     deckReviewer = new PassingDeckReview(),
     revisionPlanner = new UnsupportedRevisionPlanning(),
     revisionApplication = new UnsupportedRevisionApplication(),
+    revisionImageModel = 'gpt-image-2',
     ...runtimeInput
   } = input
   return createAgentRuntime({
     ...runtimeInput,
+    revisionImageModel,
     model: new DeterministicPlanningModel(reflectionFailureMode),
     visualReviewer,
     deckReviewer,

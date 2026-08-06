@@ -374,6 +374,7 @@ describe('OpenAPI v1 contract', () => {
       'QUALITY_ISSUE_STATE_INCONSISTENT',
       'TECHNICAL_RECOVERY_EXHAUSTED',
       'TECHNICAL_CONFIGURATION_REQUIRED',
+      'IMAGE_EDIT_UNAVAILABLE',
       'TECHNICAL_CONTRACT_INVALID',
       'USAGE_V2_FINALIZATION_REJECTED',
     ]) {
@@ -422,6 +423,9 @@ describe('OpenAPI v1 contract', () => {
     expect(capabilitiesContract).toContain('validatesActualPixels')
     expect(capabilitiesContract).not.toContain('baseUrl')
     expect(capabilitiesContract).not.toContain('apiKey')
+    const capabilitiesSchema = document.components.schemas.PptAgentCapabilities as any
+    expect(capabilitiesSchema.properties.visualDeckV4.properties.models
+      .properties.imageEdit.minItems).toBe(0)
     expect(document.components.schemas.DeliveryAvailability).toBeDefined()
     expect(document.components.schemas.DeliveryUnavailableReason?.enum).toContain('ACCOUNTING_FAILED')
     expect(JSON.stringify(document.paths['/v1/runs/{runId}']?.get))

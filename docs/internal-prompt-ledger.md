@@ -44,7 +44,7 @@
 | 6 | `VIS-04` | 页面审查阶段完成后 | 整套 PPT 终审 |
 | 7 | `REV-01` | 页审或套审产生可返修问题且尚有轮次 | 生成限定范围的修订计划 |
 | 8 | `REV-05` | 修订计划需要内容或布局裁决 | ReviewManuscript；RevisionCompiler 按槽位编译 |
-| 9 | `IMG-06` -> `IMG-08` | 当前默认 V4 图片返修路由 | GPT 对上一版受控页面做局部图片编辑 |
+| 9 | `IMG-06` -> `IMG-08` | 仅在显式启用且完成真实验收的图片编辑模型存在时 | 对上一版受控页面做局部图片编辑 |
 | 10 | `VIS-01` -> `VIS-04` | 返修产物生成后 | 重新页审和套审；达到轮次上限后按质量策略交付或阻断 |
 
 每个主动反射节点严格是一次 `Critic`，仅有问题时再调用一次 `Optimizer`。合同或 Provider 失败时记录 `REFLECTION_SKIPPED` 并保留原候选，不开启新 Run、不换幂等键、不把“跳过”伪装成“通过”。
@@ -116,7 +116,7 @@ Quick-deck 不是 Run：它只调用一次 `V4-11` 取得 `CreativeManuscript`�
 | `REV-01` | SHARED | V2/V3/V4 | 修订计划 | `revisionPlanDraftSchema` | `src/adapters/gateway-courseware-model.ts:878-893` |
 | `REV-02` | ACTIVE | V4 chain-2/3 | 局部规划补丁 | `visualDeckV4RevisionApplicationResultSchema` | `src/adapters/gateway-courseware-model.ts:895-926` |
 | `REV-05` | ACTIVE | V4 chain-4 | 语义修订文稿 | `visualDeckV4ReviewManuscriptSchema` | `src/adapters/gateway-courseware-model.ts` |
-| `IMG-06` | ACTIVE | V4 | GPT 局部图片编辑 | 图片编辑提示词 | `src/core/v4-repair-contract.ts:186-190` |
+| `IMG-06` | CONDITIONAL | V4 | 受控局部图片编辑 | 图片编辑提示词 | `src/core/v4-repair-contract.ts:186-190` |
 | `V4-03L` | COMPATIBILITY | V4 chain-2 | Deck/Visual 合并反射 | `visualDeckV4DeckVisualReflectionResultSchema` | `src/adapters/gateway-courseware-model.ts:731-744` |
 | `V4-05L` | COMPATIBILITY | V4 chain-2 | Slide Briefs 合并反射 | `visualDeckV4SlideBriefsReflectionResultSchema` | `src/adapters/gateway-courseware-model.ts:757-771` |
 | `V4-06` | COMPATIBILITY | V4 chain-1 | 最终规划连贯性审查 | `visualDeckV4FinalCoherenceReviewSchema` | `src/adapters/gateway-courseware-model.ts:773-782` |
@@ -495,10 +495,10 @@ V2 不追加统一编译规则，直接把蓝图中的 `slide.visualPrompt` 交�
 {{IMG-04 的关键文字、事实、视觉方向和全部安全规则}}
 ```
 
-- 用于已经持久化 `TEXT_TO_IMAGE` 返修路由的历史 Run；新 chain-3 Run 默认使用 `IMG-06`，但编辑来源超过 `3%` 比例阈值时也会切换到本路径。
+- 用于已经持久化 `TEXT_TO_IMAGE` 返修路由的历史 Run；显式启用图片编辑的新 Run 使用 `IMG-06`，但编辑来源超过 `3%` 比例阈值时也会切换到本路径。
 - 与 `IMG-04` 使用同一份必保留段、可选艺术段和安全尾注预算策略。
 
-### `IMG-06` V4 GPT 局部图片编辑提示词
+### `IMG-06` V4 受控局部图片编辑提示词（条件启用）
 
 > 已同步到 `src/core/v4-repair-contract.ts` 及其回归测试。
 
@@ -518,7 +518,7 @@ V2 不追加统一编译规则，直接把蓝图中的 `slide.visualPrompt` 交�
 
 - 本段固定指令统一使用中文；动态占位符按合同原样保留，支持非中文语言，不得翻译或改写。
 - 空数组对应的分段在运行时省略；`{{preserve.unaffectedAreas}}` 是后端冻结并持久化的原样保护指令。
-- 此提示词与上一版受控页面图片一起提交到图片编辑接口，随后仍经过 `IMG-08` 包装。
+- 仅当 `PPT_AGENT_V4_IMAGE_EDIT_ENABLED=true` 且模型已通过真实验收时，此提示词才与上一版受控页面图片一起提交到图片编辑接口，随后仍经过 `IMG-08` 包装；否则需要 Provider 图片编辑的新 V4 Run 在任何预算或 Provider 提交前以 `IMAGE_EDIT_UNAVAILABLE` 结束。
 - `VIS-01` 在视觉模型审查后读取本地受控图片的实际像素尺寸。任一页相对 `16:9` 误差超过 `3%` 时，记录硬质量问题并将下一轮计划扩展到整套全部页面；不裁切原图。随后 `IMG-06` 路由改为 `TEXT_TO_IMAGE`，使用原始出图模型和 `16:9` 请求参数整页重绘全部页面。
 
 ### `IMG-07` V3 独立素材图片提示词

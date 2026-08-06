@@ -55,6 +55,19 @@ export function resolveGatewayCoursewareModelsConfig(env: Environment = process.
   }
 }
 
+/**
+ * Image edits are opt-in because an edit route must prove both its request
+ * contract and its delivered-pixel contract before V4 may spend against it.
+ */
+export function resolveV4RevisionImageModel(env: Environment = process.env) {
+  const enabled = env.PPT_AGENT_V4_IMAGE_EDIT_ENABLED?.trim()
+  if (enabled && enabled !== 'true' && enabled !== 'false') {
+    throw new Error('PPT_AGENT_V4_IMAGE_EDIT_ENABLED_INVALID')
+  }
+  if (enabled !== 'true') return null
+  return required(env, 'PPT_AGENT_V4_REVISION_IMAGE_MODEL')
+}
+
 function configuredModelList(value: string | undefined, fallback: readonly string[], name: string) {
   const models = (value?.trim() ? value : fallback.join(','))
     .split(',')
@@ -135,7 +148,7 @@ export function resolveQuickDeckEvaluationConfig(
 export function resolvePublicV4CapabilitiesConfig(
   env: Environment,
   coursewareModels: ReturnType<typeof resolveGatewayCoursewareModelsConfig>,
-  revisionImageModel: string,
+  revisionImageModel: string | null,
 ) {
   const unique = (models: readonly string[]) => [...new Set(models)]
   const textModels = unique([
@@ -154,10 +167,8 @@ export function resolvePublicV4CapabilitiesConfig(
       ['gemini-3-pro-image-preview'],
       'PPT_AGENT_V4_INITIAL_IMAGE_MODELS',
     ),
-    imageEditModels: configuredModelList(
-      revisionImageModel,
-      ['gpt-image-2'],
-      'PPT_AGENT_V4_REVISION_IMAGE_MODEL',
-    ),
+    imageEditModels: revisionImageModel
+      ? configuredModelList(revisionImageModel, [], 'PPT_AGENT_V4_REVISION_IMAGE_MODEL')
+      : [],
   }
 }
