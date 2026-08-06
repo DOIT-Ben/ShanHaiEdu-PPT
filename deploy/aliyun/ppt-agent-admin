@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IFS=$' \t\n'
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 0002
+
+readonly REPOSITORY_ROOT=/srv/codex-workspace/PPT-Agent
+readonly TEST_CANDIDATES_ROOT=/opt/ppt-agent-test/candidates
+readonly DEV_GROUP=codex-dev
+
+die() {
+  printf '%s\n' "PPT_AGENT_ADMIN_DENIED: $1" >&2
+  exit 64
+}
+
+require_root() {
+  [ "$(id -u)" -eq 0 ] || die 'root is required'
+}
+
+require_no_extra_arguments() {
+  [ "$#" -eq 0 ] || die 'unexpected arguments'
+}
+
+assert_physical_directory() {
+  local target="$1"
+  [ -d "$target" ] && [ ! -L "$target" ] || die "unsafe directory: $target"
+}
+
+assert_no_symbolic_links() {
+  local target="$1"
+  if /usr/bin/find -P "$target" -xdev -type l -print -quit | /usr/bin/grep -q .; then
+    die "symbolic links are not permitted in protected tree: $target"
+  fi
+}
+
+apply_shared_directory_acl() {
+  local target="$1"
+  /usr/bin/chown --no-dereference root:"$DEV_GROUP" -- "$target"
+  /usr/bin/chmod 2775 -- "$target"
+  /usr/bin/setfacl --physical -m u::rwx,g::rwx,o::rx,d:u::rwx,d:g::rwx,d:o::rx -- "$target"
+}
+
+repair_shared_tree() {
+  local target="$1"
+  assert_physical_directory "$target"
+  assert_no_symbolic_links "$target"
+  apply_shared_directory_acl "$target"
+  /usr/bin/find -P "$target" -xdev -type d -exec /usr/bin/chown --no-dereference root:"$DEV_GROUP" -- {} +
+  /usr/bin/find -P "$target" -xdev -type d -exec /usr/bin/chmod 2775 -- {} +
+  /usr/bin/find -P "$target" -xdev -type d -exec /usr/bin/setfacl --physical -m u::rwx,g::rwx,o::rx,d:u::rwx,d:g::rwx,d:o::rx -- {} +
+  /usr/bin/find -P "$target" -xdev -type f -exec /usr/bin/chown --no-dereference root:"$DEV_GROUP" -- {} +
+  /usr/bin/find -P "$target" -xdev -type f -exec /usr/bin/chmod g+rw -- {} +
+}
+
+repair_shared_file() {
+  local target="$1"
+  [ -f "$target" ] && [ ! -L "$target" ] || die "unsafe file: $target"
+  /usr/bin/chown --no-dereference root:"$DEV_GROUP" -- "$target"
+  /usr/bin/chmod g+rw -- "$target"
+}
+
+repair_dev_ownership() {
+  assert_physical_directory "$REPOSITORY_ROOT"
+  for directory in src tests scripts docs deploy tasks; do
+    if [ -d "$REPOSITORY_ROOT/$directory" ]; then
+      repair_shared_tree "$REPOSITORY_ROOT/$directory"
+    fi
+  done
+  for file in AGENTS.md README.md package.json bun.lock tsconfig.json tsconfig.build.json .gitignore; do
+    if [ -e "$REPOSITORY_ROOT/$file" ]; then
+      repair_shared_file "$REPOSITORY_ROOT/$file"
+    fi
+  done
+  repair_shared_tree "$REPOSITORY_ROOT/.git"
+  if [ -d "$REPOSITORY_ROOT/dist" ]; then
+    repair_shared_tree "$REPOSITORY_ROOT/dist"
+  fi
+  apply_shared_directory_acl "$REPOSITORY_ROOT"
+  /usr/bin/git -C "$REPOSITORY_ROOT" config core.sharedRepository group
+  printf '%s\n' 'PPT_AGENT_ADMIN_OK: developer ownership repaired'
+}
+
+check_dev_ownership() {
+  require_no_extra_arguments "$@"
+  assert_physical_directory "$REPOSITORY_ROOT"
+  /usr/bin/stat -c '%U:%G %a %n' "$REPOSITORY_ROOT" "$REPOSITORY_ROOT/.git" "$REPOSITORY_ROOT/.git/index"
+}
+
+validate_candidate_name() {
+  local name="$1"
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]] || die 'candidate name is invalid'
+}
+
+prepare_test_candidate() {
+  local name="$1"
+  validate_candidate_name "$name"
+  assert_physical_directory "$TEST_CANDIDATES_ROOT"
+  local target="$TEST_CANDIDATES_ROOT/$name"
+  [ ! -e "$target" ] || die 'candidate already exists'
+  /usr/bin/install -d -o root -g "$DEV_GROUP" -m 2770 -- "$target"
+  /usr/bin/setfacl --physical -m u::rwx,g::rwx,o::---,d:u::rwx,d:g::rwx,d:o::--- -- "$target"
+  printf '%s\n' "PPT_AGENT_ADMIN_OK: test candidate prepared: $name"
+}
+
+service_status() {
+  local unit="$1"
+  case "$unit" in
+    ppt-agent.service|ppt-agent-test.service|ppt-agent-backup.service|ppt-agent-backup.timer) ;;
+    *) die 'service is not allowlisted' ;;
+  esac
+  /usr/bin/systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,UnitFileState -- "$unit"
+}
+
+restart_test_service() {
+  require_no_extra_arguments "$@"
+  exec /usr/bin/systemctl restart ppt-agent-test.service
+}
+
+require_root
+[ "$#" -ge 1 ] || die 'action is required'
+action="$1"
+shift
+
+case "$action" in
+  repair-dev-ownership)
+    require_no_extra_arguments "$@"
+    repair_dev_ownership
+    ;;
+  check-dev-ownership)
+    check_dev_ownership "$@"
+    ;;
+  prepare-test-candidate)
+    [ "$#" -eq 1 ] || die 'candidate name is required'
+    prepare_test_candidate "$1"
+    ;;
+  service-status)
+    [ "$#" -eq 1 ] || die 'service name is required'
+    service_status "$1"
+    ;;
+  restart-test-service)
+    restart_test_service "$@"
+    ;;
+  *) die 'action is not allowlisted' ;;
+esac

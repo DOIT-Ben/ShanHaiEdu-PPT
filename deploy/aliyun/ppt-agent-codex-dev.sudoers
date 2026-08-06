@@ -1,0 +1,15 @@
+# Managed PPT-Agent capability boundary for codex-dev.
+# This file intentionally grants no shell, package manager, arbitrary path, or
+# arbitrary systemctl authority. The root-owned dispatcher validates every
+# remaining argument again before taking an action.
+Cmnd_Alias PPT_AGENT_ADMIN = \
+    /usr/local/libexec/ppt-agent-admin repair-dev-ownership, \
+    /usr/local/libexec/ppt-agent-admin check-dev-ownership, \
+    /usr/local/libexec/ppt-agent-admin prepare-test-candidate *, \
+    /usr/local/libexec/ppt-agent-admin service-status ppt-agent.service, \
+    /usr/local/libexec/ppt-agent-admin service-status ppt-agent-test.service, \
+    /usr/local/libexec/ppt-agent-admin service-status ppt-agent-backup.service, \
+    /usr/local/libexec/ppt-agent-admin service-status ppt-agent-backup.timer, \
+    /usr/local/libexec/ppt-agent-admin restart-test-service
+
+codex-dev ALL=(root) NOPASSWD: PPT_AGENT_ADMIN
