@@ -150,7 +150,7 @@ const responsesStreamEventSchema = z.object({
   }).passthrough().optional(),
   response: z.object({
     status: z.string().min(1).optional(),
-    usage: tokenUsageSchema.optional(),
+    usage: tokenUsageSchema.nullable().optional(),
   }).passthrough().optional(),
 }).passthrough()
 

@@ -205,7 +205,7 @@ function streamedResponsesTextCompletion(
   usage?: Readonly<{ input_tokens: number; output_tokens: number; total_tokens: number }>,
 ) {
   return new Response([
-    `data: ${JSON.stringify({ type: 'response.created', response: { status: 'in_progress' } })}`,
+    `data: ${JSON.stringify({ type: 'response.created', response: { status: 'in_progress', usage: null } })}`,
     `data: ${JSON.stringify({
       type: 'response.output_text.delta', delta: value.slice(0, Math.ceil(value.length / 2)),
     })}`,
@@ -215,7 +215,7 @@ function streamedResponsesTextCompletion(
     `data: ${JSON.stringify({
       type: 'response.output_text.done', text: value,
     })}`,
-    `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', ...(usage ? { usage } : {}) } })}`,
+    `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', usage: usage ?? null } })}`,
     '',
   ].join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
 }
@@ -549,7 +549,7 @@ describe('gateway courseware model', () => {
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
   })
 
-  test('uses small Responses schemas for the chain-4 creative and review manuscripts', async () => {
+  test('uses small Responses schemas for chain-4 manuscripts with null lifecycle usage', async () => {
     const creative = {
       title: '水循环',
       narrative: ['建立主题', '解释循环关系'],
@@ -593,6 +593,10 @@ describe('gateway courseware model', () => {
       idempotencyKey: 'run-v4-manuscript-review',
       structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
       payload: { ...payload, creativeManuscript: creative },
+    })
+
+    expect(model.takeExecutionMetrics('run-v4-manuscript-creative')).toMatchObject({
+      outcome: 'SUCCEEDED', sseEventCount: 5, inputTokens: null, outputTokens: null, totalTokens: null,
     })
 
     expect(requests).toHaveLength(2)
