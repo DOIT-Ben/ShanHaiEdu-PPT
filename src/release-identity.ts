@@ -4,10 +4,12 @@ export const PPT_AGENT_SOFTWARE_VERSION = '4.3.1'
 export const PPT_AGENT_CONTRACT_VERSION = '1'
 export const LEGACY_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-1'
 export const CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-2'
-export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-3'
+export const CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-3'
+export const VISUAL_DECK_V4_COMPILER_VERSION = 'visual-deck-v4-chain-4'
 export const SUPPORTED_VISUAL_DECK_V4_COMPILER_VERSIONS = [
   LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
   CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+  CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
   VISUAL_DECK_V4_COMPILER_VERSION,
 ] as const
 
@@ -17,7 +19,7 @@ export function isSupportedVisualDeckV4CompilerVersion(value: string) {
 
 export function usesPatchRevisionContract(value: string) {
   return value === CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION
-    || value === VISUAL_DECK_V4_COMPILER_VERSION
+    || value === CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION
 }
 
 const identifierSchema = z.string().trim().min(1).max(160)

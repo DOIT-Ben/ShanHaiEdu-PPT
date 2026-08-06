@@ -12,10 +12,16 @@ import { MockArtifactPort } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
 import { blueprintDraftSchema } from '../src/presentation-contracts'
 import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
-import { LEGACY_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
+import {
+  CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+  LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+} from '../src/release-identity'
 
 const LEDGER_SYSTEM_PROMPT_IDS = [
   'TXT-00',
+  'V4-11',
+  'V4-12',
   'V4-01',
   'V4-02',
   'V4-07',
@@ -29,6 +35,7 @@ const LEDGER_SYSTEM_PROMPT_IDS = [
   'REV-01',
   'REV-02',
   'REV-03L',
+  'REV-05',
   'TXT-10',
   'TXT-11',
   'TXT-20',
@@ -256,6 +263,8 @@ describe('gateway courseware model', () => {
     ])
     const runtimePrompts = `${gatewaySource}\n${reflectionSource}`
     const stageRoles = [
+      '演示文稿创意作者',
+      '独立演示文稿内容与视觉质量审查员',
       '演示文稿需求分析与资料研究专家',
       '演示文稿叙事架构师与视觉总监',
       '演示文稿叙事与视觉一致性审稿专家',
@@ -268,6 +277,7 @@ describe('gateway courseware model', () => {
       '演示文稿质量总审专家',
       '整页视觉演示局部修订专家',
       '整页视觉演示完整规划修订专家',
+      '演示文稿语义修订作者',
     ]
     for (const role of stageRoles) {
       expect(runtimePrompts).toContain(role)
@@ -537,6 +547,134 @@ describe('gateway courseware model', () => {
       },
     })
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
+  })
+
+  test('uses small Responses schemas for the chain-4 creative and review manuscripts', async () => {
+    const creative = {
+      title: '水循环',
+      narrative: ['建立主题', '解释循环关系'],
+      slides: [{
+        title: '水循环',
+        narrative: '水通过蒸发、凝结和降水持续循环。',
+        userVisibleCopy: ['水循环', '水不断循环'],
+        factualStatements: ['太阳加热水面形成水汽。'],
+        visualDescription: '连续自然场景中的水面、云和降水关系',
+        sourceEvidence: [{ excerpt: '太阳加热水面形成水汽' }],
+      }],
+    }
+    const review = { ...creative, revisionSuggestions: [] }
+    const requests: Record<string, any>[] = []
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body))
+        requests.push(body)
+        return streamedResponsesTextCompletion(JSON.stringify(
+          body.text.format.name === 'ppt_agent_v4_creative_manuscript_v1' ? creative : review,
+        ))
+      },
+    })
+    const payload = {
+      frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+      trustedEvidence: { sourceChunks: [{ id: 'chunk-1', text: '太阳加热水面形成水汽，水汽凝结成云。' }] },
+    }
+
+    await model.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      idempotencyKey: 'run-v4-manuscript-creative',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload,
+    })
+    await model.execute({
+      operation: 'review_visual_deck_v4_manuscript',
+      schemaName: 'ppt_agent_v4_review_manuscript_v1',
+      idempotencyKey: 'run-v4-manuscript-review',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: { ...payload, creativeManuscript: creative },
+    })
+
+    expect(requests).toHaveLength(2)
+    expect(requests.map((body) => body.text.format.name)).toEqual([
+      'ppt_agent_v4_creative_manuscript_v1',
+      'ppt_agent_v4_review_manuscript_v1',
+    ])
+    for (const body of requests) {
+      expect(body.text.format).toMatchObject({ type: 'json_schema', strict: true })
+      expect(JSON.stringify(body.text.format.schema)).not.toContain('pageNumber')
+      expect(JSON.stringify(body.text.format.schema)).not.toContain('sourceChunkId')
+      expect(JSON.stringify(body.text.format.schema)).not.toContain('compilerVersion')
+      expect(body.input[0].content[0].text).toContain('严禁输出 pageNumber')
+    }
+  })
+
+  test('projects chain-4 revision input to semantic content slots before the Responses call', async () => {
+    const source = { kind: 'TEXT' as const, name: '水循环.txt', text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地面。'.repeat(4) }
+    const document = {
+      name: source.name,
+      chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+      isComplete: true,
+      missingRanges: [] as string[],
+    }
+    const proposal = compileVisualDeckV4Proposal({
+      runId: 'run-v4', inputHash: 'input-v4', source, document,
+      config: {
+        instruction: '制作水循环视觉演示', sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: {
+          deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+          audience: '小学高年级学生', focus: '水循环关系', styleHint: '清晰自然科学信息图',
+        },
+      },
+      slideCount: 2, visualDirection: '清晰自然科学信息图',
+      compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+      createdAt: '2026-08-07T00:00:00.000Z',
+    })
+    const review = {
+      title: '水循环', narrative: ['说明水循环'],
+      slides: [{
+        title: '水汽如何形成？', narrative: '太阳加热水面形成水汽。',
+        userVisibleCopy: ['太阳加热水面', '形成水汽'],
+        factualStatements: ['太阳加热水面形成水汽。'],
+        visualDescription: '水面上方自然上升的水汽和阳光关系',
+        sourceEvidence: [{ excerpt: '太阳加热水面形成水汽' }],
+      }],
+      revisionSuggestions: ['突出水汽形成关系。'],
+    }
+    let requestBody: Record<string, any> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return streamedResponsesTextCompletion(JSON.stringify(review))
+      },
+    })
+    await model.apply({
+      tenantId: 'frameflow',
+      blueprint: { id: 'run-v4:blueprint:r0', renderMode: 'VISUAL_DECK_V4', visualDeckV4Proposal: proposal } as never,
+      plan: {
+        id: 'revision-plan', reviewId: 'review', revisionRound: 1, createdAt: '2026-08-07T00:00:00.000Z', summary: '修订第一页',
+        operations: [{
+          id: 'operation-1', slideId: 'run-v4:slide:1', kind: 'UPDATE_CONTENT', issueIds: ['issue-1'],
+          instruction: '依据资料修订水汽形成关系。', sourceChunkIds: ['chunk-1'],
+        }],
+      } as never,
+      sourceChunks: document.chunks,
+      idempotencyKey: 'run-v4-revision-manuscript',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })
+
+    const body = requestBody! as Record<string, any>
+    expect(body.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_review_manuscript_v1', strict: true,
+    })
+    const payload = JSON.parse(body.input[1].content[0].text)
+    expect(payload).toHaveProperty('contentSlots')
+    expect(payload).not.toHaveProperty('blueprint')
+    expect(payload).not.toHaveProperty('plan')
+    expect(JSON.stringify(payload)).not.toContain('pageNumber')
+    expect(JSON.stringify(payload)).not.toContain('sourceChunkId')
   })
 
   test('requires visual element independence throughout V4 visual planning', async () => {
@@ -890,7 +1028,9 @@ describe('gateway courseware model', () => {
           audience: '小学三年级学生', focus: '二分之一', styleHint: '温暖儿童绘本风格',
         },
       },
-      slideCount: 2, visualDirection: '温暖儿童绘本风格', createdAt: '2026-08-01T00:00:00.000Z',
+      slideCount: 2, visualDirection: '温暖儿童绘本风格',
+      compilerVersion: CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+      createdAt: '2026-08-01T00:00:00.000Z',
     })
     const { compilerVersion: _compilerVersion, ...revisedDraft } = v4Draft
     const patchResult = {

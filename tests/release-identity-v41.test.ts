@@ -8,15 +8,16 @@ import {
   VISUAL_DECK_V4_COMPILER_VERSION,
 } from '../src/release-identity'
 
-describe('PPT Agent V4.3 release identity', () => {
-  test('distinguishes the five-stage reflection compiler from the old four-stage compiler', () => {
+describe('PPT Agent V4 release identity', () => {
+  test('keeps chain-1/2/3 recovery identities while new runs use the semantic compiler', () => {
     expect(PPT_AGENT_SOFTWARE_VERSION).toBe('4.3.1')
     expect(packageMetadata.version).toBe(PPT_AGENT_SOFTWARE_VERSION)
-    expect(VISUAL_DECK_V4_COMPILER_VERSION).toBe('visual-deck-v4-chain-3')
+    expect(VISUAL_DECK_V4_COMPILER_VERSION).toBe('visual-deck-v4-chain-4')
     expect(SUPPORTED_VISUAL_DECK_V4_COMPILER_VERSIONS).toEqual([
       'visual-deck-v4-chain-1',
       'visual-deck-v4-chain-2',
       'visual-deck-v4-chain-3',
+      'visual-deck-v4-chain-4',
     ])
     expect(PPT_AGENT_CONTRACT_VERSION).toBe('1')
   })

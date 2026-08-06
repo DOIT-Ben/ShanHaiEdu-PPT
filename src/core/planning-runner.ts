@@ -28,8 +28,8 @@ import {
   createVisualDeckV4BlueprintFromProposal,
   normalizeVisualDeckV4SourceSpecRequestBinding,
   V4_ALL_PLANNING_STAGES,
-  V4_PLANNING_STAGE_COUNT,
   V4_PLANNING_STAGES,
+  type VisualDeckV4CompilerInput,
   type VisualDeckV4PlanningStage,
   visualDeckV4PlanningStagesForCompiler,
   visualDeckV4PlanningStageStepKey,
@@ -46,8 +46,10 @@ import {
   VISUAL_DECK_V4_REFLECTION_RUBRIC_VERSION,
   visualDeckV4DeckVisualReflectionStageOutputSchema,
   visualDeckV4DeckVisualStageSchema,
+  visualDeckV4CreativeManuscriptSchema,
   visualDeckV4FinalCoherenceReviewSchema,
   visualDeckV4ProposalDraftSchema,
+  visualDeckV4ReviewManuscriptSchema,
   visualDeckV4SlideBriefsReflectionStageOutputSchema,
   visualDeckV4SlideBriefsStageSchema,
   visualDeckV4SourceSpecStageSchema,
@@ -56,11 +58,13 @@ import type { StructuredGenerationPreflightPort, StructuredGenerationProtocol } 
 import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
 import {
   CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+  CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
   isSupportedVisualDeckV4CompilerVersion,
   LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
   VISUAL_DECK_V4_COMPILER_VERSION,
 } from '../release-identity'
 import { V4ReflectionCoordinator } from './v4-reflection/coordinator'
+import { ManuscriptCompiler } from './v4-manuscript-compiler'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 5
@@ -118,6 +122,19 @@ const v4PlanningStageAuditSchema = z.object({
 }).strict()
 
 type V4PlanningStageAttempt = z.infer<typeof v4PlanningStageAttemptSchema>
+
+type V4ManuscriptStageRequest = Readonly<{
+  stage: Extract<VisualDeckV4PlanningStage, 'creative-manuscript' | 'review-manuscript'>
+  tool: string
+  operation: string
+  schemaName: string
+  payload: Record<string, unknown>
+  sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
+  protocol: StructuredGenerationProtocol
+  compilerVersion: string
+  repairAttempt?: number
+  parse: (value: unknown) => unknown
+}>
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
@@ -261,18 +278,6 @@ export class PlanningRunner {
       presentationMode,
       ...(visualDeckV4 ? { visualDeckV4 } : {}),
     }
-    let document: DocumentResult
-    try {
-      document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
-    } catch (error) {
-      const errorCode = error instanceof Error ? error.message : 'SOURCE_RESOLUTION_FAILED'
-      if (presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)) {
-        const step = await this.failTechnicalSourceResolution(effectiveInput, errorCode)
-        return { step, blueprint: null, replayed: false }
-      }
-      throw error
-    }
-    await this.completeTechnicalSourceResolution(effectiveInput, document)
     let compilerVersion: string | null = null
     let compilerIdentityError: unknown = null
     if (strategy.planningKind === 'VISUAL_DECK_COMPILER') {
@@ -282,6 +287,18 @@ export class PlanningRunner {
         compilerIdentityError = error
       }
     }
+    let document: DocumentResult
+    try {
+      document = await this.dependencies.documents.resolve({ host: run.host, source: effectiveInput.source })
+    } catch (error) {
+      const errorCode = error instanceof Error ? error.message : 'SOURCE_RESOLUTION_FAILED'
+      if (presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)) {
+        const step = await this.failTechnicalSourceResolution(effectiveInput, errorCode, compilerVersion)
+        return { step, blueprint: null, replayed: false }
+      }
+      throw error
+    }
+    await this.completeTechnicalSourceResolution(effectiveInput, document)
     const planningStageCount = compilerVersion
       ? visualDeckV4PlanningStagesForCompiler(compilerVersion).length
       : strategy.planningKind === 'VISUAL_DECK_COMPILER'
@@ -374,6 +391,16 @@ export class PlanningRunner {
       createdAt: this.dependencies.clock.now().toISOString(),
     }
     const protocol = await this.resolveV4StructuredGenerationProtocol(input, tenantId)
+    if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+      return this.createVisualDeckV4Chain4Blueprint({
+        input,
+        document,
+        compilerInput,
+        basePayload,
+        protocol,
+        compilerVersion,
+      })
+    }
     const sourceSpec = visualDeckV4SourceSpecStageSchema.parse(await this.runV4PlanningStage(input, {
         stage: 'source-spec',
         tool: 'compile_v4_source_spec',
@@ -423,7 +450,7 @@ export class PlanningRunner {
       sourceSummary: document.chunks.map((chunk) => chunk.text).join('\n').slice(0, 16_000),
     }
     let deckVisual
-    if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+    if (compilerVersion === CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION) {
       const enhanced = await reflectionCoordinator.enhanceDeck({
         ...reflectionCommon,
         presentationSpec: sourceSpec.presentationSpec,
@@ -476,7 +503,7 @@ export class PlanningRunner {
     }
     if (!candidateValidated) throw new Error('V4_SLIDE_BRIEF_CONTRACT_REPAIR_EXHAUSTED')
     let reflectedSlides
-    if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+    if (compilerVersion === CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION) {
       const enhanced = await reflectionCoordinator.enhanceSlides({
         ...reflectionCommon,
         sourceSpec,
@@ -510,6 +537,78 @@ export class PlanningRunner {
       })
     }
     return createVisualDeckV4BlueprintFromProposal(compilerInput, proposalDraft)
+  }
+
+  private async createVisualDeckV4Chain4Blueprint(input: Readonly<{
+    input: PlanPresentationInput
+    document: DocumentResult
+    compilerInput: VisualDeckV4CompilerInput
+    basePayload: Record<string, unknown>
+    protocol: StructuredGenerationProtocol
+    compilerVersion: string
+  }>) {
+    const sourceMode = input.compilerInput.config.sourceMode === 'AUTO'
+      ? 'SOURCE_GROUNDED' as const
+      : input.compilerInput.config.sourceMode
+    const manuscriptContext: Record<string, unknown> = {
+      ...input.basePayload,
+      originalRequest: {
+        instruction: input.compilerInput.config.instruction,
+        targetAudience: input.compilerInput.targetAudience ?? null,
+        presentationGoal: input.compilerInput.presentationGoal ?? null,
+        visualDirection: input.compilerInput.visualDirection,
+      },
+      frozenConstraints: {
+        presentationMode: 'VISUAL_DECK_V4',
+        sourceMode,
+        slideCount: input.compilerInput.slideCount,
+        deckType: input.compilerInput.config.deckOptions.deckType,
+        language: input.compilerInput.config.deckOptions.language,
+        aspectRatio: input.compilerInput.config.deckOptions.aspectRatio,
+        audience: input.compilerInput.config.deckOptions.audience
+          ?? input.compilerInput.targetAudience
+          ?? '需要理解本主题的学习者',
+        goal: input.compilerInput.presentationGoal ?? input.compilerInput.config.instruction,
+      },
+      trustedEvidence: {
+        sources: (input.document.sources ?? []).map((source) => ({
+          name: source.name,
+          kind: source.kind,
+          status: source.status,
+        })),
+        sourceChunks: input.document.chunks.map((chunk) => ({
+          id: chunk.id,
+          sourceId: chunk.sourceId ?? null,
+          text: chunk.text,
+          pageStart: chunk.pageStart ?? null,
+          pageEnd: chunk.pageEnd ?? null,
+        })),
+        missingRanges: input.document.missingRanges,
+      },
+    }
+    const creative = visualDeckV4CreativeManuscriptSchema.parse(await this.runV4ManuscriptStage(input.input, {
+      stage: 'creative-manuscript',
+      tool: 'compile_v4_creative_manuscript',
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      payload: manuscriptContext,
+      sourceAssets: input.document.assets ?? [],
+      protocol: input.protocol,
+      compilerVersion: input.compilerVersion,
+      parse: visualDeckV4CreativeManuscriptSchema.parse,
+    }))
+    const review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4ManuscriptStage(input.input, {
+      stage: 'review-manuscript',
+      tool: 'review_v4_manuscript',
+      operation: 'review_visual_deck_v4_manuscript',
+      schemaName: 'ppt_agent_v4_review_manuscript_v1',
+      payload: { ...manuscriptContext, creativeManuscript: creative },
+      protocol: input.protocol,
+      compilerVersion: input.compilerVersion,
+      parse: visualDeckV4ReviewManuscriptSchema.parse,
+    }))
+    const draft = new ManuscriptCompiler().compilePlan(input.compilerInput, creative, review)
+    return createVisualDeckV4BlueprintFromProposal(input.compilerInput, draft)
   }
 
   private async legacyDeckReflection(
@@ -592,12 +691,18 @@ export class PlanningRunner {
         || step.idempotencyKey.includes(':v4:final-coherence:planning:')) {
         addEvidence(LEGACY_VISUAL_DECK_V4_COMPILER_VERSION)
       }
-      if (step.tool === 'reflect_v4_deck_visual' || step.tool === 'reflect_v4_slide_briefs'
+      if ((step.tool === 'reflect_v4_deck_visual' || step.tool === 'reflect_v4_slide_briefs'
         || step.idempotencyKey.includes(':v4:reflect:deck-visual:')
-        || step.idempotencyKey.includes(':v4:reflect:slide-briefs:')) {
+        || step.idempotencyKey.includes(':v4:reflect:slide-briefs:'))
+        && !step.idempotencyKey.includes(':v4:chain-3:')) {
         addEvidence(CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION)
       }
       if (step.idempotencyKey.includes(':v4:chain-3:')) {
+        addEvidence(CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION)
+      }
+      if (step.tool === 'compile_v4_creative_manuscript' || step.tool === 'review_v4_manuscript'
+        || step.idempotencyKey.includes(':v4:creative-manuscript:')
+        || step.idempotencyKey.includes(':v4:review-manuscript:')) {
         addEvidence(VISUAL_DECK_V4_COMPILER_VERSION)
       }
     }
@@ -619,7 +724,7 @@ export class PlanningRunner {
       transaction.appendEvent({
         schemaVersion: CONTRACT_VERSION,
         type: 'tool.progress',
-        payload: { stepId: input.stepId, completed, total: V4_PLANNING_STAGE_COUNT, summary },
+        payload: { stepId: input.stepId, completed, total: V4_PLANNING_STAGES.length, summary },
       })
     })
   }
@@ -707,6 +812,25 @@ export class PlanningRunner {
       throw new Error('STRUCTURED_GENERATION_PROTOCOL_INVALID')
     }
     return { protocol }
+  }
+
+  private async runV4ManuscriptStage(
+    input: PlanPresentationInput,
+    request: V4ManuscriptStageRequest,
+  ) {
+    try {
+      return await this.runV4PlanningStage(input, request)
+    } catch (error) {
+      // A semantic slot may be completed once, but a full business contract
+      // must never be sent back to the model for repeated repair.
+      if (!(error instanceof PlanningFailureError)
+        || error.failure.errorCode !== 'MODEL_JSON_INVALID') throw error
+      return this.runV4PlanningStage(input, {
+        ...request,
+        repairAttempt: 1,
+        payload: { ...request.payload, contentSlotCompletion: true },
+      })
+    }
   }
 
   private async runV4PlanningStage(input: PlanPresentationInput, request: Readonly<{
@@ -1781,7 +1905,11 @@ export class PlanningRunner {
   }
 
   /** Records a source-port outage before a planning step exists, preserving the original planning key. */
-  private async failTechnicalSourceResolution(input: PlanPresentationInput, errorCode: string) {
+  private async failTechnicalSourceResolution(
+    input: PlanPresentationInput,
+    errorCode: string,
+    compilerVersion: string | null,
+  ) {
     const idempotencyKey = `${input.idempotencyKey}:source-resolution`
     const inputHash = hashInput({ tool: 'resolve_source', source: input.source })
     return this.dependencies.repository.transact(input.runId, (transaction) => {
@@ -1810,7 +1938,9 @@ export class PlanningRunner {
       transaction.putStep(step)
       appendV4LifecycleEvent(transaction, 'planning.started', {
         completed: 0,
-        total: V4_PLANNING_STAGE_COUNT,
+        total: visualDeckV4PlanningStagesForCompiler(
+          compilerVersion ?? LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+        ).length,
         pageNumbers: allPageNumbers(transaction.run),
       })
       const recovery = beginTechnicalRecovery(transaction, this.dependencies.clock, errorCode)

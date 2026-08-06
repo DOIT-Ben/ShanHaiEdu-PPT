@@ -1,5 +1,7 @@
 import type { CreateRunRequest } from '../contracts'
 import {
+  CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION,
+  CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
   isSupportedVisualDeckV4CompilerVersion,
   LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
   VISUAL_DECK_V4_COMPILER_VERSION,
@@ -40,6 +42,11 @@ export const V4_PLANNING_STAGES = [
   'reflect-slide-briefs',
 ] as const
 
+export const CHAIN_4_V4_PLANNING_STAGES = [
+  'creative-manuscript',
+  'review-manuscript',
+] as const
+
 export const V4_ALL_PLANNING_STAGES = [
   'source-spec',
   'deck-visual',
@@ -47,17 +54,21 @@ export const V4_ALL_PLANNING_STAGES = [
   'slide-briefs',
   'reflect-slide-briefs',
   'final-coherence',
+  'creative-manuscript',
+  'review-manuscript',
 ] as const
 
 export type VisualDeckV4PlanningStage = (typeof V4_ALL_PLANNING_STAGES)[number]
-export const V4_PLANNING_STAGE_COUNT = V4_PLANNING_STAGES.length
+export const V4_PLANNING_STAGE_COUNT = CHAIN_4_V4_PLANNING_STAGES.length
 
 export function visualDeckV4PlanningStagesForCompiler(
   compilerVersion: string,
 ): readonly VisualDeckV4PlanningStage[] {
-  return compilerVersion === LEGACY_VISUAL_DECK_V4_COMPILER_VERSION
-    ? LEGACY_V4_PLANNING_STAGES
-    : V4_PLANNING_STAGES
+  if (compilerVersion === LEGACY_VISUAL_DECK_V4_COMPILER_VERSION) return LEGACY_V4_PLANNING_STAGES
+  if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) return CHAIN_4_V4_PLANNING_STAGES
+  if (compilerVersion === CHAIN_2_VISUAL_DECK_V4_COMPILER_VERSION
+    || compilerVersion === CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION) return V4_PLANNING_STAGES
+  throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
 }
 
 export function visualDeckV4PlanningStageStepKey(
@@ -82,7 +93,7 @@ export function visualDeckV4PlanningArtifactStepKey(
   return `${runId}:v4:${artifact}:planning:${attempt}`
 }
 
-type CompileVisualDeckV4Input = Readonly<{
+export type VisualDeckV4CompilerInput = Readonly<{
   runId: string
   inputHash: string
   source: CreateRunRequest['source']
@@ -95,6 +106,8 @@ type CompileVisualDeckV4Input = Readonly<{
   compilerVersion?: string
   createdAt: string
 }>
+
+type CompileVisualDeckV4Input = VisualDeckV4CompilerInput
 
 const ROLE_SEQUENCE = [
   'CONTEXT', 'QUESTION', 'EXPLANATION', 'PROCESS', 'COMPARISON', 'EXPLANATION', 'PROCESS', 'PRACTICE',

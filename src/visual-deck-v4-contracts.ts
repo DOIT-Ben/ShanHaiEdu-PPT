@@ -145,6 +145,33 @@ export const visualDeckV4SlideBriefSchema = z.object(visualDeckV4SlideBriefShape
   }
 })
 
+/**
+ * Chain-4 is a semantic model boundary.  The model can describe content and
+ * evidence excerpts, but it cannot choose runtime-owned identifiers, pages,
+ * roles, hashes, budgets, or patch paths.
+ */
+const visualDeckV4ManuscriptSlideShape = {
+  title: boundedText(160),
+  narrative: boundedText(1_200),
+  userVisibleCopy: z.array(boundedText(500)).min(1).max(8),
+  factualStatements: z.array(boundedText(500)).max(20),
+  visualDescription: boundedText(1_500),
+  sourceEvidence: z.array(z.object({ excerpt: boundedText(1_200) }).strict()).max(8),
+} as const
+
+export const visualDeckV4CreativeManuscriptSchema = z.object({
+  title: boundedText(160),
+  narrative: z.array(boundedText(500)).min(1).max(20),
+  slides: z.array(z.object(visualDeckV4ManuscriptSlideShape).strict()).min(1).max(50),
+}).strict()
+
+export const visualDeckV4ReviewManuscriptSchema = z.object({
+  title: boundedText(160),
+  narrative: z.array(boundedText(500)).min(1).max(20),
+  slides: z.array(z.object(visualDeckV4ManuscriptSlideShape).strict()).min(1).max(50),
+  revisionSuggestions: z.array(boundedText(1_000)).max(50),
+}).strict()
+
 export const visualDeckV4SlideBriefRevisionPatchSchema = z.object({
   pageNumber: visualDeckV4SlideBriefShape.pageNumber,
   role: visualDeckV4SlideBriefShape.role,
@@ -629,6 +656,7 @@ export type VisualDeckV4SourceRole = z.infer<typeof visualDeckV4SourceRoleSchema
 export type VisualDeckV4SourceSpecStage = z.infer<typeof visualDeckV4SourceSpecStageSchema>
 export type VisualDeckV4DeckVisualStage = z.infer<typeof visualDeckV4DeckVisualStageSchema>
 export type VisualDeckV4SlideBriefsStage = z.infer<typeof visualDeckV4SlideBriefsStageSchema>
+export type VisualDeckV4SlideBrief = z.infer<typeof visualDeckV4SlideBriefSchema>
 export type VisualDeckV4FinalCoherenceReview = z.infer<typeof visualDeckV4FinalCoherenceReviewSchema>
 export type VisualDeckV4DeckVisualReflectionInput = z.infer<typeof visualDeckV4DeckVisualReflectionInputSchema>
 export type VisualDeckV4SlideBriefsReflectionInput = z.infer<typeof visualDeckV4SlideBriefsReflectionInputSchema>
@@ -639,6 +667,8 @@ export type VisualDeckV4SlideBriefsReflectionStageOutput = z.infer<typeof visual
 export type VisualDeckV4ContentRevisionPatch = z.infer<typeof visualDeckV4ContentRevisionPatchSchema>
 export type VisualDeckV4LayoutRevisionPatch = z.infer<typeof visualDeckV4LayoutRevisionPatchSchema>
 export type VisualDeckV4RevisionApplicationResult = z.infer<typeof visualDeckV4RevisionApplicationResultSchema>
+export type VisualDeckV4CreativeManuscript = z.infer<typeof visualDeckV4CreativeManuscriptSchema>
+export type VisualDeckV4ReviewManuscript = z.infer<typeof visualDeckV4ReviewManuscriptSchema>
 export type VisualDeckV4ProposalDraft = z.infer<typeof visualDeckV4ProposalDraftSchema>
 export type VisualDeckV4Proposal = z.infer<typeof visualDeckV4ProposalSchema>
 export type VisualDeckV4RenderedSlide = z.infer<typeof visualDeckV4RenderedSlideSchema>

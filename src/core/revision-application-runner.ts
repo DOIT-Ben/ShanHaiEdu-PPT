@@ -10,6 +10,7 @@ import {
 import {
   visualDeckV4ProposalDraftSchema,
   visualDeckV4RevisionApplicationResultSchema,
+  visualDeckV4ReviewManuscriptSchema,
   type VisualDeckV4ProposalDraft,
   type VisualDeckV4RevisionApplicationResult,
 } from '../visual-deck-v4-contracts'
@@ -37,8 +38,10 @@ import { revisionPlanStepKey } from './revision-planning-runner'
 import {
   createVisualDeckV4BlueprintFromProposal,
 } from './visual-deck-v4-planner'
+import { ManuscriptCompiler } from './v4-manuscript-compiler'
 import {
   isSupportedVisualDeckV4CompilerVersion,
+  VISUAL_DECK_V4_COMPILER_VERSION,
   usesPatchRevisionContract,
 } from '../release-identity'
 import {
@@ -180,14 +183,36 @@ export class RevisionApplicationRunner {
           })
           if (input.base.renderMode === 'VISUAL_DECK_V4') {
             const compilerVersion = input.base.visualDeckV4Proposal?.compilerVersion
-            const draft = usesPatchRevisionContract(compilerVersion ?? '')
-              ? this.mergeV4RevisionPatches(
+            const draft = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+              ? new ManuscriptCompiler().compileRevision({
+                  compilerInput: {
+                    runId: input.run.id,
+                    inputHash: hashInput({ baseId: input.base.id, plan: input.plan }),
+                    source: input.run.source,
+                    document: input.document,
+                    config: input.run.visualDeckV4!,
+                    slideCount: input.run.slideCount,
+                    visualDirection: input.run.visualDirection,
+                    ...(input.run.targetAudience ? { targetAudience: input.run.targetAudience } : {}),
+                    ...(input.run.presentationGoal ? { presentationGoal: input.run.presentationGoal } : {}),
+                    compilerVersion,
+                    createdAt: this.dependencies.clock.now().toISOString(),
+                  },
+                  base: (() => {
+                    const { compilerVersion: _version, ...draft } = input.base.visualDeckV4Proposal!
+                    return draft
+                  })(),
+                  plan: input.plan,
+                  manuscript: visualDeckV4ReviewManuscriptSchema.parse(raw),
+                })
+              : usesPatchRevisionContract(compilerVersion ?? '')
+                ? this.mergeV4RevisionPatches(
                   input.run.id,
                   input.base,
                   input.plan,
                   visualDeckV4RevisionApplicationResultSchema.parse(raw),
                 )
-              : visualDeckV4ProposalDraftSchema.parse(raw)
+                : visualDeckV4ProposalDraftSchema.parse(raw)
             const blueprint = this.compileV4Revision(input.run, input.base, input.plan, input.document, draft)
             this.validateV4Revision(input.run.id, input.base, blueprint, input.plan)
             return blueprint

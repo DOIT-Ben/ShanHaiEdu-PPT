@@ -10,7 +10,11 @@ import { RevisionApplicationRunner } from '../src/core/revision-application-runn
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { revisionPlanSchema } from '../src/presentation-contracts'
-import { LEGACY_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
+import {
+  CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
+  LEGACY_VISUAL_DECK_V4_COMPILER_VERSION,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+} from '../src/release-identity'
 
 function run(): RunRecord {
   return {
@@ -108,11 +112,14 @@ function layeredDraft() {
   return structuredClone(value)
 }
 
-function visualDeckV4Blueprint(slideCount = 2) {
+function visualDeckV4Blueprint(
+  slideCount = 2,
+  compilerVersion = CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
+) {
   const { source, document, config } = visualDeckV4Input(slideCount)
   return createVisualDeckV4Blueprint({
     runId: 'run-1', inputHash: 'plan-hash', source, document, config,
-    slideCount, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
+    slideCount, visualDirection: '课堂科学信息图', compilerVersion, createdAt: '2026-07-21T00:00:00.000Z',
   })
 }
 
@@ -352,6 +359,50 @@ describe('revision application runner', () => {
     expect(result.blueprint?.visualDeckV4Proposal).toEqual(base.visualDeckV4Proposal)
     expect(result.blueprint?.slides).toEqual(base.slides)
     expect(application.requests.size).toBe(0)
+  })
+
+  test('compiles a chain-4 revision manuscript into the approved target slot', async () => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
+    const input = visualDeckV4Input()
+    const response = {
+      title: '光合作用',
+      narrative: ['明确绿色植物的作用', '说明光合作用的产物'],
+      slides: [{
+        title: '光合作用会产生什么？',
+        narrative: '绿色植物制造有机物并释放氧气。',
+        userVisibleCopy: ['制造有机物', '释放氧气'],
+        factualStatements: ['绿色植物制造有机物并释放氧气。'],
+        visualDescription: '以一片完整叶子和两条清晰方向箭头表现两种产物',
+        sourceEvidence: [{ excerpt: '制造有机物并释放氧气。' }],
+      }],
+      revisionSuggestions: ['用单一叶片场景清晰区分两种产物。'],
+    }
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{
+        ...plan('UPDATE_CONTENT').operations[0]!,
+        sourceChunkIds: ['chunk-2'],
+      }],
+    }
+    const { application, runner } = await fixture(response, revisionPlan, base, {
+      runOverrides: {
+        source: input.source,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true, replayed: false })
+    expect(result.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(VISUAL_DECK_V4_COMPILER_VERSION)
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[1]).toMatchObject({
+      pageNumber: 2,
+      title: '光合作用会产生什么？',
+      sourceChunkIds: ['chunk-2'],
+    })
+    expect(application.requests.size).toBe(1)
   })
 
   test('applies the real mixed V4 revision shape with scoped patches and redraw-only pages', async () => {
