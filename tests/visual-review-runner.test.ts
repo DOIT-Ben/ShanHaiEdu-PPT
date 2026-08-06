@@ -154,7 +154,7 @@ describe('side-effect-free visual review runner', () => {
         async review(input) {
           requests.push(input.idempotencyKey)
           if (requests.length < 5) {
-            throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', 'review-request-1')
+            throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', 'review-request-1')
           }
           return { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
         },
@@ -215,7 +215,7 @@ describe('side-effect-free visual review runner', () => {
       reviewer: {
         async review() {
           attempts += 1
-          throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', `review-request-${attempts}`)
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', `review-request-${attempts}`)
         },
       },
       sleep: async () => {},
@@ -235,7 +235,7 @@ describe('side-effect-free visual review runner', () => {
             maxProviderAttempts: 5,
             contractAttempt: 1,
             maxContractAttempts: 2,
-            model: 'gpt-5.6',
+            model: 'gpt-5.6-terra',
             requestId: 'review-request-5',
           },
         },
@@ -258,7 +258,7 @@ describe('side-effect-free visual review runner', () => {
         calls += 1
         if (calls === 2) bothStarted()
         await gate
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', `concurrent-${calls}`)
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', `concurrent-${calls}`)
       },
     }
     const firstRunner = new VisualReviewRunner({ repository, reviewer: port, clock: new FixedClock() })
@@ -300,7 +300,7 @@ describe('side-effect-free visual review runner', () => {
       clock: new FixedClock(),
       reviewer: {
         async review() {
-          throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'winning-failure')
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', 'winning-failure')
         },
       },
     })

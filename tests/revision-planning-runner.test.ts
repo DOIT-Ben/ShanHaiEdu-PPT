@@ -722,7 +722,7 @@ describe('revision planning runner', () => {
     planner.plan = async (input) => {
       keys.push(input.idempotencyKey)
       if (keys.length < 3) {
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', `plan-request-${keys.length}`)
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', `plan-request-${keys.length}`)
       }
       return planOnce(input)
     }
@@ -739,7 +739,7 @@ describe('revision planning runner', () => {
     let attempts = 0
     planner.plan = async () => {
       attempts += 1
-      throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', `plan-timeout-${attempts}`)
+      throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', `plan-timeout-${attempts}`)
     }
 
     const result = await runner.plan('run-1')
@@ -754,7 +754,7 @@ describe('revision planning runner', () => {
           diagnostic: {
             providerAttempt: 5,
             maxProviderAttempts: 5,
-            model: 'gpt-5.6',
+            model: 'gpt-5.6-terra',
             requestId: 'plan-timeout-5',
           },
         },
@@ -771,7 +771,7 @@ describe('revision planning runner', () => {
     let attempts = 0
     planner.plan = async () => {
       attempts += 1
-      throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-sol', `revision-plan-timeout-${attempts}`)
+      throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', `revision-plan-timeout-${attempts}`)
     }
 
     const result = await runner.plan('run-1')

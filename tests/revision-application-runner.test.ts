@@ -300,7 +300,7 @@ describe('revision application runner', () => {
     application.apply = async (input) => {
       keys.push(input.idempotencyKey)
       if (keys.length < 3) {
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', `apply-request-${keys.length}`)
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', `apply-request-${keys.length}`)
       }
       return applyOnce(input)
     }
@@ -317,7 +317,7 @@ describe('revision application runner', () => {
     let attempts = 0
     application.apply = async () => {
       attempts += 1
-      throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', `apply-request-${attempts}`)
+      throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', `apply-request-${attempts}`)
     }
 
     const result = await runner.apply('run-1')
@@ -332,7 +332,7 @@ describe('revision application runner', () => {
           diagnostic: {
             providerAttempt: 5,
             maxProviderAttempts: 5,
-            model: 'gpt-5.6',
+            model: 'gpt-5.6-terra',
             requestId: 'apply-request-5',
           },
         },
@@ -478,7 +478,7 @@ describe('revision application runner', () => {
     application.apply = async (modelInput) => {
       keys.push(modelInput.idempotencyKey)
       if (keys.length < 3) {
-        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', `request-${keys.length}`)
+        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', `request-${keys.length}`)
       }
       return applyOnce(modelInput)
     }

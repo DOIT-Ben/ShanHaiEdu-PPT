@@ -880,7 +880,7 @@ describe('deck review runner', () => {
     reviewer.evaluate = async (input) => {
       keys.push(input.idempotencyKey)
       if (keys.length < 3) {
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6', `deck-request-${keys.length}`)
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', `deck-request-${keys.length}`)
       }
       return evaluateOnce(input)
     }
@@ -922,7 +922,7 @@ describe('deck review runner', () => {
     let attempts = 0
     reviewer.evaluate = async () => {
       attempts += 1
-      throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', `deck-timeout-${attempts}`)
+      throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', `deck-timeout-${attempts}`)
     }
 
     const result = await runner.review('run-1')
@@ -939,7 +939,7 @@ describe('deck review runner', () => {
             maxProviderAttempts: 5,
             contractAttempt: 1,
             maxContractAttempts: 3,
-            model: 'gpt-5.6',
+            model: 'gpt-5.6-terra',
             requestId: 'deck-timeout-5',
           },
         },
@@ -1008,7 +1008,7 @@ describe('deck review runner', () => {
         async evaluate() {
           started()
           await gate
-          throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'late-deck-failure')
+          throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', 'late-deck-failure')
         },
       },
       sleep: async () => {},

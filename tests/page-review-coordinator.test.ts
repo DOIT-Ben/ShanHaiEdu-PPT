@@ -813,7 +813,7 @@ describe('page review coordinator', () => {
             retryInstruction: 'Keep the approved copy and simplify the composition.',
           }
         }
-        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'page-review-2')
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', 'page-review-2')
       },
     }
     const { repository, coordinator } = await fixture({
@@ -855,7 +855,7 @@ describe('page review coordinator', () => {
             retryInstruction: 'Keep the approved copy and simplify the composition.',
           }
         }
-        if (calls === 2) throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6', 'page-review-2')
+        if (calls === 2) throw new StructuredModelError('PROVIDER_UNAVAILABLE', false, 'gpt-5.6-terra', 'page-review-2')
         return { approved: true, textDetected: false, visualScore: 90, reasons: [], retryInstruction: null }
       },
     }

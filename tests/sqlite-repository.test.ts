@@ -301,7 +301,7 @@ describe('SQLite repository', () => {
           planningFailure: {
             errorCode: 'PROVIDER_RATE_LIMIT', retryable: true, attempt: 3, maxAttempts: 3,
             suggestedAction: 'RETRY', diagnosticCode: 'PROVIDER_RATE_LIMIT', fieldPaths: [],
-            correlationId: `${runId}:correlation`, requestId: `${runId}:request`, model: 'gpt-5.6', contractVersion: '1',
+            correlationId: `${runId}:correlation`, requestId: `${runId}:request`, model: 'gpt-5.6-terra', contractVersion: '1',
           },
         },
       })
@@ -310,10 +310,10 @@ describe('SQLite repository', () => {
     await appendFailure('run-other-tenant')
 
     expect(await repository.aggregatePlanningFailures({
-      tenantId: 'frameflow', errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6', contractVersion: '1',
+      tenantId: 'frameflow', errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6-terra', contractVersion: '1',
     })).toEqual({
       groups: [{
-        errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6', contractVersion: '1',
+        errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6-terra', contractVersion: '1',
         count: 1, lastOccurredAt: '2026-07-21T00:00:00.000Z',
       }],
       totalFailures: 1,

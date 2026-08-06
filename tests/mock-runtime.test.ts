@@ -468,12 +468,12 @@ describe('mock runtime', () => {
     const clock = new FixedClock()
     let metricsTaken = 0
     const model = {
-      modelName: 'gpt-5.6',
+      modelName: 'gpt-5.6-terra',
       async preflightStructuredGeneration() {
         return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
       },
       async execute() {
-        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-runtime-metrics', 200)
+        throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-runtime-metrics', 200)
       },
       takeExecutionMetrics() {
         metricsTaken += 1

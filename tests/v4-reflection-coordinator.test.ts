@@ -232,7 +232,7 @@ describe('V4 chain-3 reflection coordinator', () => {
       async execute(input) {
         calls.push(input)
         throw new StructuredModelError(
-          'MODEL_JSON_INVALID', true, 'gpt-5.6', 'request-invalid', 200, 'ACCEPTED',
+          'MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-invalid', 200, 'ACCEPTED',
           { layer: 'JSON_SCHEMA', safeIssues: [], responseHash: 'a'.repeat(64), byteLength: 20 },
         )
       },
@@ -260,7 +260,7 @@ describe('V4 chain-3 reflection coordinator', () => {
     const context = await setup({
       async execute(input) {
         keys.push(input.idempotencyKey)
-        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6', null, null, 'UNKNOWN')
+        throw new StructuredModelError('PROVIDER_TIMEOUT', true, 'gpt-5.6-terra', null, null, 'UNKNOWN')
       },
     })
     const candidate = { deckPlan: context.proposal.deckPlan, visualContract: context.proposal.visualContract }

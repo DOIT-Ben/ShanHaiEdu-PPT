@@ -308,9 +308,9 @@ describe('gateway courseware model', () => {
   })
 
   test('selects the MiniMax profile when either configured model is MiniMax M3', () => {
-    expect(gatewayCoursewareModelProfile({ textModel: 'MiniMax-M3', visionModel: 'gpt-5.6' })).toBe('MINIMAX_M3')
-    expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6', visionModel: 'minimax-m3' })).toBe('MINIMAX_M3')
-    expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6', visionModel: 'gpt-5.6' })).toBe('DEFAULT')
+    expect(gatewayCoursewareModelProfile({ textModel: 'MiniMax-M3', visionModel: 'gpt-5.6-terra' })).toBe('MINIMAX_M3')
+    expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6-terra', visionModel: 'minimax-m3' })).toBe('MINIMAX_M3')
+    expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra' })).toBe('DEFAULT')
   })
 
   test('defaults V4 text calls to Responses and limits Chat to the compatibility setting', () => {
@@ -322,7 +322,7 @@ describe('gateway courseware model', () => {
 
   test('rejects the removed one-shot V4 planning operation', async () => {
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
     })
     await expect(model.execute({
@@ -334,7 +334,7 @@ describe('gateway courseware model', () => {
   test('preflights Responses JSON Schema and falls back to strict Responses Function only when unsupported', async () => {
     const requests: { body: Record<string, unknown>; key: string | null }[] = []
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         requests.push({
@@ -395,7 +395,7 @@ describe('gateway courseware model', () => {
 
   test('treats a successful Responses payload without output text as JSON Schema incompatibility during preflight', async () => {
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         const body = JSON.parse(String(init?.body)) as { text?: unknown }
@@ -420,7 +420,7 @@ describe('gateway courseware model', () => {
   test('does not hide an exact wrapped model 404 behind the Function compatibility fallback', async () => {
     let calls = 0
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => {
         calls += 1
@@ -482,7 +482,7 @@ describe('gateway courseware model', () => {
     let requestBody: Record<string, unknown> | null = null
     let requestUrl = ''
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (url, init) => {
         requestUrl = String(url)
@@ -518,7 +518,7 @@ describe('gateway courseware model', () => {
     expect(JSON.stringify(body.text.format.schema)).toContain('chunk-1')
 
     const compatibilityModel = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(), visualDeckV4Transport: 'CHAT_COMPLETIONS',
       fetchImpl: async (url) => {
         requestUrl = String(url)
@@ -562,7 +562,7 @@ describe('gateway courseware model', () => {
     })
     const requestBodies: Record<string, any>[] = []
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         const body = JSON.parse(String(init?.body))
@@ -621,7 +621,7 @@ describe('gateway courseware model', () => {
     }
     let requestBody: Record<string, any> | null = null
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
@@ -689,7 +689,7 @@ describe('gateway courseware model', () => {
     }
     const requests: { url: string; body: Record<string, any>; key: string | null }[] = []
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (url, init) => {
         const body = JSON.parse(String(init?.body)) as Record<string, any>
@@ -814,7 +814,7 @@ describe('gateway courseware model', () => {
     }
     let body: Record<string, any> = {}
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         body = JSON.parse(String(init?.body))
@@ -897,7 +897,7 @@ describe('gateway courseware model', () => {
       redrawOnlyPageNumbers: [1],
     }
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (url, init) => {
         requestUrls.push(String(url))
@@ -957,7 +957,7 @@ describe('gateway courseware model', () => {
 
   test('rejects an incomplete V4 staged response before using its structured text', async () => {
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => Response.json({
         object: 'response', status: 'incomplete',
@@ -969,7 +969,7 @@ describe('gateway courseware model', () => {
       operation: 'create_visual_deck_v4_source_spec', schemaName: 'ppt_agent_v4_source_spec_v1',
       idempotencyKey: 'v4-incomplete-response',
       payload: { document: { chunks: [{ id: 'chunk-1' }] } },
-    })).rejects.toMatchObject({ code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6' })
+    })).rejects.toMatchObject({ code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6-terra' })
   })
 
   test('requests a source-grounded blueprint through a typed tool', async () => {
@@ -978,7 +978,7 @@ describe('gateway courseware model', () => {
     let requestUrl = ''
     let requestInit: RequestInit | undefined
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts,
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra', artifacts,
       fetchImpl: async (url, init) => {
         requestUrl = String(url)
         requestInit = init
@@ -1005,7 +1005,7 @@ describe('gateway courseware model', () => {
     expect(headers.get('Idempotency-Key')).toBe('plan-1')
     expect(headers.get('Authorization')).toBe('Bearer test-text-key')
     expect(requestBody).toMatchObject({
-      model: 'gpt-5.6', stream: true, parallel_tool_calls: false,
+      model: 'gpt-5.6-terra', stream: true, parallel_tool_calls: false,
       stream_options: { include_usage: true },
       tools: [{ type: 'function', function: { name: 'submit_courseware_blueprint', strict: true } }],
       tool_choice: { type: 'function', function: { name: 'submit_courseware_blueprint' } },
@@ -1033,7 +1033,7 @@ describe('gateway courseware model', () => {
   test('keeps layered design optional for legacy slide-image blueprints', async () => {
     let requestBody: Record<string, unknown> | null = null
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
@@ -1062,7 +1062,7 @@ describe('gateway courseware model', () => {
   test('uses a V2.1-specific initial planning prompt', async () => {
     let requestBody: Record<string, unknown> | null = null
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
@@ -1119,7 +1119,7 @@ describe('gateway courseware model', () => {
     let requestBody: Record<string, unknown> | null = null
     const expected = blueprintReflection()
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
@@ -1174,7 +1174,7 @@ describe('gateway courseware model', () => {
       create: { width: 120, height: 80, channels: 3, background: '#68A678' },
     }).png().toBuffer())
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
@@ -1221,8 +1221,8 @@ describe('gateway courseware model', () => {
       qualityImpact: 'PASS' as const,
     }
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
-      visionModel: 'gpt-5.6', artifacts,
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra', artifacts,
       fetchImpl: async (url, init) => {
         requestUrl = String(url)
         requestBody = JSON.parse(String(init?.body))
@@ -1262,7 +1262,7 @@ describe('gateway courseware model', () => {
       qualityImpact: 'PASS' as const,
     }
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts,
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra', artifacts,
       fetchImpl: async (_url, init) => {
         requestBody = JSON.parse(String(init?.body))
         return Response.json({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(review) } }] } }] })
@@ -1351,17 +1351,17 @@ describe('gateway courseware model', () => {
 
   test('rejects insecure public endpoints and hides network failure details', async () => {
     expect(() => new GatewayCoursewareModel({
-      baseUrl: 'http://example.com/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6', artifacts: new MockArtifactPort(),
+      baseUrl: 'http://example.com/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra', artifacts: new MockArtifactPort(),
     })).toThrow('GATEWAY_BASE_URL_INSECURE')
 
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(), fetchImpl: async () => { throw new Error('private detail') },
     })
     await expect(model.execute({
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-fail',
     })).rejects.toMatchObject({
-      code: 'PROVIDER_UNAVAILABLE', retryable: true, model: 'gpt-5.6', requestId: null,
+      code: 'PROVIDER_UNAVAILABLE', retryable: true, model: 'gpt-5.6-terra', requestId: null,
     })
   })
 
@@ -1370,7 +1370,7 @@ describe('gateway courseware model', () => {
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-diagnostic',
     }
     const rateLimited = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => new Response('private provider response', {
         status: 429,
@@ -1378,31 +1378,31 @@ describe('gateway courseware model', () => {
       }),
     })
     await expect(rateLimited.execute(request)).rejects.toMatchObject({
-      code: 'PROVIDER_RATE_LIMIT', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-1',
+      code: 'PROVIDER_RATE_LIMIT', retryable: true, model: 'gpt-5.6-terra', requestId: 'request-safe-1',
     })
 
     const invalidJson = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => Response.json({
         choices: [{ message: { tool_calls: [{ function: { arguments: '{private invalid content' } }] } }],
       }, { headers: { 'x-request-id': 'request-safe-2' } }),
     })
     await expect(invalidJson.execute(request)).rejects.toMatchObject({
-      code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-2',
+      code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6-terra', requestId: 'request-safe-2',
       submissionState: 'ACCEPTED',
       contractFailure: { layer: 'JSON_PARSE', responseHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
     })
 
     const invalidContract = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => Response.json({
         choices: [{ message: { tool_calls: [{ function: { arguments: '{}' } }] } }],
       }, { headers: { 'x-request-id': 'request-safe-3' } }),
     })
     await expect(invalidContract.execute(request)).rejects.toMatchObject({
-      code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6', requestId: 'request-safe-3',
+      code: 'MODEL_JSON_INVALID', retryable: true, model: 'gpt-5.6-terra', requestId: 'request-safe-3',
       submissionState: 'ACCEPTED',
       contractFailure: { layer: 'JSON_SCHEMA', responseHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
     })
@@ -1414,7 +1414,7 @@ describe('gateway courseware model', () => {
     console.error = (...values) => records.push(values.join(' '))
     try {
       const model = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({
           error: {
@@ -1434,7 +1434,7 @@ describe('gateway courseware model', () => {
     expect(records).toHaveLength(1)
     expect(JSON.parse(records[0]!)).toEqual({
       service: 'ppt-agent', event: 'gateway_model_rejected', status: 400, requestId: 'request-safe-400',
-      model: 'gpt-5.6', providerCode: 'invalid_tool_schema', providerType: 'invalid_request_error',
+      model: 'gpt-5.6-terra', providerCode: 'invalid_tool_schema', providerType: 'invalid_request_error',
       providerParam: 'tools.0.function.parameters',
     })
     expect(records[0]).not.toContain('private provider response')
@@ -1445,7 +1445,7 @@ describe('gateway courseware model', () => {
     console.error = () => undefined
     try {
       const ambiguous = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({ error: { type: 'invalid_request_error' } }, { status: 400 }),
       })
@@ -1454,7 +1454,7 @@ describe('gateway courseware model', () => {
       })).rejects.toMatchObject({ code: 'PROVIDER_UNAVAILABLE', retryable: true })
 
       const explicit = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({
           error: { code: 'invalid_tool_schema', type: 'invalid_request_error', param: 'tools.0.function.parameters' },
@@ -1469,7 +1469,7 @@ describe('gateway courseware model', () => {
         ['plan-unsafe-param-400', { type: 'invalid_request_error', param: 'tools[0] invalid parameter' }],
       ] as const) {
         const malformedDetail = new GatewayCoursewareModel({
-          baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+          baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
           artifacts: new MockArtifactPort(),
           fetchImpl: async () => Response.json({ error }, { status: 400 }),
         })
@@ -1479,7 +1479,7 @@ describe('gateway courseware model', () => {
       }
 
       const detailCode = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({
           error: { type: 'invalid_request_error', code: ' ' },
@@ -1506,7 +1506,7 @@ describe('gateway courseware model', () => {
     console.error = () => undefined
     try {
       const model = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({ error: { code: providerCode, type: 'upstream_error' } }, {
           status,
@@ -1517,7 +1517,7 @@ describe('gateway courseware model', () => {
         operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
         idempotencyKey: `plan-upstream-${status}-${typeof providerCode}`,
       })).rejects.toMatchObject({
-        code: expectedCode, retryable: false, requestId: `request-upstream-${status}`, model: 'gpt-5.6',
+        code: expectedCode, retryable: false, requestId: `request-upstream-${status}`, model: 'gpt-5.6-terra',
       })
     } finally {
       console.error = original
@@ -1532,7 +1532,7 @@ describe('gateway courseware model', () => {
     console.error = () => undefined
     try {
       const model = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({ error: { type: 'upstream_error', ...(providerCode ? { code: providerCode } : {}) } }, {
           status: 403,
@@ -1543,7 +1543,7 @@ describe('gateway courseware model', () => {
         operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
         idempotencyKey: `plan-upstream-ambiguous-${providerCode ?? 'missing'}`,
       })).rejects.toMatchObject({
-        code: 'PROVIDER_UNAVAILABLE', retryable, requestId: 'request-upstream-ambiguous-403', model: 'gpt-5.6',
+        code: 'PROVIDER_UNAVAILABLE', retryable, requestId: 'request-upstream-ambiguous-403', model: 'gpt-5.6-terra',
       })
     } finally {
       console.error = original
@@ -1555,7 +1555,7 @@ describe('gateway courseware model', () => {
     console.error = () => undefined
     try {
       const model = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({
           error: { code: 'bad_response_status_code', type: 'bad_response_status_code' },
@@ -1568,7 +1568,7 @@ describe('gateway courseware model', () => {
         operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
         idempotencyKey: 'plan-upstream-403',
       })).rejects.toMatchObject({
-        code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-upstream-403', model: 'gpt-5.6',
+        code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-upstream-403', model: 'gpt-5.6-terra',
       })
     } finally {
       console.error = original
@@ -1580,7 +1580,7 @@ describe('gateway courseware model', () => {
     console.error = () => undefined
     try {
       const model = new GatewayCoursewareModel({
-        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+        baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
         artifacts: new MockArtifactPort(),
         fetchImpl: async () => Response.json({
           error: { code: 'model_forbidden', type: 'insufficient_permissions' },
@@ -1590,7 +1590,7 @@ describe('gateway courseware model', () => {
         operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {},
         idempotencyKey: 'plan-model-forbidden',
       })).rejects.toMatchObject({
-        code: 'MODEL_FORBIDDEN', retryable: false, requestId: 'request-model-forbidden', model: 'gpt-5.6',
+        code: 'MODEL_FORBIDDEN', retryable: false, requestId: 'request-model-forbidden', model: 'gpt-5.6-terra',
       })
     } finally {
       console.error = original
@@ -1599,14 +1599,14 @@ describe('gateway courseware model', () => {
 
   test('classifies an aborted gateway request as a provider timeout', async () => {
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(), fetchImpl: async () => { throw new DOMException('private timeout detail', 'TimeoutError') },
     })
     await expect(model.execute({
       operation: 'create_visual_deck_v4_source_spec', schemaName: 'ppt_agent_v4_source_spec_v1',
       payload: { document: { chunks: [{ id: 'chunk-1' }] } }, idempotencyKey: 'plan-timeout',
     })).rejects.toMatchObject({
-      code: 'PROVIDER_TIMEOUT', retryable: true, model: 'gpt-5.6', submissionState: 'UNKNOWN',
+      code: 'PROVIDER_TIMEOUT', retryable: true, model: 'gpt-5.6-terra', submissionState: 'UNKNOWN',
     })
     expect(model.takeExecutionMetrics('plan-timeout')).toMatchObject({
       outcome: 'FAILED', errorCode: 'PROVIDER_TIMEOUT', status: null,
@@ -1618,7 +1618,7 @@ describe('gateway courseware model', () => {
 
   test('classifies an interrupted response stream as provider unavailable instead of invalid JSON', async () => {
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => new Response(new ReadableStream({
         start(controller) { controller.error(new TypeError('private stream detail')) },
@@ -1627,14 +1627,14 @@ describe('gateway courseware model', () => {
     await expect(model.execute({
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream',
     })).rejects.toMatchObject({
-      code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-stream-1', model: 'gpt-5.6',
+      code: 'PROVIDER_UNAVAILABLE', retryable: true, requestId: 'request-stream-1', model: 'gpt-5.6-terra',
       submissionState: 'ACCEPTED',
     })
   })
 
   test('classifies a response stream timeout as provider timeout', async () => {
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => new Response(new ReadableStream({
         start(controller) { controller.error(new DOMException('private stream timeout detail', 'TimeoutError')) },
@@ -1643,7 +1643,7 @@ describe('gateway courseware model', () => {
     await expect(model.execute({
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-stream-timeout',
     })).rejects.toMatchObject({
-      code: 'PROVIDER_TIMEOUT', retryable: true, requestId: 'request-stream-timeout-1', model: 'gpt-5.6',
+      code: 'PROVIDER_TIMEOUT', retryable: true, requestId: 'request-stream-timeout-1', model: 'gpt-5.6-terra',
       submissionState: 'ACCEPTED',
     })
   })
@@ -1657,7 +1657,7 @@ describe('gateway courseware model', () => {
       '',
     ].join('\n\n'))
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => new Response(new ReadableStream({
         start(controller) { controller.enqueue(payload) },
@@ -1668,7 +1668,7 @@ describe('gateway courseware model', () => {
     await expect(model.execute({
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-oversized',
     })).rejects.toMatchObject({
-      code: 'MODEL_JSON_INVALID', retryable: true, requestId: 'request-oversized-1', model: 'gpt-5.6',
+      code: 'MODEL_JSON_INVALID', retryable: true, requestId: 'request-oversized-1', model: 'gpt-5.6-terra',
     })
     expect(cancelled).toBe(true)
   })
@@ -1679,7 +1679,7 @@ describe('gateway courseware model', () => {
       `data: ${'x'.repeat(MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 256 * 1024 + 1)}`,
     )
     const model = new GatewayCoursewareModel({
-      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6',
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
       fetchImpl: async () => new Response(new ReadableStream({
         start(controller) { controller.enqueue(payload) },
@@ -1690,7 +1690,7 @@ describe('gateway courseware model', () => {
     await expect(model.execute({
       operation: 'create_blueprint', schemaName: 'ppt_agent_blueprint_v1', payload: {}, idempotencyKey: 'plan-unframed',
     })).rejects.toMatchObject({
-      code: 'MODEL_JSON_INVALID', retryable: true, requestId: 'request-unframed-1', model: 'gpt-5.6',
+      code: 'MODEL_JSON_INVALID', retryable: true, requestId: 'request-unframed-1', model: 'gpt-5.6-terra',
     })
     expect(cancelled).toBe(true)
   })

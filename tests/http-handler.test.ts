@@ -532,7 +532,7 @@ describe('HTTP v1 handler', () => {
           planningFailure: {
             errorCode: 'PROVIDER_RATE_LIMIT', retryable: true, attempt: 3, maxAttempts: 3,
             suggestedAction: 'RETRY', diagnosticCode: 'PROVIDER_RATE_LIMIT', fieldPaths: [],
-            correlationId: 'plan-correlation-1', requestId: 'request-safe-1', model: 'gpt-5.6', contractVersion: '1',
+            correlationId: 'plan-correlation-1', requestId: 'request-safe-1', model: 'gpt-5.6-terra', contractVersion: '1',
           },
         },
       })
@@ -544,14 +544,14 @@ describe('HTTP v1 handler', () => {
       headers: { 'X-Test-Role': 'ADMIN' },
     }))
     expect(invalidFilter.status).toBe(422)
-    const admin = await handle(request('/v1/admin/planning-failures?errorCode=PROVIDER_RATE_LIMIT&model=gpt-5.6', {
+    const admin = await handle(request('/v1/admin/planning-failures?errorCode=PROVIDER_RATE_LIMIT&model=gpt-5.6-terra', {
       headers: { 'X-Test-Role': 'ADMIN' },
     }))
     const body = await admin.json() as { data: unknown[]; totalFailures: number }
     expect(admin.status).toBe(200)
     expect(body).toEqual({
       data: [{
-        errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6', contractVersion: '1',
+        errorCode: 'PROVIDER_RATE_LIMIT', model: 'gpt-5.6-terra', contractVersion: '1',
         count: 1, lastOccurredAt: '2026-07-21T00:00:00.000Z',
       }],
       totalFailures: 1,
