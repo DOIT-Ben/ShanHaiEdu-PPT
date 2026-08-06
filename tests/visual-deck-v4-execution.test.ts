@@ -7,7 +7,7 @@ import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-rend
 import { blueprintImageRequirements, V4_REVISION_PROMPT_MAX_LENGTH } from '../src/core/blueprint-assets'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 
-function blueprint() {
+function blueprint(slideCount = 2) {
   const source = {
     kind: 'SOURCE_PACKAGE' as const,
     name: '分数课程资料',
@@ -37,17 +37,28 @@ function blueprint() {
       instruction: '制作一套学生能够理解分数意义的完整视觉演示',
       sourceMode: 'SOURCE_GROUNDED',
       deckOptions: {
-        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount }, aspectRatio: '16:9',
         audience: '小学三年级学生', focus: '平均分与二分之一', styleHint: '温暖的儿童绘本课堂视觉',
       },
     },
-    slideCount: 2,
+    slideCount,
     visualDirection: '温暖的儿童绘本课堂视觉',
     createdAt: '2026-07-30T00:00:00.000Z',
   })
 }
 
 describe('visual deck v4 execution', () => {
+  test('compiles a one-page SINGLE brief into one isolated full-slide request', () => {
+    const planned = blueprint(1)
+    const requirements = blueprintImageRequirements({ id: 'run-v4-single', revisionRound: 0 }, planned)
+
+    expect(planned.visualDeckV4Proposal?.slideBriefs).toMatchObject([
+      expect.objectContaining({ role: 'SINGLE', previousSlideRelation: null, nextSlideRelation: null }),
+    ])
+    expect(requirements).toHaveLength(1)
+    expect(requirements[0]).toMatchObject({ pageNumber: 1, aspectRatio: '16:9' })
+  })
+
   test('compiles one isolated full-slide image instruction per approved brief', () => {
     const planned = blueprint()
     planned.visualDeckV4Proposal!.slideBriefs[0]!.facts = [

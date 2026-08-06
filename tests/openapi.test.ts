@@ -12,6 +12,25 @@ import {
 const filename = new URL('../docs/openapi-v1.json', import.meta.url)
 
 describe('OpenAPI v1 contract', () => {
+  test('documents V4-only single-page support in parity with the public boundary', async () => {
+    const document = JSON.parse(await readFile(filename, 'utf8')) as any
+    const create = document.components.schemas.CreateRunRequest
+
+    expect(create.properties.slideCount.minimum).toBe(1)
+    expect(create.properties.visualDeckV4.properties.deckOptions.properties.length.oneOf[1]
+      .properties.slideCount.minimum).toBe(1)
+    expect(create.allOf).toContainEqual(expect.objectContaining({
+      if: { properties: { presentationMode: { const: 'VISUAL_DECK_V4' } }, required: ['presentationMode'] },
+      then: { required: ['visualDeckV4'] },
+      else: { properties: { slideCount: { minimum: 2 }, visualDeckV4: false } },
+    }))
+    expect(document.components.schemas.DeliveryIdentity.properties.slideCount.minimum).toBe(1)
+    expect(document.components.schemas.DeliveryIdentity.properties.pageNumbers.minItems).toBe(1)
+    expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.slideCount.minimum).toBe(1)
+    expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.flow.minItems).toBe(1)
+    expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.pages.minItems).toBe(1)
+  })
+
   test('keeps release presentationMode consistency in parity with Zod for every mode', async () => {
     type ReleaseModeRule = {
       if?: { properties?: { presentationMode?: { const?: string } }; required?: string[] }

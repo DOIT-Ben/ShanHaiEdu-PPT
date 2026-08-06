@@ -183,7 +183,7 @@ export const approvedPageDesignSourceSchema = z.object({
   lessonDurationMinutes: z.number().int().min(1).max(300),
   audience: z.string().trim().min(1).max(300),
   objectives: z.array(z.string().trim().min(1).max(300)).min(1).max(10),
-  pages: z.array(approvedPageDesignPageSchema).min(2).max(50),
+  pages: z.array(approvedPageDesignPageSchema).min(1).max(50),
 }).strict().superRefine((value, context) => {
   value.pages.forEach((page, index) => {
     if (page.pageNumber !== index + 1) {
@@ -245,7 +245,7 @@ export const createRunRequestSchema = z.object({
   schemaVersion: z.literal(CONTRACT_VERSION),
   host: hostContextSchema,
   source: documentSourceSchema,
-  slideCount: z.number().int().min(2).max(50),
+  slideCount: z.number().int().min(1).max(50),
   visualDirection: z.string().trim().min(3).max(1_000),
   targetAudience: z.string().trim().min(3).max(500).optional(),
   presentationGoal: z.string().trim().min(3).max(1_000).optional(),
@@ -264,6 +264,9 @@ export const createRunRequestSchema = z.object({
   }
   if (value.presentationMode !== 'VISUAL_DECK_V4' && value.visualDeckV4) {
     context.addIssue({ code: 'custom', path: ['visualDeckV4'], message: 'visual deck v4 configuration is only valid for v4' })
+  }
+  if (value.presentationMode !== 'VISUAL_DECK_V4' && value.slideCount < 2) {
+    context.addIssue({ code: 'custom', path: ['slideCount'], message: 'single-slide runs are only supported by visual deck v4' })
   }
   const length = value.visualDeckV4?.deckOptions.length
   if (typeof length === 'object' && length.slideCount !== value.slideCount) {
@@ -295,7 +298,7 @@ export const runActionSchema = z.discriminatedUnion('type', [
   z.object({
     ...actionBase,
     type: z.literal('REPLAN'),
-    slideCount: z.number().int().min(2).max(50),
+    slideCount: z.number().int().min(1).max(50),
     visualDirection: z.string().trim().min(3).max(1_000),
   }).strict(),
   z.object({
@@ -443,7 +446,7 @@ export const runSnapshotSchema = z.object({
   imageModel: z.string().trim().min(1).max(120),
   automationLevel: automationLevelSchema,
   version: z.number().int().nonnegative(),
-  slideCount: z.number().int().min(2).max(50),
+  slideCount: z.number().int().min(1).max(50),
   revisionRound: z.number().int().nonnegative(),
   maxRevisionRounds: z.number().int().min(0).max(4),
   planningAttempt: z.number().int().min(0).max(MAX_PLANNING_RETRIES),

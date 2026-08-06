@@ -941,6 +941,45 @@ describe('run service', () => {
     })
   })
 
+  test('allows a V4 replan to one page and keeps its length snapshot aligned', async () => {
+    const { repository, service } = fixture()
+    const created = await service.create({
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      visualDeckV4: {
+        instruction: '根据教材制作视觉演示',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+      },
+    }, 'frameflow-create-v4-single-replan-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      transaction.putRun({ ...transaction.run, status: 'NEEDS_HUMAN', version: 1 })
+      transaction.putStep({
+        id: 'step-v4-plan-failed', runId: created.run.id,
+        idempotencyKey: planningStepKey(created.run.id, 0), inputHash: 'failed-v4-input',
+        tool: 'create_blueprint', status: 'FAILED', budgetUnits: 0, budgetReservationId: null,
+        externalOperationId: null, errorCode: 'MODEL_JSON_INVALID', output: null,
+        createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
+      })
+    })
+
+    const replanned = await service.act(created.run.id, host, {
+      schemaVersion: CONTRACT_VERSION,
+      type: 'REPLAN',
+      expectedVersion: 1,
+      slideCount: 1,
+      visualDirection: '一个主视觉承载主题和结论的单页信息图',
+    }, 'v4-replan-to-single-0001')
+
+    expect(replanned).toMatchObject({
+      presentationMode: 'VISUAL_DECK_V4',
+      status: 'PLANNING',
+      slideCount: 1,
+      visualDeckV4: { deckOptions: { length: { slideCount: 1 } } },
+    })
+  })
+
   test('retries delivery only when the current delivery step failed', async () => {
     const { repository, service } = fixture()
     const created = await service.create(request, 'frameflow-create-delivery-retry-0001')

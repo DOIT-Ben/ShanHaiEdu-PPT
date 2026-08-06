@@ -101,7 +101,7 @@ const ROLE_SEQUENCE = [
 ] as const
 
 const ROLE_LABELS = {
-  COVER: '主题', SECTION: '章节', CONTEXT: '情境', QUESTION: '问题', EXPLANATION: '解释',
+  SINGLE: '主题结论', COVER: '主题', SECTION: '章节', CONTEXT: '情境', QUESTION: '问题', EXPLANATION: '解释',
   COMPARISON: '对比', PROCESS: '过程', PRACTICE: '练习', SUMMARY: '总结',
 } as const
 
@@ -219,6 +219,14 @@ export function normalizeVisualDeckV4SourceSpecRequestBinding(
 }
 
 function compileChapters(slideCount: number) {
+  if (slideCount === 1) {
+    return [{
+      chapterId: 'single',
+      title: '单页叙事',
+      purpose: '在同一画面中建立主题、核心结论与主视觉',
+      slideNumbers: [1],
+    }]
+  }
   if (slideCount <= 4) {
     return [{ chapterId: 'story', title: '完整叙事', purpose: '从主题建立到结论收束', slideNumbers: range(1, slideCount) }]
   }
@@ -234,6 +242,7 @@ function range(start: number, end: number) {
 }
 
 function slideRole(pageNumber: number, slideCount: number) {
+  if (slideCount === 1) return 'SINGLE' as const
   if (pageNumber === 1) return 'COVER' as const
   if (pageNumber === slideCount) return 'SUMMARY' as const
   return ROLE_SEQUENCE[(pageNumber - 2) % ROLE_SEQUENCE.length]!
@@ -296,7 +305,9 @@ export function compileVisualDeckV4Proposal(input: CompileVisualDeckV4Input): Vi
     deckPlan: {
       title,
       slideCount: input.slideCount,
-      narrativeArc: ['建立主题和核心问题', '逐步解释并组织来源事实', '通过应用和总结完成认知闭环'],
+      narrativeArc: input.slideCount === 1
+        ? ['在单页中建立主题、核心结论与主视觉']
+        : ['建立主题和核心问题', '逐步解释并组织来源事实', '通过应用和总结完成认知闭环'],
       chapters: compileChapters(input.slideCount),
     },
     slideBriefs,
@@ -384,7 +395,11 @@ export function createVisualDeckV4BlueprintFromProposal(
       pageNumber: brief.pageNumber,
       title: brief.title,
       body: brief.lockedCopy.map((copy) => clipped(copy, 300)),
-      layout: brief.role === 'COVER' ? 'HERO' : brief.role === 'SUMMARY' ? 'STATEMENT' : brief.pageNumber % 2 === 0 ? 'SPLIT' : 'EDITORIAL',
+      layout: brief.role === 'SINGLE' || brief.role === 'COVER'
+        ? 'HERO'
+        : brief.role === 'SUMMARY'
+          ? 'STATEMENT'
+          : brief.pageNumber % 2 === 0 ? 'SPLIT' : 'EDITORIAL',
       visualIntent: brief.visualMetaphor,
       visualPrompt: `V4页级视觉编译待执行：${brief.keyClaim}；${brief.composition}`,
       sourceChunkIds: brief.sourceChunkIds,

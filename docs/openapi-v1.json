@@ -1146,8 +1146,8 @@
                 "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
               },
               "pages": {
-                "type": "array", "minItems": 2, "maxItems": 50,
-                "description": "Ordered, teacher-approved pages. pageNumber must be continuous from 1.",
+                "type": "array", "minItems": 1, "maxItems": 50,
+                "description": "Ordered, teacher-approved pages. pageNumber must be continuous from 1. Presentation Job V2 retains its separate two-page minimum.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -1224,7 +1224,7 @@
           "schemaVersion": { "const": "1" },
           "host": { "$ref": "#/components/schemas/HostContext" },
           "source": { "$ref": "#/components/schemas/DocumentSource" },
-          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+          "slideCount": { "type": "integer", "minimum": 1, "maximum": 50 },
           "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
           "targetAudience": { "type": "string", "minLength": 3, "maxLength": 500 },
           "presentationGoal": { "type": "string", "minLength": 3, "maxLength": 1000 },
@@ -1253,7 +1253,7 @@
                   "length": {
                     "oneOf": [
                       { "enum": ["SHORT", "DEFAULT", "LONG"] },
-                      { "type": "object", "additionalProperties": false, "required": ["slideCount"], "properties": { "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 } } }
+                      { "type": "object", "additionalProperties": false, "required": ["slideCount"], "properties": { "slideCount": { "type": "integer", "minimum": 1, "maximum": 50 } } }
                     ],
                     "default": "DEFAULT"
                   },
@@ -1265,7 +1265,12 @@
               }
             }
           }
-        }
+        },
+        "allOf": [{
+          "if": { "properties": { "presentationMode": { "const": "VISUAL_DECK_V4" } }, "required": ["presentationMode"] },
+          "then": { "required": ["visualDeckV4"] },
+          "else": { "properties": { "slideCount": { "minimum": 2 }, "visualDeckV4": false } }
+        }]
       },
       "RunAction": {
         "type": "object",
@@ -1278,7 +1283,7 @@
           "reason": { "type": "string", "minLength": 3, "maxLength": 2000 },
           "mode": { "const": "STOP_NEW_SUBMISSIONS" },
           "issueIds": { "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 160 } },
-          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+          "slideCount": { "type": "integer", "minimum": 1, "maximum": 50, "description": "One slide is accepted only when the target Run is VISUAL_DECK_V4." },
           "visualDirection": { "type": "string", "minLength": 3, "maxLength": 1000 },
           "additionalBudgetUnits": { "type": "integer", "minimum": 1, "maximum": 1000000 },
           "slideId": { "type": "string", "minLength": 1, "maxLength": 160 },
@@ -1631,8 +1636,8 @@
         "required": ["status", "slideCount", "pageNumbers", "blueprintHash"],
         "properties": {
           "status": { "const": "VERIFIED" },
-          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
-          "pageNumbers": { "type": "array", "minItems": 2, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 50 } },
+          "slideCount": { "type": "integer", "minimum": 1, "maximum": 50 },
+          "pageNumbers": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "integer", "minimum": 1, "maximum": 50 } },
           "blueprintHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
           "proposalHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
         }
@@ -1908,18 +1913,18 @@
           "title": { "type": "string", "minLength": 1, "maxLength": 160 },
           "summary": { "type": "string", "minLength": 20, "maxLength": 2000 },
           "audience": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "slideCount": { "type": "integer", "minimum": 2, "maximum": 50 },
+          "slideCount": { "type": "integer", "minimum": 1, "maximum": 50 },
           "aspectRatio": { "const": "16:9" },
           "presentationType": { "type": "string", "minLength": 1, "maxLength": 80 },
           "flow": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 20,
             "items": { "type": "string", "minLength": 1, "maxLength": 500 }
           },
           "pages": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 50,
             "items": {
               "type": "object",

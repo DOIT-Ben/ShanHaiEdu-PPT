@@ -237,6 +237,9 @@ export class RunService {
         : null
       return await this.dependencies.repository.transact(runId, (transaction) => {
         if (!owns(transaction.run, host)) throw new RunServiceError(404, 'RUN_NOT_FOUND', 'run was not found')
+        if (parsed.data.type === 'REPLAN' && parsed.data.slideCount === 1 && !isVisualDeckV4(transaction.run)) {
+          throw new RunServiceError(422, 'SINGLE_SLIDE_MODE_UNSUPPORTED', 'single-slide replan requires visual deck v4')
+        }
         const actionStepKey = `${runId}:action:${key}`
         const actionInputHash = hashInput({ host, action: parsed.data })
         const existingAction = transaction.getStep(actionStepKey)
@@ -289,6 +292,15 @@ export class RunService {
             ...(parsed.data.type === 'REPLAN' ? {
               slideCount: parsed.data.slideCount,
               visualDirection: parsed.data.visualDirection,
+              ...(isVisualDeckV4(previous) && previous.visualDeckV4 ? {
+                visualDeckV4: {
+                  ...previous.visualDeckV4,
+                  deckOptions: {
+                    ...previous.visualDeckV4.deckOptions,
+                    length: { slideCount: parsed.data.slideCount },
+                  },
+                },
+              } : {}),
             } : {}),
           }),
           updatedAt: now,

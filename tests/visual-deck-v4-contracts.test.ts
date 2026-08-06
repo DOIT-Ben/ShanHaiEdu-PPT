@@ -65,6 +65,43 @@ describe('visual deck v4 contracts', () => {
     expect(visualDeckV4ProposalSchema.parse(proposal()).slideBriefs).toHaveLength(2)
   })
 
+  test('accepts a one-page SINGLE proposal and manifest', () => {
+    const multiPage = proposal()
+    const single = {
+      ...multiPage,
+      presentationSpec: { ...multiPage.presentationSpec, slideCount: 1 },
+      deckPlan: {
+        ...multiPage.deckPlan,
+        slideCount: 1,
+        narrativeArc: ['在同一画面中建立主题、核心结论与主视觉'],
+        chapters: [{ chapterId: 'single', title: '单页叙事', purpose: '聚焦唯一结论', slideNumbers: [1] }],
+      },
+      slideBriefs: [{
+        ...multiPage.slideBriefs[0]!,
+        role: 'SINGLE',
+        sourceChunkIds: ['chunk-1'],
+        previousSlideRelation: null,
+        nextSlideRelation: null,
+      }],
+    }
+
+    expect(visualDeckV4ProposalSchema.parse(single).slideBriefs[0]).toMatchObject({
+      pageNumber: 1,
+      role: 'SINGLE',
+      previousSlideRelation: null,
+      nextSlideRelation: null,
+    })
+    expect(visualDeckV4DeckManifestSchema.parse({
+      schemaVersion: '1', runId: 'run-v4-single', presentationMode: 'VISUAL_DECK_V4',
+      compilerVersion: 'visual-deck-v4-chain-3', proposalHash: 'a'.repeat(64),
+      slides: [{
+        pageNumber: 1, strategy: 'FULL_GENERATIVE', artifactId: 'slide-1',
+        sha256: 'b'.repeat(64), revision: 0, qualityStatus: 'APPROVED',
+      }],
+      createdAt: '2026-08-07T00:00:00.000Z',
+    }).slides).toHaveLength(1)
+  })
+
   test('rejects incomplete chapter coverage and invented source chunks', () => {
     const invalidCoverage = proposal()
     invalidCoverage.deckPlan.chapters[1]!.slideNumbers = [1]

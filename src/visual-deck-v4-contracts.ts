@@ -12,7 +12,7 @@ export const visualDeckV4SourceRoleSchema = z.enum([
 
 export const visualDeckV4LengthSchema = z.union([
   z.enum(['SHORT', 'DEFAULT', 'LONG']),
-  z.object({ slideCount: z.number().int().min(2).max(50) }).strict(),
+  z.object({ slideCount: z.number().int().min(1).max(50) }).strict(),
 ])
 
 export const visualDeckV4ConfigSchema = z.object({
@@ -68,7 +68,7 @@ export const visualDeckV4PresentationSpecSchema = z.object({
   language: boundedText(40),
   audience: boundedText(500),
   goal: boundedText(1_000),
-  slideCount: z.number().int().min(2).max(50),
+  slideCount: z.number().int().min(1).max(50),
   focus: z.array(boundedText(500)).min(1).max(12),
   style: boundedText(1_000),
   requiredCoverage: z.array(boundedText(500)).min(1).max(30),
@@ -77,8 +77,8 @@ export const visualDeckV4PresentationSpecSchema = z.object({
 
 export const visualDeckV4DeckPlanSchema = z.object({
   title: boundedText(160),
-  slideCount: z.number().int().min(2).max(50),
-  narrativeArc: z.array(boundedText(500)).min(2).max(20),
+  slideCount: z.number().int().min(1).max(50),
+  narrativeArc: z.array(boundedText(500)).min(1).max(20),
   chapters: z.array(z.object({
     chapterId: identifierSchema,
     title: boundedText(160),
@@ -98,6 +98,7 @@ export const visualDeckV4DeckPlanSchema = z.object({
 })
 
 export const visualDeckV4SlideRoleSchema = z.enum([
+  'SINGLE',
   'COVER',
   'SECTION',
   'CONTEXT',
@@ -243,7 +244,7 @@ export const visualDeckV4DeckVisualStageSchema = z.object({
 }).strict()
 
 export const visualDeckV4SlideBriefsStageSchema = z.object({
-  slideBriefs: z.array(visualDeckV4SlideBriefSchema).min(2).max(50),
+  slideBriefs: z.array(visualDeckV4SlideBriefSchema).min(1).max(50),
 }).strict()
 
 export function normalizeVisualDeckV4VisibleReferences(
@@ -489,7 +490,7 @@ const reflectionTrustedEvidenceSchema = z.object({
 }).strict()
 
 const reflectionFrozenConstraintsSchema = z.object({
-  slideCount: z.number().int().min(2).max(50),
+  slideCount: z.number().int().min(1).max(50),
   language: boundedText(40),
   sourceMode: visualDeckV4SourceModeSchema,
   presentationMode: z.literal('VISUAL_DECK_V4'),
@@ -540,7 +541,7 @@ export const visualDeckV4ProposalDraftSchema = z.object({
   sourceUnderstanding: visualDeckV4SourceUnderstandingSchema,
   presentationSpec: visualDeckV4PresentationSpecSchema,
   deckPlan: visualDeckV4DeckPlanSchema,
-  slideBriefs: z.array(visualDeckV4SlideBriefSchema).min(2).max(50),
+  slideBriefs: z.array(visualDeckV4SlideBriefSchema).min(1).max(50),
   visualContract: visualDeckV4VisualContractSchema,
 }).strict().superRefine((value, context) => {
   const count = value.presentationSpec.slideCount
@@ -613,7 +614,7 @@ export const visualDeckV4DeckManifestSchema = z.object({
   presentationMode: z.literal('VISUAL_DECK_V4'),
   compilerVersion: identifierSchema,
   proposalHash: z.string().regex(/^[a-f0-9]{64}$/),
-  slides: z.array(visualDeckV4RenderedSlideSchema).min(2).max(50),
+  slides: z.array(visualDeckV4RenderedSlideSchema).min(1).max(50),
   createdAt: z.string().datetime(),
 }).strict().superRefine((value, context) => {
   value.slides.forEach((slide, index) => {

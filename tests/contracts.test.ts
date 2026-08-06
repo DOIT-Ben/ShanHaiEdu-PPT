@@ -162,6 +162,36 @@ describe('public v1 contracts', () => {
     expect(() => createRunRequestSchema.parse({ ...base, presentationMode: 'SLIDE_IMAGE_V2' })).toThrow()
   })
 
+  test('allows a single slide only for a configured v4 run', () => {
+    const base = {
+      schemaVersion: CONTRACT_VERSION,
+      host,
+      source: { kind: 'TEXT' as const, text: '这是一段足够长的资料，用于验证单页视觉演示的公开合同边界。' },
+      slideCount: 1,
+      visualDirection: '以一个主视觉清晰表达主题与结论',
+      imageModel: 'gemini-3-pro-image-preview',
+      automationLevel: 'BOUNDED_AUTO' as const,
+      budgetUnits: 1,
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      visualDeckV4: {
+        instruction: '把资料制作成一张包含主题、结论和主视觉的演示页',
+        sourceMode: 'SOURCE_GROUNDED' as const,
+        deckOptions: { length: { slideCount: 1 }, aspectRatio: '16:9' as const },
+      },
+    }
+
+    expect(createRunRequestSchema.parse(base)).toMatchObject({
+      slideCount: 1,
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: { deckOptions: { length: { slideCount: 1 } } },
+    })
+    expect(createRunRequestSchema.safeParse({
+      ...base,
+      presentationMode: 'SLIDE_IMAGE_V2',
+      visualDeckV4: undefined,
+    }).success).toBe(false)
+  })
+
   test('accepts an ordered mixed source package and rejects duplicate attachments', () => {
     const base = {
       schemaVersion: CONTRACT_VERSION,

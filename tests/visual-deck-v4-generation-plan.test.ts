@@ -47,4 +47,33 @@ describe('visual deck v4 user generation plan', () => {
     expect(JSON.stringify(plan)).not.toContain('compilerVersion')
     expect(JSON.stringify(plan)).not.toContain('visualPrompt')
   })
+
+  test('projects a single-page v4 plan without fabricating a two-step flow', () => {
+    const source = {
+      kind: 'TEXT' as const,
+      name: '水循环教材.txt',
+      text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4),
+    }
+    const blueprint = createVisualDeckV4Blueprint({
+      runId: 'run-user-plan-single', inputHash: 'input-user-plan-single', source,
+      document: {
+        name: source.name,
+        chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+        isComplete: true,
+        missingRanges: [],
+      },
+      config: {
+        instruction: '制作一张解释水循环核心关系的视觉演示页',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount: 1 }, aspectRatio: '16:9' },
+      },
+      slideCount: 1,
+      visualDirection: '清晰的自然科学信息图',
+      createdAt: '2026-08-07T00:00:00.000Z',
+    })
+
+    const plan = visualDeckV4GenerationPlan(blueprint.visualDeckV4Proposal!)
+    expect(plan).toMatchObject({ slideCount: 1, flow: ['在单页中建立主题、核心结论与主视觉'] })
+    expect(plan.pages).toHaveLength(1)
+  })
 })

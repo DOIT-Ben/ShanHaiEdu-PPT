@@ -274,7 +274,9 @@ describe('gateway courseware model', () => {
       expect(promptLedger).toContain(role)
     }
     const runtimeRoleLines = runtimePrompts.split('\n').filter((line) => line.includes('你是'))
-    const ledgerRoleLines = promptLedger.split('\n').filter((line) => line.startsWith('你是'))
+    const ledgerRoleLines = LEDGER_SYSTEM_PROMPT_IDS
+      .map((id) => ledgerSystemPrompt(promptLedger, id))
+      .filter((line) => line.startsWith('你是'))
     expect(runtimeRoleLines).toHaveLength(ledgerRoleLines.length)
     expect(ledgerRoleLines.length).toBeGreaterThan(stageRoles.length)
     for (const line of [...runtimeRoleLines, ...ledgerRoleLines]) {

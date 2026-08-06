@@ -7,6 +7,42 @@ import {
 } from '../src/core/visual-deck-v4-planner'
 
 describe('visual deck v4 chain planner', () => {
+  test('compiles one page as a SINGLE narrative with a hero blueprint slide', () => {
+    const source = {
+      kind: 'TEXT' as const,
+      name: '水循环教材.txt',
+      text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4),
+    }
+    const blueprint = createVisualDeckV4Blueprint({
+      runId: 'run-v4-single', inputHash: 'input-v4-single', source,
+      document: {
+        name: source.name,
+        chunks: [{ id: 'chunk-1', text: source.text, sha256: 'a'.repeat(64) }],
+        isComplete: true,
+        missingRanges: [],
+      },
+      config: {
+        instruction: '制作一张解释水循环核心关系的视觉演示页',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: {
+          deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount: 1 }, aspectRatio: '16:9',
+          audience: '小学高年级学生', focus: '水循环的核心关系', styleHint: '清晰的自然科学信息图',
+        },
+      },
+      slideCount: 1,
+      visualDirection: '清晰的自然科学信息图',
+      createdAt: '2026-08-07T00:00:00.000Z',
+    })
+
+    expect(blueprint.slides).toHaveLength(1)
+    expect(blueprint.slides[0]).toMatchObject({ pageNumber: 1, layout: 'HERO' })
+    expect(blueprint.visualDeckV4Proposal).toMatchObject({
+      presentationSpec: { slideCount: 1 },
+      deckPlan: { narrativeArc: ['在单页中建立主题、核心结论与主视觉'] },
+      slideBriefs: [expect.objectContaining({ role: 'SINGLE', previousSlideRelation: null, nextSlideRelation: null })],
+    })
+  })
+
   test('rejects a model proposal that changes frozen request fields', () => {
     const source = {
       kind: 'TEXT' as const,

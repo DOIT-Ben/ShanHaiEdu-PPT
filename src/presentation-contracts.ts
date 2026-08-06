@@ -163,7 +163,7 @@ export const blueprintSlideSchema = z.object({
 export const blueprintDraftSchema = z.object({
   title: z.string().trim().min(1).max(160),
   curriculum: curriculumBriefSchema,
-  slides: z.array(blueprintSlideSchema).min(2).max(50),
+  slides: z.array(blueprintSlideSchema).min(1).max(50),
 }).strict().superRefine((value, context) => {
   value.slides.forEach((slide, index) => {
     if (slide.pageNumber !== index + 1) {
@@ -496,8 +496,8 @@ export const webAssetProvenanceSchema = z.object({
 
 export const verifiedDeliveryIdentitySchema = z.object({
   status: z.literal('VERIFIED'),
-  slideCount: z.number().int().min(2).max(50),
-  pageNumbers: z.array(z.number().int().min(1).max(50)).min(2).max(50),
+  slideCount: z.number().int().min(1).max(50),
+  pageNumbers: z.array(z.number().int().min(1).max(50)).min(1).max(50),
   blueprintHash: z.string().regex(/^[a-f0-9]{64}$/),
   proposalHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict().superRefine((value, context) => {
