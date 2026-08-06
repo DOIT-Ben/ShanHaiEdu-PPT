@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import sharp from 'sharp'
 import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
+import { SharpControlledRasterPort } from '../src/adapters/v4-controlled-raster'
 import {
   FixedClock,
   MockArtifactPort,
@@ -29,6 +30,7 @@ import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-ca
 import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
 import type { UsageAccountingPort } from '../src/core/ports'
 import type { UsageRunBill } from '../src/usage-accounting-contracts'
+import { presentationBlueprintSchema } from '../src/presentation-contracts'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -145,6 +147,32 @@ function visualDeckV4Blueprint() {
       },
     },
     slideCount: 2, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
+  })
+}
+
+function exactCountVisualDeckV4Blueprint() {
+  const base = visualDeckV4Blueprint()
+  const proposal = base.visualDeckV4Proposal!
+  return presentationBlueprintSchema.parse({
+    ...base,
+    visualDeckV4Proposal: {
+      ...proposal,
+      slideBriefs: proposal.slideBriefs.map((brief, index) => index === 1 ? {
+        ...brief,
+        title: '五个苹果',
+        keyClaim: '桌上有5个苹果。',
+        audienceTakeaway: '能够准确数出5个苹果。',
+        lockedCopy: ['桌上有5个苹果。'],
+        facts: ['桌上有5个苹果。'],
+        numbers: [],
+        formulas: [],
+      } : brief),
+    },
+    slides: base.slides.map((slide, index) => index === 1 ? {
+      ...slide,
+      title: '五个苹果',
+      body: ['桌上有5个苹果。'],
+    } : slide),
   })
 }
 
@@ -311,6 +339,79 @@ async function usageV2RevisionFixture(inputs: Readonly<{
 }
 
 describe('revision media coordinator', () => {
+  test('re-renders a verified exact-count V4 revision without a Provider image operation', async () => {
+    const base = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: exactCountVisualDeckV4Blueprint(),
+    })
+    const coordinator = new RevisionMediaCoordinator({
+      repository: base.repository,
+      media: base.media,
+      batchBudget: base.budget,
+      artifacts: base.artifacts,
+      controlledRaster: new SharpControlledRasterPort({ artifacts: base.artifacts }),
+      clock: base.clock,
+      revisionImageModel: 'gpt-image-2',
+    })
+
+    await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({
+      status: 'REVISING', submitted: 1, total: 1,
+    })
+    expect(base.images.submitCalls).toBe(0)
+    const revisionStep = (await base.repository.listSteps('run-1')).find((step) =>
+      step.idempotencyKey === 'run-1:slide:2:image:r1:v1')
+    expect(revisionStep).toMatchObject({
+      status: 'COMPLETED',
+      budgetUnits: 0,
+      output: { renderStrategy: 'CONTROLLED_RASTER' },
+    })
+    expect((await base.repository.listSteps('run-1')).find((step) =>
+      step.idempotencyKey === generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })))
+      .toMatchObject({ budgetUnits: 0, output: { accounting: { estimatedUnits: 0 } } })
+
+    await expect(coordinator.refresh('run-1')).resolves.toMatchObject({
+      status: 'PAGE_REVIEW', completed: 1, total: 1,
+    })
+    expect(base.budget.batchFinalizations).toHaveLength(0)
+  })
+
+  test('keeps a mixed V4 revision on its persisted controlled and Provider routes', async () => {
+    const basePlan = revisionPlan()
+    const plan = {
+      ...basePlan,
+      operations: [
+        { ...basePlan.operations[0]!, id: 'operation-page-1', slideId: 'run-1:slide:1', instruction: 'Correct page one composition.' },
+        { ...basePlan.operations[0]!, id: 'operation-page-2', slideId: 'run-1:slide:2', instruction: 'Preserve exactly five apples.' },
+      ],
+    }
+    const base = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: exactCountVisualDeckV4Blueprint(), plan,
+    })
+    const coordinator = new RevisionMediaCoordinator({
+      repository: base.repository,
+      media: base.media,
+      batchBudget: base.budget,
+      artifacts: base.artifacts,
+      controlledRaster: new SharpControlledRasterPort({ artifacts: base.artifacts }),
+      clock: base.clock,
+      revisionImageModel: 'gpt-image-2',
+    })
+
+    await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({ submitted: 2, total: 2 })
+    expect(base.images.submitCalls).toBe(1)
+    const controlled = (await base.repository.listSteps('run-1')).find((step) =>
+      step.idempotencyKey === 'run-1:slide:2:image:r1:v1')
+    expect(controlled).toMatchObject({ status: 'COMPLETED', budgetUnits: 0 })
+
+    const providerKey = [...base.images.operations.keys()][0]!
+    base.images.complete(providerKey, 'artifact-r1-1')
+    await expect(coordinator.refresh('run-1')).resolves.toMatchObject({
+      status: 'PAGE_REVIEW', completed: 2, total: 2,
+    })
+    expect(base.budget.batchFinalizations).toEqual([
+      expect.objectContaining({ settledUnits: 5, releasedUnits: 0 }),
+    ])
+  })
+
   test('runs Usage V2 image edits through per-page permits and local batch reduction without legacy credit calls', async () => {
     const { repository, budget, images, usage, coordinator } = await usageV2RevisionFixture()
 

@@ -739,6 +739,7 @@ export function createAgentRuntime(input: RuntimeInput) {
     media,
     batchBudget: budget,
     artifacts: input.artifacts,
+    controlledRaster,
     clock,
     revisionImageModel,
     imageConcurrency,

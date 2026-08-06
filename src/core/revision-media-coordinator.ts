@@ -31,7 +31,15 @@ import {
   isUsageAuthorizationCapFailureStep,
   MediaStepRunner,
 } from './media-step-runner'
-import type { AgentRepository, ArtifactPort, BatchBudgetPort, ClockPort, RunRecord, StepRecord } from './ports'
+import type {
+  AgentRepository,
+  ArtifactPort,
+  BatchBudgetPort,
+  ClockPort,
+  ControlledRasterPort,
+  RunRecord,
+  StepRecord,
+} from './ports'
 import { visualDeckV4RevisionInstructions } from './revision-instruction-memory'
 import { evaluateBudget, transitionRun } from './policy'
 import {
@@ -56,6 +64,7 @@ import {
   revisionDetails,
   v4LifecyclePayload,
 } from './v4-lifecycle'
+import { resolveV4RenderStrategy, type V4RenderStrategy } from './v4-render-strategy'
 
 export type RevisionMediaResult = Readonly<{
   status: RunRecord['status']
@@ -85,6 +94,7 @@ type RevisionTarget = Readonly<{
     bytes: Uint8Array
     sha256: string
   }>
+  renderStrategy?: V4RenderStrategy
 }>
 
 function canRetryReleasedV4Submission(run: RunRecord, step: StepRecord | undefined) {
@@ -149,6 +159,7 @@ export class RevisionMediaCoordinator {
     media: MediaStepRunner
     batchBudget: BatchBudgetPort
     artifacts: ArtifactPort
+    controlledRaster?: ControlledRasterPort
     clock: ClockPort
     revisionImageModel: string
     imageConcurrency?: number
@@ -180,24 +191,27 @@ export class RevisionMediaCoordinator {
       !stepsByKey.has(target.idempotencyKey)
         || canRetryReleasedV4Submission(run, stepsByKey.get(target.idempotencyKey))).length
     let batchReservation: GenerationBatchReservation | undefined
+    const v4Blueprint = isVisualDeckV4(run)
+      ? await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
+      : null
     if (isVisualDeckV4(run)) {
-      const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
+      const accountingTarget = targets.find((target) => target.renderStrategy?.kind !== 'CONTROLLED_RASTER') ?? targets[0]!
       await ensureGenerationBatch({
         repository: this.dependencies.repository,
         clock: this.dependencies.clock,
         run,
-        blueprint,
-        requirements: this.batchRequirements(targets),
+        blueprint: v4Blueprint!,
+        requirements: this.batchRequirements(targets, unitBudgetUnits),
         unitBudgetUnits,
-        accountingModel: targets[0]!.model,
-        operationMode: targets[0]!.operationMode ?? 'TEXT_TO_IMAGE',
+        accountingModel: accountingTarget.model,
+        operationMode: accountingTarget.operationMode ?? 'TEXT_TO_IMAGE',
         identity: { revisionRound: run.revisionRound, scope: 'REVISION' },
       })
       const batchKey = generationBatchStepKeyFor(runId, { revisionRound: run.revisionRound, scope: 'REVISION' })
       const batchStep = (await this.dependencies.repository.listSteps(runId))
         .find((step) => step.idempotencyKey === batchKey)
       if (!batchStep) throw new Error('REVISION_GENERATION_BATCH_STEP_NOT_FOUND')
-      if (!batchStep.budgetReservationId) {
+      if (!batchStep.budgetReservationId && batchStep.budgetUnits > 0) {
         const supported = await preflightGenerationBatchFinalization({
           repository: this.dependencies.repository,
           budget: this.dependencies.batchBudget,
@@ -213,7 +227,7 @@ export class RevisionMediaCoordinator {
       if (!latestBatchStep) throw new Error('REVISION_GENERATION_BATCH_STEP_NOT_FOUND')
       const needsInitialBudgetCheck = !latestBatchStep.budgetReservationId
         && !['RESERVED', 'RESERVATION_UNKNOWN'].includes(latestBatchStep.status)
-      if (needsInitialBudgetCheck) {
+      if (needsInitialBudgetCheck && latestBatchStep.budgetUnits > 0) {
         const decision = evaluateBudget(run, latestBatchStep.budgetUnits)
         if (!decision.allowed && decision.reason === 'BUDGET_EXCEEDED') {
           await this.pauseForBudget(run, latestBatchStep.budgetUnits)
@@ -244,7 +258,9 @@ export class RevisionMediaCoordinator {
       const outcomes = await mapWithConcurrency(pending, this.imageConcurrency, async (target) => {
         const existing = stepsByKey.get(target.idempotencyKey)
         try {
-          return { step: (await this.submitTarget(run, target, unitBudgetUnits, existing, batchReservation)).step }
+          return { step: target.renderStrategy?.kind === 'CONTROLLED_RASTER'
+            ? await this.completeControlledRaster(run, v4Blueprint!, target, target.renderStrategy)
+            : (await this.submitTarget(run, target, unitBudgetUnits, existing, batchReservation)).step }
         } catch (error) {
           return { error }
         }
@@ -447,6 +463,41 @@ export class RevisionMediaCoordinator {
         operation.instruction,
       ])
     }
+    const pageEntries = [...byPage]
+    const persistedBatchStep = blueprint.renderMode === 'VISUAL_DECK_V4'
+      ? steps.find((candidate) => candidate.idempotencyKey === generationBatchStepKeyFor(run.id, {
+          revisionRound: run.revisionRound,
+          scope: 'REVISION',
+        }))
+      : undefined
+    const persistedStrategies = persistedBatchStep?.tool === 'generate_image_batch'
+      ? storedGenerationBatchSchema.parse(persistedBatchStep.output).pages
+        .sort((left, right) => left.pageNumber - right.pageNumber)
+      : []
+    const v4RenderStrategies = new Map<number, V4RenderStrategy>()
+    if (blueprint.renderMode === 'VISUAL_DECK_V4') {
+      for (const [index, [pageNumber]] of pageEntries.entries()) {
+        const stored = persistedStrategies[index]?.renderStrategy
+        if (stored === undefined && persistedBatchStep) {
+          v4RenderStrategies.set(pageNumber, { kind: 'FULL_GENERATIVE' })
+          continue
+        }
+        if (stored === 'FULL_GENERATIVE') {
+          v4RenderStrategies.set(pageNumber, { kind: 'FULL_GENERATIVE' })
+          continue
+        }
+        const resolved = resolveV4RenderStrategy(blueprint, pageNumber)
+        if (stored === 'CONTROLLED_RASTER' && resolved.kind !== 'CONTROLLED_RASTER') {
+          throw new Error('CONTROLLED_RASTER_CONTRACT_MISSING')
+        }
+        if (resolved.kind === 'CONTROLLED_RASTER' && !this.dependencies.controlledRaster) {
+          if (stored === 'CONTROLLED_RASTER') throw new Error('CONTROLLED_RASTER_PORT_REQUIRED')
+          v4RenderStrategies.set(pageNumber, { kind: 'FULL_GENERATIVE' })
+          continue
+        }
+        v4RenderStrategies.set(pageNumber, resolved)
+      }
+    }
     let revisionRoute = blueprint.renderMode === 'VISUAL_DECK_V4'
       ? this.persistedRevisionRoute(run, steps)
       : { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
@@ -456,6 +507,7 @@ export class RevisionMediaCoordinator {
       && !this.hasPersistedV4RevisionRoute(run, steps)) {
       const requirements = blueprintImageRequirements(run, blueprint)
       for (const pageNumber of byPage.keys()) {
+        if (v4RenderStrategies.get(pageNumber)?.kind === 'CONTROLLED_RASTER') continue
         const requirement = requirements.find((candidate) => candidate.pageNumber === pageNumber && candidate.elementId === null)
         if (!requirement) throw new Error('V4_REPAIR_SOURCE_REQUIREMENT_MISSING')
         const sourceStep = latestCompletedAssetStep(steps, requirement, run.revisionRound - 1)
@@ -468,7 +520,7 @@ export class RevisionMediaCoordinator {
         revisionRoute = { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
       }
     }
-    return Promise.all([...byPage].map(async ([pageNumber, instructions]) => {
+    return Promise.all(pageEntries.map(async ([pageNumber, instructions]) => {
       const slide = blueprint.slides[pageNumber - 1]
       if (!slide) throw new Error('REVISION_PLAN_SLIDE_REFERENCE_INVALID')
       const revisionInstructions = blueprint.renderMode === 'VISUAL_DECK_V4'
@@ -483,6 +535,24 @@ export class RevisionMediaCoordinator {
       if (blueprint.renderMode === 'VISUAL_DECK_V4') {
         const proposal = blueprint.visualDeckV4Proposal
         if (!proposal) throw new Error('VISUAL_DECK_V4_BRIEF_MISSING')
+        const renderStrategy = v4RenderStrategies.get(pageNumber)
+        if (renderStrategy?.kind === 'CONTROLLED_RASTER') {
+          return {
+            pageNumber,
+            elementId: null,
+            assetReuseKey: null,
+            idempotencyKey: this.imageKey(run, pageNumber),
+            stepId: `step-${run.id}-slide-${pageNumber}-image-r${run.revisionRound}`,
+            slideId: `${run.id}:slide:${pageNumber}`,
+            versionId: `${run.id}:slide:${pageNumber}:r${run.revisionRound}:v1`,
+            prompt: `controlled-raster:${hashInput(renderStrategy.diagram)}`,
+            negativePrompt: null,
+            aspectRatio: '16:9' as const,
+            backgroundMode: 'OPAQUE' as const,
+            model: run.imageModel,
+            renderStrategy,
+          }
+        }
         if (revisionRoute.operationMode === 'TEXT_TO_IMAGE') {
           return {
             pageNumber,
@@ -590,9 +660,13 @@ export class RevisionMediaCoordinator {
   private persistedRevisionRoute(run: RunRecord, steps: readonly StepRecord[]) {
     const currentPageSteps = steps.filter((step) => {
       const identity = visualDeckPageImageIdentity(step.idempotencyKey)
+      const output = step.output && typeof step.output === 'object'
+        ? step.output as { renderStrategy?: unknown }
+        : null
       return step.tool === 'generate_slide_image'
         && identity?.runId === run.id
         && identity.revisionRound === run.revisionRound
+        && output?.renderStrategy !== 'CONTROLLED_RASTER'
     })
     const editSteps = currentPageSteps.filter((step) => step.idempotencyKey.includes(':edit:'))
     const legacySteps = currentPageSteps.filter((step) => !step.idempotencyKey.includes(':edit:'))
@@ -698,14 +772,92 @@ export class RevisionMediaCoordinator {
       .filter((step) => step.tool === 'generate_slide_image' && keys.has(step.idempotencyKey))
   }
 
-  private batchRequirements(targets: readonly RevisionTarget[]) {
+  private batchRequirements(targets: readonly RevisionTarget[], unitBudgetUnits: number) {
     // Revision batches are internal-only. Keep the public batch schema unchanged
     // while preserving the real page identities in stable image idempotency keys.
     return targets.map((target, index) => ({
       pageNumber: index + 1,
       idempotencyKey: target.idempotencyKey,
       prompt: target.prompt,
+      budgetUnits: target.renderStrategy?.kind === 'CONTROLLED_RASTER' ? 0 : unitBudgetUnits,
+      renderStrategy: target.renderStrategy?.kind ?? 'FULL_GENERATIVE',
     }))
+  }
+
+  private async completeControlledRaster(
+    run: RunRecord,
+    blueprint: Awaited<ReturnType<typeof getActiveBlueprint>>,
+    target: RevisionTarget,
+    strategy: Extract<V4RenderStrategy, { kind: 'CONTROLLED_RASTER' }>,
+  ) {
+    const renderer = this.dependencies.controlledRaster
+    if (!renderer) throw new Error('CONTROLLED_RASTER_PORT_REQUIRED')
+    const brief = blueprint.visualDeckV4Proposal?.slideBriefs.find((candidate) => candidate.pageNumber === target.pageNumber)
+    if (!brief) throw new Error('CONTROLLED_RASTER_BRIEF_MISSING')
+    const inputHash = hashInput({
+      tool: 'render_controlled_raster',
+      slideId: target.slideId,
+      versionId: target.versionId,
+      title: brief.title,
+      visibleCopy: brief.lockedCopy,
+      diagram: strategy.diagram,
+    })
+    const artifact = await renderer.render({
+      tenantId: run.host.tenantId,
+      runId: run.id,
+      pageNumber: target.pageNumber,
+      title: brief.title,
+      visibleCopy: brief.lockedCopy,
+      diagram: strategy.diagram,
+      idempotencyKey: target.idempotencyKey,
+    })
+    if (!hasVisualDeckV4AspectRatio(artifact.width, artifact.height)) {
+      throw new Error('CONTROLLED_RASTER_ASPECT_RATIO_INVALID')
+    }
+    return this.dependencies.repository.transact(run.id, (transaction) => {
+      const existing = transaction.getStep(target.idempotencyKey)
+      if (existing) {
+        if (existing.inputHash !== inputHash || existing.tool !== 'generate_slide_image') {
+          throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+        }
+        if (existing.status === 'COMPLETED') return existing
+        if (existing.status !== 'RESERVED' || existing.externalOperationId) {
+          throw new Error('CONTROLLED_RASTER_STEP_NOT_REPLACEABLE')
+        }
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      const step: StepRecord = {
+        id: target.stepId,
+        runId: run.id,
+        idempotencyKey: target.idempotencyKey,
+        inputHash,
+        tool: 'generate_slide_image',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: {
+          slideId: target.slideId,
+          versionId: target.versionId,
+          artifactId: artifact.artifactId,
+          aspectRatio: '16:9',
+          renderStrategy: 'CONTROLLED_RASTER',
+          diagramHash: hashInput(strategy.diagram),
+          imageWidth: artifact.width,
+          imageHeight: artifact.height,
+        },
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      }
+      transaction.putStep(step)
+      transaction.appendEvent({
+        schemaVersion: CONTRACT_VERSION,
+        type: 'tool.completed',
+        payload: { stepId: step.id, summary: '已用受控图示完成精确数量页面修订' },
+      })
+      return step
+    })
   }
 
   private submitTarget(
