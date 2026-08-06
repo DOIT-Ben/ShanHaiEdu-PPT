@@ -14,7 +14,9 @@ permissions or general host administration.
 - `codex-dev` has an exact Git `safe.directory` entry for this root-owned
   working tree. This is not a wildcard trust exception.
 - `bun run check:ownership` fails when root-private Git metadata or `dist`
-  artifacts would block `codex-dev`.
+  artifacts would block `codex-dev`. Immutable Git object files require group
+  read access; their setgid object directories carry the group write access
+  needed to create new objects.
 - `bun run verify:ownership` is the root-only integration check. It runs Git
   status, ownership verification, tests, type checking, and build as both
   root and `codex-dev`.

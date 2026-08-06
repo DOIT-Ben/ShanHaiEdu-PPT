@@ -74,6 +74,7 @@ repair_dev_ownership() {
     fi
   done
   repair_shared_tree "$REPOSITORY_ROOT/.git"
+  /usr/bin/find -P "$REPOSITORY_ROOT/.git/objects" -xdev -type f -exec /usr/bin/chmod g+r,g-w -- {} +
   if [ -d "$REPOSITORY_ROOT/dist" ]; then
     repair_shared_tree "$REPOSITORY_ROOT/dist"
   fi

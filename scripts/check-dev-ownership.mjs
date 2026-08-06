@@ -69,7 +69,7 @@ function assertDefaultAcl(location) {
   }
 }
 
-function inspectRootOwnedEntries(location) {
+function inspectRootOwnedEntries(location, requireGroupWrite = true) {
   if (!existsSync(location)) return
   const stats = lstatSync(location)
   if (stats.isSymbolicLink()) {
@@ -77,15 +77,16 @@ function inspectRootOwnedEntries(location) {
     return
   }
   if (stats.uid === 0) {
-    const groupReadableWritable = (stats.mode & 0o060) === 0o060
+    const groupReadable = (stats.mode & 0o040) === 0o040
+    const groupWritable = (stats.mode & 0o020) === 0o020
     const groupExecutable = !stats.isDirectory() || (stats.mode & 0o010) === 0o010
-    if (stats.gid !== expectedGroupId || !groupReadableWritable || !groupExecutable) {
+    if (stats.gid !== expectedGroupId || !groupReadable || (requireGroupWrite && !groupWritable) || !groupExecutable) {
       report(`root-private entry blocks codex-dev: ${relativePath(location)}`)
     }
   }
   if (!stats.isDirectory()) return
   for (const entry of readdirSync(location, { withFileTypes: true })) {
-    inspectRootOwnedEntries(join(location, entry.name))
+    inspectRootOwnedEntries(join(location, entry.name), requireGroupWrite)
   }
 }
 
@@ -101,13 +102,9 @@ for (const directory of protectedDirectories) {
   assertDefaultAcl(directory)
 }
 
-for (const directory of [
-  join(repositoryRoot, '.git', 'objects'),
-  join(repositoryRoot, '.git', 'refs'),
-  join(repositoryRoot, 'dist'),
-]) {
-  inspectRootOwnedEntries(directory)
-}
+inspectRootOwnedEntries(join(repositoryRoot, '.git', 'objects'), false)
+inspectRootOwnedEntries(join(repositoryRoot, '.git', 'refs'))
+inspectRootOwnedEntries(join(repositoryRoot, 'dist'))
 
 const indexPath = join(repositoryRoot, '.git', 'index')
 if (existsSync(indexPath)) inspectRootOwnedEntries(indexPath)
