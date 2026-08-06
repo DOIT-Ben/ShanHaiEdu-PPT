@@ -48,6 +48,7 @@ export type QuickDeckEvaluationRecord = Readonly<{
   completedAt: string | null
   expiresAt: string
   nextAttemptAt: string | null
+  updatedAt: string
 }>
 
 export interface QuickDeckEvaluationRepository {
