@@ -1345,6 +1345,25 @@ export class QuickDeckEvaluationService {
         if (inspected.state === 'COMPLETED') {
           artifactIds.add(inspected.artifactId)
           discoveredArtifacts.set(page.pageNumber, inspected.artifactId)
+        } else if (inspected.state === 'FAILED') {
+          const receivedAspectDiagnostics = inspected.aspectDiagnostics ?? null
+          const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
+          const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null
+          settledPages.set(page.pageNumber, {
+            ...page,
+            status: 'FAILED',
+            submissionState: 'SUBMITTED',
+            billingState: inspected.billingState,
+            operationId: lookupResult.operationId,
+            providerRequestId: inspected.providerRequestId ?? page.providerRequestId,
+            width: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedWidth ?? page.width,
+            height: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedHeight ?? page.height,
+            aspectRatioValidated: false,
+            aspectDiagnostics: invalidAspectDiagnostics ? null : aspectDiagnostics ?? page.aspectDiagnostics,
+            errorCode: invalidAspectDiagnostics
+              ? 'EVALUATION_IMAGE_ARTIFACT_INVALID'
+              : storedDiagnosticCode(inspected.errorCode) ?? 'EVALUATION_PROVIDER_ERROR',
+          })
         } else {
           cleanupPending = true
         }

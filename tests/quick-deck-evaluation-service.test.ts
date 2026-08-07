@@ -280,6 +280,26 @@ class ProcessingAtExpiryImages extends AsyncImages {
   }
 }
 
+class FailedAtExpiryImages extends AsyncImages {
+  failInspection = false
+
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
+    if (!this.failInspection) return await super.inspect(input)
+    this.inspections.push(structuredClone(input))
+    return {
+      state: 'FAILED' as const,
+      errorCode: 'UPSTREAM_IMAGE_FAILED',
+      billingState: 'CHARGED' as const,
+      providerRequestId: 'provider-terminal-failure',
+      technicalFailure: {
+        category: 'PROVIDER' as const,
+        disposition: 'NON_RETRYABLE' as const,
+        diagnosticCode: 'UPSTREAM_IMAGE_FAILED',
+      },
+    }
+  }
+}
+
 class FailOnceCompletedSaveRepository extends InMemoryQuickDeckEvaluationRepository {
   #failed = false
 
@@ -1266,6 +1286,40 @@ describe('quick-deck evaluation service', () => {
       await service.tick({ limit: 10 })
       expect((await repository.get(created.jobId))?.cleanupPending).toBe(false)
       expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('persists an expired terminal image failure once instead of repeatedly inspecting it', async () => {
+    const { directory, repository, clock, images: imagePort, service } = await fixture(undefined, false, false,
+      (artifacts) => new FailedAtExpiryImages(artifacts))
+    const images = imagePort as FailedAtExpiryImages
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      const operationId = submitted!.pages[0]!.operationId
+      images.failInspection = true
+      clock.advance(60_001)
+
+      await service.tick({ limit: 10 })
+
+      expect(images.inspections).toHaveLength(1)
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'EXPIRED',
+        cleanupPending: false,
+        pages: [expect.objectContaining({
+          status: 'FAILED',
+          submissionState: 'SUBMITTED',
+          billingState: 'CHARGED',
+          operationId,
+          errorCode: 'EVALUATION_PROVIDER_ERROR',
+        })],
+      })
+
+      await service.tick({ limit: 10 })
+      expect(images.inspections).toHaveLength(1)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
