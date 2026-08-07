@@ -22,6 +22,7 @@ const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
 const pageSchema = z.object({
   pageNumber: z.number().int().min(1).max(10),
   status: z.enum(['PENDING', 'SUBMITTED', 'PROCESSING', 'COMPLETED', 'FAILED']),
+  submissionState: z.enum(['NOT_SUBMITTED', 'SUBMITTED', 'UNKNOWN']).default('NOT_SUBMITTED'),
   idempotencyKey: z.string().trim().min(1).max(512),
   operationId: z.string().trim().min(1).max(512).nullable(),
   artifactId: identifierSchema.nullable(),

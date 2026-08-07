@@ -27,6 +27,7 @@ import type {
   QuickDeckEvaluationRecord,
   QuickDeckEvaluationRepository,
 } from './quick-deck-evaluation-ports'
+import { V4EvidenceWindowCompiler } from './v4-evidence-window-compiler'
 
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const
 const PREVIEW_MIME = 'image/png' as const
@@ -102,6 +103,12 @@ function contentConfig(request: QuickDeckEvaluationRequest) {
 }
 
 function planningPayload(input: VisualDeckV4CompilerInput) {
+  const evidenceWindow = new V4EvidenceWindowCompiler().compile({
+    document: input.document,
+    instruction: input.config.instruction,
+    ...(input.config.deckOptions.focus ? { focus: input.config.deckOptions.focus } : {}),
+    ...(input.presentationGoal ? { goal: input.presentationGoal } : {}),
+  })
   const sourceReferences = [{
     sourceId: 'quick-deck-source',
     name: input.document.name,
@@ -116,18 +123,6 @@ function planningPayload(input: VisualDeckV4CompilerInput) {
     slideCount: input.slideCount,
     visualDirection: input.visualDirection,
     ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
-    document: {
-      name: input.document.name,
-      sources: input.document.sources,
-      chunks: input.document.chunks.map((chunk) => ({
-        id: chunk.id,
-        sourceId: chunk.sourceId,
-        sha256: chunk.sha256,
-        text: chunk.text,
-      })),
-      assets: [],
-      missingRanges: input.document.missingRanges,
-    },
     originalRequest: {
       instruction: input.config.instruction,
       targetAudience: input.targetAudience ?? null,
@@ -146,7 +141,7 @@ function planningPayload(input: VisualDeckV4CompilerInput) {
     },
     trustedEvidence: {
       sources: input.document.sources?.map(({ name, kind, status }) => ({ name, kind, status })) ?? [],
-      sourceChunks: input.document.chunks.map((chunk) => ({
+      sourceChunks: evidenceWindow.chunks.map((chunk) => ({
         id: chunk.id,
         sourceId: chunk.sourceId ?? null,
         text: chunk.text,
@@ -255,6 +250,7 @@ export class QuickDeckEvaluationService {
       pages: Array.from({ length: parsed.data.slideCount }, (_, index) => ({
         pageNumber: index + 1,
         status: 'PENDING' as const,
+        submissionState: 'NOT_SUBMITTED' as const,
         idempotencyKey: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${id}:slide:${index + 1}:image`,
         operationId: null,
         artifactId: null,
@@ -297,6 +293,10 @@ export class QuickDeckEvaluationService {
 
   async getContentOwned(tenantId: string, jobId: string, format: QuickDeckContentFormat) {
     const record = await this.requireOwned(tenantId, jobId)
+    if (Date.parse(record.expiresAt) <= this.dependencies.clock.now().getTime()) {
+      await this.expire(record, this.dependencies.clock.now().toISOString()).catch(() => {})
+      throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
+    }
     if (record.status === 'EXPIRED') throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
     if (record.status !== 'COMPLETED') throw new QuickDeckEvaluationError(409, 'EVALUATION_CONTENT_NOT_READY')
     const artifact = format === 'pptx' ? record.pptx : record.preview
@@ -371,18 +371,32 @@ export class QuickDeckEvaluationService {
       backgroundMode: 'OPAQUE',
       idempotencyKey: submitting.pages.find((page) => page.pageNumber === requirement.pageNumber)!.idempotencyKey,
     })))
-    if (results.some((result) => result.status === 'rejected')) {
-      return await this.fail(submitting, 'EVALUATION_IMAGE_SUBMISSION_FAILED')
-    }
     const nextPages = submitting.pages.map((page) => {
       const result = results[page.pageNumber - 1]!
-      if (result.status !== 'fulfilled') throw new Error('QUICK_DECK_IMAGE_SUBMISSION_RESULT_INVALID')
+      if (result.status !== 'fulfilled') return {
+        ...page,
+        status: 'FAILED' as const,
+        submissionState: 'UNKNOWN' as const,
+        errorCode: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+      }
       return {
         ...page,
         status: result.value.state === 'PROCESSING' ? 'PROCESSING' as const : 'SUBMITTED' as const,
+        submissionState: 'SUBMITTED' as const,
         operationId: result.value.operationId,
       }
     })
+    const rejected = results.filter((result) => result.status === 'rejected').length
+    if (rejected > 0) {
+      const persisted = { ...submitting, pages: nextPages, updatedAt: this.dependencies.clock.now().toISOString() }
+      await this.dependencies.repository.save({ record: persisted })
+      return await this.fail(
+        persisted,
+        rejected === results.length
+          ? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+          : 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+      )
+    }
     const generatingAt = this.dependencies.clock.now().toISOString()
     const generating: QuickDeckEvaluationRecord = {
       ...submitting,
@@ -591,6 +605,24 @@ export class QuickDeckEvaluationService {
       ...(record.pptx ? [record.pptx.artifactId] : []),
       ...(record.preview ? [record.preview.artifactId] : []),
     ])
+    if (this.dependencies.images.lookupByIdempotency) {
+      for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED')) {
+        const lookup = await this.dependencies.images.lookupByIdempotency({
+          tenantId: record.tenantId,
+          idempotencyKey: page.idempotencyKey,
+          operationMode: 'TEXT_TO_IMAGE',
+        })
+        if (lookup.state !== 'SUBMITTED') continue
+        const inspected = await this.dependencies.images.inspect({
+          tenantId: record.tenantId,
+          operationId: lookup.operationId,
+          idempotencyKey: page.idempotencyKey,
+          aspectRatio: '16:9',
+          backgroundMode: 'OPAQUE',
+        })
+        if (inspected.state === 'COMPLETED') artifactIds.add(inspected.artifactId)
+      }
+    }
     if (this.dependencies.artifactCleanup) {
       for (const artifactId of artifactIds) {
         await this.dependencies.artifactCleanup.remove({ tenantId: record.tenantId, artifactId })

@@ -241,4 +241,34 @@ describe('quick-deck evaluation HTTP facade', () => {
     expect(ranged.status).toBe(416)
     expect(ranged.headers.get('Content-Range')).toContain('bytes */')
   })
+
+  test('disposes a delayed SSE subscription when the request is aborted during subscribe', async () => {
+    const { handle, repository } = fixture()
+    const created = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()),
+    }))
+    const jobId = (await created.json() as { data: { jobId: string } }).data.jobId
+    const originalRead = repository.readEvents.bind(repository)
+    let release!: () => void
+    let started!: () => void
+    const startedPromise = new Promise<void>((resolve) => { started = resolve })
+    const blocker = new Promise<void>((resolve) => { release = resolve })
+    let reads = 0
+    repository.readEvents = async (input) => {
+      reads += 1
+      started()
+      await blocker
+      return originalRead(input)
+    }
+    const abort = new AbortController()
+    const responsePromise = handle(request(`/v1/evaluations/quick-decks/${jobId}/events`, { signal: abort.signal }))
+    await startedPromise
+    abort.abort()
+    release()
+    const response = await responsePromise
+    await response.body?.cancel()
+    await Bun.sleep(20)
+
+    expect(reads).toBe(1)
+  })
 })

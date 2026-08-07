@@ -10,6 +10,7 @@ import {
 } from '../src/contracts'
 import {
   quickDeckEvaluationEventSchema,
+  quickDeckEvaluationFailureCodeSchema,
   quickDeckEvaluationStatusSchema,
 } from '../src/quick-deck-evaluation-contracts'
 
@@ -43,6 +44,7 @@ describe('OpenAPI v1 contract', () => {
     const events = document.components.schemas.QuickDeckEvaluationEvent.oneOf
 
     expect(create.parameters).toBeUndefined()
+    expect(document.components.securitySchemes.quickDeckEvaluatorAuth).toMatchObject({ type: 'http', scheme: 'bearer' })
     expect(create.description).toContain('Idempotency-Key is intentionally not used')
     expect(request.properties.source.properties.kind.const).toBe('TEXT')
     expect(request.properties.source.properties.text.maxLength).toBe(200_000)
@@ -56,6 +58,19 @@ describe('OpenAPI v1 contract', () => {
     expect(JSON.stringify(job)).not.toContain('visualPrompt')
     expect(events.map((event: any) => event.properties.type.const).sort())
       .toEqual(quickDeckEvaluationEventSchema.options.map((event) => event.shape.type.value).sort())
+    expect(job.properties.failure.oneOf[1].properties.code.enum).toEqual(quickDeckEvaluationFailureCodeSchema.options)
+    for (const path of [
+      '/v1/evaluations/quick-decks',
+      '/v1/evaluations/quick-decks/{jobId}',
+      '/v1/evaluations/quick-decks/{jobId}/events',
+      '/v1/evaluations/quick-decks/{jobId}/content',
+    ]) {
+      const operation = document.paths[path][path.endsWith('quick-decks') ? 'post' : 'get']
+      expect(operation.security).toEqual([{ quickDeckEvaluatorAuth: [] }])
+      expect(Object.keys(operation.responses)).toEqual(expect.arrayContaining([
+        '400', '401', '404', '409', '410', '413', '416', '422', '429', '500', '503',
+      ]))
+    }
     expect(document.paths['/v1/evaluations/quick-decks/{jobId}/content'].get.responses['416'].headers)
       .toMatchObject({ 'Accept-Ranges': { schema: { const: 'none' } } })
   })

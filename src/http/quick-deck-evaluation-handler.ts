@@ -157,16 +157,23 @@ function sseResponse(input: Readonly<{
   let heartbeat: ReturnType<typeof setInterval> | null = null
   let unsubscribe: (() => void) | null = null
   let closed = false
+  let abortHandler: (() => void) | null = null
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const close = () => {
         if (closed) return
         closed = true
         if (heartbeat) clearInterval(heartbeat)
+        if (abortHandler) input.signal.removeEventListener('abort', abortHandler)
         unsubscribe?.()
         try { controller.close() } catch {}
       }
-      input.signal.addEventListener('abort', close, { once: true })
+      abortHandler = close
+      input.signal.addEventListener('abort', abortHandler, { once: true })
+      if (input.signal.aborted) {
+        close()
+        return
+      }
       heartbeat = setInterval(() => {
         if (!closed) controller.enqueue(encoder.encode(': heartbeat\n\n'))
       }, 15_000)
@@ -183,10 +190,16 @@ function sseResponse(input: Readonly<{
         },
         onClose: close,
       })
+      if (closed) {
+        unsubscribe()
+        unsubscribe = null
+        if (abortHandler) input.signal.removeEventListener('abort', abortHandler)
+      }
     },
     cancel() {
       closed = true
       if (heartbeat) clearInterval(heartbeat)
+      if (abortHandler) input.signal.removeEventListener('abort', abortHandler)
       unsubscribe?.()
     },
   }, { highWaterMark: DEFAULT_QUICK_DECK_EVENT_BATCH_LIMIT })

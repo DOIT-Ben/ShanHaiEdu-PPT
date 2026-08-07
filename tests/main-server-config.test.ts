@@ -34,6 +34,10 @@ describe('main PPT Agent server configuration', () => {
     const config = resolveQuickDeckEvaluationConfig({
       PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY: 'evaluation-text-key-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY: 'evaluation-image-key-0001',
+      MODEL_GATEWAY_TEXT_KEY: 'formal-text-key-0001',
+      MODEL_GATEWAY_IMAGE_KEY: 'formal-image-key-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL: 'gpt-5.6-terra',
       PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS: 'gemini-3-pro-image-preview,gpt-image-2',
       PPT_AGENT_QUICK_DECK_EVALUATION_MAX_ACTIVE_JOBS: '3',
@@ -47,6 +51,8 @@ describe('main PPT Agent server configuration', () => {
     expect(config).toEqual({
       apiToken: 'quick-deck-evaluation-token-0001',
       dataRoot: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      gatewayTextKey: 'evaluation-text-key-0001',
+      gatewayImageKey: 'evaluation-image-key-0001',
       textModel: 'gpt-5.6-terra',
       allowedImageModels: ['gemini-3-pro-image-preview', 'gpt-image-2'],
       maxActiveJobs: 3,
@@ -57,6 +63,8 @@ describe('main PPT Agent server configuration', () => {
     expect(() => resolveQuickDeckEvaluationConfig({
       PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY: 'evaluation-text-key-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY: 'evaluation-image-key-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS: 'unpublished-image-model',
     }, {
       textModels: ['gpt-5.6-terra'], imageModels: ['gemini-3-pro-image-preview'],
@@ -64,10 +72,22 @@ describe('main PPT Agent server configuration', () => {
     expect(() => resolveQuickDeckEvaluationConfig({
       PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY: 'evaluation-text-key-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY: 'evaluation-image-key-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS: '0',
     }, {
       textModels: ['gpt-5.6-terra'], imageModels: ['gemini-3-pro-image-preview'],
     })).toThrow('PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS_INVALID')
+    expect(() => resolveQuickDeckEvaluationConfig({
+      PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY: 'shared-text-key-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY: 'evaluation-image-key-0001',
+      MODEL_GATEWAY_TEXT_KEY: 'shared-text-key-0001',
+      MODEL_GATEWAY_IMAGE_KEY: 'formal-image-key-0001',
+    }, {
+      textModels: ['gpt-5.6-terra'], imageModels: ['gemini-3-pro-image-preview'],
+    })).toThrow('PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_KEY_NOT_ISOLATED')
   })
 
   test('routes the optional MiniMax fallback through the unified model gateway', () => {

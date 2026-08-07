@@ -27,7 +27,7 @@ function record(id: string, overrides: Partial<QuickDeckEvaluationRecord> = {}):
     phase: 'ACCEPTED',
     blueprint: null,
     pages: [{
-      pageNumber: 1, status: 'PENDING', idempotencyKey: `quick-deck-evaluation:${id}:slide:1`, operationId: null,
+      pageNumber: 1, status: 'PENDING', submissionState: 'NOT_SUBMITTED', idempotencyKey: `quick-deck-evaluation:${id}:slide:1`, operationId: null,
       artifactId: null, width: null, height: null, aspectRatioValidated: false, sha256: null, errorCode: null,
     }],
     pptx: null,

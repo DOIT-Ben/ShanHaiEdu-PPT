@@ -195,7 +195,7 @@ const quickDeckEvaluationRuntime = quickDeckEvaluationDataRoot
         repository: new SqliteQuickDeckEvaluationRepository(path.join(quickDeckEvaluationDataRoot, 'evaluations.sqlite')),
         images: new GatewayImageGenerationPort({
           baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
-          apiKey: process.env.MODEL_GATEWAY_IMAGE_KEY?.trim() || '',
+          apiKey: quickDeckEvaluationConfig!.gatewayImageKey,
           artifacts,
         }),
       }
@@ -242,7 +242,7 @@ const runtime = runtimeMode === 'gateway'
           })
         : hostBudget
       const primaryModel = new GatewayCoursewareModel({
-        ...gatewayCoursewareModels!.primary,
+          ...gatewayCoursewareModels!.primary,
         artifacts,
         profile: gatewayCoursewareModelProfile(gatewayCoursewareModels!.primary),
         visualDeckV4Transport,
@@ -261,6 +261,7 @@ const runtime = runtimeMode === 'gateway'
       const quickDeckEvaluationModel = quickDeckEvaluationRuntime && quickDeckEvaluationConfig
         ? new GatewayCoursewareModel({
             ...gatewayCoursewareModels!.primary,
+            apiKey: quickDeckEvaluationConfig.gatewayTextKey,
             textModel: quickDeckEvaluationConfig.textModel,
             artifacts: quickDeckEvaluationRuntime.artifacts,
             profile: gatewayCoursewareModelProfile({ textModel: quickDeckEvaluationConfig.textModel }),

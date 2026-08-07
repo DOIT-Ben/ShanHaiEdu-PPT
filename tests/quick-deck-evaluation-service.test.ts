@@ -83,6 +83,13 @@ class AsyncImages implements ImageGenerationPort {
   }
 }
 
+class PartialImages extends AsyncImages {
+  override async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+    if (input.idempotencyKey.includes(':slide:2:')) throw new Error('TEST_SUBMISSION_UNKNOWN')
+    return super.submit(input)
+  }
+}
+
 async function fixture(
   imageSize: Readonly<{ width: number; height: number }> = { width: 1600, height: 900 },
   removeExpiredArtifacts = false,
@@ -136,6 +143,7 @@ describe('quick-deck evaluation service', () => {
       expect(model.calls).toHaveLength(2)
       expect(model.calls.every((call) => call.operation === 'create_visual_deck_v4_creative_manuscript'
         && call.structuredGenerationProtocol === 'RESPONSES_JSON_SCHEMA')).toBe(true)
+      expect(model.calls.every((call) => !(call.payload as Record<string, unknown>).document)).toBe(true)
       expect(images.submissions).toHaveLength(4)
       expect(images.submissions.every((input) => input.idempotencyKey.startsWith('quick-deck-evaluation:'))).toBe(true)
 
@@ -166,6 +174,23 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
+  test('bounds a valid 200,000-character input before the Responses call', async () => {
+    const { directory, model, service } = await fixture()
+    try {
+      const created = await service.create('evaluation-tenant', {
+        ...request(1),
+        source: { kind: 'TEXT', name: 'large.txt', text: '资料'.repeat(100_000) },
+      })
+      await service.tick({ limit: 10 })
+
+      expect(created.status).toBe('QUEUED')
+      expect(JSON.stringify(model.calls[0]!.payload).length).toBeLessThanOrEqual(220_000)
+      expect((model.calls[0]!.payload as Record<string, unknown>).document).toBeUndefined()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('fails a quick evaluation when actual image pixels are not 16:9', async () => {
     const { directory, service } = await fixture({ width: 1000, height: 1000 })
     try {
@@ -182,6 +207,31 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
+  test('persists successful and unknown page submissions before failing a partial batch', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-partial-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images: new PartialImages(artifacts),
+        renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(2))
+      await service.tick({ limit: 10 })
+      const stored = await repository.get(created.jobId)
+
+      expect(stored).toMatchObject({ status: 'FAILED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL' })
+      expect(stored?.pages).toEqual([
+        expect.objectContaining({ submissionState: 'SUBMITTED', operationId: expect.any(String) }),
+        expect.objectContaining({ submissionState: 'UNKNOWN', errorCode: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN' }),
+      ])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('expires completed content and rejects image models outside the server whitelist', async () => {
     const { directory, clock, service } = await fixture()
     try {
@@ -191,7 +241,8 @@ describe('quick-deck evaluation service', () => {
       await service.tick({ limit: 10 })
       await service.tick({ limit: 10 })
       clock.advance(60_001)
-      await service.tick({ limit: 10 })
+      await expect(service.getContentOwned('evaluation-tenant', created.jobId, 'pptx'))
+        .rejects.toMatchObject({ status: 410, code: 'EVALUATION_CONTENT_EXPIRED' })
       expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'EXPIRED', phase: 'EXPIRED' })
       await expect(service.getContentOwned('evaluation-tenant', created.jobId, 'pptx'))
         .rejects.toMatchObject({ code: 'EVALUATION_CONTENT_EXPIRED' })

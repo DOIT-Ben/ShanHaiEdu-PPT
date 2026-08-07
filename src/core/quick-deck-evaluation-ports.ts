@@ -12,6 +12,7 @@ import type {
 export type QuickDeckEvaluationPageRecord = Readonly<{
   pageNumber: number
   status: 'PENDING' | 'SUBMITTED' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+  submissionState: 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
   idempotencyKey: string
   operationId: string | null
   artifactId: string | null
