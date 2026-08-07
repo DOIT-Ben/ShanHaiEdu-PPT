@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import sharp from 'sharp'
 import {
   assertControlledRasterSvgTextWhitelist,
   controlledRasterSvg,
@@ -14,6 +15,12 @@ const input = {
 
 function svgText(svg: string) {
   return [...svg.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)].map((match) => match[1]!.replace(/<[^>]*>/g, ''))
+}
+
+function colorDistance(data: Buffer, offset: number, color: readonly [number, number, number]) {
+  return Math.abs(data[offset]! - color[0])
+    + Math.abs(data[offset + 1]! - color[1])
+    + Math.abs(data[offset + 2]! - color[2])
 }
 
 describe('V4 controlled raster text layout', () => {
@@ -53,6 +60,38 @@ describe('V4 controlled raster text layout', () => {
     expect(() => assertControlledRasterSvgTextWhitelist(svg, new Set(['两个 空格', '保留 原始间距']))).toThrow(
       'CONTROLLED_RASTER_VISIBLE_TEXT_NOT_ALLOWED',
     )
+  })
+
+  test('keeps the largest supported multiline text above the diagram in rendered pixels', async () => {
+    const svg = controlledRasterSvg({
+      ...input,
+      title: 'W'.repeat(100),
+      visibleCopy: ['W'.repeat(400)],
+    })
+    const rendered = await sharp(Buffer.from(svg)).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    let left = rendered.info.width
+    let right = -1
+    let top = rendered.info.height
+    let bottom = -1
+    const textColors: readonly (readonly [number, number, number])[] = [[23, 37, 84], [71, 85, 105]]
+
+    for (let y = 0; y < rendered.info.height; y += 1) {
+      for (let x = 0; x < rendered.info.width; x += 1) {
+        const offset = (y * rendered.info.width + x) * rendered.info.channels
+        if (textColors.some((color) => colorDistance(rendered.data, offset, color) <= 12)) {
+          left = Math.min(left, x)
+          right = Math.max(right, x)
+          top = Math.min(top, y)
+          bottom = Math.max(bottom, y)
+        }
+      }
+    }
+
+    expect([left, right, top, bottom]).not.toContain(-1)
+    expect(left).toBeGreaterThanOrEqual(120)
+    expect(right).toBeLessThanOrEqual(1_480)
+    expect(top).toBeGreaterThanOrEqual(90)
+    expect(bottom).toBeLessThan(480)
   })
 
   test('fails closed instead of truncating visible copy that cannot fit the controlled raster', () => {
