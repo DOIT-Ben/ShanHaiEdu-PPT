@@ -14,6 +14,7 @@ function active(status: QuickDeckEvaluationRecord['status']) {
 export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluationRepository {
   readonly #records = new Map<string, QuickDeckEvaluationRecord>()
   readonly #events = new Map<string, QuickDeckEvaluationEvent[]>()
+  readonly #leases = new Map<string, Readonly<{ token: string; until: string }>>()
 
   async create(input: Parameters<QuickDeckEvaluationRepository['create']>[0]) {
     const records = [...this.#records.values()]
@@ -45,20 +46,67 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
 
   async listRunnable(input: Parameters<QuickDeckEvaluationRepository['listRunnable']>[0]) {
     return [...this.#records.values()]
-      .filter((record) => ['QUEUED', 'GENERATING'].includes(record.status))
+      .filter((record) => ['QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING'].includes(record.status))
       .filter((record) => record.nextAttemptAt !== null && record.nextAttemptAt <= input.now)
+      .filter((record) => record.expiresAt > input.now)
+      .filter((record) => {
+        const lease = this.#leases.get(record.id)
+        return !lease || lease.until <= input.now
+      })
       .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id))
       .slice(0, input.limit)
       .map(clone)
   }
 
+  async claimRunnable(input: Parameters<QuickDeckEvaluationRepository['claimRunnable']>[0]) {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100
+      || !input.leaseToken.trim() || Date.parse(input.leaseUntil) <= Date.parse(input.now)) {
+      throw new Error('QUICK_DECK_EVALUATION_LEASE_INPUT_INVALID')
+    }
+    const excluded = new Set(input.excludeJobIds ?? [])
+    const claimed: QuickDeckEvaluationRecord[] = []
+    for (const record of [...this.#records.values()]
+      .filter((candidate) => ['QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING'].includes(candidate.status))
+      .filter((candidate) => candidate.nextAttemptAt !== null && candidate.nextAttemptAt <= input.now)
+      .filter((candidate) => candidate.expiresAt > input.now)
+      .filter((candidate) => !excluded.has(candidate.id))
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id))) {
+      if (claimed.length >= input.limit) break
+      const existing = this.#leases.get(record.id)
+      if (existing && existing.until > input.now) continue
+      this.#leases.set(record.id, { token: input.leaseToken, until: input.leaseUntil })
+      claimed.push(clone(record))
+    }
+    return claimed
+  }
+
+  async saveClaimed(input: Parameters<QuickDeckEvaluationRepository['saveClaimed']>[0]) {
+    const lease = this.#leases.get(input.record.id)
+    if (!lease || lease.token !== input.leaseToken || lease.until <= input.now) return false
+    this.#leases.set(input.record.id, { token: input.leaseToken, until: input.leaseUntil })
+    await this.save({ record: input.record, ...(input.event ? { event: input.event } : {}) })
+    return true
+  }
+
+  async releaseClaim(input: Parameters<QuickDeckEvaluationRepository['releaseClaim']>[0]) {
+    const existing = this.#leases.get(input.jobId)
+    if (!existing || existing.token !== input.leaseToken) return false
+    this.#leases.delete(input.jobId)
+    return true
+  }
+
   async listExpired(input: Parameters<QuickDeckEvaluationRepository['listExpired']>[0]) {
     return [...this.#records.values()]
       .filter((record) => record.expiresAt <= input.now)
+      .filter((record) => {
+        const lease = this.#leases.get(record.id)
+        return !lease || lease.until <= input.now
+      })
       .filter((record) => record.status !== 'EXPIRED'
         || record.pages.some((page) => page.artifactId !== null)
         || record.pptx !== null
-        || record.preview !== null)
+        || record.preview !== null
+        || record.cleanupPending === true)
       .sort((left, right) => left.expiresAt.localeCompare(right.expiresAt) || left.id.localeCompare(right.id))
       .slice(0, input.limit)
       .map(clone)
@@ -77,6 +125,9 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
   }
 
   async recoverInterrupted(input: Parameters<QuickDeckEvaluationRepository['recoverInterrupted']>[0]) {
+    for (const [jobId, lease] of this.#leases) {
+      if (lease.until <= input.now) this.#leases.delete(jobId)
+    }
     let changed = 0
     for (const record of [...this.#records.values()]) {
       const recovered = recoverInterruptedQuickDeckEvaluation(record, input)
@@ -87,7 +138,15 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
           schemaVersion: '1', jobId: recovered.record.id, eventId: `event-${randomUUID()}`,
           ...(recovered.action === 'FAILED'
             ? { type: 'evaluation.failed' as const, payload: { code: recovered.record.errorCode! } }
-            : {
+            : recovered.action === 'RESUMED'
+              ? {
+                  type: 'images.submitted' as const,
+                  payload: {
+                    submittedPages: recovered.record.pages.filter((page) => page.submissionState !== 'NOT_SUBMITTED').length,
+                    totalPages: recovered.record.request.slideCount,
+                  },
+                }
+              : {
                 type: 'images.draining' as const,
                 payload: {
                   pendingPages: recovered.record.pages.filter((page) => !['COMPLETED', 'FAILED'].includes(page.status)).length,

@@ -76,6 +76,9 @@ const recordSchema = z.object({
   drainDeadline: dateTimeSchema.nullable().default(null),
   nextAttemptAt: dateTimeSchema.nullable(),
   updatedAt: dateTimeSchema,
+  cleanupPending: z.boolean().default(false),
+  cleanupDeadline: dateTimeSchema.nullable().default(null),
+  cleanupAuditRequired: z.boolean().default(false),
 }).strict()
 
 function parseRecord(row: JsonRow | null) {
@@ -111,6 +114,12 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS quick_deck_evaluation_leases (
+        job_id TEXT PRIMARY KEY,
+        lease_token TEXT NOT NULL,
+        lease_until TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES quick_deck_evaluations(id) ON DELETE CASCADE
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS quick_deck_evaluation_events (
         job_id TEXT NOT NULL,
         sequence INTEGER NOT NULL,
@@ -124,6 +133,8 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
         ON quick_deck_evaluations(expires_at ASC, id ASC);
       CREATE INDEX IF NOT EXISTS quick_deck_evaluations_daily_idx
         ON quick_deck_evaluations(tenant_id, created_at ASC, id ASC);
+      CREATE INDEX IF NOT EXISTS quick_deck_evaluation_leases_expiry_idx
+        ON quick_deck_evaluation_leases(lease_until ASC, job_id ASC);
     `)
   }
 
@@ -191,34 +202,116 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new Error('QUICK_DECK_EVALUATION_LIST_LIMIT_INVALID')
     }
-    return this.#database.query<JsonRow, [string, number]>(`
-      SELECT data FROM quick_deck_evaluations
-      WHERE status IN ('QUEUED', 'GENERATING')
-        AND next_attempt_at IS NOT NULL
-        AND next_attempt_at <= ?
-      ORDER BY updated_at ASC, id ASC
+    return this.#database.query<JsonRow, [string, string, string, number]>(`
+      SELECT evaluation.data FROM quick_deck_evaluations AS evaluation
+      LEFT JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
+      WHERE evaluation.status IN ('QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
+        AND evaluation.next_attempt_at IS NOT NULL
+        AND evaluation.next_attempt_at <= ?
+        AND evaluation.expires_at > ?
+        AND (lease.lease_until IS NULL OR lease.lease_until <= ?)
+      ORDER BY evaluation.updated_at ASC, evaluation.id ASC
       LIMIT ?
-    `).all(input.now, input.limit).map((row) => parseRecord(row)!)
+    `).all(input.now, input.now, input.now, input.limit).map((row) => parseRecord(row)!)
+  }
+
+  async claimRunnable(input: Parameters<QuickDeckEvaluationRepository['claimRunnable']>[0]) {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100
+      || !input.leaseToken.trim() || Date.parse(input.leaseUntil) <= Date.parse(input.now)) {
+      throw new Error('QUICK_DECK_EVALUATION_LEASE_INPUT_INVALID')
+    }
+    const excluded = [...new Set(input.excludeJobIds ?? [])]
+    if (excluded.length > 100 || excluded.some((jobId) => !jobId.trim() || jobId.length > 160)) {
+      throw new Error('QUICK_DECK_EVALUATION_LEASE_INPUT_INVALID')
+    }
+    const excludedCondition = excluded.length > 0
+      ? `AND evaluation.id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : ''
+    const values = [input.leaseToken, input.leaseUntil, input.now, input.now, input.now, ...excluded, String(input.limit), input.now]
+    this.#database.query<unknown, string[]>(`
+      INSERT INTO quick_deck_evaluation_leases (job_id, lease_token, lease_until)
+      SELECT evaluation.id, ?, ?
+      FROM quick_deck_evaluations AS evaluation
+      LEFT JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
+      WHERE evaluation.status IN ('QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
+        AND evaluation.next_attempt_at IS NOT NULL
+        AND evaluation.next_attempt_at <= ?
+        AND evaluation.expires_at > ?
+        AND (lease.lease_until IS NULL OR lease.lease_until <= ?)
+        ${excludedCondition}
+      ORDER BY evaluation.updated_at ASC, evaluation.id ASC
+      LIMIT ?
+      ON CONFLICT(job_id) DO UPDATE SET
+        lease_token = excluded.lease_token,
+        lease_until = excluded.lease_until
+      WHERE quick_deck_evaluation_leases.lease_until <= ?
+    `).run(...values)
+    return this.#database.query<JsonRow, [string, string]>(`
+      SELECT evaluation.data FROM quick_deck_evaluations AS evaluation
+      INNER JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
+      WHERE lease.lease_token = ? AND lease.lease_until = ?
+      ORDER BY evaluation.updated_at ASC, evaluation.id ASC
+    `).all(input.leaseToken, input.leaseUntil).map((row) => parseRecord(row)!)
+  }
+
+  async releaseClaim(input: Parameters<QuickDeckEvaluationRepository['releaseClaim']>[0]) {
+    return this.#database.query<unknown, [string, string]>(`
+      DELETE FROM quick_deck_evaluation_leases WHERE job_id = ? AND lease_token = ?
+    `).run(input.jobId, input.leaseToken).changes === 1
+  }
+
+  async saveClaimed(input: Parameters<QuickDeckEvaluationRepository['saveClaimed']>[0]) {
+    const transaction = this.#database.transaction(() => {
+      const record = recordSchema.parse(input.record)
+      const renewed = this.#database.query<unknown, [string, string, string, string]>(`
+        UPDATE quick_deck_evaluation_leases
+        SET lease_until = ?
+        WHERE job_id = ? AND lease_token = ? AND lease_until > ?
+      `).run(input.leaseUntil, record.id, input.leaseToken, input.now).changes
+      if (renewed !== 1) return false
+      const changed = this.#database.query<unknown, [string, string, string, string | null, string, string, string]>(`
+        UPDATE quick_deck_evaluations
+        SET data = ?, tenant_id = ?, status = ?, next_attempt_at = ?, expires_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(JSON.stringify(record), record.tenantId, record.status, record.nextAttemptAt,
+        record.expiresAt, record.updatedAt, record.id).changes
+      if (changed !== 1) throw new Error('QUICK_DECK_EVALUATION_NOT_FOUND')
+      if (!input.event) return true
+      const sequence = (this.#database.query<SequenceRow, [string]>(`
+        SELECT MAX(sequence) AS sequence FROM quick_deck_evaluation_events WHERE job_id = ?
+      `).get(record.id)?.sequence ?? 0) + 1
+      const event = quickDeckEvaluationEventSchema.parse({ ...input.event, sequence })
+      if (event.jobId !== record.id) throw new Error('QUICK_DECK_EVALUATION_EVENT_JOB_MISMATCH')
+      this.#database.query<unknown, [string, number, string]>(`
+        INSERT INTO quick_deck_evaluation_events (job_id, sequence, data) VALUES (?, ?, ?)
+      `).run(record.id, sequence, JSON.stringify(event))
+      return true
+    })
+    return transaction()
   }
 
   async listExpired(input: Parameters<QuickDeckEvaluationRepository['listExpired']>[0]) {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new Error('QUICK_DECK_EVALUATION_LIST_LIMIT_INVALID')
     }
-    return this.#database.query<JsonRow, [string, number]>(`
-      SELECT data FROM quick_deck_evaluations
-      WHERE expires_at <= ? AND (
-        status <> 'EXPIRED'
-        OR json_extract(data, '$.pptx') IS NOT NULL
-        OR json_extract(data, '$.preview') IS NOT NULL
+    return this.#database.query<JsonRow, [string, string, number]>(`
+      SELECT evaluation.data FROM quick_deck_evaluations AS evaluation
+      LEFT JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
+      WHERE evaluation.expires_at <= ?
+        AND (lease.lease_until IS NULL OR lease.lease_until <= ?)
+        AND (
+        evaluation.status <> 'EXPIRED'
+        OR json_extract(evaluation.data, '$.pptx') IS NOT NULL
+        OR json_extract(evaluation.data, '$.preview') IS NOT NULL
         OR EXISTS (
-          SELECT 1 FROM json_each(json_extract(data, '$.pages')) AS page
+          SELECT 1 FROM json_each(json_extract(evaluation.data, '$.pages')) AS page
           WHERE json_extract(page.value, '$.artifactId') IS NOT NULL
         )
+        OR COALESCE(json_extract(evaluation.data, '$.cleanupPending'), 0) = 1
       )
-      ORDER BY expires_at ASC, id ASC
+      ORDER BY evaluation.expires_at ASC, evaluation.id ASC
       LIMIT ?
-    `).all(input.now, input.limit).map((row) => parseRecord(row)!)
+    `).all(input.now, input.now, input.limit).map((row) => parseRecord(row)!)
   }
 
   async readEvents(input: Parameters<QuickDeckEvaluationRepository['readEvents']>[0]) {
@@ -240,6 +333,9 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
 
   async recoverInterrupted(input: Parameters<QuickDeckEvaluationRepository['recoverInterrupted']>[0]) {
     const transaction = this.#database.transaction(() => {
+      this.#database.query<unknown, [string]>(`
+        DELETE FROM quick_deck_evaluation_leases WHERE lease_until <= ?
+      `).run(input.now)
       const rows = this.#database.query<JsonRow, []>(`
         SELECT data FROM quick_deck_evaluations
         WHERE status IN ('QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
@@ -256,7 +352,15 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
           schemaVersion: '1', jobId: recovered.record.id, sequence, eventId: `event-${randomUUID()}`,
           ...(recovered.action === 'FAILED'
             ? { type: 'evaluation.failed' as const, payload: { code: recovered.record.errorCode! } }
-            : {
+            : recovered.action === 'RESUMED'
+              ? {
+                  type: 'images.submitted' as const,
+                  payload: {
+                    submittedPages: recovered.record.pages.filter((page) => page.submissionState !== 'NOT_SUBMITTED').length,
+                    totalPages: recovered.record.request.slideCount,
+                  },
+                }
+              : {
                 type: 'images.draining' as const,
                 payload: {
                   pendingPages: recovered.record.pages.filter((page) => !['COMPLETED', 'FAILED'].includes(page.status)).length,

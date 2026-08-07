@@ -68,6 +68,10 @@ export type QuickDeckEvaluationRecord = Readonly<{
   drainDeadline: string | null
   nextAttemptAt: string | null
   updatedAt: string
+  /** Internal-only TTL cleanup queue state; never exposed by the public job projection. */
+  cleanupPending?: boolean
+  cleanupDeadline?: string | null
+  cleanupAuditRequired?: boolean
 }>
 
 export interface QuickDeckEvaluationRepository {
@@ -84,6 +88,26 @@ export interface QuickDeckEvaluationRepository {
     event?: QuickDeckEvaluationEventInput
   }>): Promise<void>
   listRunnable(input: Readonly<{ now: string; limit: number }>): Promise<readonly QuickDeckEvaluationRecord[]>
+  /**
+   * Atomically assigns runnable evaluations to one worker. The lease is
+   * internal-only: public evaluation state never exposes worker ownership.
+   */
+  claimRunnable(input: Readonly<{
+    now: string
+    leaseToken: string
+    leaseUntil: string
+    limit: number
+    excludeJobIds?: readonly string[]
+  }>): Promise<readonly QuickDeckEvaluationRecord[]>
+  /** Atomically renews the claim and writes one state transition under the same fence token. */
+  saveClaimed(input: Readonly<{
+    record: QuickDeckEvaluationRecord
+    event?: QuickDeckEvaluationEventInput
+    leaseToken: string
+    now: string
+    leaseUntil: string
+  }>): Promise<boolean>
+  releaseClaim(input: Readonly<{ jobId: string; leaseToken: string }>): Promise<boolean>
   listExpired(input: Readonly<{ now: string; limit: number }>): Promise<readonly QuickDeckEvaluationRecord[]>
   readEvents(input: Readonly<{
     jobId: string

@@ -37,6 +37,7 @@ import { V4EvidenceWindowCompiler } from './v4-evidence-window-compiler'
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const
 const PREVIEW_MIME = 'image/png' as const
 const QUICK_DECK_DRAIN_TIMEOUT_MS = 15 * 60_000
+const QUICK_DECK_EVALUATION_LEASE_MS = 5 * 60_000
 
 export type QuickDeckEvidenceContext = Readonly<{
   runtimeMode: 'GATEWAY' | 'MOCK'
@@ -54,6 +55,14 @@ export class QuickDeckEvaluationError extends Error {
 }
 
 type EventInput = QuickDeckEvaluationEventInput
+type QuickDeckClaim = Readonly<{ leaseToken: string }>
+
+class QuickDeckClaimLostError extends Error {
+  constructor() {
+    super('QUICK_DECK_EVALUATION_CLAIM_LOST')
+    this.name = 'QuickDeckClaimLostError'
+  }
+}
 
 function boundedDelay(value: number | undefined) {
   if (!Number.isFinite(value)) return 1_000
@@ -144,40 +153,43 @@ function planningPayload(input: VisualDeckV4CompilerInput) {
     roleHint: 'CONTENT_SOURCE' as const,
   }]
   return {
-    presentationMode: 'VISUAL_DECK_V4' as const,
-    instruction: input.config.instruction,
-    deckOptions: input.config.deckOptions,
-    sourceMode: input.config.sourceMode,
-    sourceReferences,
-    slideCount: input.slideCount,
-    visualDirection: input.visualDirection,
-    ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
-    originalRequest: {
+    evidenceWindow,
+    payload: {
+      presentationMode: 'VISUAL_DECK_V4' as const,
       instruction: input.config.instruction,
-      targetAudience: input.targetAudience ?? null,
-      presentationGoal: input.presentationGoal ?? null,
-      visualDirection: input.visualDirection,
-    },
-    frozenConstraints: {
-      presentationMode: 'VISUAL_DECK_V4',
+      deckOptions: input.config.deckOptions,
       sourceMode: input.config.sourceMode,
+      sourceReferences,
       slideCount: input.slideCount,
-      deckType: input.config.deckOptions.deckType,
-      language: input.config.deckOptions.language,
-      aspectRatio: input.config.deckOptions.aspectRatio,
-      audience: input.config.deckOptions.audience ?? input.targetAudience ?? '快速评测观察者',
-      goal: input.presentationGoal ?? input.config.instruction,
-    },
-    trustedEvidence: {
-      sources: input.document.sources?.map(({ name, kind, status }) => ({ name, kind, status })) ?? [],
-      sourceChunks: evidenceWindow.chunks.map((chunk) => ({
-        id: chunk.id,
-        sourceId: chunk.sourceId ?? null,
-        text: chunk.text,
-        pageStart: chunk.pageStart ?? null,
-        pageEnd: chunk.pageEnd ?? null,
-      })),
-      missingRanges: input.document.missingRanges,
+      visualDirection: input.visualDirection,
+      ...(input.targetAudience ? { targetAudience: input.targetAudience } : {}),
+      originalRequest: {
+        instruction: input.config.instruction,
+        targetAudience: input.targetAudience ?? null,
+        presentationGoal: input.presentationGoal ?? null,
+        visualDirection: input.visualDirection,
+      },
+      frozenConstraints: {
+        presentationMode: 'VISUAL_DECK_V4',
+        sourceMode: input.config.sourceMode,
+        slideCount: input.slideCount,
+        deckType: input.config.deckOptions.deckType,
+        language: input.config.deckOptions.language,
+        aspectRatio: input.config.deckOptions.aspectRatio,
+        audience: input.config.deckOptions.audience ?? input.targetAudience ?? '快速评测观察者',
+        goal: input.presentationGoal ?? input.config.instruction,
+      },
+      trustedEvidence: {
+        sources: input.document.sources?.map(({ name, kind, status }) => ({ name, kind, status })) ?? [],
+        sourceChunks: evidenceWindow.chunks.map((chunk) => ({
+          id: chunk.id,
+          sourceId: chunk.sourceId ?? null,
+          text: chunk.text,
+          pageStart: chunk.pageStart ?? null,
+          pageEnd: chunk.pageEnd ?? null,
+        })),
+        missingRanges: input.document.missingRanges,
+      },
     },
   }
 }
@@ -426,7 +438,6 @@ export class QuickDeckEvaluationService {
   async getContentOwned(tenantId: string, jobId: string, format: QuickDeckContentFormat) {
     const record = await this.requireOwned(tenantId, jobId)
     if (Date.parse(record.expiresAt) <= this.dependencies.clock.now().getTime()) {
-      await this.expire(record, this.dependencies.clock.now().toISOString()).catch(() => {})
       throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
     }
     if (record.status === 'EXPIRED') throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
@@ -439,7 +450,6 @@ export class QuickDeckEvaluationService {
   async getEvidenceOwned(tenantId: string, jobId: string) {
     const record = await this.requireOwned(tenantId, jobId)
     if (Date.parse(record.expiresAt) <= this.dependencies.clock.now().getTime()) {
-      await this.expire(record, this.dependencies.clock.now().toISOString()).catch(() => {})
       throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
     }
     if (record.status === 'EXPIRED') throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
@@ -499,27 +509,46 @@ export class QuickDeckEvaluationService {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new Error('QUICK_DECK_EVALUATION_TICK_LIMIT_INVALID')
     }
-    const now = this.dependencies.clock.now().toISOString()
+    const tickStartedAt = this.dependencies.clock.now()
+    const now = tickStartedAt.toISOString()
     const expired = await this.dependencies.repository.listExpired({ now, limit: input.limit })
     for (const record of expired) await this.expire(record, now)
-    const runnable = await this.dependencies.repository.listRunnable({ now, limit: input.limit })
     let failedJobs = 0
-    for (const record of runnable) {
+    let scannedJobs = 0
+    const processedJobIds = new Set<string>()
+    while (scannedJobs < input.limit) {
+      const claimedAt = this.dependencies.clock.now()
+      const leaseToken = `quick-deck-worker-${randomUUID()}`
+      const [record] = await this.dependencies.repository.claimRunnable({
+        now: claimedAt.toISOString(),
+        leaseToken,
+        leaseUntil: new Date(claimedAt.getTime() + QUICK_DECK_EVALUATION_LEASE_MS).toISOString(),
+        limit: 1,
+        excludeJobIds: [...processedJobIds],
+      })
+      if (!record) break
+      scannedJobs += 1
+      processedJobIds.add(record.id)
+      const claim: QuickDeckClaim = { leaseToken }
       try {
-        if (record.status === 'QUEUED') await this.planAndSubmit(record)
-        else await this.inspectAndPackage(record)
-      } catch {
-        failedJobs += 1
+        if (record.status === 'QUEUED') await this.planAndSubmit(record, claim)
+        else await this.inspectAndPackage(record, claim)
+      } catch (error) {
+        if (error instanceof QuickDeckClaimLostError) continue
         const latest = await this.dependencies.repository.get(record.id)
+        if (latest && await this.recoverSubmissionPersistenceFailure(latest, claim)) continue
+        failedJobs += 1
         if (latest && !['COMPLETED', 'FAILED', 'EXPIRED'].includes(latest.status)) {
-          await this.fail(latest, 'EVALUATION_PACKAGING_FAILED')
+          await this.fail(latest, 'EVALUATION_PACKAGING_FAILED', claim)
         }
+      } finally {
+        await this.dependencies.repository.releaseClaim({ jobId: record.id, leaseToken })
       }
     }
-    return { scannedJobs: runnable.length, failedJobs, expiredJobs: expired.length }
+    return { scannedJobs, failedJobs, expiredJobs: expired.length }
   }
 
-  private async planAndSubmit(record: QuickDeckEvaluationRecord) {
+  private async planAndSubmit(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
     const startedAt = this.dependencies.clock.now().toISOString()
     const planning: QuickDeckEvaluationRecord = {
       ...record,
@@ -529,15 +558,15 @@ export class QuickDeckEvaluationService {
       nextAttemptAt: null,
       updatedAt: startedAt,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: planning,
       event: event(planning.id, 'planning.started', {}, startedAt),
-    })
+    }, claim)
     let blueprint
     try {
       blueprint = await this.createBlueprint(planning)
     } catch {
-      return await this.fail(planning, 'EVALUATION_PLANNING_FAILED')
+      return await this.fail(planning, 'EVALUATION_PLANNING_FAILED', claim)
     }
     const submittedAt = this.dependencies.clock.now().toISOString()
     const submitting: QuickDeckEvaluationRecord = {
@@ -548,101 +577,107 @@ export class QuickDeckEvaluationService {
       nextAttemptAt: null,
       updatedAt: submittedAt,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: submitting,
       event: event(submitting.id, 'planning.completed', { slideCount: submitting.request.slideCount }, submittedAt),
-    })
+    }, claim)
     const requirements = blueprintImageRequirements({ id: submitting.id, revisionRound: 0 }, blueprint)
-    let persisted = submitting
-    let submissionFailure: QuickDeckEvaluationFailureCode | null = null
-    for (const requirement of requirements) {
-      const page = this.pageForRequirement(persisted, requirement.pageNumber)
-      const beforeSubmit = this.replacePage(persisted, {
+    const preflighted: QuickDeckEvaluationRecord = {
+      ...submitting,
+      pages: submitting.pages.map((page) => ({
         ...page,
-        status: 'PENDING',
-        submissionState: 'UNKNOWN',
-        billingState: 'UNKNOWN',
+        status: 'PENDING' as const,
+        submissionState: 'UNKNOWN' as const,
+        billingState: 'UNKNOWN' as const,
         operationId: null,
         providerRequestId: null,
         errorCode: null,
-      })
-      await this.dependencies.repository.save({ record: beforeSubmit })
-      persisted = beforeSubmit
+      })),
+      nextAttemptAt: this.dependencies.clock.now().toISOString(),
+      updatedAt: this.dependencies.clock.now().toISOString(),
+    }
+    // Persist every original idempotency key before a Provider can accept it.
+    await this.saveClaimed({ record: preflighted }, claim)
+    const outcomes = await Promise.all(requirements.map(async (requirement) => {
+      const page = this.pageForRequirement(preflighted, requirement.pageNumber)
       try {
         const result = await this.dependencies.images.submit({
-          tenantId: persisted.tenantId,
+          tenantId: preflighted.tenantId,
           prompt: requirement.prompt,
           ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
-          model: persisted.imageModel,
+          model: preflighted.imageModel,
           aspectRatio: '16:9',
           exactAspectRatio: true,
           backgroundMode: 'OPAQUE',
           operationMode: 'TEXT_TO_IMAGE',
           idempotencyKey: page.idempotencyKey,
         })
-        persisted = this.replacePage(persisted, {
-          ...page,
-          status: result.state === 'PROCESSING' ? 'PROCESSING' : 'SUBMITTED',
-          submissionState: 'SUBMITTED',
-          billingState: 'UNKNOWN',
-          operationId: result.operationId,
-          providerRequestId: result.providerRequestId ?? null,
-          aspectDiagnostics: boundedAspectDiagnostics(result.aspectDiagnostics) ?? page.aspectDiagnostics,
-          errorCode: null,
-        })
-        await this.dependencies.repository.save({ record: persisted })
+        return {
+          pageNumber: page.pageNumber,
+          page: {
+            ...page,
+            status: result.state === 'PROCESSING' ? 'PROCESSING' as const : 'SUBMITTED' as const,
+            submissionState: 'SUBMITTED' as const,
+            billingState: 'UNKNOWN' as const,
+            operationId: result.operationId,
+            providerRequestId: result.providerRequestId ?? null,
+            aspectDiagnostics: boundedAspectDiagnostics(result.aspectDiagnostics) ?? page.aspectDiagnostics,
+            errorCode: null,
+          },
+        }
       } catch (error) {
         const mediaError = error instanceof MediaSubmissionError ? error : null
         const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
         const errorCode = storedDiagnosticCode(mediaError?.code) ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
         const aspectDiagnostics = boundedAspectDiagnostics(mediaError?.aspectDiagnostics)
-        persisted = this.replacePage(persisted, submissionState === 'NOT_SUBMITTED'
-          ? {
-              ...page,
-              status: 'FAILED',
-              submissionState,
-              billingState: mediaError?.billingState ?? 'UNKNOWN',
-              operationId: null,
-              providerRequestId: mediaError?.providerRequestId ?? null,
-              aspectDiagnostics,
-              errorCode,
-            }
-          : {
-              ...page,
-              status: 'PENDING',
-              submissionState,
-              billingState: mediaError?.billingState ?? 'UNKNOWN',
-              operationId: mediaError?.operationId ?? null,
-              providerRequestId: mediaError?.providerRequestId ?? null,
-              aspectDiagnostics,
-              errorCode,
-            })
-        await this.dependencies.repository.save({ record: persisted })
-        submissionFailure = this.submissionFailureCode(persisted.pages, submissionState)
-        break
+        return {
+          pageNumber: page.pageNumber,
+          page: submissionState === 'NOT_SUBMITTED'
+            ? {
+                ...page,
+                status: 'FAILED' as const,
+                submissionState,
+                billingState: mediaError?.billingState ?? 'UNKNOWN',
+                operationId: null,
+                providerRequestId: mediaError?.providerRequestId ?? null,
+                aspectDiagnostics,
+                errorCode,
+              }
+            : {
+                ...page,
+                status: 'PENDING' as const,
+                submissionState,
+                billingState: mediaError?.billingState ?? 'UNKNOWN',
+                operationId: mediaError?.operationId ?? null,
+                providerRequestId: mediaError?.providerRequestId ?? null,
+                aspectDiagnostics,
+                errorCode,
+              },
+        }
       }
+    }))
+    let persisted = preflighted
+    for (const outcome of outcomes.sort((left, right) => left.pageNumber - right.pageNumber)) {
+      persisted = this.replacePage(persisted, outcome.page)
+      await this.saveClaimed({ record: persisted }, claim)
     }
+    const submissionFailure = outcomes.some((outcome) => outcome.page.errorCode !== null)
+      ? this.submissionFailureCode(persisted.pages)
+      : null
     if (submissionFailure) {
-      const stopped = {
-        ...persisted,
-        pages: persisted.pages.map((page) => page.status === 'PENDING' && page.submissionState === 'NOT_SUBMITTED'
-          ? { ...page, status: 'FAILED' as const, errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }
-          : page),
-        updatedAt: this.dependencies.clock.now().toISOString(),
-      }
-      if (!this.hasUnresolvedPages(stopped.pages)) return await this.fail(stopped, submissionFailure)
-      const draining = this.startDraining(stopped, submissionFailure)
-      await this.dependencies.repository.save({
+      if (!this.hasUnresolvedPages(persisted.pages)) return await this.fail(persisted, submissionFailure, claim)
+      const draining = this.startDraining(persisted, submissionFailure)
+      await this.saveClaimed({
         record: draining,
         event: event(draining.id, 'images.submitted', {
           submittedPages: draining.pages.filter((page) => page.submissionState !== 'NOT_SUBMITTED').length,
           totalPages: draining.request.slideCount,
         }, draining.updatedAt),
-      })
-      return await this.dependencies.repository.save({
+      }, claim)
+      return await this.saveClaimed({
         record: draining,
         event: event(draining.id, 'images.draining', this.drainEventPayload(draining), draining.updatedAt),
-      })
+      }, claim)
     }
     const generatingAt = this.dependencies.clock.now().toISOString()
     const generating: QuickDeckEvaluationRecord = {
@@ -652,17 +687,17 @@ export class QuickDeckEvaluationService {
       nextAttemptAt: generatingAt,
       updatedAt: generatingAt,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: generating,
       event: event(generating.id, 'images.submitted', {
         submittedPages: generating.pages.length,
         totalPages: generating.request.slideCount,
       }, generatingAt),
-    })
+    }, claim)
   }
 
-  private async inspectAndPackage(record: QuickDeckEvaluationRecord) {
-    if (!record.blueprint) return await this.fail(record, 'EVALUATION_PLANNING_FAILED')
+  private async inspectAndPackage(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
+    if (!record.blueprint) return await this.fail(record, 'EVALUATION_PLANNING_FAILED', claim)
     const recoveredPages = await this.recoverOperationIds(record)
     const pending = recoveredPages.filter((page) => page.operationId !== null && !this.isTerminalPage(page))
     const inspected = await Promise.all(pending.map(async (page) => {
@@ -676,7 +711,7 @@ export class QuickDeckEvaluationService {
         const timedOut = pages.map((page) => this.isTerminalPage(page)
           ? page
           : { ...page, status: 'FAILED' as const, errorCode: 'EVALUATION_IMAGE_DRAIN_TIMEOUT' })
-        return await this.fail({ ...record, pages: timedOut, updatedAt: now.toISOString() }, 'EVALUATION_IMAGE_DRAIN_TIMEOUT')
+        return await this.fail({ ...record, pages: timedOut, updatedAt: now.toISOString() }, 'EVALUATION_IMAGE_DRAIN_TIMEOUT', claim)
       }
       const failure = record.pendingFailure ?? this.failureFromPages(pages)
       const progressAt = this.dependencies.clock.now()
@@ -686,12 +721,12 @@ export class QuickDeckEvaluationService {
         const publishDrain = record.pendingFailure !== draining.pendingFailure
           || record.drainDeadline !== draining.drainDeadline
           || pagesChanged
-        return await this.dependencies.repository.save({
+        return await this.saveClaimed({
           record: draining,
           ...(publishDrain ? {
             event: event(draining.id, 'images.draining', this.drainEventPayload(draining), draining.updatedAt),
           } : {}),
-        })
+        }, claim)
       }
       const delays = inspected.flatMap((item) => item.retryAfterMs === null ? [] : [boundedDelay(item.retryAfterMs)])
       const generating: QuickDeckEvaluationRecord = {
@@ -700,16 +735,16 @@ export class QuickDeckEvaluationService {
         nextAttemptAt: new Date(progressAt.getTime() + (delays.length > 0 ? Math.min(...delays) : 1_000)).toISOString(),
         updatedAt: progressAt.toISOString(),
       }
-      return await this.dependencies.repository.save({
+      return await this.saveClaimed({
         record: generating,
         event: event(generating.id, 'images.progress', {
           completedPages: pages.filter((page) => page.status === 'COMPLETED').length,
           totalPages: generating.request.slideCount,
         }, generating.updatedAt),
-      })
+      }, claim)
     }
     const failure = record.pendingFailure ?? this.failureFromPages(pages)
-    if (failure) return await this.fail({ ...record, pages, updatedAt: now.toISOString() }, failure)
+    if (failure) return await this.fail({ ...record, pages, updatedAt: now.toISOString() }, failure, claim)
     const packagingAt = this.dependencies.clock.now().toISOString()
     const packaging: QuickDeckEvaluationRecord = {
       ...record,
@@ -719,15 +754,56 @@ export class QuickDeckEvaluationService {
       nextAttemptAt: null,
       updatedAt: packagingAt,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: packaging,
       event: event(packaging.id, 'packaging.started', {}, packagingAt),
-    })
+    }, claim)
     try {
-      await this.package(packaging)
+      await this.package(packaging, claim)
     } catch {
-      await this.fail(packaging, 'EVALUATION_PACKAGING_FAILED')
+      await this.fail(packaging, 'EVALUATION_PACKAGING_FAILED', claim)
     }
+  }
+
+  /**
+   * The Provider may have accepted image work before saving its page outcome
+   * fails. Preserve the preflighted idempotency keys and drain by lookup only.
+   */
+  private async recoverSubmissionPersistenceFailure(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
+    if (record.status !== 'SUBMITTING_IMAGES') {
+      return false
+    }
+    const submittedPages = record.pages.filter((page) => page.submissionState === 'SUBMITTED')
+    const hasOnlyPersistedSuccessfulSubmissions = submittedPages.length === record.request.slideCount
+      && submittedPages.every((page) => page.operationId !== null && page.errorCode === null)
+    if (hasOnlyPersistedSuccessfulSubmissions) {
+      const generatingAt = this.dependencies.clock.now().toISOString()
+      const generating: QuickDeckEvaluationRecord = {
+        ...record,
+        status: 'GENERATING',
+        phase: 'IMAGE_GENERATION',
+        pendingFailure: null,
+        nextAttemptAt: generatingAt,
+        updatedAt: generatingAt,
+      }
+      await this.saveClaimed({
+        record: generating,
+        event: event(generating.id, 'images.submitted', {
+          submittedPages: generating.pages.length,
+          totalPages: generating.request.slideCount,
+        }, generatingAt),
+      }, claim)
+      return true
+    }
+    if (!record.pages.some((page) => page.submissionState === 'SUBMITTED' || page.submissionState === 'UNKNOWN')) {
+      return false
+    }
+    const draining = this.startDraining(record, 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN')
+    await this.saveClaimed({
+      record: draining,
+      event: event(draining.id, 'images.draining', this.drainEventPayload(draining), draining.updatedAt),
+    }, claim)
+    return true
   }
 
   private pageForRequirement(record: QuickDeckEvaluationRecord, pageNumber: number) {
@@ -752,16 +828,13 @@ export class QuickDeckEvaluationService {
     return pages.some((page) => !this.isTerminalPage(page))
   }
 
-  private submissionFailureCode(
-    pages: readonly QuickDeckEvaluationPageRecord[],
-    failureState: QuickDeckEvaluationPageRecord['submissionState'],
-  ): QuickDeckEvaluationFailureCode {
+  private submissionFailureCode(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode {
     if (pages.some((page) => page.submissionState === 'SUBMITTED')) {
       return 'EVALUATION_IMAGE_SUBMISSION_PARTIAL'
     }
-    return failureState === 'NOT_SUBMITTED'
-      ? 'EVALUATION_IMAGE_SUBMISSION_FAILED'
-      : 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+    return pages.some((page) => page.submissionState === 'UNKNOWN')
+      ? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+      : 'EVALUATION_IMAGE_SUBMISSION_FAILED'
   }
 
   private failureFromPages(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode | null {
@@ -808,7 +881,7 @@ export class QuickDeckEvaluationService {
   }
 
   private async recoverOperationIds(record: QuickDeckEvaluationRecord): Promise<readonly QuickDeckEvaluationPageRecord[]> {
-    const lookup = this.dependencies.images.lookupByIdempotency
+    const lookup = this.dependencies.images.lookupByIdempotency?.bind(this.dependencies.images)
     if (!lookup) return record.pages
     return await Promise.all(record.pages.map(async (page) => {
       if (this.isTerminalPage(page) || page.operationId !== null
@@ -940,21 +1013,26 @@ export class QuickDeckEvaluationService {
       compilerVersion: 'visual-deck-v4-chain-4',
       createdAt: record.createdAt,
     }
+    const planning = planningPayload(compilerInput)
     const raw = await this.dependencies.model.execute({
       tenantId: record.tenantId,
       operation: 'create_visual_deck_v4_creative_manuscript',
       schemaName: 'ppt_agent_v4_creative_manuscript_v1',
-      payload: planningPayload(compilerInput),
+      payload: planning.payload,
       idempotencyKey: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}:creative-manuscript`,
       structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
     })
     const creative = visualDeckV4CreativeManuscriptSchema.parse(raw)
     const review = visualDeckV4ReviewManuscriptSchema.parse({ ...creative, revisionSuggestions: [] })
-    const draft = new V4PlanCompiler().compile(compilerInput, review)
-    return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
+    const manuscriptCompilerInput: VisualDeckV4CompilerInput = {
+      ...compilerInput,
+      document: { ...compilerInput.document, chunks: planning.evidenceWindow.chunks },
+    }
+    const draft = new V4PlanCompiler().compile(manuscriptCompilerInput, review)
+    return createVisualDeckV4BlueprintFromProposal(manuscriptCompilerInput, draft)
   }
 
-  private async package(record: QuickDeckEvaluationRecord) {
+  private async package(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
     if (!record.blueprint) throw new Error('QUICK_DECK_BLUEPRINT_MISSING')
     const slides = await Promise.all(record.pages.map(async (page) => {
       if (!page.artifactId) throw new Error('QUICK_DECK_PAGE_ARTIFACT_MISSING')
@@ -1003,13 +1081,13 @@ export class QuickDeckEvaluationService {
       nextAttemptAt: null,
       updatedAt: completedAt,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: completed,
       event: event(completed.id, 'packaging.completed', {}, completedAt),
-    })
+    }, claim)
   }
 
-  private async fail(record: QuickDeckEvaluationRecord, code: QuickDeckEvaluationFailureCode) {
+  private async fail(record: QuickDeckEvaluationRecord, code: QuickDeckEvaluationFailureCode, claim: QuickDeckClaim) {
     const completedAt = this.dependencies.clock.now().toISOString()
     const failed: QuickDeckEvaluationRecord = {
       ...record,
@@ -1020,10 +1098,10 @@ export class QuickDeckEvaluationService {
       nextAttemptAt: null,
       updatedAt: completedAt,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: failed,
       event: event(failed.id, 'evaluation.failed', { code }, completedAt),
-    })
+    }, claim)
   }
 
   private async expire(record: QuickDeckEvaluationRecord, now: string) {
@@ -1102,5 +1180,19 @@ export class QuickDeckEvaluationService {
     const record = await this.dependencies.repository.get(jobId)
     if (!record || record.tenantId !== tenantId) throw new QuickDeckEvaluationError(404, 'QUICK_DECK_EVALUATION_NOT_FOUND')
     return record
+  }
+
+  private async saveClaimed(
+    input: Readonly<{ record: QuickDeckEvaluationRecord; event?: EventInput }>,
+    claim: QuickDeckClaim,
+  ) {
+    const now = this.dependencies.clock.now()
+    const saved = await this.dependencies.repository.saveClaimed({
+      ...input,
+      leaseToken: claim.leaseToken,
+      now: now.toISOString(),
+      leaseUntil: new Date(now.getTime() + QUICK_DECK_EVALUATION_LEASE_MS).toISOString(),
+    })
+    if (!saved) throw new QuickDeckClaimLostError()
   }
 }
