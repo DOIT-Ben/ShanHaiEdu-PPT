@@ -3,7 +3,10 @@ import sharp from 'sharp'
 import type { ArtifactPort, ImageGenerationPort } from '../core/ports'
 import { MediaSubmissionError } from '../core/ports'
 import { providerTechnicalFailure } from '../core/technical-recovery'
-import { hasVisualDeckV4AspectRatio } from '../core/blueprint-assets'
+import {
+  V4_IMAGE_ASPECT_TARGET,
+  visualDeckV4AspectDecision,
+} from '../core/image-aspect-policy'
 
 const gatewayResponseSchema = z.object({
   data: z.array(z.object({ b64_json: z.string().min(1) }).passthrough()).min(1),
@@ -84,13 +87,25 @@ async function assertImageAspectRatio(
   const metadata = await sharp(image).metadata()
   if (!metadata.width || !metadata.height) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
   if (aspectRatio === '16:9' && exactAspectRatio) {
-    if (!hasVisualDeckV4AspectRatio(metadata.width, metadata.height)) throw new GatewayImageAspectRatioError()
-    return
+    return visualDeckV4AspectDecision(metadata.width, metadata.height)
   }
   const ratio = metadata.width / metadata.height
   if (Math.abs(ratio / expectedAspectRatio(aspectRatio) - 1) > GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE) {
     throw new GatewayImageAspectRatioError()
   }
+  return null
+}
+
+async function normalizedVisualDeckV4Image(
+  image: Uint8Array,
+  crop: NonNullable<Awaited<ReturnType<typeof assertImageAspectRatio>>>['crop'],
+) {
+  if (!crop) return image
+  return new Uint8Array(await sharp(image)
+    .extract(crop)
+    .resize(V4_IMAGE_ASPECT_TARGET.width, V4_IMAGE_ASPECT_TARGET.height, { fit: 'fill' })
+    .png({ compressionLevel: 8 })
+    .toBuffer())
 }
 
 function operationState(status: z.infer<typeof imageOperationSchema>['status']) {
@@ -430,16 +445,21 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     result: z.infer<typeof gatewayResponseSchema>,
   ) {
     const image = decodedImage(result.data[0]!.b64_json)
-    await assertImageAspectRatio(image.bytes, input.aspectRatio, input.exactAspectRatio)
-    const bytes = input.backgroundMode === 'TRANSPARENT'
-      ? await removeConnectedNeutralBackdrop(image.bytes)
+    const decision = await assertImageAspectRatio(image.bytes, input.aspectRatio, input.exactAspectRatio)
+    if (input.exactAspectRatio && input.aspectRatio === '16:9' && !decision) throw new GatewayImageAspectRatioError()
+    const normalized = input.exactAspectRatio && input.aspectRatio === '16:9'
+      ? await normalizedVisualDeckV4Image(image.bytes, decision!.crop)
       : image.bytes
+    const bytes = input.backgroundMode === 'TRANSPARENT'
+      ? await removeConnectedNeutralBackdrop(normalized)
+      : normalized
+    const mimeType = decision?.crop ? 'image/png' : image.mimeType
     const runId = input.idempotencyKey.split(':')[0] || 'gateway-run'
     return this.dependencies.artifacts.put({
       tenantId: input.tenantId,
       runId,
-      name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${image.mimeType.split('/')[1]}`,
-      mimeType: image.mimeType,
+      name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${mimeType.split('/')[1]}`,
+      mimeType,
       bytes,
       idempotencyKey: `${input.idempotencyKey}:gateway-output`,
     })

@@ -63,10 +63,10 @@ describe('gateway image generation adapter', () => {
     expect(String(JSON.parse(String(request.init.body)).prompt)).toContain('透明背景中的独立主体')
   })
 
-  test('rejects a completed gateway image whose actual pixels violate the requested ratio', async () => {
+  test('normalizes a near-16:9 V4 image into an exact 1600 by 900 artifact', async () => {
     const artifacts = new MockArtifactPort()
     const nearSixteenNine = await sharp({
-      create: { width: 1360, height: 768, channels: 3, background: '#DDE7F7' },
+      create: { width: 1376, height: 768, channels: 3, background: '#DDE7F7' },
     }).png().toBuffer()
     const operationId = 'imgop_11111111111111111111111111111111'
     const adapter = new GatewayImageGenerationPort({
@@ -79,6 +79,41 @@ describe('gateway image generation adapter', () => {
             status: 'COMPLETED',
             submission_state: 'SUBMITTED',
             result: { data: [{ b64_json: nearSixteenNine.toString('base64') }] },
+          }),
+    })
+    const submitted = await adapter.submit({
+      tenantId: 'frameflow', prompt: 'A complete 16 by 9 classroom slide', model: 'gpt-image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:slide:1:image:r0:v1',
+    })
+
+    const inspected = await adapter.inspect({
+      tenantId: 'frameflow', operationId: submitted.operationId,
+      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9', exactAspectRatio: true,
+    })
+    expect(inspected).toMatchObject({ state: 'COMPLETED' })
+    const artifact = inspected.state === 'COMPLETED' ? artifacts.artifacts.get(inspected.artifactId) : null
+    expect(artifact).toBeDefined()
+    await expect(sharp(artifact!.bytes).metadata()).resolves.toMatchObject({ width: 1600, height: 900 })
+  })
+
+  test.each([
+    { width: 2048, height: 2048, label: 'square' },
+    { width: 1200, height: 800, label: 'three-by-two' },
+    { width: 1024, height: 768, label: 'four-by-three' },
+  ])('rejects a completed V4 $label image whose actual pixels materially violate the requested ratio', async ({ width, height }) => {
+    const artifacts = new MockArtifactPort()
+    const invalid = await sharp({
+      create: { width, height, channels: 3, background: '#DDE7F7' },
+    }).png().toBuffer()
+    const operationId = 'imgop_11111111111111111111111111111111'
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url) => String(url).endsWith('/image-tasks')
+        ? Response.json({ id: operationId, status: 'QUEUED', submission_state: 'SUBMITTED' }, { status: 202 })
+        : Response.json({
+            id: operationId, status: 'COMPLETED', submission_state: 'SUBMITTED',
+            result: { data: [{ b64_json: invalid.toString('base64') }] },
           }),
     })
     const submitted = await adapter.submit({

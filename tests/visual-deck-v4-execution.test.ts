@@ -150,4 +150,16 @@ describe('visual deck v4 execution', () => {
       await rm(directory, { recursive: true, force: true })
     }
   })
+
+  test('rejects a V4 raster that bypasses exact aspect-ratio normalization', async () => {
+    const renderer = new SharpPptxPresentationRenderer()
+    const image = await sharp({
+      create: { width: 1376, height: 768, channels: 3, background: '#E5484D' },
+    }).png().toBuffer()
+
+    await expect(renderer.renderPptx({
+      blueprint: blueprint(1),
+      slides: [{ pageNumber: 1, image, imageMimeType: 'image/png' }],
+    })).rejects.toThrow('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
+  })
 })

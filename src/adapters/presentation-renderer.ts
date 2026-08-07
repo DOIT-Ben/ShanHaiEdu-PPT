@@ -9,6 +9,7 @@ import {
   isFiveCompositionCourseware,
   renderFiveCompositionSlide,
 } from './five-composition-courseware'
+import { hasExactVisualDeckV4AspectRatio } from '../core/image-aspect-policy'
 
 const SLIDE_WIDTH = 1600
 const SLIDE_HEIGHT = 900
@@ -76,6 +77,14 @@ async function normalizedPng(image: Uint8Array) {
     .flatten({ background: '#ffffff' })
     .png({ compressionLevel: 8 })
     .toBuffer()
+}
+
+async function normalizedVisualDeckV4Png(image: Uint8Array) {
+  const metadata = await sharp(image).metadata()
+  if (!metadata.width || !metadata.height || !hasExactVisualDeckV4AspectRatio(metadata.width, metadata.height)) {
+    throw new Error('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
+  }
+  return normalizedPng(image)
 }
 
 async function renderSlide(input: Readonly<{
@@ -310,7 +319,7 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
         continue
       }
       if (input.blueprint.renderMode === 'VISUAL_DECK_V4') {
-        const image = await normalizedPng(source.image)
+        const image = await normalizedVisualDeckV4Png(source.image)
         const slide = pptx.addSlide()
         slide.addImage({
           data: `data:image/png;base64,${image.toString('base64')}`,
