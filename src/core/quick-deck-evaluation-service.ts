@@ -623,6 +623,7 @@ export class QuickDeckEvaluationService {
       try {
         if (record.status === 'QUEUED') await this.planAndSubmit(record, claim)
         else if (record.status === 'PLANNING') await this.fail(record, 'EVALUATION_INTERRUPTED', claim)
+        else if (record.status === 'SUBMITTING_IMAGES') await this.recoverSubmissionPersistenceFailure(record, claim)
         else await this.inspectAndPackage(record, claim)
       } catch (error) {
         if (error instanceof QuickDeckClaimLostError) continue
@@ -889,7 +890,8 @@ export class QuickDeckEvaluationService {
       return false
     }
     const submittedPages = record.pages.filter((page) => page.submissionState === 'SUBMITTED')
-    const hasOnlyPersistedSuccessfulSubmissions = submittedPages.length === record.request.slideCount
+    const hasOnlyPersistedSuccessfulSubmissions = record.pendingFailure === null
+      && submittedPages.length === record.request.slideCount
       && submittedPages.every((page) => page.operationId !== null && page.errorCode === null)
     if (hasOnlyPersistedSuccessfulSubmissions) {
       const generatingAt = this.dependencies.clock.now().toISOString()
@@ -910,10 +912,19 @@ export class QuickDeckEvaluationService {
       }, claim)
       return true
     }
-    if (!record.pages.some((page) => page.submissionState === 'SUBMITTED' || page.submissionState === 'UNKNOWN')) {
-      return false
+    const pages = record.pages.map((page) => page.status === 'PENDING' && page.submissionState === 'NOT_SUBMITTED'
+      ? {
+          ...page,
+          status: 'FAILED' as const,
+          errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+        }
+      : page)
+    const pendingFailure = record.pendingFailure ?? this.submissionFailureCode(pages)
+    if (!this.hasUnresolvedPages(pages)) {
+      await this.fail({ ...record, pages }, pendingFailure, claim)
+      return true
     }
-    const draining = this.startDraining(record, 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN')
+    const draining = this.startDraining({ ...record, pages }, pendingFailure)
     await this.saveClaimed({
       record: draining,
       event: event(draining.id, 'images.draining', this.drainEventPayload(draining), draining.updatedAt),

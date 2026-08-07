@@ -311,6 +311,13 @@ class NotSubmittedLookupImages extends AsyncImages {
   }
 }
 
+class UnknownLookupImages extends AsyncImages {
+  override async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+    this.lookups.push(structuredClone(input))
+    return { state: 'UNKNOWN' as const }
+  }
+}
+
 class LeaseExpiredCreativeModel extends CreativeModel {
   constructor(private readonly clock: ControlledClock) {
     super()
@@ -342,6 +349,7 @@ async function fixture(
   failFirstArtifactCleanup = false,
   imageFactory?: (artifacts: LocalArtifactPort) => AsyncImages,
   modelEligibility?: QuickDeckEvaluationModelEligibilityPort,
+  ttlMs = 60_000,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-service-'))
   const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
@@ -365,7 +373,7 @@ async function fixture(
     ...(modelEligibility ? { modelEligibility } : {}),
     maxActiveJobs: 2,
     maxDailyJobs: 3,
-    ttlMs: 60_000,
+    ttlMs,
   })
   return { directory, artifacts, repository, clock, model, images, service }
 }
@@ -918,6 +926,108 @@ describe('quick-deck evaluation service', () => {
           expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
           expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
         ],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('reclaims a stale unknown image submission into a bounded lookup-only drain', async () => {
+    const { directory, images, repository, clock, service } = await fixture(
+      undefined,
+      false,
+      false,
+      (artifacts) => new UnknownLookupImages(artifacts),
+      undefined,
+      30 * 60_000,
+    )
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      expect(submitted).not.toBeNull()
+      const submissionCount = images.submissions.length
+      const originalKey = submitted!.pages[0]!.idempotencyKey
+      await repository.save({
+        record: {
+          ...submitted!,
+          status: 'SUBMITTING_IMAGES',
+          phase: 'IMAGE_GENERATION',
+          pages: submitted!.pages.map((page) => ({
+            ...page,
+            status: 'PENDING' as const,
+            submissionState: 'UNKNOWN' as const,
+            billingState: 'UNKNOWN' as const,
+            operationId: null,
+            providerRequestId: null,
+            artifactId: null,
+            width: null,
+            height: null,
+            aspectRatioValidated: false,
+            aspectDiagnostics: null,
+            sha256: null,
+            errorCode: null,
+          })),
+          pendingFailure: null,
+          drainStartedAt: null,
+          drainDeadline: null,
+          nextAttemptAt: clock.now().toISOString(),
+          updatedAt: clock.now().toISOString(),
+        },
+      })
+
+      await service.tick({ limit: 10 })
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'GENERATING',
+        pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+        drainDeadline: expect.any(String),
+      })
+      expect(images.submissions).toHaveLength(submissionCount)
+      expect(images.lookups).toHaveLength(0)
+
+      clock.advance(15 * 60_000 + 1)
+      await service.tick({ limit: 10 })
+
+      expect(images.submissions).toHaveLength(submissionCount)
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([originalKey])
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        failure: { code: 'EVALUATION_IMAGE_DRAIN_TIMEOUT' },
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('reclaims a fully persisted image submission without resubmitting or draining', async () => {
+    const { directory, images, repository, clock, service } = await fixture()
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      expect(submitted).not.toBeNull()
+      const submissionCount = images.submissions.length
+      await repository.save({
+        record: {
+          ...submitted!,
+          status: 'SUBMITTING_IMAGES',
+          phase: 'IMAGE_GENERATION',
+          pendingFailure: null,
+          drainStartedAt: null,
+          drainDeadline: null,
+          nextAttemptAt: clock.now().toISOString(),
+          updatedAt: clock.now().toISOString(),
+        },
+      })
+
+      await service.tick({ limit: 10 })
+
+      expect(images.submissions).toHaveLength(submissionCount)
+      expect(images.lookups).toHaveLength(0)
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'GENERATING',
+        pendingFailure: null,
+        drainDeadline: null,
       })
     } finally {
       await rm(directory, { recursive: true, force: true })
