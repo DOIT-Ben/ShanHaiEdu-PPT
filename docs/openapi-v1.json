@@ -289,6 +289,38 @@
         }
       }
     },
+    "/v1/evaluations/quick-decks/{jobId}/evidence": {
+      "get": {
+        "operationId": "getQuickDeckEvaluationEvidence",
+        "security": [{ "quickDeckEvaluatorAuth": [] }],
+        "description": "Returns evaluator-tenant-scoped, redacted evidence for one quick-deck evaluation. It includes stable request and operation digests, submission and billing state, actual ratio diagnostics, model identity and the runtime build identity captured when the job was created. It never exposes source text, internal prompts, artifact identifiers, provider URLs, credentials, route accounts or raw provider payloads.",
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 160 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Redacted evaluation evidence",
+            "headers": {
+              "Link": { "$ref": "#/components/headers/ContractLink" },
+              "X-PPT-Agent-Contract-Version": { "$ref": "#/components/headers/ContractVersion" },
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuickDeckEvaluationEvidenceEnvelope" } } }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "410": { "$ref": "#/components/responses/Error" },
+          "413": { "$ref": "#/components/responses/Error" },
+          "416": { "$ref": "#/components/responses/Error" },
+          "422": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" },
+          "500": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/v1/evaluations/quick-decks/{jobId}/events": {
       "get": {
         "operationId": "streamQuickDeckEvaluationEvents",
@@ -2434,14 +2466,31 @@
       "QuickDeckEvaluationPage": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["pageNumber", "status", "width", "height", "aspectRatioValidated", "sha256"],
+        "required": ["pageNumber", "status", "submissionState", "billingState", "errorCode", "width", "height", "aspectRatioValidated", "aspect", "sha256"],
         "properties": {
           "pageNumber": { "type": "integer", "minimum": 1, "maximum": 10 },
           "status": { "enum": ["PENDING", "SUBMITTED", "PROCESSING", "COMPLETED", "FAILED"] },
+          "submissionState": { "enum": ["NOT_SUBMITTED", "SUBMITTED", "UNKNOWN"] },
+          "billingState": { "enum": ["NOT_CHARGED", "CHARGED", "UNKNOWN"] },
+          "errorCode": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]{0,119}$" },
           "width": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
           "height": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
           "aspectRatioValidated": { "type": "boolean" },
+          "aspect": { "oneOf": [{ "$ref": "#/components/schemas/QuickDeckImageAspectDiagnostics" }, { "type": "null" }] },
           "sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" }
+        }
+      },
+      "QuickDeckImageAspectDiagnostics": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["observedWidth", "observedHeight", "relativeError", "normalization", "normalizedWidth", "normalizedHeight"],
+        "properties": {
+          "observedWidth": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
+          "observedHeight": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
+          "relativeError": { "type": ["number", "null"], "minimum": 0, "maximum": 30000 },
+          "normalization": { "enum": ["PASSTHROUGH", "NORMALIZED", "REJECTED", "UNKNOWN"] },
+          "normalizedWidth": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 },
+          "normalizedHeight": { "type": ["integer", "null"], "minimum": 1, "maximum": 20000 }
         }
       },
       "QuickDeckEvaluation": {
@@ -2517,6 +2566,82 @@
           "schemaVersion": { "const": "1" },
           "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
           "data": { "$ref": "#/components/schemas/QuickDeckEvaluation" }
+        }
+      },
+      "QuickDeckEvaluationEvidence": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "jobId", "runtime", "models", "planning", "pages", "evidenceCompleteness", "createdAt", "startedAt", "completedAt", "expiresAt"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "runtime": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["runtimeMode", "softwareVersion", "gitSha", "releaseId", "startedAt"],
+            "properties": {
+              "runtimeMode": { "enum": ["GATEWAY", "MOCK", "UNKNOWN"] },
+              "softwareVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "gitSha": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "releaseId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "startedAt": { "type": ["string", "null"], "format": "date-time" }
+            }
+          },
+          "models": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "image"],
+            "properties": {
+              "text": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "image": { "type": "string", "minLength": 1, "maxLength": 160 }
+            }
+          },
+          "planning": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agentRequestId", "providerRequestId", "evidenceCompleteness"],
+            "properties": {
+              "agentRequestId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "providerRequestId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+              "evidenceCompleteness": { "enum": ["COMPLETE", "PARTIAL", "UNKNOWN"] }
+            }
+          },
+          "pages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pageNumber", "agentRequestId", "gatewayOperationId", "providerRequestId", "submissionState", "billingState", "errorCode", "aspect", "evidenceCompleteness"],
+              "properties": {
+                "pageNumber": { "type": "integer", "minimum": 1, "maximum": 10 },
+                "agentRequestId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "gatewayOperationId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+                "providerRequestId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+                "submissionState": { "enum": ["NOT_SUBMITTED", "SUBMITTED", "UNKNOWN"] },
+                "billingState": { "enum": ["NOT_CHARGED", "CHARGED", "UNKNOWN"] },
+                "errorCode": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]{0,119}$" },
+                "aspect": { "oneOf": [{ "$ref": "#/components/schemas/QuickDeckImageAspectDiagnostics" }, { "type": "null" }] },
+                "evidenceCompleteness": { "enum": ["COMPLETE", "PARTIAL", "UNKNOWN"] }
+              }
+            }
+          },
+          "evidenceCompleteness": { "enum": ["COMPLETE", "PARTIAL", "UNKNOWN"] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": ["string", "null"], "format": "date-time" },
+          "completedAt": { "type": ["string", "null"], "format": "date-time" },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "QuickDeckEvaluationEvidenceEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "requestId", "data"],
+        "properties": {
+          "schemaVersion": { "const": "1" },
+          "requestId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "data": { "$ref": "#/components/schemas/QuickDeckEvaluationEvidence" }
         }
       },
       "QuickDeckEvaluationEvent": {

@@ -162,6 +162,15 @@ export type MediaSubmissionState = 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
 /** Billing is independent of whether the gateway accepted a media request. */
 export type MediaBillingState = 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN'
 
+export type ImageAspectDiagnostics = Readonly<{
+  observedWidth: number | null
+  observedHeight: number | null
+  relativeError: number | null
+  normalization: 'PASSTHROUGH' | 'NORMALIZED' | 'REJECTED' | 'UNKNOWN'
+  normalizedWidth: number | null
+  normalizedHeight: number | null
+}>
+
 export type TechnicalFailureDisposition = 'RETRYABLE' | 'NON_RETRYABLE'
 
 export type TechnicalFailure = Readonly<{
@@ -182,13 +191,20 @@ export class MediaSubmissionError extends Error {
     details: Readonly<{
       billingState?: MediaBillingState
       operationId?: string
+      providerRequestId?: string
+      aspectDiagnostics?: ImageAspectDiagnostics
     }> = {},
   ) {
     super(message)
     this.name = 'MediaSubmissionError'
     this.billingState = details.billingState ?? 'UNKNOWN'
     this.operationId = details.operationId ?? null
+    this.providerRequestId = details.providerRequestId ?? null
+    this.aspectDiagnostics = details.aspectDiagnostics ?? null
   }
+
+  readonly providerRequestId: string | null
+  readonly aspectDiagnostics: ImageAspectDiagnostics | null
 }
 
 export interface ImageGenerationPort {
@@ -211,6 +227,8 @@ export interface ImageGenerationPort {
   }>): Promise<Readonly<{
     operationId: string
     state: 'QUEUED' | 'PROCESSING' | 'COMPLETED'
+    providerRequestId?: string
+    aspectDiagnostics?: ImageAspectDiagnostics
   }>>
 
   /**
@@ -235,13 +253,15 @@ export interface ImageGenerationPort {
     exactAspectRatio?: boolean
     backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
   }>): Promise<
-    | Readonly<{ state: 'QUEUED' | 'PROCESSING'; retryAfterMs?: number }>
-    | Readonly<{ state: 'COMPLETED'; artifactId: string }>
+    | Readonly<{ state: 'QUEUED' | 'PROCESSING'; retryAfterMs?: number; providerRequestId?: string }>
+    | Readonly<{ state: 'COMPLETED'; artifactId: string; providerRequestId?: string; aspectDiagnostics?: ImageAspectDiagnostics }>
     | Readonly<{
         state: 'FAILED'
         errorCode: string
         billingState: MediaBillingState
         technicalFailure: TechnicalFailure
+        providerRequestId?: string
+        aspectDiagnostics?: ImageAspectDiagnostics
       }>
   >
 }

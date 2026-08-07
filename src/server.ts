@@ -290,6 +290,13 @@ const runtime = runtimeMode === 'gateway'
             maxDailyJobs: quickDeckEvaluationConfig.maxDailyJobs,
             ttlMs: quickDeckEvaluationConfig.ttlMs,
             tickBatchSize: quickDeckEvaluationConfig.tickBatchSize,
+            evidence: {
+              runtimeMode: 'GATEWAY',
+              softwareVersion: releaseIdentity.softwareVersion,
+              gitSha: releaseIdentity.gitSha,
+              releaseId: releaseIdentity.releaseId,
+              startedAt: new Date().toISOString(),
+            },
           },
         } : {}),
         ...(discovery ? { discovery } : {}),

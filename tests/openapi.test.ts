@@ -9,8 +9,10 @@ import {
   runStatusSchema,
 } from '../src/contracts'
 import {
+  quickDeckEvaluationEvidenceSchema,
   quickDeckEvaluationEventSchema,
   quickDeckEvaluationFailureCodeSchema,
+  quickDeckImageAspectDiagnosticsSchema,
   quickDeckEvaluationStatusSchema,
 } from '../src/quick-deck-evaluation-contracts'
 
@@ -40,7 +42,9 @@ describe('OpenAPI v1 contract', () => {
     const document = JSON.parse(await readFile(filename, 'utf8')) as any
     const create = document.paths['/v1/evaluations/quick-decks'].post
     const job = document.components.schemas.QuickDeckEvaluation
+    const page = document.components.schemas.QuickDeckEvaluationPage
     const request = document.components.schemas.QuickDeckEvaluationRequest
+    const evidence = document.components.schemas.QuickDeckEvaluationEvidence
     const events = document.components.schemas.QuickDeckEvaluationEvent.oneOf
 
     expect(create.parameters).toBeUndefined()
@@ -50,6 +54,12 @@ describe('OpenAPI v1 contract', () => {
     expect(request.properties.source.properties.text.maxLength).toBe(200_000)
     expect(request.properties.slideCount).toMatchObject({ minimum: 1, maximum: 10 })
     expect(job.properties.status.enum).toEqual(quickDeckEvaluationStatusSchema.options)
+    expect(page.properties.submissionState.enum).toEqual(['NOT_SUBMITTED', 'SUBMITTED', 'UNKNOWN'])
+    expect(page.properties.billingState.enum).toEqual(['NOT_CHARGED', 'CHARGED', 'UNKNOWN'])
+    expect(document.components.schemas.QuickDeckImageAspectDiagnostics.properties.normalization.enum)
+      .toEqual(quickDeckImageAspectDiagnosticsSchema.shape.normalization.options)
+    expect(evidence.properties.pages.items.properties.evidenceCompleteness.enum).toEqual(['COMPLETE', 'PARTIAL', 'UNKNOWN'])
+    expect(evidence.properties.runtime.properties.runtimeMode.enum).toEqual(['GATEWAY', 'MOCK', 'UNKNOWN'])
     expect(job.properties.artifacts.properties.pptx.oneOf).toEqual(expect.arrayContaining([
       { $ref: '#/components/schemas/QuickDeckEvaluationArtifact' },
       { type: 'null' },
@@ -62,6 +72,7 @@ describe('OpenAPI v1 contract', () => {
     for (const path of [
       '/v1/evaluations/quick-decks',
       '/v1/evaluations/quick-decks/{jobId}',
+      '/v1/evaluations/quick-decks/{jobId}/evidence',
       '/v1/evaluations/quick-decks/{jobId}/events',
       '/v1/evaluations/quick-decks/{jobId}/content',
     ]) {
@@ -252,6 +263,7 @@ describe('OpenAPI v1 contract', () => {
       '/v1/evaluations/quick-decks/{jobId}',
       '/v1/evaluations/quick-decks/{jobId}/content',
       '/v1/evaluations/quick-decks/{jobId}/events',
+      '/v1/evaluations/quick-decks/{jobId}/evidence',
       '/v1/runs',
       '/v1/runs/{runId}',
       '/v1/runs/{runId}/actions',
@@ -278,6 +290,7 @@ describe('OpenAPI v1 contract', () => {
     expect(document.paths['/v1/capabilities']?.get).toBeDefined()
     expect(document.paths['/v1/evaluations/quick-decks']?.post).toBeDefined()
     expect(document.paths['/v1/evaluations/quick-decks/{jobId}']?.get).toBeDefined()
+    expect(document.paths['/v1/evaluations/quick-decks/{jobId}/evidence']?.get).toBeDefined()
     expect(document.paths['/v1/evaluations/quick-decks/{jobId}/events']?.get).toBeDefined()
     expect(document.paths['/v1/evaluations/quick-decks/{jobId}/content']?.get).toBeDefined()
     expect(document.paths['/v1/runs/{runId}/plan']?.get).toBeDefined()
@@ -505,6 +518,7 @@ describe('OpenAPI v1 contract', () => {
       ['/v1/capabilities', 'get', '200'],
       ['/v1/evaluations/quick-decks', 'post', '201'],
       ['/v1/evaluations/quick-decks/{jobId}', 'get', '200'],
+      ['/v1/evaluations/quick-decks/{jobId}/evidence', 'get', '200'],
       ['/v1/evaluations/quick-decks/{jobId}/events', 'get', '200'],
       ['/v1/evaluations/quick-decks/{jobId}/content', 'get', '200'],
       ['/v1/runs/{runId}', 'get', '200'],

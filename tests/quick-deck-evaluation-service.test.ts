@@ -7,10 +7,19 @@ import { LocalArtifactPort } from '../src/adapters/local-artifact-port'
 import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-renderer'
 import { LocalQuickDeckEvaluationArtifactCleanupPort } from '../src/adapters/quick-deck-evaluation-local-artifact-cleanup'
 import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-deck-evaluation-in-memory-repository'
-import { MediaSubmissionError, type ImageGenerationPort, type StructuredModelPort } from '../src/core/ports'
+import { MediaSubmissionError, type ImageAspectDiagnostics, type ImageGenerationPort, type StructuredModelPort } from '../src/core/ports'
 import { QuickDeckEvaluationError, QuickDeckEvaluationService } from '../src/core/quick-deck-evaluation-service'
 
 const sourceText = '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4)
+const oversizedProviderErrorCode = `UPSTREAM_${'X'.repeat(200)}`
+const unboundedAspectDiagnostics: ImageAspectDiagnostics = {
+  observedWidth: 20_001,
+  observedHeight: 1,
+  relativeError: 11_250,
+  normalization: 'REJECTED',
+  normalizedWidth: null,
+  normalizedHeight: null,
+}
 
 class ControlledClock {
   constructor(private value = new Date('2026-08-07T00:00:00.000Z')) {}
@@ -55,7 +64,7 @@ class AsyncImages implements ImageGenerationPort {
     private readonly height = 900,
   ) {}
 
-  async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+  async submit(input: Parameters<ImageGenerationPort['submit']>[0]): ReturnType<ImageGenerationPort['submit']> {
     this.submissions.push(structuredClone(input))
     const existing = this.operations.get(input.idempotencyKey)
     if (existing) return { operationId: existing, state: 'QUEUED' as const }
@@ -76,7 +85,7 @@ class AsyncImages implements ImageGenerationPort {
     return { operationId, state: 'QUEUED' as const }
   }
 
-  async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
+  async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
     this.inspections.push(structuredClone(input))
     const artifactId = this.operations.get(input.operationId)
     if (!artifactId) throw new Error('TEST_IMAGE_OPERATION_NOT_FOUND')
@@ -105,14 +114,59 @@ class RejectedSecondPageImages extends AsyncImages {
     if (input.idempotencyKey.includes(':slide:2:')) {
       this.submissions.push(structuredClone(input))
       throw new MediaSubmissionError(
-        'TEST_SUBMISSION_REJECTED',
+        oversizedProviderErrorCode,
         'NOT_SUBMITTED',
         'the gateway rejected this page before accepting it',
-        { category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'TEST_SUBMISSION_REJECTED' },
-        { billingState: 'NOT_CHARGED' },
+        { category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: oversizedProviderErrorCode },
+        { billingState: 'NOT_CHARGED', aspectDiagnostics: unboundedAspectDiagnostics },
       )
     }
     return super.submit(input)
+  }
+}
+
+class UnboundedDiagnosticsImages extends AsyncImages {
+  override async submit(input: Parameters<ImageGenerationPort['submit']>[0]): ReturnType<ImageGenerationPort['submit']> {
+    const result = await super.submit(input)
+    return { ...result, aspectDiagnostics: unboundedAspectDiagnostics }
+  }
+
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
+    const result = await super.inspect(input)
+    if (result.state !== 'COMPLETED') return result
+    return { ...result, aspectDiagnostics: unboundedAspectDiagnostics }
+  }
+}
+
+class FailedRatioImages extends AsyncImages {
+  constructor(
+    artifacts: LocalArtifactPort,
+    private readonly failureAspectDiagnostics: ImageAspectDiagnostics = {
+      observedWidth: 2048,
+      observedHeight: 2048,
+      relativeError: 0.4375,
+      normalization: 'REJECTED',
+      normalizedWidth: null,
+      normalizedHeight: null,
+    },
+  ) {
+    super(artifacts)
+  }
+
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
+    this.inspections.push(structuredClone(input))
+    return {
+      state: 'FAILED' as const,
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      billingState: 'UNKNOWN' as const,
+      providerRequestId: 'provider-request-redacted-id',
+      aspectDiagnostics: this.failureAspectDiagnostics,
+      technicalFailure: {
+        category: 'CONTRACT' as const,
+        disposition: 'NON_RETRYABLE' as const,
+        diagnosticCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      },
+    }
   }
 }
 
@@ -134,13 +188,14 @@ async function fixture(
   imageSize: Readonly<{ width: number; height: number }> = { width: 1600, height: 900 },
   removeExpiredArtifacts = false,
   failFirstArtifactCleanup = false,
+  imageFactory?: (artifacts: LocalArtifactPort) => AsyncImages,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-service-'))
   const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
   const repository = new InMemoryQuickDeckEvaluationRepository()
   const clock = new ControlledClock()
   const model = new CreativeModel()
-  const images = new AsyncImages(artifacts, imageSize.width, imageSize.height)
+  const images = imageFactory?.(artifacts) ?? new AsyncImages(artifacts, imageSize.width, imageSize.height)
   const localCleanup = new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts'))
   const service = new QuickDeckEvaluationService({
     repository,
@@ -267,8 +322,163 @@ describe('quick-deck evaluation service', () => {
       await service.tick({ limit: 10 })
       await expect(service.getContentOwned('evaluation-tenant', created.jobId, 'pptx'))
         .rejects.toMatchObject({ code: 'EVALUATION_CONTENT_NOT_READY' })
-      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+      const job = await service.getOwned('evaluation-tenant', created.jobId)
+      expect(job).toMatchObject({
         status: 'FAILED', phase: 'FAILED', failure: { code: 'EVALUATION_IMAGE_RATIO_INVALID' },
+      })
+      expect(job.pages[0]).toMatchObject({
+        submissionState: 'SUBMITTED',
+        billingState: 'UNKNOWN',
+        errorCode: 'EVALUATION_IMAGE_RATIO_INVALID',
+        aspect: {
+          observedWidth: 1000,
+          observedHeight: 1000,
+          relativeError: 0.4375,
+          normalization: 'REJECTED',
+        },
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('fails closed before public persistence when an image adapter returns oversized pixels', async () => {
+    const { directory, service } = await fixture({ width: 20_001, height: 1 })
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        phase: 'FAILED',
+        failure: { code: 'EVALUATION_IMAGE_ARTIFACT_INVALID' },
+        pages: [{
+          status: 'FAILED',
+          errorCode: 'EVALUATION_IMAGE_ARTIFACT_INVALID',
+          width: null,
+          height: null,
+          aspect: null,
+        }],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('uses verified artifact pixels when a completed image result carries an unbounded diagnostic', async () => {
+    const { directory, service } = await fixture(undefined, false, false, (artifacts) => new UnboundedDiagnosticsImages(artifacts))
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'COMPLETED',
+        pages: [{
+          width: 1600,
+          height: 900,
+          aspectRatioValidated: true,
+          aspect: {
+            observedWidth: 1600,
+            observedHeight: 900,
+            normalization: 'PASSTHROUGH',
+          },
+        }],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('persists an inspected gateway ratio failure with its safe diagnostic evidence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-inspection-failure-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const service = new QuickDeckEvaluationService({
+        repository,
+        artifacts,
+        model: new CreativeModel(),
+        images: new FailedRatioImages(artifacts),
+        renderer: new SharpPptxPresentationRenderer(),
+        clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra',
+        allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2,
+        maxDailyJobs: 3,
+        ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+
+      const job = await service.getOwned('evaluation-tenant', created.jobId)
+      expect(job).toMatchObject({ failure: { code: 'EVALUATION_IMAGE_RATIO_INVALID' } })
+      expect(job.pages[0]).toMatchObject({
+        status: 'FAILED',
+        submissionState: 'SUBMITTED',
+        billingState: 'UNKNOWN',
+        errorCode: 'EVALUATION_IMAGE_RATIO_INVALID',
+        width: 2048,
+        height: 2048,
+        aspect: {
+          observedWidth: 2048,
+          observedHeight: 2048,
+          relativeError: 0.4375,
+          normalization: 'REJECTED',
+        },
+      })
+      const evidence = await service.getEvidenceOwned('evaluation-tenant', created.jobId)
+      expect(evidence.pages[0]).toMatchObject({
+        submissionState: 'SUBMITTED',
+        billingState: 'UNKNOWN',
+        errorCode: 'EVALUATION_IMAGE_RATIO_INVALID',
+        evidenceCompleteness: 'COMPLETE',
+      })
+      expect(evidence.pages[0]?.providerRequestId).toMatch(/^[a-f0-9]{64}$/)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects unbounded failure diagnostics from an external image adapter before persistence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-unbounded-diagnostic-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const service = new QuickDeckEvaluationService({
+        repository,
+        artifacts,
+        model: new CreativeModel(),
+        images: new FailedRatioImages(artifacts, {
+          observedWidth: 20_001,
+          observedHeight: 1,
+          relativeError: 11_250,
+          normalization: 'REJECTED',
+          normalizedWidth: null,
+          normalizedHeight: null,
+        }),
+        renderer: new SharpPptxPresentationRenderer(),
+        clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra',
+        allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2,
+        maxDailyJobs: 3,
+        ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        failure: { code: 'EVALUATION_IMAGE_ARTIFACT_INVALID' },
+        pages: [{
+          errorCode: 'EVALUATION_IMAGE_ARTIFACT_INVALID',
+          width: null,
+          height: null,
+          aspect: null,
+        }],
       })
     } finally {
       await rm(directory, { recursive: true, force: true })
@@ -303,7 +513,7 @@ describe('quick-deck evaluation service', () => {
       })
       expect(stored?.pages).toEqual([
         expect.objectContaining({ submissionState: 'SUBMITTED', operationId: expect.any(String) }),
-        expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'TEST_SUBMISSION_REJECTED' }),
+        expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_PROVIDER_ERROR' }),
         expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
       ])
 
@@ -312,7 +522,7 @@ describe('quick-deck evaluation service', () => {
         status: 'FAILED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
         pages: [
           expect.objectContaining({ status: 'COMPLETED' }),
-          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', aspectDiagnostics: null }),
           expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED' }),
         ],
       })

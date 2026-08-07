@@ -242,6 +242,70 @@ describe('quick-deck evaluation HTTP facade', () => {
     expect(ranged.headers.get('Content-Range')).toContain('bytes */')
   })
 
+  test('returns evaluator-scoped, redacted page evidence without exposing source or provider configuration', async () => {
+    const { handle, service, repository } = fixture()
+    const created = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body(1)),
+    }))
+    const jobId = (await created.json() as { data: { jobId: string } }).data.jobId
+    await service.tick({ limit: 10 })
+    await service.tick({ limit: 10 })
+    const persisted = await repository.get(jobId)
+    expect(persisted).not.toBeNull()
+    expect(persisted?.evidenceContext).toMatchObject({ runtimeMode: 'MOCK' })
+    await repository.save({
+      record: {
+        ...persisted!,
+        evidenceContext: {
+          runtimeMode: 'GATEWAY',
+          softwareVersion: '4.4.0-test',
+          gitSha: 'test-git-sha',
+          releaseId: 'test-release',
+          startedAt: '2026-08-07T00:00:00.000Z',
+        },
+        pages: persisted!.pages.map((page) => ({
+          ...page,
+          aspectDiagnostics: null,
+          errorCode: 'UPSTREAM_PRIVATE_DETAIL',
+        })),
+      },
+    })
+
+    const job = await handle(request(`/v1/evaluations/quick-decks/${jobId}`))
+    expect(job.status).toBe(200)
+    const jobPayload = await job.json() as { data: { pages: { errorCode: string | null }[] } }
+    expect(jobPayload.data.pages[0]?.errorCode).toBe('EVALUATION_PROVIDER_ERROR')
+
+    const evidence = await handle(request(`/v1/evaluations/quick-decks/${jobId}/evidence`))
+    expect(evidence.status).toBe(200)
+    const payload = await evidence.json() as { data: Record<string, unknown> }
+    expect(payload.data).toMatchObject({
+      jobId,
+      runtime: { runtimeMode: 'GATEWAY', softwareVersion: '4.4.0-test', gitSha: 'test-git-sha', releaseId: 'test-release' },
+      models: { text: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
+    })
+    const pages = payload.data.pages as Record<string, unknown>[]
+    expect(pages).toHaveLength(1)
+    expect(pages[0]).toMatchObject({
+      pageNumber: 1,
+      providerRequestId: null,
+      errorCode: 'EVALUATION_PROVIDER_ERROR',
+      aspect: {
+        normalization: 'UNKNOWN',
+        normalizedWidth: null,
+        normalizedHeight: null,
+      },
+      evidenceCompleteness: 'PARTIAL',
+    })
+    expect(pages[0]?.agentRequestId).toMatch(/^[a-f0-9]{64}$/)
+    expect(pages[0]?.gatewayOperationId).toMatch(/^[a-f0-9]{64}$/)
+    const serialized = JSON.stringify(payload)
+    expect(serialized).not.toContain(sourceText)
+    expect(serialized).not.toContain('visualPrompt')
+    expect(serialized).not.toContain('gateway-image')
+    expect((await handle(request(`/v1/evaluations/quick-decks/${jobId}/evidence`, {}, secondEvaluationToken))).status).toBe(404)
+  })
+
   test('disposes a delayed SSE subscription when the request is aborted during subscribe', async () => {
     const { handle, repository } = fixture()
     const created = await handle(request('/v1/evaluations/quick-decks', {

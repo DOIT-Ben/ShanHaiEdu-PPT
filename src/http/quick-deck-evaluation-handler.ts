@@ -5,6 +5,7 @@ import type { QuickDeckEvaluationRepository } from '../core/quick-deck-evaluatio
 import { QuickDeckEvaluationError, QuickDeckEvaluationService } from '../core/quick-deck-evaluation-service'
 import {
   quickDeckContentFormatSchema,
+  quickDeckEvaluationEvidenceEnvelopeSchema,
   quickDeckEvaluationEnvelopeSchema,
 } from '../quick-deck-evaluation-contracts'
 import { QuickDeckEvaluationEventBroker, DEFAULT_QUICK_DECK_EVENT_BATCH_LIMIT } from './quick-deck-evaluation-event-broker'
@@ -259,6 +260,13 @@ export function createQuickDeckEvaluationRequestHandler(dependencies: QuickDeckE
           schemaVersion: CONTRACT_VERSION,
           requestId,
           data: await dependencies.service.getOwned(owner.tenantId, jobId),
+        }))
+      }
+      if (parts.length === 5 && parts[4] === 'evidence' && request.method === 'GET') {
+        return response(quickDeckEvaluationEvidenceEnvelopeSchema.parse({
+          schemaVersion: CONTRACT_VERSION,
+          requestId,
+          data: await dependencies.service.getEvidenceOwned(owner.tenantId, jobId),
         }))
       }
       if (parts.length === 5 && parts[4] === 'events' && request.method === 'GET') {

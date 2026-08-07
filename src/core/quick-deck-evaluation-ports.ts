@@ -6,19 +6,24 @@ import type {
   QuickDeckEvaluationFailureCode,
   QuickDeckEvaluationPhase,
   QuickDeckEvaluationRequest,
+  QuickDeckEvaluationRuntimeEvidence,
   QuickDeckEvaluationStatus,
 } from '../quick-deck-evaluation-contracts'
+import type { ImageAspectDiagnostics, MediaBillingState } from './ports'
 
 export type QuickDeckEvaluationPageRecord = Readonly<{
   pageNumber: number
   status: 'PENDING' | 'SUBMITTED' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
   submissionState: 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
+  billingState: MediaBillingState
   idempotencyKey: string
   operationId: string | null
+  providerRequestId: string | null
   artifactId: string | null
   width: number | null
   height: number | null
   aspectRatioValidated: boolean
+  aspectDiagnostics: ImageAspectDiagnostics | null
   sha256: string | null
   errorCode: string | null
 }>
@@ -45,6 +50,7 @@ export type QuickDeckEvaluationRecord = Readonly<{
   requestHash: string
   textModel: string
   imageModel: string
+  evidenceContext: QuickDeckEvaluationRuntimeEvidence | null
   status: QuickDeckEvaluationStatus
   phase: QuickDeckEvaluationPhase
   blueprint: PresentationBlueprint | null

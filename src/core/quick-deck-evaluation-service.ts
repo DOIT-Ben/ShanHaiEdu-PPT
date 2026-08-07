@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import sharp from 'sharp'
-import { MediaSubmissionError, type ArtifactPort, type ClockPort, type ImageGenerationPort, type PresentationRendererPort, type StructuredModelPort } from './ports'
+import { MediaSubmissionError, type ArtifactPort, type ClockPort, type ImageAspectDiagnostics, type ImageGenerationPort, type PresentationRendererPort, type StructuredModelPort } from './ports'
 import { blueprintImageRequirements, hasVisualDeckV4AspectRatio } from './blueprint-assets'
 import { hashInput } from './hash'
 import { assertReadablePptxArtifact } from './pptx-artifact-validation'
@@ -8,7 +8,11 @@ import { V4PlanCompiler } from './v4-manuscript-compiler'
 import { createVisualDeckV4BlueprintFromProposal, type VisualDeckV4CompilerInput } from './visual-deck-v4-planner'
 import {
   QUICK_DECK_EVALUATION_ARTIFACT_PREFIX,
+  QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION,
+  quickDeckImageAspectDiagnosticsSchema,
   quickDeckEvaluationPublicJobSchema,
+  quickDeckEvaluationEvidenceSchema,
+  quickDeckEvaluationFailureCodeSchema,
   quickDeckEvaluationRequestSchema,
   type QuickDeckContentFormat,
   type QuickDeckEvaluationEvent,
@@ -33,6 +37,14 @@ import { V4EvidenceWindowCompiler } from './v4-evidence-window-compiler'
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const
 const PREVIEW_MIME = 'image/png' as const
 const QUICK_DECK_DRAIN_TIMEOUT_MS = 15 * 60_000
+
+export type QuickDeckEvidenceContext = Readonly<{
+  runtimeMode: 'GATEWAY' | 'MOCK'
+  softwareVersion: string
+  gitSha: string
+  releaseId: string
+  startedAt: string
+}>
 
 export class QuickDeckEvaluationError extends Error {
   constructor(readonly status: number, readonly code: string) {
@@ -174,6 +186,91 @@ function artifactPublic(record: QuickDeckEvaluationArtifactRecord | null) {
   return record ? { mimeType: record.mimeType, sha256: record.sha256, byteLength: record.byteLength } : null
 }
 
+function publicDiagnosticCode(value: string | null | undefined) {
+  const normalized = storedDiagnosticCode(value)
+  if (!normalized) return null
+  if (normalized === 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID') return 'EVALUATION_IMAGE_RATIO_INVALID'
+  if (normalized === 'GATEWAY_IMAGE_DIMENSIONS_INVALID') return 'EVALUATION_IMAGE_ARTIFACT_INVALID'
+  return normalized
+}
+
+function storedDiagnosticCode(value: string | null | undefined) {
+  if (!value) return null
+  const normalized = value.trim().toUpperCase()
+  if (['GATEWAY_IMAGE_ASPECT_RATIO_INVALID', 'GATEWAY_IMAGE_DIMENSIONS_INVALID', 'EVALUATION_IMAGE_SUBMISSION_SKIPPED'].includes(normalized)) {
+    return normalized
+  }
+  return quickDeckEvaluationFailureCodeSchema.options.includes(normalized as never)
+    ? normalized
+    : 'EVALUATION_PROVIDER_ERROR'
+}
+
+function redactedEvidenceIdentifier(value: string | null | undefined) {
+  if (!value) return null
+  const normalized = value.trim()
+  if (!/^[A-Za-z0-9._:-]{1,160}$/.test(normalized) || normalized.startsWith('gateway-image:')) return null
+  return hashInput(`quick-deck-evidence:${normalized}`)
+}
+
+function observedAspectDiagnostics(width: number, height: number, normalization: ImageAspectDiagnostics['normalization']): ImageAspectDiagnostics {
+  const relativeError = Math.abs((width / height) / (16 / 9) - 1)
+  return {
+    observedWidth: width,
+    observedHeight: height,
+    relativeError,
+    normalization,
+    normalizedWidth: normalization === 'PASSTHROUGH' ? width : null,
+    normalizedHeight: normalization === 'PASSTHROUGH' ? height : null,
+  }
+}
+
+function publicAspect(page: QuickDeckEvaluationPageRecord) {
+  if (page.aspectDiagnostics) return page.aspectDiagnostics
+  if (!page.width || !page.height) return null
+  return observedAspectDiagnostics(page.width, page.height, 'UNKNOWN')
+}
+
+function boundedAspectDiagnostics(value: ImageAspectDiagnostics | null | undefined) {
+  const parsed = quickDeckImageAspectDiagnosticsSchema.safeParse(value)
+  return parsed.success ? parsed.data : null
+}
+
+function normalizeEvidenceContext(value: QuickDeckEvidenceContext | undefined, now: string): QuickDeckEvidenceContext {
+  const fallback: QuickDeckEvidenceContext = {
+    runtimeMode: 'MOCK',
+    softwareVersion: 'local-mock',
+    gitSha: 'local-mock',
+    releaseId: 'local-mock',
+    startedAt: now,
+  }
+  const context = value ?? fallback
+  for (const [name, candidate] of Object.entries({
+    softwareVersion: context.softwareVersion,
+    gitSha: context.gitSha,
+    releaseId: context.releaseId,
+  })) {
+    if (!candidate.trim() || candidate.trim().length > 160) throw new Error(`QUICK_DECK_EVIDENCE_${name.toUpperCase()}_INVALID`)
+  }
+  if (!Number.isFinite(Date.parse(context.startedAt))) throw new Error('QUICK_DECK_EVIDENCE_STARTED_AT_INVALID')
+  return {
+    runtimeMode: context.runtimeMode,
+    softwareVersion: context.softwareVersion.trim(),
+    gitSha: context.gitSha.trim(),
+    releaseId: context.releaseId.trim(),
+    startedAt: new Date(context.startedAt).toISOString(),
+  }
+}
+
+function unknownEvidenceContext() {
+  return {
+    runtimeMode: 'UNKNOWN' as const,
+    softwareVersion: 'unknown',
+    gitSha: 'unknown',
+    releaseId: 'unknown',
+    startedAt: null,
+  }
+}
+
 function publicJob(record: QuickDeckEvaluationRecord): QuickDeckEvaluationPublicJob {
   const completed = record.status === 'COMPLETED'
   const submittedPages = record.pages.filter((page) => page.submissionState !== 'NOT_SUBMITTED').length
@@ -190,9 +287,13 @@ function publicJob(record: QuickDeckEvaluationRecord): QuickDeckEvaluationPublic
     pages: record.pages.map((page) => ({
       pageNumber: page.pageNumber,
       status: page.status,
+      submissionState: page.submissionState ?? 'UNKNOWN',
+      billingState: page.billingState ?? 'UNKNOWN',
+      errorCode: publicDiagnosticCode(page.errorCode),
       width: page.width,
       height: page.height,
       aspectRatioValidated: page.aspectRatioValidated,
+      aspect: publicAspect(page),
       sha256: page.sha256,
     })),
     artifacts: {
@@ -211,6 +312,7 @@ function publicJob(record: QuickDeckEvaluationRecord): QuickDeckEvaluationPublic
 
 export class QuickDeckEvaluationService {
   readonly #allowedImageModels: ReadonlySet<string>
+  readonly #evidenceContext: QuickDeckEvidenceContext
 
   constructor(private readonly dependencies: Readonly<{
     repository: QuickDeckEvaluationRepository
@@ -225,6 +327,7 @@ export class QuickDeckEvaluationService {
     maxActiveJobs: number
     maxDailyJobs: number
     ttlMs: number
+    evidence?: QuickDeckEvidenceContext
   }>) {
     if (dependencies.textModel.trim().length < 1 || dependencies.textModel.trim().length > 120) {
       throw new Error('QUICK_DECK_TEXT_MODEL_INVALID')
@@ -239,6 +342,7 @@ export class QuickDeckEvaluationService {
       throw new Error('QUICK_DECK_EVALUATION_LIMITS_INVALID')
     }
     this.#allowedImageModels = new Set(dependencies.allowedImageModels)
+    this.#evidenceContext = normalizeEvidenceContext(dependencies.evidence, dependencies.clock.now().toISOString())
   }
 
   async initialize() {
@@ -265,6 +369,7 @@ export class QuickDeckEvaluationService {
       requestHash: hashInput(parsed.data),
       textModel: this.dependencies.textModel,
       imageModel: parsed.data.imageModel,
+      evidenceContext: this.#evidenceContext,
       status: 'QUEUED',
       phase: 'ACCEPTED',
       blueprint: null,
@@ -272,12 +377,15 @@ export class QuickDeckEvaluationService {
         pageNumber: index + 1,
         status: 'PENDING' as const,
         submissionState: 'NOT_SUBMITTED' as const,
+        billingState: 'NOT_CHARGED' as const,
         idempotencyKey: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${id}:slide:${index + 1}:image`,
         operationId: null,
+        providerRequestId: null,
         artifactId: null,
         width: null,
         height: null,
         aspectRatioValidated: false,
+        aspectDiagnostics: null,
         sha256: null,
         errorCode: null,
       })),
@@ -326,6 +434,65 @@ export class QuickDeckEvaluationService {
     const artifact = format === 'pptx' ? record.pptx : record.preview
     if (!artifact) throw new QuickDeckEvaluationError(404, 'EVALUATION_CONTENT_NOT_FOUND')
     return artifact
+  }
+
+  async getEvidenceOwned(tenantId: string, jobId: string) {
+    const record = await this.requireOwned(tenantId, jobId)
+    if (Date.parse(record.expiresAt) <= this.dependencies.clock.now().getTime()) {
+      await this.expire(record, this.dependencies.clock.now().toISOString()).catch(() => {})
+      throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
+    }
+    if (record.status === 'EXPIRED') throw new QuickDeckEvaluationError(410, 'EVALUATION_CONTENT_EXPIRED')
+    const planningEvidenceCompleteness = 'UNKNOWN' as const
+    const pages = record.pages.map((page) => {
+      const gatewayOperationId = redactedEvidenceIdentifier(page.operationId)
+      const providerRequestId = redactedEvidenceIdentifier(page.providerRequestId)
+      const submissionState = page.submissionState ?? 'UNKNOWN'
+      const billingState = page.billingState ?? 'UNKNOWN'
+      const evidenceCompleteness = submissionState === 'NOT_SUBMITTED' && billingState === 'NOT_CHARGED'
+        ? 'COMPLETE' as const
+        : submissionState === 'UNKNOWN'
+          ? 'UNKNOWN' as const
+          : gatewayOperationId && providerRequestId
+            ? 'COMPLETE' as const
+            : gatewayOperationId || providerRequestId
+              ? 'PARTIAL' as const
+              : 'UNKNOWN' as const
+      return {
+        pageNumber: page.pageNumber,
+        agentRequestId: hashInput(page.idempotencyKey),
+        gatewayOperationId,
+        providerRequestId,
+        submissionState,
+        billingState,
+        errorCode: publicDiagnosticCode(page.errorCode),
+        aspect: publicAspect(page),
+        evidenceCompleteness,
+      }
+    })
+    const completeness = [planningEvidenceCompleteness, ...pages.map((page) => page.evidenceCompleteness)]
+    const evidenceCompleteness = completeness.every((value) => value === 'COMPLETE')
+      ? 'COMPLETE' as const
+      : completeness.every((value) => value === 'UNKNOWN')
+        ? 'UNKNOWN' as const
+        : 'PARTIAL' as const
+    return quickDeckEvaluationEvidenceSchema.parse({
+      schemaVersion: '1',
+      jobId: record.id,
+      runtime: record.evidenceContext ?? unknownEvidenceContext(),
+      models: { text: record.textModel, image: record.imageModel },
+      planning: {
+        agentRequestId: hashInput(`${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}:creative-manuscript`),
+        providerRequestId: null,
+        evidenceCompleteness: planningEvidenceCompleteness,
+      },
+      pages,
+      evidenceCompleteness,
+      createdAt: record.createdAt,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      expiresAt: record.expiresAt,
+    })
   }
 
   async tick(input: Readonly<{ limit: number }>) {
@@ -394,7 +561,9 @@ export class QuickDeckEvaluationService {
         ...page,
         status: 'PENDING',
         submissionState: 'UNKNOWN',
+        billingState: 'UNKNOWN',
         operationId: null,
+        providerRequestId: null,
         errorCode: null,
       })
       await this.dependencies.repository.save({ record: beforeSubmit })
@@ -415,21 +584,37 @@ export class QuickDeckEvaluationService {
           ...page,
           status: result.state === 'PROCESSING' ? 'PROCESSING' : 'SUBMITTED',
           submissionState: 'SUBMITTED',
+          billingState: 'UNKNOWN',
           operationId: result.operationId,
+          providerRequestId: result.providerRequestId ?? null,
+          aspectDiagnostics: boundedAspectDiagnostics(result.aspectDiagnostics) ?? page.aspectDiagnostics,
           errorCode: null,
         })
         await this.dependencies.repository.save({ record: persisted })
       } catch (error) {
         const mediaError = error instanceof MediaSubmissionError ? error : null
         const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
-        const errorCode = mediaError?.code ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+        const errorCode = storedDiagnosticCode(mediaError?.code) ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+        const aspectDiagnostics = boundedAspectDiagnostics(mediaError?.aspectDiagnostics)
         persisted = this.replacePage(persisted, submissionState === 'NOT_SUBMITTED'
-          ? { ...page, status: 'FAILED', submissionState, operationId: null, errorCode }
+          ? {
+              ...page,
+              status: 'FAILED',
+              submissionState,
+              billingState: mediaError?.billingState ?? 'UNKNOWN',
+              operationId: null,
+              providerRequestId: mediaError?.providerRequestId ?? null,
+              aspectDiagnostics,
+              errorCode,
+            }
           : {
               ...page,
               status: 'PENDING',
               submissionState,
+              billingState: mediaError?.billingState ?? 'UNKNOWN',
               operationId: mediaError?.operationId ?? null,
+              providerRequestId: mediaError?.providerRequestId ?? null,
+              aspectDiagnostics,
               errorCode,
             })
         await this.dependencies.repository.save({ record: persisted })
@@ -585,10 +770,10 @@ export class QuickDeckEvaluationService {
     if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_DRAIN_TIMEOUT')) {
       return 'EVALUATION_IMAGE_DRAIN_TIMEOUT'
     }
-    if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_RATIO_INVALID')) {
+    if (failed.some((page) => ['EVALUATION_IMAGE_RATIO_INVALID', 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID'].includes(page.errorCode ?? ''))) {
       return 'EVALUATION_IMAGE_RATIO_INVALID'
     }
-    if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_ARTIFACT_INVALID')) {
+    if (failed.some((page) => ['EVALUATION_IMAGE_ARTIFACT_INVALID', 'GATEWAY_IMAGE_DIMENSIONS_INVALID'].includes(page.errorCode ?? ''))) {
       return 'EVALUATION_IMAGE_ARTIFACT_INVALID'
     }
     return 'EVALUATION_IMAGE_TASK_FAILED'
@@ -673,9 +858,23 @@ export class QuickDeckEvaluationService {
     }
     if (result.state !== 'COMPLETED') {
       if (result.state === 'FAILED') {
+        const receivedAspectDiagnostics = result.aspectDiagnostics ?? null
+        const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
+        const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null
         return {
           page,
-          next: { ...page, status: 'FAILED', submissionState: 'SUBMITTED', errorCode: result.errorCode },
+          next: {
+            ...page,
+            status: 'FAILED',
+            submissionState: 'SUBMITTED',
+            billingState: result.billingState,
+            providerRequestId: result.providerRequestId ?? page.providerRequestId,
+            width: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedWidth ?? page.width,
+            height: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedHeight ?? page.height,
+            aspectRatioValidated: false,
+            aspectDiagnostics: invalidAspectDiagnostics ? null : aspectDiagnostics ?? page.aspectDiagnostics,
+            errorCode: invalidAspectDiagnostics ? 'EVALUATION_IMAGE_ARTIFACT_INVALID' : storedDiagnosticCode(result.errorCode) ?? 'EVALUATION_PROVIDER_ERROR',
+          },
           retryAfterMs: null,
         }
       }
@@ -697,17 +896,29 @@ export class QuickDeckEvaluationService {
         retryAfterMs: null,
       }
     }
+    if (metadata.width > QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION || metadata.height > QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION) {
+      return {
+        page,
+        next: { ...page, status: 'FAILED', submissionState: 'SUBMITTED', errorCode: 'EVALUATION_IMAGE_ARTIFACT_INVALID' },
+        retryAfterMs: null,
+      }
+    }
     const aspectRatioValidated = hasVisualDeckV4AspectRatio(metadata.width, metadata.height)
+    const aspectDiagnostics = boundedAspectDiagnostics(result.aspectDiagnostics)
+      ?? observedAspectDiagnostics(metadata.width, metadata.height, aspectRatioValidated ? 'PASSTHROUGH' : 'REJECTED')
     return {
       page,
       next: {
         ...page,
         status: aspectRatioValidated ? 'COMPLETED' : 'FAILED',
         submissionState: 'SUBMITTED',
+        billingState: 'UNKNOWN',
+        providerRequestId: result.providerRequestId ?? page.providerRequestId,
         artifactId: result.artifactId,
         width: metadata.width,
         height: metadata.height,
         aspectRatioValidated,
+        aspectDiagnostics,
         sha256: artifact.sha256,
         errorCode: aspectRatioValidated ? null : 'EVALUATION_IMAGE_RATIO_INVALID',
       },

@@ -65,7 +65,7 @@ import type {
   QuickDeckEvaluationArtifactCleanupPort,
   QuickDeckEvaluationRepository,
 } from '../core/quick-deck-evaluation-ports'
-import { QuickDeckEvaluationService } from '../core/quick-deck-evaluation-service'
+import { QuickDeckEvaluationService, type QuickDeckEvidenceContext } from '../core/quick-deck-evaluation-service'
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
@@ -615,6 +615,7 @@ type RuntimeInput = Readonly<{
     maxDailyJobs: number
     ttlMs: number
     tickBatchSize: number
+    evidence?: QuickDeckEvidenceContext
   }>
 }>
 
@@ -709,6 +710,13 @@ export function createAgentRuntime(input: RuntimeInput) {
         maxActiveJobs: input.quickDeckEvaluation.maxActiveJobs,
         maxDailyJobs: input.quickDeckEvaluation.maxDailyJobs,
         ttlMs: input.quickDeckEvaluation.ttlMs,
+        evidence: input.quickDeckEvaluation.evidence ?? {
+          runtimeMode: 'MOCK',
+          softwareVersion: runtimeBuildIdentity.softwareVersion,
+          gitSha: runtimeBuildIdentity.gitSha,
+          releaseId: runtimeBuildIdentity.releaseId,
+          startedAt: clock.now().toISOString(),
+        },
       })
     : null
   if (Boolean(input.usageAccounting) !== Boolean(input.providerBillingCatalog)) {

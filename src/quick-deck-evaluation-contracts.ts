@@ -3,10 +3,22 @@ import { CONTRACT_VERSION } from './contracts'
 
 export const QUICK_DECK_EVALUATION_ARTIFACT_PREFIX = 'quick-deck-evaluation'
 export const QUICK_DECK_EVALUATION_MAX_SLIDES = 10
+export const QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION = 20_000
 
 const identifierSchema = z.string().trim().min(1).max(160)
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/)
 const dateTimeSchema = z.string().datetime()
+const publicDiagnosticCodeSchema = z.string().trim().regex(/^[A-Z][A-Z0-9_]{0,119}$/)
+const evidenceCompletenessSchema = z.enum(['COMPLETE', 'PARTIAL', 'UNKNOWN'])
+
+export const quickDeckImageAspectDiagnosticsSchema = z.object({
+  observedWidth: z.number().int().positive().max(QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION).nullable(),
+  observedHeight: z.number().int().positive().max(QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION).nullable(),
+  relativeError: z.number().finite().nonnegative().max(30_000).nullable(),
+  normalization: z.enum(['PASSTHROUGH', 'NORMALIZED', 'REJECTED', 'UNKNOWN']),
+  normalizedWidth: z.number().int().positive().max(QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION).nullable(),
+  normalizedHeight: z.number().int().positive().max(QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION).nullable(),
+}).strict()
 
 export const quickDeckEvaluationRequestSchema = z.object({
   schemaVersion: z.literal(CONTRACT_VERSION),
@@ -59,9 +71,13 @@ export const quickDeckEvaluationFailureCodeSchema = z.enum([
 export const quickDeckEvaluationPageSchema = z.object({
   pageNumber: z.number().int().min(1).max(QUICK_DECK_EVALUATION_MAX_SLIDES),
   status: z.enum(['PENDING', 'SUBMITTED', 'PROCESSING', 'COMPLETED', 'FAILED']),
-  width: z.number().int().positive().max(20_000).nullable(),
-  height: z.number().int().positive().max(20_000).nullable(),
+  submissionState: z.enum(['NOT_SUBMITTED', 'SUBMITTED', 'UNKNOWN']),
+  billingState: z.enum(['NOT_CHARGED', 'CHARGED', 'UNKNOWN']),
+  errorCode: publicDiagnosticCodeSchema.nullable(),
+  width: z.number().int().positive().max(QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION).nullable(),
+  height: z.number().int().positive().max(QUICK_DECK_EVALUATION_MAX_IMAGE_DIMENSION).nullable(),
   aspectRatioValidated: z.boolean(),
+  aspect: quickDeckImageAspectDiagnosticsSchema.nullable(),
   sha256: sha256Schema.nullable(),
 }).strict()
 
@@ -137,6 +153,51 @@ export const quickDeckEvaluationEnvelopeSchema = z.object({
   data: quickDeckEvaluationPublicJobSchema,
 }).strict()
 
+export const quickDeckEvaluationRuntimeEvidenceSchema = z.object({
+  runtimeMode: z.enum(['GATEWAY', 'MOCK', 'UNKNOWN']),
+  softwareVersion: identifierSchema,
+  gitSha: identifierSchema,
+  releaseId: identifierSchema,
+  startedAt: dateTimeSchema.nullable(),
+}).strict()
+
+export const quickDeckEvaluationEvidenceSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  jobId: identifierSchema,
+  runtime: quickDeckEvaluationRuntimeEvidenceSchema,
+  models: z.object({
+    text: identifierSchema,
+    image: identifierSchema,
+  }).strict(),
+  planning: z.object({
+    agentRequestId: sha256Schema,
+    providerRequestId: identifierSchema.nullable(),
+    evidenceCompleteness: evidenceCompletenessSchema,
+  }).strict(),
+  pages: z.array(z.object({
+    pageNumber: z.number().int().min(1).max(QUICK_DECK_EVALUATION_MAX_SLIDES),
+    agentRequestId: sha256Schema,
+    gatewayOperationId: identifierSchema.nullable(),
+    providerRequestId: identifierSchema.nullable(),
+    submissionState: z.enum(['NOT_SUBMITTED', 'SUBMITTED', 'UNKNOWN']),
+    billingState: z.enum(['NOT_CHARGED', 'CHARGED', 'UNKNOWN']),
+    errorCode: publicDiagnosticCodeSchema.nullable(),
+    aspect: quickDeckImageAspectDiagnosticsSchema.nullable(),
+    evidenceCompleteness: evidenceCompletenessSchema,
+  }).strict()).min(1).max(QUICK_DECK_EVALUATION_MAX_SLIDES),
+  evidenceCompleteness: evidenceCompletenessSchema,
+  createdAt: dateTimeSchema,
+  startedAt: dateTimeSchema.nullable(),
+  completedAt: dateTimeSchema.nullable(),
+  expiresAt: dateTimeSchema,
+}).strict()
+
+export const quickDeckEvaluationEvidenceEnvelopeSchema = z.object({
+  schemaVersion: z.literal(CONTRACT_VERSION),
+  requestId: identifierSchema,
+  data: quickDeckEvaluationEvidenceSchema,
+}).strict()
+
 const eventBase = {
   schemaVersion: z.literal(CONTRACT_VERSION),
   jobId: identifierSchema,
@@ -169,6 +230,8 @@ export type QuickDeckEvaluationFailureCode = z.output<typeof quickDeckEvaluation
 export type QuickDeckEvaluationPage = z.output<typeof quickDeckEvaluationPageSchema>
 export type QuickDeckEvaluationArtifact = z.output<typeof quickDeckEvaluationArtifactSchema>
 export type QuickDeckEvaluationPublicJob = z.output<typeof quickDeckEvaluationPublicJobSchema>
+export type QuickDeckEvaluationRuntimeEvidence = z.output<typeof quickDeckEvaluationRuntimeEvidenceSchema>
+export type QuickDeckEvaluationEvidence = z.output<typeof quickDeckEvaluationEvidenceSchema>
 export type QuickDeckEvaluationEvent = z.output<typeof quickDeckEvaluationEventSchema>
 export type QuickDeckEvaluationEventInput = WithoutSequence<QuickDeckEvaluationEvent>
 export type QuickDeckContentFormat = z.output<typeof quickDeckContentFormatSchema>

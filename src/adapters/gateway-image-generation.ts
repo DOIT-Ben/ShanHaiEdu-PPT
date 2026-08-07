@@ -1,11 +1,12 @@
 import { z } from 'zod'
 import sharp from 'sharp'
-import type { ArtifactPort, ImageGenerationPort } from '../core/ports'
+import type { ArtifactPort, ImageAspectDiagnostics, ImageGenerationPort } from '../core/ports'
 import { MediaSubmissionError } from '../core/ports'
 import { providerTechnicalFailure } from '../core/technical-recovery'
 import {
   V4_IMAGE_ASPECT_TARGET,
   visualDeckV4AspectDecision,
+  type VisualDeckV4AspectDecision,
 } from '../core/image-aspect-policy'
 
 const gatewayResponseSchema = z.object({
@@ -23,13 +24,23 @@ const imageOperationSchema = z.object({
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 const GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE = 0.03
+const MAX_GATEWAY_IMAGE_DIMENSION = 20_000
 
 class GatewayImageAspectRatioError extends Error {
   readonly code = 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID'
 
-  constructor() {
+  constructor(readonly aspectDiagnostics: ImageAspectDiagnostics | null = null) {
     super('gateway image pixels do not match the requested aspect ratio')
     this.name = 'GatewayImageAspectRatioError'
+  }
+}
+
+class GatewayImageDimensionsError extends Error {
+  readonly code = 'GATEWAY_IMAGE_DIMENSIONS_INVALID'
+
+  constructor() {
+    super('gateway image pixels exceed the supported dimensions')
+    this.name = 'GatewayImageDimensionsError'
   }
 }
 
@@ -86,19 +97,50 @@ async function assertImageAspectRatio(
 ) {
   const metadata = await sharp(image).metadata()
   if (!metadata.width || !metadata.height) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
+  if (metadata.width > MAX_GATEWAY_IMAGE_DIMENSION || metadata.height > MAX_GATEWAY_IMAGE_DIMENSION) {
+    throw new GatewayImageDimensionsError()
+  }
+  const relativeError = Math.abs((metadata.width / metadata.height) / expectedAspectRatio(aspectRatio) - 1)
   if (aspectRatio === '16:9' && exactAspectRatio) {
-    return visualDeckV4AspectDecision(metadata.width, metadata.height)
+    const decision = visualDeckV4AspectDecision(metadata.width, metadata.height)
+    if (!decision) {
+      throw new GatewayImageAspectRatioError({
+        observedWidth: metadata.width,
+        observedHeight: metadata.height,
+        relativeError,
+        normalization: 'REJECTED',
+        normalizedWidth: null,
+        normalizedHeight: null,
+      })
+    }
+    return {
+      crop: decision.crop,
+      aspectDiagnostics: {
+        observedWidth: metadata.width,
+        observedHeight: metadata.height,
+        relativeError,
+        normalization: decision.crop ? 'NORMALIZED' as const : 'PASSTHROUGH' as const,
+        normalizedWidth: decision.crop ? V4_IMAGE_ASPECT_TARGET.width : metadata.width,
+        normalizedHeight: decision.crop ? V4_IMAGE_ASPECT_TARGET.height : metadata.height,
+      },
+    }
   }
-  const ratio = metadata.width / metadata.height
-  if (Math.abs(ratio / expectedAspectRatio(aspectRatio) - 1) > GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE) {
-    throw new GatewayImageAspectRatioError()
+  if (relativeError > GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE) {
+    throw new GatewayImageAspectRatioError({
+      observedWidth: metadata.width,
+      observedHeight: metadata.height,
+      relativeError,
+      normalization: 'REJECTED',
+      normalizedWidth: null,
+      normalizedHeight: null,
+    })
   }
-  return null
+  return { crop: null, aspectDiagnostics: null }
 }
 
 async function normalizedVisualDeckV4Image(
   image: Uint8Array,
-  crop: NonNullable<Awaited<ReturnType<typeof assertImageAspectRatio>>>['crop'],
+  crop: VisualDeckV4AspectDecision['crop'],
 ) {
   if (!crop) return image
   return new Uint8Array(await sharp(image)
@@ -274,17 +316,25 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     }
 
     try {
-      const artifact = await this.storeOutput(input, gatewayResponseSchema.parse(payload))
-      return { operationId: `gateway-image:${artifact.artifactId}`, state: 'COMPLETED' as const }
+      const output = await this.storeOutput(input, gatewayResponseSchema.parse(payload))
+      return {
+        operationId: `gateway-image:${output.artifact.artifactId}`,
+        state: 'COMPLETED' as const,
+        ...(output.aspectDiagnostics ? { aspectDiagnostics: output.aspectDiagnostics } : {}),
+      }
     } catch (error) {
-      const errorCode = error instanceof GatewayImageAspectRatioError ? error.code : 'GATEWAY_OUTPUT_INVALID'
+      const contractError = error instanceof GatewayImageAspectRatioError || error instanceof GatewayImageDimensionsError
+      const errorCode = contractError ? error.code : 'GATEWAY_OUTPUT_INVALID'
       throw new MediaSubmissionError(
         errorCode,
         'SUBMITTED',
         'gateway returned an invalid image result',
-        providerTechnicalFailure(errorCode, error instanceof GatewayImageAspectRatioError
+        providerTechnicalFailure(errorCode, contractError
           ? { category: 'CONTRACT', disposition: 'NON_RETRYABLE' }
           : {}),
+        error instanceof GatewayImageAspectRatioError && error.aspectDiagnostics
+          ? { aspectDiagnostics: error.aspectDiagnostics }
+          : {},
       )
     }
   }
@@ -357,22 +407,30 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         }
       }
       try {
-        const artifact = await this.storeOutput({
+        const output = await this.storeOutput({
           tenantId: input.tenantId,
           idempotencyKey: input.idempotencyKey ?? input.operationId,
           aspectRatio: input.aspectRatio,
           ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
         }, operation.result)
-        return { state: 'COMPLETED' as const, artifactId: artifact.artifactId }
+        return {
+          state: 'COMPLETED' as const,
+          artifactId: output.artifact.artifactId,
+          ...(output.aspectDiagnostics ? { aspectDiagnostics: output.aspectDiagnostics } : {}),
+        }
       } catch (error) {
-        const errorCode = error instanceof GatewayImageAspectRatioError ? error.code : 'GATEWAY_OUTPUT_INVALID'
+        const contractError = error instanceof GatewayImageAspectRatioError || error instanceof GatewayImageDimensionsError
+        const errorCode = contractError ? error.code : 'GATEWAY_OUTPUT_INVALID'
         return {
           state: 'FAILED' as const,
           errorCode,
           billingState: 'UNKNOWN' as const,
-          technicalFailure: providerTechnicalFailure(errorCode, error instanceof GatewayImageAspectRatioError
+          technicalFailure: providerTechnicalFailure(errorCode, contractError
             ? { category: 'CONTRACT', disposition: 'NON_RETRYABLE' }
+            : {}),
+          ...(error instanceof GatewayImageAspectRatioError && error.aspectDiagnostics
+            ? { aspectDiagnostics: error.aspectDiagnostics }
             : {}),
         }
       }
@@ -472,23 +530,25 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     result: z.infer<typeof gatewayResponseSchema>,
   ) {
     const image = decodedImage(result.data[0]!.b64_json)
-    const decision = await assertImageAspectRatio(image.bytes, input.aspectRatio, input.exactAspectRatio)
-    if (input.exactAspectRatio && input.aspectRatio === '16:9' && !decision) throw new GatewayImageAspectRatioError()
+    const aspect = await assertImageAspectRatio(image.bytes, input.aspectRatio, input.exactAspectRatio)
     const normalized = input.exactAspectRatio && input.aspectRatio === '16:9'
-      ? await normalizedVisualDeckV4Image(image.bytes, decision!.crop)
+      ? await normalizedVisualDeckV4Image(image.bytes, aspect.crop)
       : image.bytes
     const bytes = input.backgroundMode === 'TRANSPARENT'
       ? await removeConnectedNeutralBackdrop(normalized)
       : normalized
-    const mimeType = decision?.crop ? 'image/png' : image.mimeType
+    const mimeType = aspect.crop ? 'image/png' : image.mimeType
     const runId = input.idempotencyKey.split(':')[0] || 'gateway-run'
-    return this.dependencies.artifacts.put({
-      tenantId: input.tenantId,
-      runId,
-      name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${mimeType.split('/')[1]}`,
-      mimeType,
-      bytes,
-      idempotencyKey: `${input.idempotencyKey}:gateway-output`,
-    })
+    return {
+      artifact: await this.dependencies.artifacts.put({
+        tenantId: input.tenantId,
+        runId,
+        name: `${input.idempotencyKey.replace(/[^A-Za-z0-9._-]/g, '_')}.${mimeType.split('/')[1]}`,
+        mimeType,
+        bytes,
+        idempotencyKey: `${input.idempotencyKey}:gateway-output`,
+      }),
+      aspectDiagnostics: aspect.aspectDiagnostics,
+    }
   }
 }

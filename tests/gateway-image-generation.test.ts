@@ -90,7 +90,17 @@ describe('gateway image generation adapter', () => {
       tenantId: 'frameflow', operationId: submitted.operationId,
       idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9', exactAspectRatio: true,
     })
-    expect(inspected).toMatchObject({ state: 'COMPLETED' })
+    expect(inspected).toMatchObject({
+      state: 'COMPLETED',
+      aspectDiagnostics: {
+        observedWidth: 1376,
+        observedHeight: 768,
+        relativeError: 0.0078125,
+        normalization: 'NORMALIZED',
+        normalizedWidth: 1600,
+        normalizedHeight: 900,
+      },
+    })
     const artifact = inspected.state === 'COMPLETED' ? artifacts.artifacts.get(inspected.artifactId) : null
     expect(artifact).toBeDefined()
     await expect(sharp(artifact!.bytes).metadata()).resolves.toMatchObject({ width: 1600, height: 900 })
@@ -124,12 +134,54 @@ describe('gateway image generation adapter', () => {
     await expect(adapter.inspect({
       tenantId: 'frameflow', operationId: submitted.operationId,
       idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9', exactAspectRatio: true,
-    })).resolves.toEqual({
+    })).resolves.toMatchObject({
       state: 'FAILED',
       errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
       billingState: 'UNKNOWN',
+      aspectDiagnostics: {
+        observedWidth: width,
+        observedHeight: height,
+        normalization: 'REJECTED',
+      },
       technicalFailure: {
         category: 'CONTRACT', disposition: 'NON_RETRYABLE', diagnosticCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      },
+    })
+    expect(artifacts.artifacts.size).toBe(0)
+  })
+
+  test('rejects a decoded image whose dimensions exceed the public diagnostic bound', async () => {
+    const artifacts = new MockArtifactPort()
+    const oversized = await sharp({
+      create: { width: 20_001, height: 1, channels: 3, background: '#DDE7F7' },
+    }).png().toBuffer()
+    const operationId = 'imgop_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url) => String(url).endsWith('/image-tasks')
+        ? Response.json({ id: operationId, status: 'QUEUED', submission_state: 'SUBMITTED' }, { status: 202 })
+        : Response.json({
+            id: operationId,
+            status: 'COMPLETED',
+            submission_state: 'SUBMITTED',
+            result: { data: [{ b64_json: oversized.toString('base64') }] },
+          }),
+    })
+    const submitted = await adapter.submit({
+      tenantId: 'frameflow', prompt: 'A bounded complete classroom slide', model: 'gpt-image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:slide:1:image:r0:v1',
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow', operationId: submitted.operationId,
+      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9', exactAspectRatio: true,
+    })).resolves.toMatchObject({
+      state: 'FAILED',
+      errorCode: 'GATEWAY_IMAGE_DIMENSIONS_INVALID',
+      billingState: 'UNKNOWN',
+      technicalFailure: {
+        category: 'CONTRACT', disposition: 'NON_RETRYABLE', diagnosticCode: 'GATEWAY_IMAGE_DIMENSIONS_INVALID',
       },
     })
     expect(artifacts.artifacts.size).toBe(0)

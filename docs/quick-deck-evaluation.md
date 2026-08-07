@@ -12,7 +12,7 @@ Quick-deck 是用于验证 PPT Agent V4 创意规划、真实出图、像素比�
 
 ## 认证
 
-四个资源都只接受 `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN`：
+全部资源都只接受 `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN`：
 
 ```http
 Authorization: Bearer <PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN>
@@ -26,6 +26,7 @@ Authorization: Bearer <PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN>
 | --- | --- | --- |
 | 创建实验 | `POST /v1/evaluations/quick-decks` | 返回 `201` 与独立 `jobId` |
 | 查询 | `GET /v1/evaluations/quick-decks/{jobId}` | 只返回公开状态、模型、耗时、像素、比例和摘要 |
+| 证据 | `GET /v1/evaluations/quick-decks/{jobId}/evidence` | 返回脱敏的请求/operation 摘要、提交/账务状态、比例诊断和创建时运行身份 |
 | 实时事件 | `GET /v1/evaluations/quick-decks/{jobId}/events` | SSE，以单调 `sequence` 断线续传 |
 | 下载 | `GET /v1/evaluations/quick-decks/{jobId}/content?format=pptx` | 仅 `COMPLETED` 后可读；`preview` 可请求 PNG 总览 |
 
@@ -48,7 +49,7 @@ Authorization: Bearer <PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN>
 }
 ```
 
-图片模型必须位于服务端公布的 V4 初始图片白名单内。查询结果固定返回本次实际选择的文本与图片模型、每页 `width`、`height`、`aspectRatioValidated` 和 SHA-256；不会返回 Provider URL、密钥、内部 Prompt、完整蓝图、来源正文或 artifact ID。
+图片模型必须位于服务端公布的 V4 初始图片白名单内。查询结果固定返回本次实际选择的文本与图片模型、每页 `width`、`height`、`aspectRatioValidated` 和 SHA-256。证据资源额外返回稳定摘要形式的 Agent 请求与 operation、提交/账务状态、比例正规化诊断和创建时运行版本；不会返回 Provider URL、密钥、内部 Prompt、完整蓝图、来源正文、artifact ID、路由账号或原始 Provider 响应。
 
 ## 事件与内容
 

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   quickDeckEvaluationEventSchema,
+  quickDeckImageAspectDiagnosticsSchema,
   quickDeckEvaluationPublicJobSchema,
   quickDeckEvaluationRequestSchema,
 } from '../src/quick-deck-evaluation-contracts'
@@ -17,7 +18,18 @@ function job() {
     aspectRatio: '16:9' as const,
     models: { text: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
     progress: { planned: false, submittedPages: 0, completedPages: 0, totalPages: 1 },
-    pages: [{ pageNumber: 1, status: 'PENDING' as const, width: null, height: null, aspectRatioValidated: false, sha256: null }],
+    pages: [{
+      pageNumber: 1,
+      status: 'PENDING' as const,
+      submissionState: 'NOT_SUBMITTED' as const,
+      billingState: 'NOT_CHARGED' as const,
+      errorCode: null,
+      width: null,
+      height: null,
+      aspectRatioValidated: false,
+      aspect: null,
+      sha256: null,
+    }],
     artifacts: { pptx: null, preview: null },
     quality: { state: 'NOT_ASSESSED' as const, score: null, rubric: null },
     failure: null,
@@ -68,7 +80,25 @@ describe('quick-deck evaluation contracts', () => {
       status: 'COMPLETED',
       phase: 'COMPLETE',
       progress: { planned: true, submittedPages: 1, completedPages: 1, totalPages: 1 },
-      pages: [{ pageNumber: 1, status: 'COMPLETED', width: 1600, height: 900, aspectRatioValidated: true, sha256: 'b'.repeat(64) }],
+      pages: [{
+        pageNumber: 1,
+        status: 'COMPLETED',
+        submissionState: 'SUBMITTED',
+        billingState: 'UNKNOWN',
+        errorCode: null,
+        width: 1600,
+        height: 900,
+        aspectRatioValidated: true,
+        aspect: {
+          observedWidth: 1600,
+          observedHeight: 900,
+          relativeError: 0,
+          normalization: 'PASSTHROUGH',
+          normalizedWidth: 1600,
+          normalizedHeight: 900,
+        },
+        sha256: 'b'.repeat(64),
+      }],
       artifacts: {
         pptx: { mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', sha256: 'a'.repeat(64), byteLength: 2_048 },
         preview: { mimeType: 'image/png', sha256: 'c'.repeat(64), byteLength: 1_024 },
@@ -87,5 +117,16 @@ describe('quick-deck evaluation contracts', () => {
       schemaVersion: '1', jobId: 'quick-deck-eval-1', sequence: 1, eventId: 'event-1', occurredAt: now,
       type: 'images.progress', payload: { completedPages: 1, totalPages: 3, rawPrompt: 'must not leak' },
     }).success).toBe(false)
+  })
+
+  test('keeps a bounded extreme image ratio diagnosable instead of rejecting its evidence', () => {
+    expect(quickDeckImageAspectDiagnosticsSchema.parse({
+      observedWidth: 20_000,
+      observedHeight: 1,
+      relativeError: 11_249,
+      normalization: 'REJECTED',
+      normalizedWidth: null,
+      normalizedHeight: null,
+    })).toMatchObject({ relativeError: 11_249, normalization: 'REJECTED' })
   })
 })
