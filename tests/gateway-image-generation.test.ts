@@ -260,7 +260,26 @@ describe('gateway image generation adapter', () => {
     })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' })
   })
 
-  test('recovers the persistent operation by the original idempotency key after a response loss', async () => {
+  test.each([
+    {
+      label: 'not-submitted', status: 'CREATED', submissionState: 'NOT_SUBMITTED',
+      errorCode: 'IMAGE_TASK_REJECTED', expectedCode: 'IMAGE_TASK_REJECTED', operationId: null,
+    },
+    {
+      label: 'unknown', status: 'SUBMITTING', submissionState: 'UNKNOWN',
+      errorCode: undefined, expectedCode: 'GATEWAY_SUBMISSION_UNKNOWN', operationId: null,
+    },
+    {
+      label: 'failed', status: 'FAILED', submissionState: 'SUBMITTED',
+      errorCode: 'IMAGE_TASK_FAILED', expectedCode: 'IMAGE_TASK_FAILED',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+    },
+    {
+      label: 'expired', status: 'EXPIRED', submissionState: 'SUBMITTED',
+      errorCode: undefined, expectedCode: 'IDEMPOTENCY_RESPONSE_EXPIRED',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+    },
+  ] as const)('does not turn a recovered $label image task into QUEUED', async (case_) => {
     const artifacts = new MockArtifactPort()
     const operationId = 'imgop_0123456789abcdef0123456789abcdef'
     const requests: string[] = []
@@ -270,14 +289,23 @@ describe('gateway image generation adapter', () => {
       fetchImpl: async (url) => {
         requests.push(String(url))
         if (String(url).endsWith('/image-tasks')) throw new Error('connection dropped after gateway accepted request')
-        return Response.json({ id: operationId, status: 'SUBMITTING', submission_state: 'UNKNOWN' })
+        return Response.json({
+          id: operationId,
+          status: case_.status,
+          submission_state: case_.submissionState,
+          ...(case_.errorCode ? { error: { code: case_.errorCode } } : {}),
+        })
       },
     })
 
     await expect(adapter.submit({
       tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
-    })).resolves.toEqual({ operationId, state: 'QUEUED' })
+    })).rejects.toMatchObject({
+      submissionState: case_.submissionState,
+      code: case_.expectedCode,
+      ...(case_.operationId ? { operationId: case_.operationId } : {}),
+    })
     expect(requests).toEqual([
       'https://newapi.doitbenai.cloud/v1/image-tasks',
       'https://newapi.doitbenai.cloud/v1/image-tasks/by-idempotency',
@@ -313,6 +341,43 @@ describe('gateway image generation adapter', () => {
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
       aspectRatio: '16:9',
     })).resolves.toEqual({ state: 'PROCESSING', retryAfterMs: 7_000 })
+  })
+
+  test.each([
+    {
+      label: 'unknown submission while processing', status: 'PROCESSING', submissionState: 'UNKNOWN',
+      error: undefined, expected: { errorCode: 'GATEWAY_SUBMISSION_UNKNOWN', billingState: 'UNKNOWN' },
+    },
+    {
+      label: 'explicitly unsubmitted task while queued', status: 'QUEUED', submissionState: 'NOT_SUBMITTED',
+      error: 'MODEL_FORBIDDEN', expected: { errorCode: 'MODEL_FORBIDDEN', billingState: 'NOT_CHARGED' },
+    },
+    {
+      label: 'unknown submission despite a completed payload', status: 'COMPLETED', submissionState: 'UNKNOWN',
+      error: undefined, expected: { errorCode: 'GATEWAY_SUBMISSION_UNKNOWN', billingState: 'UNKNOWN' },
+    },
+  ] as const)('stops inspection for $label', async (case_) => {
+    const artifacts = new MockArtifactPort()
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async () => Response.json({
+        id: 'imgop_0123456789abcdef0123456789abcdef',
+        status: case_.status,
+        submission_state: case_.submissionState,
+        ...(case_.error ? { error: { code: case_.error } } : {}),
+        ...(case_.status === 'COMPLETED' ? { result: { data: [{ b64_json: 'not-an-image' }] } } : {}),
+      }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow', operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
+    })).resolves.toMatchObject({
+      state: 'FAILED',
+      ...case_.expected,
+    })
+    expect(artifacts.artifacts.size).toBe(0)
   })
 
   test('keeps authorization failures as an explicit unknown-billing result', async () => {

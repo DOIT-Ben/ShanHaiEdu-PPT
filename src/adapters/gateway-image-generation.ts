@@ -150,9 +150,43 @@ async function normalizedVisualDeckV4Image(
     .toBuffer())
 }
 
-function operationState(status: z.infer<typeof imageOperationSchema>['status']) {
-  return status === 'PROCESSING' ? 'PROCESSING' as const
-    : status === 'COMPLETED' ? 'COMPLETED' as const
+function operationErrorCode(operation: z.infer<typeof imageOperationSchema>) {
+  return operation.error?.code
+    ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED')
+}
+
+function acceptedOperationState(operation: z.infer<typeof imageOperationSchema>) {
+  const errorCode = operationErrorCode(operation)
+  if (operation.submission_state === 'NOT_SUBMITTED') {
+    throw new MediaSubmissionError(
+      errorCode,
+      'NOT_SUBMITTED',
+      'gateway did not accept the image task',
+      providerTechnicalFailure(errorCode),
+      { billingState: 'NOT_CHARGED' },
+    )
+  }
+  if (operation.submission_state === 'UNKNOWN' || operation.status === 'SUBMISSION_UNKNOWN') {
+    throw new MediaSubmissionError(
+      errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode,
+      'UNKNOWN',
+      'gateway image task submission state is unknown',
+      providerTechnicalFailure(errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode, {
+        disposition: 'RETRYABLE',
+      }),
+    )
+  }
+  if (operation.status === 'FAILED' || operation.status === 'EXPIRED') {
+    throw new MediaSubmissionError(
+      errorCode,
+      'SUBMITTED',
+      'gateway accepted the image task but it already failed',
+      providerTechnicalFailure(errorCode),
+      { operationId: operation.id },
+    )
+  }
+  return operation.status === 'PROCESSING' ? 'PROCESSING' as const
+    : operation.status === 'COMPLETED' ? 'COMPLETED' as const
       : 'QUEUED' as const
 }
 
@@ -164,6 +198,28 @@ function billingState() {
   // `submission_state` says whether the gateway accepted work, not whether a
   // provider charge was settled. This endpoint exposes no billing receipt.
   return 'UNKNOWN' as const
+}
+
+function inspectedSubmissionFailure(operation: z.infer<typeof imageOperationSchema>) {
+  const errorCode = operationErrorCode(operation)
+  if (operation.submission_state === 'NOT_SUBMITTED') {
+    return {
+      state: 'FAILED' as const,
+      errorCode,
+      billingState: 'NOT_CHARGED' as const,
+      technicalFailure: providerTechnicalFailure(errorCode),
+    }
+  }
+  if (operation.submission_state === 'UNKNOWN' || operation.status === 'SUBMISSION_UNKNOWN') {
+    const unknownCode = errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode
+    return {
+      state: 'FAILED' as const,
+      errorCode: unknownCode,
+      billingState: billingState(),
+      technicalFailure: providerTechnicalFailure(unknownCode, { disposition: 'RETRYABLE' }),
+    }
+  }
+  return null
 }
 
 async function removeConnectedNeutralBackdrop(image: Uint8Array) {
@@ -393,6 +449,8 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       }
     }
     const operation = parsed.data
+    const submissionFailure = inspectedSubmissionFailure(operation)
+    if (submissionFailure) return submissionFailure
     if (operation.status === 'CREATED' || operation.status === 'SUBMITTING'
       || operation.status === 'QUEUED' || operation.status === 'PROCESSING') {
       return { state: pendingOperationState(operation.status) }
@@ -487,11 +545,11 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
           providerTechnicalFailure('GATEWAY_OPERATION_INVALID', { disposition: 'RETRYABLE' }),
         )
       }
-      return { operationId: operation.data.id, state: operationState(operation.data.status) }
+      return { operationId: operation.data.id, state: acceptedOperationState(operation.data) }
     } catch (error) {
       if (error instanceof MediaSubmissionError) throw error
       const recovered = await this.lookupImageTask(input.idempotencyKey, input.operationMode ?? 'TEXT_TO_IMAGE')
-      if (recovered) return { operationId: recovered.id, state: operationState(recovered.status) }
+      if (recovered) return { operationId: recovered.id, state: acceptedOperationState(recovered) }
       throw new MediaSubmissionError(
         'GATEWAY_SUBMISSION_UNKNOWN',
         'UNKNOWN',
