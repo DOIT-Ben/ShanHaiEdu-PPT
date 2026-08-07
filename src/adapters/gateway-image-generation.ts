@@ -155,8 +155,14 @@ function operationErrorCode(operation: z.infer<typeof imageOperationSchema>) {
     ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED')
 }
 
+function gatewayAcceptedBeforeProviderSubmission(operation: z.infer<typeof imageOperationSchema>) {
+  return operation.submission_state === 'NOT_SUBMITTED'
+    && (operation.status === 'CREATED' || operation.status === 'SUBMITTING')
+}
+
 function acceptedOperationState(operation: z.infer<typeof imageOperationSchema>) {
   const errorCode = operationErrorCode(operation)
+  if (gatewayAcceptedBeforeProviderSubmission(operation)) return 'QUEUED' as const
   if (operation.submission_state === 'NOT_SUBMITTED') {
     throw new MediaSubmissionError(
       errorCode,
@@ -174,6 +180,7 @@ function acceptedOperationState(operation: z.infer<typeof imageOperationSchema>)
       providerTechnicalFailure(errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode, {
         disposition: 'RETRYABLE',
       }),
+      { operationId: operation.id },
     )
   }
   if (operation.status === 'FAILED' || operation.status === 'EXPIRED') {
@@ -202,6 +209,7 @@ function billingState() {
 
 function inspectedSubmissionFailure(operation: z.infer<typeof imageOperationSchema>) {
   const errorCode = operationErrorCode(operation)
+  if (gatewayAcceptedBeforeProviderSubmission(operation)) return null
   if (operation.submission_state === 'NOT_SUBMITTED') {
     return {
       state: 'FAILED' as const,
@@ -398,6 +406,9 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
   async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
     const operation = await this.lookupImageTask(input.idempotencyKey, input.operationMode ?? 'TEXT_TO_IMAGE')
     if (!operation || operation.submission_state === 'UNKNOWN') return { state: 'UNKNOWN' as const }
+    if (gatewayAcceptedBeforeProviderSubmission(operation)) {
+      return { state: 'SUBMITTED' as const, operationId: operation.id }
+    }
     if (operation.submission_state === 'NOT_SUBMITTED') return { state: 'NOT_SUBMITTED' as const }
     return { state: 'SUBMITTED' as const, operationId: operation.id }
   }

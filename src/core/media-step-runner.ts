@@ -334,7 +334,15 @@ export class MediaStepRunner {
         return { step, replayed: false }
       }
 
-      const step = await this.markUnknown(input, reservationId, errorCode, 'MEDIA', technicalFailure, mediaFailure)
+      const step = await this.markUnknown(
+        input,
+        reservationId,
+        errorCode,
+        'MEDIA',
+        technicalFailure,
+        mediaFailure,
+        mediaError?.operationId ?? null,
+      )
       return { step, replayed: false }
     }
     const step = await this.markWaiting(input, reservationId, submitted.operationId)
@@ -376,7 +384,7 @@ export class MediaStepRunner {
     if (['SUBMITTING', 'SUBMISSION_UNKNOWN'].includes(step.status) && !step.externalOperationId) {
       return this.recoverUnacknowledgedSubmission(run, step)
     }
-    if (!['WAITING', 'BILLING_UNKNOWN'].includes(step.status)) return { step, changed: false }
+    if (!['WAITING', 'BILLING_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status)) return { step, changed: false }
     if (!step.externalOperationId) throw new Error('MEDIA_OPERATION_ID_MISSING')
     if (this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) return { step, changed: false }
 
@@ -1187,6 +1195,7 @@ export class MediaStepRunner {
     kind: 'BUDGET' | 'MEDIA',
     technicalFailure?: TechnicalFailure,
     mediaFailure?: MediaFailureState,
+    operationId?: string | null,
   ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1203,15 +1212,25 @@ export class MediaStepRunner {
         && step.status === 'SUBMISSION_UNKNOWN'
         && step.errorCode === errorCode
       const rawOutput = step.output && typeof step.output === 'object' ? step.output as Record<string, unknown> : {}
+      const externalOperationId = kind === 'MEDIA'
+        ? operationId ?? step.externalOperationId
+        : step.externalOperationId
       const previousAttempt = typeof rawOutput.submissionLookupAttempt === 'number'
         && Number.isSafeInteger(rawOutput.submissionLookupAttempt)
         ? rawOutput.submissionLookupAttempt
         : 0
-      const submissionLookupAttempt = kind === 'MEDIA' && !step.externalOperationId
+      const submissionLookupAttempt = kind === 'MEDIA' && !externalOperationId
         ? Math.min(5, previousAttempt + 1)
         : null
+      const {
+        submissionLookupAttempt: _submissionLookupAttempt,
+        nextInspectionAt: _nextInspectionAt,
+        ...outputWithoutSubmissionLookup
+      } = rawOutput
       const output = submissionLookupAttempt === null
-        ? step.output
+        ? kind === 'MEDIA' && externalOperationId
+          ? outputWithoutSubmissionLookup
+          : step.output
         : {
             ...rawOutput,
             submissionLookupAttempt,
@@ -1226,6 +1245,7 @@ export class MediaStepRunner {
         ...step,
         status: kind === 'BUDGET' ? 'RESERVATION_UNKNOWN' : 'SUBMISSION_UNKNOWN',
         budgetReservationId: reservationId,
+        externalOperationId,
         errorCode,
         output: persistedOutput,
         updatedAt: now,

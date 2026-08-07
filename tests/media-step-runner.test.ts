@@ -3,10 +3,10 @@ import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { MediaStepRunner } from '../src/core/media-step-runner'
-import type { RunRecord } from '../src/core/ports'
+import { MediaSubmissionError, type RunRecord } from '../src/core/ports'
 import { hashInput } from '../src/core/hash'
 import { applyRunAction, reserveBudget } from '../src/core/policy'
-import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
+import { providerTechnicalFailure, resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-catalog'
 import { UsageV2Coordinator } from '../src/core/usage-v2-coordinator'
 import type { UsageAccountingPort } from '../src/core/ports'
@@ -779,6 +779,43 @@ describe('media step runner', () => {
     expect(budget.released.size).toBe(0)
     expect(budget.settled.size).toBe(0)
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10 })
+  })
+
+  test('polls a known unknown-submission operation without sending a second image POST', async () => {
+    const { repository, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+    const submit = images.submit.bind(images)
+    let firstAttempt = true
+    images.submit = async (input) => {
+      const accepted = await submit(input)
+      if (!firstAttempt) return accepted
+      firstAttempt = false
+      throw new MediaSubmissionError(
+        'IDEMPOTENCY_SUBMISSION_UNKNOWN',
+        'UNKNOWN',
+        'gateway accepted the task but the submission state is unknown',
+        providerTechnicalFailure('IDEMPOTENCY_SUBMISSION_UNKNOWN', { disposition: 'RETRYABLE' }),
+        { operationId: accepted.operationId },
+      )
+    }
+
+    const first = await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+
+    expect(first.step).toMatchObject({
+      status: 'SUBMISSION_UNKNOWN',
+      externalOperationId: operationId,
+      errorCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN',
+    })
+    expect(images.submitCalls).toBe(1)
+
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 0 })
+    expect(images.inspectCalls).toBe(1)
+    expect(images.submitCalls).toBe(1)
+    expect(images.lookupRequests).toEqual([])
+    expect((await repository.listSteps('run-1'))[0]).toMatchObject({
+      status: 'SUBMISSION_UNKNOWN',
+      externalOperationId: operationId,
+    })
   })
 
   test('releases an unknown V4 submission only after lookup proves it was not submitted', async () => {

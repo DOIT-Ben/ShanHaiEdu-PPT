@@ -63,6 +63,34 @@ describe('gateway image generation adapter', () => {
     expect(String(JSON.parse(String(request.init.body)).prompt)).toContain('透明背景中的独立主体')
   })
 
+  test.each(['CREATED', 'SUBMITTING'] as const)(
+    'keeps a gateway-persisted %s task pollable while its provider submission has not started',
+    async (status) => {
+      const artifacts = new MockArtifactPort()
+      const operationId = 'imgop_1234567890abcdef1234567890abcdef'
+      const adapter = new GatewayImageGenerationPort({
+        ...config,
+        artifacts,
+        fetchImpl: async () => Response.json({
+          id: operationId,
+          status,
+          submission_state: 'NOT_SUBMITTED',
+        }, { status: 202 }),
+      })
+      const input = {
+        tenantId: 'frameflow',
+        prompt: 'A complete 16 by 9 classroom slide',
+        model: 'gemini-3-pro-image-preview',
+        aspectRatio: '16:9' as const,
+        idempotencyKey: 'run-1:slide:1:image:r0:v1',
+      }
+
+      await expect(adapter.submit(input)).resolves.toEqual({ operationId, state: 'QUEUED' })
+      await expect(adapter.lookupByIdempotency!(input)).resolves.toEqual({ state: 'SUBMITTED', operationId })
+      await expect(adapter.inspect({ ...input, operationId })).resolves.toEqual({ state: 'QUEUED' })
+    },
+  )
+
   test('normalizes a near-16:9 V4 image into an exact 1600 by 900 artifact', async () => {
     const artifacts = new MockArtifactPort()
     const nearSixteenNine = await sharp({
@@ -262,12 +290,16 @@ describe('gateway image generation adapter', () => {
 
   test.each([
     {
-      label: 'not-submitted', status: 'CREATED', submissionState: 'NOT_SUBMITTED',
+      label: 'terminal not-submitted', status: 'FAILED', submissionState: 'NOT_SUBMITTED',
       errorCode: 'IMAGE_TASK_REJECTED', expectedCode: 'IMAGE_TASK_REJECTED', operationId: null,
     },
     {
+      label: 'expired before submission', status: 'EXPIRED', submissionState: 'NOT_SUBMITTED',
+      errorCode: undefined, expectedCode: 'IDEMPOTENCY_RESPONSE_EXPIRED', operationId: null,
+    },
+    {
       label: 'unknown', status: 'SUBMITTING', submissionState: 'UNKNOWN',
-      errorCode: undefined, expectedCode: 'GATEWAY_SUBMISSION_UNKNOWN', operationId: null,
+      errorCode: undefined, expectedCode: 'GATEWAY_SUBMISSION_UNKNOWN', operationId: 'imgop_0123456789abcdef0123456789abcdef',
     },
     {
       label: 'failed', status: 'FAILED', submissionState: 'SUBMITTED',
