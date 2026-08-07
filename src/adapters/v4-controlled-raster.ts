@@ -47,23 +47,62 @@ function exactCountDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'EXACT_COU
   return circleGrid({ count: diagram.count, startX: 310, startY: 360, availableWidth: 980, color: '#F97316' })
 }
 
+function circleGridInBox(input: Readonly<{
+  count: number
+  left: number
+  top: number
+  width: number
+  height: number
+  color: string
+  maximumPerRow: number
+  maximumRadius: number
+}>) {
+  const columns = Math.max(1, Math.min(input.maximumPerRow, input.count))
+  const rows = Math.ceil(input.count / columns)
+  const spacing = 2.55
+  const radius = Math.min(
+    input.maximumRadius,
+    input.width / (2 + (columns - 1) * spacing),
+    input.height / (2 + (rows - 1) * spacing),
+  )
+  const gap = radius * spacing
+  const firstX = input.left + input.width / 2 - (columns - 1) * gap / 2
+  const firstY = input.top + input.height / 2 - (rows - 1) * gap / 2
+  return Array.from({ length: input.count }, (_, index) => {
+    const column = index % columns
+    const row = Math.floor(index / columns)
+    const x = firstX + column * gap
+    const y = firstY + row * gap
+    return `<circle cx="${x}" cy="${y}" r="${radius}" fill="${input.color}" fill-opacity="0.94"/><circle cx="${x - radius * 0.26}" cy="${y - radius * 0.28}" r="${radius * 0.22}" fill="#ffffff" fill-opacity="0.48"/>`
+  }).join('')
+}
+
 function partitionDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'PARTITION' }>) {
-  const groupWidth = Math.min(390, Math.floor(1100 / diagram.groupCount))
-  const totalWidth = groupWidth * diagram.groupCount
-  const firstLeft = 800 - totalWidth / 2
+  const groupColumns = Math.ceil(Math.sqrt(diagram.groupCount))
+  const groupRows = Math.ceil(diagram.groupCount / groupColumns)
+  const groupGap = 18
+  const area = { left: 200, top: 315, width: 1200, height: 450 }
+  const groupWidth = (area.width - groupGap * (groupColumns - 1)) / groupColumns
+  const groupHeight = (area.height - groupGap * (groupRows - 1)) / groupRows
   const boxes = Array.from({ length: diagram.groupCount }, (_, index) => {
-    const left = firstLeft + index * groupWidth
+    const column = index % groupColumns
+    const row = Math.floor(index / groupColumns)
+    const left = area.left + column * (groupWidth + groupGap)
+    const top = area.top + row * (groupHeight + groupGap)
     const color = index % 2 === 0 ? '#0EA5E9' : '#8B5CF6'
+    const inset = Math.min(26, Math.max(12, Math.min(groupWidth, groupHeight) * 0.14))
+    const cornerRadius = Math.min(30, Math.max(12, Math.min(groupWidth, groupHeight) / 4))
     return [
-      `<rect x="${left + 12}" y="335" width="${groupWidth - 24}" height="430" rx="30" fill="#ffffff" stroke="${color}" stroke-width="5"/>`,
-      circleGrid({
+      `<rect x="${left}" y="${top}" width="${groupWidth}" height="${groupHeight}" rx="${cornerRadius}" fill="#ffffff" stroke="${color}" stroke-width="5"/>`,
+      circleGridInBox({
         count: diagram.itemsPerGroup,
-        startX: left + 54,
-        startY: 430,
-        availableWidth: groupWidth - 108,
+        left: left + inset,
+        top: top + inset,
+        width: groupWidth - inset * 2,
+        height: groupHeight - inset * 2,
         color,
         maximumPerRow: Math.min(4, diagram.itemsPerGroup),
-        radius: 28,
+        maximumRadius: 28,
       }),
     ].join('')
   }).join('')
