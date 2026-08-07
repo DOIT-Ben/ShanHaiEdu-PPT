@@ -52,6 +52,28 @@ class CreativeModel implements StructuredModelPort {
   }
 }
 
+function oversizedManuscript() {
+  return {
+    title: '标题'.repeat(80),
+    narrative: Array.from({ length: 20 }, () => '叙事'.repeat(250)),
+    slides: Array.from({ length: 5 }, () => ({
+      title: '页'.repeat(160),
+      narrative: '叙'.repeat(1_200),
+      userVisibleCopy: Array.from({ length: 8 }, () => '文'.repeat(500)),
+      factualStatements: Array.from({ length: 20 }, () => '事'.repeat(500)),
+      visualDescription: '视'.repeat(1_500),
+      sourceEvidence: Array.from({ length: 8 }, () => ({ excerpt: '证'.repeat(1_200) })),
+    })),
+  }
+}
+
+class OversizedManuscriptModel extends CreativeModel {
+  override async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
+    await super.execute(input)
+    return oversizedManuscript()
+  }
+}
+
 class AsyncImages implements ImageGenerationPort {
   readonly submissions: Parameters<ImageGenerationPort['submit']>[0][] = []
   readonly inspections: Parameters<ImageGenerationPort['inspect']>[0][] = []
@@ -347,6 +369,33 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
+  test('fails a quick evaluation before image submission when its CreativeManuscript exceeds the aggregate limit', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-oversized-manuscript-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const model = new OversizedManuscriptModel()
+      const images = new AsyncImages(artifacts)
+      const service = new QuickDeckEvaluationService({
+        repository: new InMemoryQuickDeckEvaluationRepository(), artifacts, model, images,
+        renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(1))
+
+      await service.tick({ limit: 10 })
+
+      expect(model.calls).toHaveLength(1)
+      expect(images.submissions).toHaveLength(0)
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        phase: 'FAILED',
+        failure: { code: 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE' },
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
   test('bounds a valid 200,000-character input before the Responses call', async () => {
     const { directory, model, service } = await fixture()
     try {

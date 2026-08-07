@@ -5,7 +5,12 @@ import {
   V4ManuscriptCompilationError,
   V4PlanCompiler,
 } from '../src/core/v4-manuscript-compiler'
-import { visualDeckV4CreativeManuscriptSchema, visualDeckV4ReviewManuscriptSchema } from '../src/visual-deck-v4-contracts'
+import {
+  assertVisualDeckV4ManuscriptCharacterLimit,
+  VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS,
+  visualDeckV4CreativeManuscriptSchema,
+  visualDeckV4ReviewManuscriptSchema,
+} from '../src/visual-deck-v4-contracts'
 
 function input(slideCount = 1) {
   const text = '太阳加热水面形成水汽，水汽凝结成云，降水回到地面，构成持续循环。'
@@ -50,6 +55,21 @@ function manuscript(slideCount = 1) {
     sourceEvidence: [{ excerpt }],
   }))
   return { title: '水循环', narrative: ['建立水循环主题', '解释循环关系'], slides }
+}
+
+function oversizedManuscript() {
+  return {
+    title: '标题'.repeat(80),
+    narrative: Array.from({ length: 20 }, () => '叙事'.repeat(250)),
+    slides: Array.from({ length: 5 }, () => ({
+      title: '页'.repeat(160),
+      narrative: '叙'.repeat(1_200),
+      userVisibleCopy: Array.from({ length: 8 }, () => '文'.repeat(500)),
+      factualStatements: Array.from({ length: 20 }, () => '事'.repeat(500)),
+      visualDescription: '视'.repeat(1_500),
+      sourceEvidence: Array.from({ length: 8 }, () => ({ excerpt: '证'.repeat(1_200) })),
+    })),
+  }
 }
 
 describe('V4 chain-4 semantic manuscript compiler', () => {
@@ -105,6 +125,19 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
       ...manuscript(),
       slides: [{ ...manuscript().slides[0], pageNumber: 1, role: 'SINGLE', sourceChunkId: 'chunk-1' }],
     })).toThrow()
+  })
+
+  test('rejects aggregate semantic manuscripts before deterministic compilation', () => {
+    const creative = oversizedManuscript()
+    const review = { ...creative, revisionSuggestions: Array.from({ length: 50 }, () => '建议'.repeat(500)) }
+
+    expect(JSON.stringify(creative).length).toBeGreaterThan(VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS)
+    expect(() => visualDeckV4CreativeManuscriptSchema.parse(creative)).toThrow('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    expect(() => visualDeckV4ReviewManuscriptSchema.parse(review)).toThrow('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    expect(() => assertVisualDeckV4ManuscriptCharacterLimit(creative)).toThrow('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    expect(() => new ManuscriptCompiler().compilePlan(input(5), creative as never, review as never))
+      .toThrow('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    expect(() => new V4PlanCompiler().compile(input(5), review as never)).toThrow('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
   })
 
   test('requires one semantic slot per requested page', () => {

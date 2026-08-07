@@ -22,6 +22,7 @@ import {
   type QuickDeckEvaluationRequest,
 } from '../quick-deck-evaluation-contracts'
 import {
+  isV4ManuscriptContextTooLargeError,
   visualDeckV4CreativeManuscriptSchema,
   visualDeckV4ReviewManuscriptSchema,
 } from '../visual-deck-v4-contracts'
@@ -597,8 +598,14 @@ export class QuickDeckEvaluationService {
     let blueprint
     try {
       blueprint = await this.createBlueprint(planning)
-    } catch {
-      return await this.fail(planning, 'EVALUATION_PLANNING_FAILED', claim)
+    } catch (error) {
+      return await this.fail(
+        planning,
+        isV4ManuscriptContextTooLargeError(error)
+          ? 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE'
+          : 'EVALUATION_PLANNING_FAILED',
+        claim,
+      )
     }
     const submittedAt = this.dependencies.clock.now().toISOString()
     const submitting: QuickDeckEvaluationRecord = {

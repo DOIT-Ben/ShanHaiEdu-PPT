@@ -1,5 +1,6 @@
 import type { RevisionPlan } from '../presentation-contracts'
 import {
+  assertVisualDeckV4ManuscriptCharacterLimit,
   visualDeckV4ProposalDraftSchema,
   type VisualDeckV4CreativeManuscript,
   type VisualDeckV4ProposalDraft,
@@ -84,6 +85,7 @@ export class V4PlanCompiler {
   constructor(private readonly evidenceResolver = new SourceEvidenceResolver()) {}
 
   compile(input: VisualDeckV4CompilerInput, manuscript: VisualDeckV4ReviewManuscript): VisualDeckV4ProposalDraft {
+    assertVisualDeckV4ManuscriptCharacterLimit(manuscript)
     const template = compileVisualDeckV4Proposal(input)
     if (manuscript.slides.length !== input.slideCount) {
       throw new V4ManuscriptCompilationError('V4_MANUSCRIPT_SLIDE_COUNT_MISMATCH')
@@ -177,6 +179,7 @@ export class RevisionCompiler {
     plan: RevisionPlan
     manuscript: VisualDeckV4ReviewManuscript
   }>): VisualDeckV4ProposalDraft {
+    assertVisualDeckV4ManuscriptCharacterLimit(input.manuscript)
     const operationsByPage = new Map<number, RevisionPlan['operations'][number][]>()
     for (const operation of input.plan.operations) {
       const pageNumber = Number(operation.slideId.split(':').at(-1))
@@ -232,6 +235,8 @@ export class ManuscriptCompiler {
     creative: VisualDeckV4CreativeManuscript,
     review: VisualDeckV4ReviewManuscript,
   ) {
+    assertVisualDeckV4ManuscriptCharacterLimit(creative)
+    assertVisualDeckV4ManuscriptCharacterLimit(review)
     if (creative.slides.length !== review.slides.length || review.slides.length !== input.slideCount) {
       throw new V4ManuscriptCompilationError('V4_MANUSCRIPT_REVIEW_BINDING_INVALID')
     }

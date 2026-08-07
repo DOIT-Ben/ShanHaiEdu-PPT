@@ -36,6 +36,23 @@ const boundedText = (maximum: number) => z.string().trim().min(1).max(maximum)
 // Reserve the remaining 12k prompt budget for corrections and fixed safeguards.
 export const VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH = 4_000
 export const VISUAL_DECK_V4_REPAIR_CONSTRAINT_MAX_LENGTH = 2_300
+export const VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS = 80_000
+export const V4_MANUSCRIPT_CONTEXT_TOO_LARGE = 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE'
+
+export function visualDeckV4ManuscriptCharacterCount(value: unknown) {
+  return JSON.stringify(value)?.length ?? 0
+}
+
+export function assertVisualDeckV4ManuscriptCharacterLimit(value: unknown) {
+  if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {
+    throw new Error(V4_MANUSCRIPT_CONTEXT_TOO_LARGE)
+  }
+}
+
+export function isV4ManuscriptContextTooLargeError(error: unknown) {
+  return (error instanceof Error && error.message === V4_MANUSCRIPT_CONTEXT_TOO_LARGE)
+    || (error instanceof z.ZodError && error.issues.some((issue) => issue.message === V4_MANUSCRIPT_CONTEXT_TOO_LARGE))
+}
 
 export const visualDeckV4SourceModeSchema = z.enum(['SOURCE_GROUNDED', 'OPEN_KNOWLEDGE'])
 
@@ -163,14 +180,22 @@ export const visualDeckV4CreativeManuscriptSchema = z.object({
   title: boundedText(160),
   narrative: z.array(boundedText(500)).min(1).max(20),
   slides: z.array(z.object(visualDeckV4ManuscriptSlideShape).strict()).min(1).max(50),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {
+    context.addIssue({ code: 'custom', message: V4_MANUSCRIPT_CONTEXT_TOO_LARGE })
+  }
+})
 
 export const visualDeckV4ReviewManuscriptSchema = z.object({
   title: boundedText(160),
   narrative: z.array(boundedText(500)).min(1).max(20),
   slides: z.array(z.object(visualDeckV4ManuscriptSlideShape).strict()).min(1).max(50),
   revisionSuggestions: z.array(boundedText(1_000)).max(50),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {
+    context.addIssue({ code: 'custom', message: V4_MANUSCRIPT_CONTEXT_TOO_LARGE })
+  }
+})
 
 export const visualDeckV4SlideBriefRevisionPatchSchema = z.object({
   pageNumber: visualDeckV4SlideBriefShape.pageNumber,
