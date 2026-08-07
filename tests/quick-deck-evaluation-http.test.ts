@@ -8,7 +8,10 @@ import type { ImageGenerationPort, StructuredModelPort } from '../src/core/ports
 import { QuickDeckEvaluationService } from '../src/core/quick-deck-evaluation-service'
 import { RunService } from '../src/core/run-service'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
-import { createQuickDeckEvaluationHttpHandler } from '../src/http/quick-deck-evaluation-handler'
+import {
+  createQuickDeckEvaluationHttpHandler,
+  type QuickDeckEvaluationEventBrokerPort,
+} from '../src/http/quick-deck-evaluation-handler'
 import { ServiceTokenAuthentication } from '../src/http/service-token-authentication'
 import { RuntimeHealthMonitor } from '../src/observability/runtime-health'
 
@@ -76,7 +79,7 @@ class AsyncImages implements ImageGenerationPort {
   }
 }
 
-function fixture() {
+function fixture(input: Readonly<{ eventBroker?: QuickDeckEvaluationEventBrokerPort }> = {}) {
   const artifacts = new MockArtifactPort()
   const repository = new InMemoryQuickDeckEvaluationRepository()
   const service = new QuickDeckEvaluationService({
@@ -110,7 +113,10 @@ function fixture() {
     repository,
     artifacts,
     authentication,
-    handle: createQuickDeckEvaluationHttpHandler({ service, artifacts, repository, authentication, eventPollMs: 5 }),
+    handle: createQuickDeckEvaluationHttpHandler({
+      service, artifacts, repository, authentication, eventPollMs: 5,
+      ...(input.eventBroker ? { eventBroker: input.eventBroker } : {}),
+    }),
   }
 }
 
@@ -353,6 +359,36 @@ describe('quick-deck evaluation HTTP facade', () => {
     await Bun.sleep(20)
 
     expect(reads).toBe(1)
+  })
+
+  test('drains a disposer returned after SSE abort closes the stream', async () => {
+    let release!: () => void
+    let subscribed!: () => void
+    const subscribedPromise = new Promise<void>((resolve) => { subscribed = resolve })
+    const blocker = new Promise<void>((resolve) => { release = resolve })
+    let disposeCalls = 0
+    const broker: QuickDeckEvaluationEventBrokerPort = {
+      async subscribe() {
+        subscribed()
+        await blocker
+        return () => { disposeCalls += 1 }
+      },
+    }
+    const { handle } = fixture({ eventBroker: broker })
+    const created = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()),
+    }))
+    const jobId = (await created.json() as { data: { jobId: string } }).data.jobId
+    const abort = new AbortController()
+    const responsePromise = handle(request(`/v1/evaluations/quick-decks/${jobId}/events`, { signal: abort.signal }))
+
+    await subscribedPromise
+    abort.abort()
+    release()
+    const response = await responsePromise
+    await response.body?.cancel()
+
+    expect(disposeCalls).toBe(1)
   })
 
   test('releases the SSE heartbeat and abort listener when initial subscription fails', async () => {

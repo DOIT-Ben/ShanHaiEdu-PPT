@@ -18,12 +18,15 @@ export interface QuickDeckEvaluationAuthenticationPort {
   authenticateQuickDeckEvaluation(request: Request): Promise<Readonly<{ tenantId: string }> | null>
 }
 
+export type QuickDeckEvaluationEventBrokerPort = Pick<QuickDeckEvaluationEventBroker, 'subscribe'>
+
 export type QuickDeckEvaluationHandlerDependencies = Readonly<{
   service: QuickDeckEvaluationService
   artifacts: ArtifactPort
   repository: QuickDeckEvaluationRepository
   authentication: QuickDeckEvaluationAuthenticationPort
   eventPollMs?: number
+  eventBroker?: QuickDeckEvaluationEventBrokerPort
 }>
 
 function validIdentifier(value: string) {
@@ -148,7 +151,7 @@ function safeFilename(name: string) {
 }
 
 function sseResponse(input: Readonly<{
-  broker: QuickDeckEvaluationEventBroker
+  broker: QuickDeckEvaluationEventBrokerPort
   jobId: string
   after: number
   signal: AbortSignal
@@ -160,16 +163,19 @@ function sseResponse(input: Readonly<{
   let closed = false
   let abortHandler: (() => void) | null = null
   const dispose = () => {
-    if (closed) return
-    closed = true
-    if (heartbeat) {
-      clearInterval(heartbeat)
-      heartbeat = null
+    if (!closed) {
+      closed = true
+      if (heartbeat) {
+        clearInterval(heartbeat)
+        heartbeat = null
+      }
+      if (abortHandler) {
+        input.signal.removeEventListener('abort', abortHandler)
+        abortHandler = null
+      }
     }
-    if (abortHandler) {
-      input.signal.removeEventListener('abort', abortHandler)
-      abortHandler = null
-    }
+    // subscribe() can finish after abort has already closed the stream.
+    // Always drain a newly returned disposer in that race window.
     const currentUnsubscribe = unsubscribe
     unsubscribe = null
     currentUnsubscribe?.()
@@ -241,7 +247,7 @@ async function principal(
 }
 
 export function createQuickDeckEvaluationRequestHandler(dependencies: QuickDeckEvaluationHandlerDependencies) {
-  const broker = new QuickDeckEvaluationEventBroker({
+  const broker = dependencies.eventBroker ?? new QuickDeckEvaluationEventBroker({
     repository: dependencies.repository,
     pollMs: dependencies.eventPollMs ?? 500,
   })
