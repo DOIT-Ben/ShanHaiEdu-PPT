@@ -600,6 +600,24 @@ export const visualDeckV4ProposalDraftSchema = z.object({
   if (value.deckPlan.slideCount !== count || value.slideBriefs.length !== count) {
     context.addIssue({ code: 'custom', path: ['slideBriefs'], message: 'v4 proposal slide counts must match' })
   }
+  if (count === 1) {
+    const [slide] = value.slideBriefs
+    if (slide?.role !== 'SINGLE') {
+      context.addIssue({ code: 'custom', path: ['slideBriefs', 0, 'role'], message: 'a one-page v4 proposal requires the SINGLE role' })
+    }
+    if (slide?.previousSlideRelation !== null) {
+      context.addIssue({ code: 'custom', path: ['slideBriefs', 0, 'previousSlideRelation'], message: 'a one-page v4 proposal has no previous slide relation' })
+    }
+    if (slide?.nextSlideRelation !== null) {
+      context.addIssue({ code: 'custom', path: ['slideBriefs', 0, 'nextSlideRelation'], message: 'a one-page v4 proposal has no next slide relation' })
+    }
+  } else {
+    value.slideBriefs.forEach((slide, index) => {
+      if (slide.role === 'SINGLE') {
+        context.addIssue({ code: 'custom', path: ['slideBriefs', index, 'role'], message: 'the SINGLE role is valid only for a one-page v4 proposal' })
+      }
+    })
+  }
   value.slideBriefs.forEach((slide, index) => {
     if (slide.pageNumber !== index + 1) {
       context.addIssue({ code: 'custom', path: ['slideBriefs', index, 'pageNumber'], message: 'v4 slide pages must be continuous' })

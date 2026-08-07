@@ -102,6 +102,46 @@ describe('visual deck v4 contracts', () => {
     }).slides).toHaveLength(1)
   })
 
+  test('enforces the SINGLE role and relation boundaries for one-page proposals', () => {
+    const multiPage = proposal()
+    const single = {
+      ...multiPage,
+      presentationSpec: { ...multiPage.presentationSpec, slideCount: 1 },
+      deckPlan: {
+        ...multiPage.deckPlan,
+        slideCount: 1,
+        narrativeArc: ['在同一画面中建立主题、核心结论与主视觉'],
+        chapters: [{ chapterId: 'single', title: '单页叙事', purpose: '聚焦唯一结论', slideNumbers: [1] }],
+      },
+      slideBriefs: [{
+        ...multiPage.slideBriefs[0]!,
+        role: 'SINGLE' as const,
+        sourceChunkIds: ['chunk-1'],
+        previousSlideRelation: null,
+        nextSlideRelation: null,
+      }],
+    }
+
+    expect(() => visualDeckV4ProposalSchema.parse({
+      ...single,
+      slideBriefs: [{ ...single.slideBriefs[0]!, role: 'COVER' }],
+    })).toThrow('a one-page v4 proposal requires the SINGLE role')
+    expect(() => visualDeckV4ProposalSchema.parse({
+      ...single,
+      slideBriefs: [{ ...single.slideBriefs[0]!, previousSlideRelation: '伪造前页关系' }],
+    })).toThrow('a one-page v4 proposal has no previous slide relation')
+    expect(() => visualDeckV4ProposalSchema.parse({
+      ...single,
+      slideBriefs: [{ ...single.slideBriefs[0]!, nextSlideRelation: '伪造后页关系' }],
+    })).toThrow('a one-page v4 proposal has no next slide relation')
+
+    const multi = proposal()
+    expect(() => visualDeckV4ProposalSchema.parse({
+      ...multi,
+      slideBriefs: [{ ...multi.slideBriefs[0]!, role: 'SINGLE' }, multi.slideBriefs[1]!],
+    })).toThrow('the SINGLE role is valid only for a one-page v4 proposal')
+  })
+
   test('rejects incomplete chapter coverage and invented source chunks', () => {
     const invalidCoverage = proposal()
     invalidCoverage.deckPlan.chapters[1]!.slideNumbers = [1]
