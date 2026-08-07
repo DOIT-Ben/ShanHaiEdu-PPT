@@ -7,6 +7,7 @@ import { PlanningRunner, planningStepKey } from '../src/core/planning-runner'
 import { blueprintImageRequirements } from '../src/core/blueprint-assets'
 import { hashInput } from '../src/core/hash'
 import { RunService } from '../src/core/run-service'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 import {
   compileVisualDeckV4Proposal,
   V4_PLANNING_STAGES,
@@ -32,6 +33,26 @@ import { VISUAL_DECK_V4_REFLECTION_DIMENSIONS } from '../src/visual-deck-v4-cont
 const baseStages: readonly VisualDeckV4PlanningStage[] = [
   'source-spec', 'deck-visual', 'slide-briefs',
 ]
+
+function runService(repository: InMemoryAgentRepository, clock: FixedClock) {
+  const readiness = {
+    status: 'PASSED' as const,
+    evaluationRelease: 'test', gatewayContractVersion: 'test', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+    evaluatedAt: '2026-08-07T00:00:00.000Z', evaluationSuite: 'test',
+    expiresAt: '9999-12-31T23:59:59.999Z',
+  }
+  return new RunService({
+    repository,
+    clock,
+    v4ModelPolicy: new V4ModelPolicy({
+      runtimeMode: 'MOCK',
+      models: [
+        { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness },
+        { model: 'gpt-image-2', roles: ['IMAGE', 'IMAGE_EDIT'], evaluationEnabled: true, published: true, readiness },
+      ],
+    }),
+  })
+}
 
 function planningStageAuditKey(runId: string, stage: VisualDeckV4PlanningStage) {
   return `${visualDeckV4PlanningStageStepKey(runId, stage)}:attempt-audit`
@@ -146,13 +167,18 @@ function stagedModel(
   let creativeManuscript: unknown = null
   let shouldFail = failSlideBriefsOnce
   const operations: string[] = []
+  const modelInputs: Array<Pick<Parameters<StructuredModelPort['execute']>[0], 'operation' | 'modelOverride'>> = []
+  let preflightCalls = 0
   const repairPayloads: unknown[] = []
   const reflectionPayloads: unknown[] = []
   const model: StructuredModelPort & {
     preflightStructuredGeneration: () => Promise<{ protocol: 'RESPONSES_JSON_SCHEMA' }>
     takeExecutionMetrics: StructuredModelMetricsPort['takeExecutionMetrics']
   } = {
-    async preflightStructuredGeneration() { return { protocol: 'RESPONSES_JSON_SCHEMA' } },
+    async preflightStructuredGeneration() {
+      preflightCalls += 1
+      return { protocol: 'RESPONSES_JSON_SCHEMA' }
+    },
     takeExecutionMetrics(idempotencyKey) {
       return {
         outcome: 'SUCCEEDED',
@@ -170,6 +196,10 @@ function stagedModel(
     },
     async execute(modelInput) {
       operations.push(modelInput.operation)
+      modelInputs.push({
+        operation: modelInput.operation,
+        ...(modelInput.modelOverride ? { modelOverride: modelInput.modelOverride } : {}),
+      })
       if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript') {
         proposal = proposalFromSourceStage(created, input, clock, modelInput.payload)
         const payload = modelInput.payload as { trustedEvidence: { sourceChunks: { text: string }[] } }
@@ -312,17 +342,17 @@ function stagedModel(
       throw new Error(`TEST_OPERATION_UNEXPECTED:${modelInput.operation}`)
     },
   }
-  return { model, operations, repairPayloads, reflectionPayloads }
+  return { model, operations, modelInputs, preflightCalls: () => preflightCalls, repairPayloads, reflectionPayloads }
 }
 
 describe('visual deck v4 planning runner', () => {
   test('uses the chain-4 semantic manuscript contract for a new V4 Run', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-manuscript-0001')
-    const { model, operations } = stagedModel(created, inputRequest, clock)
+    const { model, operations, modelInputs } = stagedModel(created, inputRequest, clock)
     const runner = new PlanningRunner({ repository, documents: documents(), model, clock })
     const result = await runner.plan({
       runId: created.run.id,
@@ -339,6 +369,10 @@ describe('visual deck v4 planning runner', () => {
     expect(operations).toEqual([
       'create_visual_deck_v4_creative_manuscript',
       'review_visual_deck_v4_manuscript',
+    ])
+    expect(modelInputs).toEqual([
+      { operation: 'create_visual_deck_v4_creative_manuscript', modelOverride: 'gpt-5.6-terra' },
+      { operation: 'review_visual_deck_v4_manuscript', modelOverride: 'gpt-5.6-terra' },
     ])
     expect(result.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(VISUAL_DECK_V4_COMPILER_VERSION)
     expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[0]).toMatchObject({ pageNumber: 1, role: 'COVER' })
@@ -359,15 +393,16 @@ describe('visual deck v4 planning runner', () => {
   test('plans with a 200-chunk evidence window without demanding omitted chunk coverage', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-window-0001')
     const { model } = stagedModel(created, inputRequest, clock)
+    const outsideMarker = 'WINDOW_OUTSIDE_MARKER_MUST_NOT_REACH_THE_BLUEPRINT'
     const chunks = Array.from({ length: 201 }, (_, index) => ({
       id: `chunk-${String(index + 1).padStart(3, '0')}`,
       sourceId: index % 2 === 0 ? 'textbook' : 'design',
       text: index === 200
-        ? '统一比较标准是本次演示的重点目标。'
+        ? outsideMarker
         : `唯一编号 ${String(index + 1).padStart(3, '0')} 的普通短来源块内容。`,
       sha256: hashInput(`chunk-${index + 1}`),
     }))
@@ -402,15 +437,16 @@ describe('visual deck v4 planning runner', () => {
     expect(result.step).toMatchObject({ status: 'COMPLETED' })
     expect(result.blueprint?.visualDeckV4Proposal?.sourceUnderstanding.sources
       .flatMap((source) => source.sourceChunkIds)).toHaveLength(200)
+    expect(result.blueprint?.curriculum.sourceSummary).not.toContain(outsideMarker)
     const audit = (await repository.listSteps(created.run.id))
       .find((step) => step.idempotencyKey === `${created.run.id}:v4:evidence-window`)
     expect(audit?.output).toMatchObject({ omittedChunkCount: 1 })
   })
 
-  test('bounds CJK review payloads by UTF-8 bytes before the gateway boundary', async () => {
+  test('bounds CJK review payloads by characters before the gateway boundary', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-cjk-budget-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -426,10 +462,10 @@ describe('visual deck v4 planning runner', () => {
       const manuscript = structuredClone(result) as { slides: Record<string, unknown>[] }
       manuscript.slides = manuscript.slides.map((slide) => ({
         ...slide,
-        narrative: '汉'.repeat(1_200),
-        userVisibleCopy: Array.from({ length: 8 }, () => '汉'.repeat(500)),
-        factualStatements: Array.from({ length: 20 }, (_, index) => `${index}${'汉'.repeat(498)}`),
-        visualDescription: '汉'.repeat(1_500),
+        narrative: '汉'.repeat(500),
+        userVisibleCopy: Array.from({ length: 8 }, () => '汉'.repeat(300)),
+        factualStatements: Array.from({ length: 20 }, (_, index) => `${index}${'汉'.repeat(148)}`),
+        visualDescription: '汉'.repeat(900),
       }))
       return manuscript
     }
@@ -447,18 +483,105 @@ describe('visual deck v4 planning runner', () => {
     })
 
     const payload = reviewPayload as { creativeManuscript: unknown }
-    expect(Buffer.byteLength(JSON.stringify(payload.creativeManuscript), 'utf8')).toBeLessThanOrEqual(80_000)
-    expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeLessThanOrEqual(220_000)
+    expect(JSON.stringify(payload.creativeManuscript).length).toBeLessThanOrEqual(80_000)
+    expect(JSON.stringify(payload.creativeManuscript).length).toBeGreaterThan(70_000)
+    expect(JSON.stringify(payload).length).toBeLessThanOrEqual(220_000)
+    expect(Buffer.byteLength(JSON.stringify(payload.creativeManuscript), 'utf8')).toBeGreaterThan(80_000)
+  })
+
+  test('fails before persisting an oversized CreativeManuscript', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-oversized-manuscript-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation !== 'create_visual_deck_v4_creative_manuscript') return await execute(modelInput)
+      creativeCalls += 1
+      return {
+        title: '标题'.repeat(80),
+        narrative: Array.from({ length: 20 }, () => '叙事'.repeat(250)),
+        slides: Array.from({ length: 5 }, () => ({
+          title: '页'.repeat(160), narrative: '叙'.repeat(1_200),
+          userVisibleCopy: Array.from({ length: 8 }, () => '文'.repeat(500)),
+          factualStatements: Array.from({ length: 20 }, () => '事'.repeat(500)),
+          visualDescription: '视'.repeat(1_500),
+          sourceEvidence: Array.from({ length: 8 }, () => ({ excerpt: '证'.repeat(1_200) })),
+        })),
+      }
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`, idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source, slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result).toMatchObject({ blueprint: null, step: { errorCode: 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE' } })
+    expect(creativeCalls).toBe(1)
+    const manuscript = (await repository.listSteps(created.run.id))
+      .find((step) => step.tool === 'compile_v4_creative_manuscript')
+    expect(manuscript).toMatchObject({ status: 'FAILED', output: null })
   })
 
   test('fails a new chain-4 run closed when preflight is not Responses JSON Schema', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-protocol-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      const { v4StructuredGenerationProtocol: _protocol, ...withoutProtocol } = transaction.run
+      transaction.putRun(withoutProtocol)
+    })
     const staged = stagedModel(created, inputRequest, clock)
-    staged.model.preflightStructuredGeneration = async () => ({ protocol: 'CHAT_LEGACY' as never })
+    let preflightCalls = 0
+    staged.model.preflightStructuredGeneration = async () => {
+      preflightCalls += 1
+      return { protocol: 'CHAT_LEGACY' as never }
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+      attempt: 1,
+    })
+
+    expect(result.blueprint).toBeNull()
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' })
+    expect(preflightCalls).toBe(1)
+    expect(staged.operations).toEqual([])
+    expect(await repository.getRun(created.run.id)).toMatchObject({ status: 'FAILED', committedBudgetUnits: 0 })
+    const steps = await repository.listSteps(created.run.id)
+    expect(steps.find((step) => step.idempotencyKey === `${created.run.id}:v4:structured-generation-preflight:planning:1`))
+      .toMatchObject({ status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' })
+    expect(steps.some((step) => step.tool === 'generate_slide_image'
+      || step.tool === 'generate_image_batch'
+      || step.tool.includes('usage'))).toBe(false)
+  })
+
+  test('fails a chain-4 V4 Run without a model snapshot before any model submission', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-legacy-snapshot-missing-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      const { v4ModelSnapshot: _snapshot, ...legacy } = transaction.run
+      transaction.putRun(legacy)
+    })
+    const staged = stagedModel(created, inputRequest, clock)
     const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
 
     const result = await runner.plan({
@@ -472,20 +595,57 @@ describe('visual deck v4 planning runner', () => {
       visualDeckV4: inputRequest.visualDeckV4,
     })
 
-    expect(result.blueprint).toBeNull()
-    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' })
+    expect(result).toMatchObject({ blueprint: null, step: { errorCode: 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE' } })
+    expect(staged.preflightCalls()).toBe(0)
+    expect(staged.operations).toEqual([])
+    expect(await repository.getRun(created.run.id)).toMatchObject({ status: 'FAILED' })
+  })
+
+  test('resumes a historical chain-3 V4 Run without recomputing missing model or protocol snapshots', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await createChain3Run(service, repository, inputRequest, 'create-v4-chain-3-snapshot-missing-0001')
+    await repository.transact(created.run.id, (transaction) => {
+      const { v4ModelSnapshot: _snapshot, ...legacy } = transaction.run
+      transaction.putRun(legacy)
+    })
+    const staged = stagedModel(created, inputRequest, clock)
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION)
+    expect(staged.preflightCalls()).toBe(0)
+    expect(staged.modelInputs.every((input) => input.modelOverride === undefined)).toBe(true)
+    const resumed = await repository.getRun(created.run.id)
+    expect(resumed?.v4ModelSnapshot).toBeUndefined()
+    expect(resumed?.v4StructuredGenerationProtocol).toBeUndefined()
   })
 
   test('fails a recovered chain-4 run closed when its persisted preflight protocol is legacy', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-persisted-protocol-0001')
     const key = `${created.run.id}:v4:structured-generation-preflight:planning:0`
     await repository.transact(created.run.id, (transaction) => transaction.putStep({
       id: `step-${hashInput({ key }).slice(0, 28)}`, runId: created.run.id, idempotencyKey: key,
-      inputHash: hashInput({ tool: 'preflight_v4_structured_generation', model: null }),
+      inputHash: hashInput({
+        tool: 'preflight_v4_structured_generation',
+        model: created.run.v4ModelSnapshot!.textModel,
+      }),
       tool: 'preflight_v4_structured_generation', status: 'COMPLETED', budgetUnits: 0,
       budgetReservationId: null, externalOperationId: null, errorCode: null,
       output: { protocol: 'RESPONSES_FUNCTION' },
@@ -506,7 +666,7 @@ describe('visual deck v4 planning runner', () => {
   test('allows exactly one semantic completion to disambiguate repeated source evidence', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-evidence-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -560,7 +720,7 @@ describe('visual deck v4 planning runner', () => {
   test('permits exactly one chain-4 content-slot completion after a semantic schema failure', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-slot-completion-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -597,7 +757,7 @@ describe('visual deck v4 planning runner', () => {
   test('does not grant a second semantic completion after repaired review evidence remains ambiguous', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await service.create(inputRequest, 'create-v4-chain-4-combined-repair-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -641,7 +801,7 @@ describe('visual deck v4 planning runner', () => {
   test('persists a real ten-page plan as five recoverable structured stages', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-planning-0001')
     const { model, operations, reflectionPayloads } = stagedModel(created, inputRequest, clock)
@@ -678,7 +838,7 @@ describe('visual deck v4 planning runner', () => {
       status: 'EXECUTING', committedBudgetUnits: 0,
     })
     const steps = await repository.listSteps(created.run.id)
-    expect(steps).toHaveLength(12)
+    expect(steps).toHaveLength(11)
     for (const stage of baseStages) {
       expect(steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(created.run.id, stage)))
         .toMatchObject({ status: 'COMPLETED' })
@@ -747,7 +907,7 @@ describe('visual deck v4 planning runner', () => {
   test('deterministically restores source roles and the explicit presentation goal before reflection', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request({ presentationGoal: '让学生解释为什么百分数便于统一比较' })
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-source-binding-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -795,7 +955,7 @@ describe('visual deck v4 planning runner', () => {
   test('keeps a persisted chain-2 Run on its original reflection contract', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-chain-2-compatibility-0001')
     await repository.transact(created.run.id, (transaction) => {
@@ -855,7 +1015,7 @@ describe('visual deck v4 planning runner', () => {
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
     const inputRequest = request()
     const seedRepository = new InMemoryAgentRepository()
-    const created = await new RunService({ repository: seedRepository, clock })
+    const created = await runService(seedRepository, clock)
       .create(inputRequest, 'create-v4-chain-1-missing-release-0001')
     const { release: _release, ...legacyRun } = created.run
     const repository = new InMemoryAgentRepository()
@@ -894,7 +1054,7 @@ describe('visual deck v4 planning runner', () => {
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
     const inputRequest = request()
     const seedRepository = new InMemoryAgentRepository()
-    const created = await new RunService({ repository: seedRepository, clock })
+    const created = await runService(seedRepository, clock)
       .create(inputRequest, 'create-v4-chain-1-failed-lifecycle-0001')
     const { release: _release, ...legacyRun } = created.run
     const repository = new InMemoryAgentRepository()
@@ -926,7 +1086,7 @@ describe('visual deck v4 planning runner', () => {
   test('infers chain-2 from a persisted legacy reflection marker when release metadata is missing', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-chain-2-marker-0001')
     await repository.transact(created.run.id, (transaction) => {
@@ -989,7 +1149,7 @@ describe('visual deck v4 planning runner', () => {
   test('fails closed before model submission when historical compiler markers conflict', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-compiler-conflict-0001')
     await repository.transact(created.run.id, (transaction) => {
@@ -1027,7 +1187,7 @@ describe('visual deck v4 planning runner', () => {
   test('resumes only the failed Slide Briefs stage with its original idempotency key', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-planning-recovery-0001')
     const { model, operations } = stagedModel(created, inputRequest, clock, true)
@@ -1077,7 +1237,7 @@ describe('visual deck v4 planning runner', () => {
   test('keeps one planning lifecycle open while source resolution recovers', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-source-recovery-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -1128,7 +1288,7 @@ describe('visual deck v4 planning runner', () => {
   test('closes source resolution lifecycle once after the fifth recoverable failure', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-source-exhaustion-0001')
     let sourceAttempts = 0
@@ -1172,7 +1332,7 @@ describe('visual deck v4 planning runner', () => {
   test('closes source resolution lifecycle once on a non-retryable configuration failure', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-source-forbidden-0001')
     const runner = new PlanningRunner({
@@ -1205,7 +1365,7 @@ describe('visual deck v4 planning runner', () => {
   test('continues the same Run after an accepted invalid Slide Critic contract', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-reflection-contract-skip-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -1248,7 +1408,7 @@ describe('visual deck v4 planning runner', () => {
   test('reuses one Slide Critic key for one UNKNOWN recovery and never submits a third time', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-reflection-unknown-skip-0001')
     const staged = stagedModel(created, inputRequest, clock)
@@ -1285,7 +1445,7 @@ describe('visual deck v4 planning runner', () => {
   test('normalizes invisible Slide Brief references without an extra model repair', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-slide-brief-contract-repair-0001')
     const { model, operations, repairPayloads } = stagedModel(
@@ -1330,7 +1490,7 @@ describe('visual deck v4 planning runner', () => {
   test('still repairs unrelated Slide Brief contract failures', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-slide-brief-source-repair-0001')
     const { model, operations, repairPayloads } = stagedModel(
@@ -1379,7 +1539,7 @@ describe('visual deck v4 planning runner', () => {
   test('does not grant a sixth provider submission to a Slide Brief contract repair', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-slide-brief-shared-budget-0001')
     const staged = stagedModel(created, inputRequest, clock, false, 'INVALID_SOURCE_CHUNK')
@@ -1439,7 +1599,7 @@ describe('visual deck v4 planning runner', () => {
   test('restores an exact request focus after the model splits it into separate items', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const inputRequest = request()
     const created = await createChain3Run(service, repository, inputRequest, 'create-v4-split-focus-0001')
     const { model, operations } = stagedModel(created, inputRequest, clock, false, 'NONE', true)
@@ -1470,7 +1630,7 @@ describe('visual deck v4 planning runner', () => {
   test('removes page 6 duplicate-count and page 12 numbering risks before prompt compilation', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-01T00:00:00.000Z'))
-    const service = new RunService({ repository, clock })
+    const service = runService(repository, clock)
     const baseRequest = request()
     const inputRequest = {
       ...baseRequest,

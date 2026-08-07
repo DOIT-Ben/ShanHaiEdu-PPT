@@ -91,6 +91,7 @@ type HandlerDependencies = Readonly<{
   presentationJobV2?: PresentationJobV2HandlerDependencies
   quickDeckEvaluation?: QuickDeckEvaluationHandlerDependencies
   capabilities?: PublicCapabilities
+  capabilitiesProvider?: () => Promise<PublicCapabilities>
 }>
 
 async function publicRunError(repository: AgentRepository, run: RunRecord): Promise<PublicError | null> {
@@ -776,10 +777,13 @@ export function createHttpHandler(dependencies: HandlerDependencies) {
       }
 
       if (parts.length === 2 && parts[1] === 'capabilities' && request.method === 'GET') {
+        const capabilities = dependencies.capabilitiesProvider
+          ? await dependencies.capabilitiesProvider()
+          : dependencies.capabilities ?? DEFAULT_PUBLIC_CAPABILITIES
         return json(capabilitiesEnvelopeSchema.parse({
           schemaVersion: CONTRACT_VERSION,
           requestId,
-          data: dependencies.capabilities ?? DEFAULT_PUBLIC_CAPABILITIES,
+          data: capabilities,
         }))
       }
 

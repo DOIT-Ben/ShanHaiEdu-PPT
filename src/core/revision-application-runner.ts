@@ -11,6 +11,8 @@ import {
   visualDeckV4ProposalDraftSchema,
   visualDeckV4RevisionApplicationResultSchema,
   visualDeckV4ReviewManuscriptSchema,
+  isV4ManuscriptContextTooLargeError,
+  V4_MANUSCRIPT_CONTEXT_TOO_LARGE,
   type VisualDeckV4ProposalDraft,
   type VisualDeckV4RevisionApplicationResult,
 } from '../visual-deck-v4-contracts'
@@ -50,6 +52,8 @@ import {
   failVisualDeckV4Transaction,
   revisionDetails,
 } from './v4-lifecycle'
+import { requireV4StructuredGenerationProtocol, v4ModelOverride } from './v4-model-policy'
+import { requirePersistedV4EvidenceWindow } from './v4-evidence-window-compiler'
 
 export type RevisionApplicationResult = Readonly<{
   status: RunRecord['status']
@@ -113,7 +117,30 @@ export class RevisionApplicationRunner {
     } catch (error) {
       return this.failBeforeApply(run, error instanceof Error ? error.message : 'REVISION_INPUT_FAILED')
     }
-    const sourceChunks = document.chunks
+    const compilerVersion = base.visualDeckV4Proposal?.compilerVersion
+    const chain4Manuscript = base.renderMode === 'VISUAL_DECK_V4'
+      && compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    const requiresSemanticModel = !(
+      base.renderMode === 'VISUAL_DECK_V4'
+      && plan.operations.every((operation) => operation.kind === 'REGENERATE_IMAGE')
+    )
+    let modelDocument = document
+    if (chain4Manuscript && requiresSemanticModel) {
+      try {
+        requireV4StructuredGenerationProtocol(run, compilerVersion)
+        modelDocument = {
+          ...document,
+          chunks: requirePersistedV4EvidenceWindow({
+            run,
+            document,
+            steps: await this.dependencies.repository.listSteps(run.id),
+          }).chunks,
+        }
+      } catch (error) {
+        return this.failBeforeApply(run, error instanceof Error ? error.message : 'REVISION_INPUT_FAILED')
+      }
+    }
+    const sourceChunks = modelDocument.chunks
     const idempotencyKey = revisionBlueprintStepKey(run.id, run.revisionRound)
     const inputHash = hashInput({
       tool: 'apply_revision',
@@ -125,8 +152,11 @@ export class RevisionApplicationRunner {
     if (prepared) return prepared
 
     try {
+      if (base.renderMode === 'VISUAL_DECK_V4') {
+        requireV4StructuredGenerationProtocol(run, compilerVersion)
+      }
       if (base.renderMode === 'VISUAL_DECK_V4'
-        && !isSupportedVisualDeckV4CompilerVersion(base.visualDeckV4Proposal?.compilerVersion ?? '')) {
+        && !isSupportedVisualDeckV4CompilerVersion(compilerVersion ?? '')) {
         throw new Error('VISUAL_DECK_V4_COMPILER_UNSUPPORTED')
       }
       if (base.renderMode === 'VISUAL_DECK_V4'
@@ -147,6 +177,7 @@ export class RevisionApplicationRunner {
         base,
         plan,
         document,
+        modelDocument,
         idempotencyKey,
       })
       return this.complete(run, idempotencyKey, blueprint, plan)
@@ -163,10 +194,17 @@ export class RevisionApplicationRunner {
     base: PresentationBlueprint
     plan: RevisionPlan
     document: Awaited<ReturnType<DocumentPort['resolve']>>
+    modelDocument: Awaited<ReturnType<DocumentPort['resolve']>>
     idempotencyKey: string
   }>) {
     let contractRepairIssues: readonly ContractRepairIssue[] | undefined
+    let contentSlotCompletion = false
+    let sourceEvidenceDisambiguation = false
     let lastError: unknown = new Error('REVISION_APPLICATION_FAILED')
+    const compilerVersion = input.base.visualDeckV4Proposal?.compilerVersion
+    const chain4 = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    const modelOverride = v4ModelOverride(input.run, 'TEXT', compilerVersion)
+    const structuredGenerationProtocol = requireV4StructuredGenerationProtocol(input.run, compilerVersion)
     for (let contractAttempt = 0; contractAttempt < MAX_REVISION_CONTRACT_ATTEMPTS; contractAttempt += 1) {
       for (let providerAttempt = 1;
         providerAttempt <= MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS;
@@ -176,10 +214,16 @@ export class RevisionApplicationRunner {
             tenantId: input.run.host.tenantId,
             blueprint: input.base,
             plan: input.plan,
-            sourceChunks: input.document.chunks,
+            sourceChunks: input.modelDocument.chunks,
             idempotencyKey: revisionContractAttemptKey(input.idempotencyKey, contractAttempt),
-            ...(contractRepairIssues ? { contractRepairIssues } : {}),
-            ...(input.run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: input.run.v4StructuredGenerationProtocol } : {}),
+            ...(modelOverride ? { modelOverride } : {}),
+            ...(chain4
+              ? {
+                  ...(contentSlotCompletion ? { contentSlotCompletion: true } : {}),
+                  ...(sourceEvidenceDisambiguation ? { sourceEvidenceDisambiguation: true } : {}),
+                }
+              : (contractRepairIssues ? { contractRepairIssues } : {})),
+            ...(structuredGenerationProtocol ? { structuredGenerationProtocol } : {}),
           })
           if (input.base.renderMode === 'VISUAL_DECK_V4') {
             const compilerVersion = input.base.visualDeckV4Proposal?.compilerVersion
@@ -189,7 +233,7 @@ export class RevisionApplicationRunner {
                     runId: input.run.id,
                     inputHash: hashInput({ baseId: input.base.id, plan: input.plan }),
                     source: input.run.source,
-                    document: input.document,
+                    document: input.modelDocument,
                     config: input.run.visualDeckV4!,
                     slideCount: input.run.slideCount,
                     visualDirection: input.run.visualDirection,
@@ -213,7 +257,10 @@ export class RevisionApplicationRunner {
                   visualDeckV4RevisionApplicationResultSchema.parse(raw),
                 )
                 : visualDeckV4ProposalDraftSchema.parse(raw)
-            const blueprint = this.compileV4Revision(input.run, input.base, input.plan, input.document, draft)
+            const blueprintDocument = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+              ? input.modelDocument
+              : input.document
+            const blueprint = this.compileV4Revision(input.run, input.base, input.plan, blueprintDocument, draft)
             this.validateV4Revision(input.run.id, input.base, blueprint, input.plan)
             return blueprint
           }
@@ -246,13 +293,19 @@ export class RevisionApplicationRunner {
             )
             continue
           }
+          const sourceEvidenceAmbiguous = chain4
+            && error instanceof Error
+            && error.message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
           const issues = revisionContractRepairIssues(error)
           if (!issues || contractAttempt + 1 >= MAX_REVISION_CONTRACT_ATTEMPTS) {
             throw new RevisionApplicationExecutionError(
               revisionApplicationFailure(error, providerAttempt, contractAttempt + 1),
             )
           }
-          contractRepairIssues = issues
+          if (chain4) {
+            contentSlotCompletion = true
+            if (sourceEvidenceAmbiguous) sourceEvidenceDisambiguation = true
+          } else contractRepairIssues = issues
           break
         }
       }
@@ -699,12 +752,20 @@ function revisionApplicationFailure(
   contractAttempt: number,
 ): RevisionApplicationFailure {
   const structured = error instanceof StructuredModelError ? error : null
+  const manuscriptContextTooLarge = isV4ManuscriptContextTooLargeError(error)
   const diagnosticCode = structured?.code
-    ?? (error instanceof Error && /^[A-Z][A-Z0-9_]{2,99}$/.test(error.message)
+    ?? (manuscriptContextTooLarge
+      ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
+      : error instanceof Error && /^[A-Z][A-Z0-9_]{2,99}$/.test(error.message)
       ? error.message
       : 'REVISION_APPLICATION_FAILED')
   return {
-    errorCode: structured?.code ?? 'REVISION_APPLICATION_FAILED',
+    errorCode: structured?.code
+      ?? (manuscriptContextTooLarge
+        ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
+        : error instanceof Error && ['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'].includes(error.message)
+        ? error.message
+        : 'REVISION_APPLICATION_FAILED'),
     diagnosticCode,
     providerAttempt,
     maxProviderAttempts: MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS,

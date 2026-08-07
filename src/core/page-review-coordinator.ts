@@ -86,6 +86,7 @@ export class PageReviewCoordinator {
     })
     const requirements = blueprintImageRequirements(run, blueprint)
     const fullPageRaster = blueprint.renderMode === 'VISUAL_DECK_V4'
+    const v4CompilerVersion = blueprint.visualDeckV4Proposal?.compilerVersion
     const completedImageSteps = (await this.dependencies.repository.listSteps(runId))
       .filter((step) => step.tool === 'generate_slide_image' && step.status === 'COMPLETED')
     const imageSteps = requirements.map((requirement) =>
@@ -114,10 +115,12 @@ export class PageReviewCoordinator {
           : requirement.elementId ? `${slide.visualIntent}；审查独立素材 ${requirement.elementId}` : slide.visualIntent,
         layout: fullPageRaster ? 'VISUAL_DECK_V4' : requirement.elementId ? `LAYERED:${requirement.elementId}` : slide.layout,
         visualDirection: blueprint.visualDirection,
+        ...(fullPageRaster && v4CompilerVersion ? { v4CompilerVersion } : {}),
         ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
       })
       this.dependencies.onReviewCompleted?.()
-      if (result.review === null) stopReviews = true
+      // A local protocol rejection is non-billable; persist it for every page.
+      if (result.review === null && result.step.errorCode !== 'V4_CHAIN4_PROTOCOL_UNSUPPORTED') stopReviews = true
       return result
     })
     reviews.push(...assetReviews.filter((result): result is ReviewSlideResult => result !== null))
@@ -156,6 +159,7 @@ export class PageReviewCoordinator {
             visualIntent: `${slide.visualIntent}；审查完整组装页面的知识相关性、文字可读性、遮挡、层级和越界`,
             layout: `COMPOSITE:${slide.layout}`,
             visualDirection: blueprint.visualDirection,
+            ...(blueprint.renderMode === 'VISUAL_DECK_V4' && v4CompilerVersion ? { v4CompilerVersion } : {}),
             ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
           })
           this.dependencies.onReviewCompleted?.()
@@ -172,6 +176,7 @@ export class PageReviewCoordinator {
       && !aspectRatioInvalidPageNumbers.has(this.reviewPageNumber(run.id, result.step) ?? -1)).length
     const total = requirements.length + (fullPageRaster ? 0 : blueprint.slides.length)
     const executionFailed = reviews.some((result) => result.review === null) || reviews.length !== total
+    const executionFailureCode = reviews.find((result) => result.review === null)?.step.errorCode
     if (!executionFailed) {
       await this.resolveSupersededPageIssues(run, reviews)
     }
@@ -201,7 +206,7 @@ export class PageReviewCoordinator {
             ],
           })
         } else {
-          await this.moveToHuman(runId, executionFailed ? 'PAGE_REVIEW_FAILED' : 'PAGE_REVIEW_REJECTED', {
+          await this.moveToHuman(runId, executionFailed ? executionFailureCode ?? 'PAGE_REVIEW_FAILED' : 'PAGE_REVIEW_REJECTED', {
             completed: reviews.filter((result) => result.review !== null).length,
             total,
             pageNumbers: problemPageNumbers,

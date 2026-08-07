@@ -26,6 +26,7 @@ import { RevisionApplicationRunner } from '../src/core/revision-application-runn
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
 import { RevisionPlanningRunner } from '../src/core/revision-planning-runner'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
+import { compileV4EvidenceWindowForRun, v4EvidenceWindowStepKey } from '../src/core/v4-evidence-window-compiler'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 
@@ -118,6 +119,14 @@ function run(): RunRecord {
     slideCount: 2,
     visualDirection: '温暖的儿童绘本课堂视觉',
     imageModel: 'gemini-3-pro-image-preview',
+    v4ModelSnapshot: {
+      schemaVersion: '1',
+      textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra',
+      imageModel: 'gemini-3-pro-image-preview',
+      imageEditModel: 'gpt-image-2',
+    },
+    v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
     automationLevel: 'BOUNDED_AUTO',
     presentationMode: 'VISUAL_DECK_V4',
     visualDeckV4: v4Config,
@@ -177,21 +186,39 @@ describe('V4 GPT revision delivery integration', () => {
     const renderer = new CapturingRenderer()
     const planned = blueprint()
     await repository.createRun(run())
-    await repository.transact(runId, (transaction) => transaction.putStep({
-      id: `step-${runId}-plan`,
-      runId,
-      idempotencyKey: planningStepKey(runId),
-      inputHash: 'plan-hash',
-      tool: 'create_blueprint',
-      status: 'COMPLETED',
-      budgetUnits: 0,
-      budgetReservationId: null,
-      externalOperationId: null,
-      errorCode: null,
-      output: planned,
-      createdAt: transaction.run.createdAt,
-      updatedAt: transaction.run.updatedAt,
-    }))
+    await repository.transact(runId, (transaction) => {
+      const evidenceWindow = compileV4EvidenceWindowForRun({ run: transaction.run, document: document() })
+      transaction.putStep({
+        id: `step-${runId}-plan`,
+        runId,
+        idempotencyKey: planningStepKey(runId),
+        inputHash: 'plan-hash',
+        tool: 'create_blueprint',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: planned,
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+      transaction.putStep({
+        id: `step-${runId}-evidence-window`,
+        runId,
+        idempotencyKey: v4EvidenceWindowStepKey(runId),
+        inputHash: 'evidence-window-hash',
+        tool: 'compile_v4_evidence_window',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: evidenceWindow.audit,
+        createdAt: transaction.run.createdAt,
+        updatedAt: transaction.run.updatedAt,
+      })
+    })
 
     const media = new MediaStepRunner({ repository, budget, images, clock })
     const generation = new SlideGenerationCoordinator({

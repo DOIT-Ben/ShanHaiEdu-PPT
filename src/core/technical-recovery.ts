@@ -48,6 +48,11 @@ function isTechnicalContractFailure(errorCode: string) {
 }
 
 function terminalFailureCode(failure: TechnicalFailure, attempt: number): V4RunFailureCode {
+  if (failure.diagnosticCode === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
+    || failure.diagnosticCode === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+    || failure.diagnosticCode === 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE') {
+    return failure.diagnosticCode
+  }
   if (attempt >= MAX_TECHNICAL_RECOVERY_ATTEMPTS) return 'TECHNICAL_RECOVERY_EXHAUSTED'
   return failure.category === 'CONTRACT'
     ? 'TECHNICAL_CONTRACT_INVALID'
@@ -71,6 +76,9 @@ function terminalLifecycleReason(resumeState: TechnicalRecovery['resumeState']) 
  */
 export function technicalFailureDisposition(errorCode: string): TechnicalFailureDisposition | null {
   const normalized = errorCode.toUpperCase()
+  if (normalized === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
+    || normalized === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+    || normalized === 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE') return 'NON_RETRYABLE'
   if (isTechnicalContractFailure(normalized)) return 'NON_RETRYABLE'
   if (NON_RETRYABLE_AUTHENTICATION_FAILURE_CODES.has(normalized)
     || /(^|_)(401|403|404)(_|$)|PERMISSION|MODEL_(FORBIDDEN|NOT_FOUND)|CONTENT_POLICY|UNSUPPORTED/.test(normalized)) {
@@ -92,6 +100,7 @@ function boundedDiagnosticCode(errorCode: string, fallback: string) {
 }
 
 function categoryForKnownCode(errorCode: string): TechnicalFailure['category'] {
+  if (['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED', 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE'].includes(errorCode.toUpperCase())) return 'CONTRACT'
   if (isTechnicalContractFailure(errorCode.toUpperCase())) return 'CONTRACT'
   if (/^(HOST_|PPT_)USAGE_V2_/.test(errorCode.toUpperCase())) return 'USAGE_V2'
   if (/PROVIDER|MODEL_|GATEWAY|RATE_LIMIT|NO_HEALTHY_ROUTE/.test(errorCode.toUpperCase())) return 'PROVIDER'

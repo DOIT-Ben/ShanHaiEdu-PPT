@@ -4,7 +4,24 @@ import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock } from '../src/adapters/mock-ports'
 import { getPresentationModeStrategy, listPresentationModeStrategies } from '../src/core/presentation-mode-strategy'
 import { RunService } from '../src/core/run-service'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
+
+function testV4ModelPolicy() {
+  const readiness = {
+    status: 'PASSED' as const,
+    evaluationRelease: 'test', gatewayContractVersion: 'test', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+    evaluatedAt: '2026-08-07T00:00:00.000Z', evaluationSuite: 'test',
+    expiresAt: '9999-12-31T23:59:59.999Z',
+  }
+  return new V4ModelPolicy({
+    runtimeMode: 'MOCK',
+    models: [
+      { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness },
+      { model: 'gpt-image-2', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
+    ],
+  })
+}
 
 describe('presentation mode strategy', () => {
   test('registers every supported mode with an explicit planning, asset, delivery, and execution policy', () => {
@@ -31,7 +48,7 @@ describe('presentation mode strategy', () => {
 
   test('allows an approved v4 proposal to enter its registered execution path', async () => {
     const repository = new InMemoryAgentRepository()
-    const service = new RunService({ repository, clock: new FixedClock() })
+    const service = new RunService({ repository, clock: new FixedClock(), v4ModelPolicy: testV4ModelPolicy() })
     const request = {
       schemaVersion: CONTRACT_VERSION,
       host: { tenantId: 'frameflow', externalUserId: 'user-v4' },

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../../release-identity'
 import type {
   VisualDeckV4DeckVisualStage,
   VisualDeckV4SlideBriefsStage,
@@ -53,7 +54,8 @@ type CommonInput = Readonly<{
   tenantId: string
   planningAttempt: number
   compilerVersion: string
-  protocol: StructuredGenerationProtocol
+  protocol: StructuredGenerationProtocol | undefined
+  modelOverride?: string
   sourceSummary: string
 }>
 
@@ -235,13 +237,17 @@ export class V4ReflectionCoordinator {
         }
       }
       try {
+        if (input.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION && !input.modelOverride) {
+          throw new Error('V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE')
+        }
         const value = await this.dependencies.model.execute({
           tenantId: input.tenantId,
           operation: input.operation,
           schemaName: input.schemaName,
           payload: input.payload,
           idempotencyKey: key,
-          structuredGenerationProtocol: input.protocol,
+          ...(input.modelOverride ? { modelOverride: input.modelOverride } : {}),
+          ...(input.protocol ? { structuredGenerationProtocol: input.protocol } : {}),
         })
         const parsed = input.schema.safeParse(value)
         if (!parsed.success) {
@@ -249,6 +255,7 @@ export class V4ReflectionCoordinator {
         }
         return { ok: true, value: parsed.data, key, transportAttemptCount: prepared.attempts, step: prepared.step }
       } catch (error) {
+        if (error instanceof Error && error.message === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE') throw error
         const layer = failureLayer(error)
         const submissionState = error instanceof StructuredModelError ? error.submissionState : 'NOT_ACCEPTED'
         if (submissionState === 'UNKNOWN' && prepared.attempts < 2) continue

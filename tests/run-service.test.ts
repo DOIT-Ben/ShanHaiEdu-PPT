@@ -27,6 +27,26 @@ const request = {
   budgetUnits: 100,
 } as const
 
+const v4Readiness = {
+  status: 'PASSED' as const,
+  evaluationRelease: 'test',
+  gatewayContractVersion: 'test',
+  structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+  evaluatedAt: '2026-08-07T00:00:00.000Z',
+  evaluationSuite: 'test',
+  expiresAt: '9999-12-31T23:59:59.999Z',
+}
+
+function testV4ModelPolicy() {
+  return new V4ModelPolicy({
+    runtimeMode: 'MOCK',
+    models: [
+      { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness: v4Readiness },
+      { model: 'gpt-image-2', roles: ['IMAGE', 'IMAGE_EDIT'], evaluationEnabled: true, published: true, readiness: v4Readiness },
+    ],
+  })
+}
+
 function usageV2Catalog(model = 'gpt-image-2') {
   return parseProviderBillingCatalog(JSON.stringify({ schemaVersion: '1', entries: [{
     model, operationMode: 'TEXT_TO_IMAGE', resolution: '1K', costBasis: 'FIXED_PER_OPERATION',
@@ -96,7 +116,12 @@ function fixture() {
   const repository = new InMemoryAgentRepository()
   const artifacts = new MockArtifactPort()
   const clock = new FixedClock()
-  return { repository, artifacts, clock, service: new RunService({ repository, artifacts, clock }) }
+  return {
+    repository,
+    artifacts,
+    clock,
+    service: new RunService({ repository, artifacts, clock, v4ModelPolicy: testV4ModelPolicy() }),
+  }
 }
 
 type QualityRecoveryImageFault =
@@ -250,11 +275,25 @@ describe('run service', () => {
   test('rejects unpublished image models only for new V4 Runs and preserves exact replay', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock()
+    const readiness = {
+      status: 'PASSED' as const,
+      evaluationRelease: 'test',
+      gatewayContractVersion: 'test',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+      evaluatedAt: '2026-08-07T00:00:00.000Z',
+      evaluationSuite: 'test',
+      expiresAt: '9999-12-31T23:59:59.999Z',
+    }
     const allowed = new RunService({
       repository,
       clock,
       v4ModelPolicy: new V4ModelPolicy({
-        runtimeMode: 'GATEWAY', textModels: ['text'], visionModels: ['vision'], imageModels: ['gpt-image-2'],
+        runtimeMode: 'MOCK',
+        models: [
+          { model: 'text', roles: ['TEXT'], evaluationEnabled: true, published: true, readiness },
+          { model: 'vision', roles: ['VISION'], evaluationEnabled: true, published: true, readiness },
+          { model: 'gpt-image-2', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
+        ],
       }),
     })
     const v4Request = {
@@ -266,18 +305,47 @@ describe('run service', () => {
       },
     }
     const created = await allowed.create(v4Request, 'v4-model-policy-create-0001')
+    expect(created.run.v4ModelSnapshot).toEqual({
+      schemaVersion: '1',
+      textModel: 'text',
+      visionModel: 'vision',
+      imageModel: 'gpt-image-2',
+      imageEditModel: null,
+    })
     const restricted = new RunService({
       repository,
       clock,
       v4ModelPolicy: new V4ModelPolicy({
-        runtimeMode: 'GATEWAY', textModels: ['text'], visionModels: ['vision'], imageModels: ['other-image'],
+        runtimeMode: 'MOCK',
+        models: [
+          { model: 'text', roles: ['TEXT'], evaluationEnabled: true, published: true, readiness },
+          { model: 'vision', roles: ['VISION'], evaluationEnabled: true, published: true, readiness },
+          { model: 'other-image', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
+        ],
       }),
     })
 
     await expect(restricted.create(v4Request, 'v4-model-policy-create-0001'))
-      .resolves.toMatchObject({ replayed: true, run: { id: created.run.id } })
+      .resolves.toMatchObject({ replayed: true, run: { id: created.run.id, v4ModelSnapshot: created.run.v4ModelSnapshot } })
     await expect(restricted.create(v4Request, 'v4-model-policy-create-0002'))
       .rejects.toMatchObject({ status: 422, code: 'V4_IMAGE_MODEL_NOT_ALLOWED' })
+  })
+
+  test('fails a new V4 Run closed when no model policy is installed', async () => {
+    const service = new RunService({ repository: new InMemoryAgentRepository(), clock: new FixedClock() })
+
+    await expect(service.create({
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: {
+        instruction: '根据来源生成两页演示',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+      },
+    }, 'v4-model-policy-required-0001')).rejects.toMatchObject({
+      status: 503,
+      code: 'V4_MODEL_POLICY_REQUIRED',
+    })
   })
   test('creates and safely replays a host-scoped Run', async () => {
     const { repository, service } = fixture()
@@ -297,6 +365,7 @@ describe('run service', () => {
       clock: new FixedClock(),
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
       providerBillingCatalog: usageV2Catalog(),
+      v4ModelPolicy: testV4ModelPolicy(),
     })
     const v4Request = {
       ...request,
@@ -333,6 +402,7 @@ describe('run service', () => {
     const service = new RunService({
       repository, clock: new FixedClock(), defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
       providerBillingCatalog: usageV2Catalog(),
+      v4ModelPolicy: testV4ModelPolicy(),
     })
     const created = await service.create({
       ...request,
@@ -365,6 +435,7 @@ describe('run service', () => {
       clock: new FixedClock(),
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
       providerBillingCatalog: usageV2Catalog('another-model'),
+      v4ModelPolicy: testV4ModelPolicy(),
     })
 
     await expect(service.create({

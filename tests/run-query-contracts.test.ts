@@ -76,6 +76,12 @@ describe('public run query contracts', () => {
         slideCount: { minimum: 1, maximum: 50 },
         aspectRatios: ['16:9'],
         models: { text: ['local-mock-text'], vision: ['local-mock-vision'], image: ['local-mock-image'], imageEdit: [] },
+        modelAvailability: {
+          text: [{ model: 'local-mock-text', state: 'HEALTHY', checkedAt: null }],
+          vision: [{ model: 'local-mock-vision', state: 'HEALTHY', checkedAt: null }],
+          image: [{ model: 'local-mock-image', state: 'HEALTHY', checkedAt: null }],
+          imageEdit: [],
+        },
         imageGeneration: { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
         delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },
       },
@@ -84,5 +90,23 @@ describe('public run query contracts', () => {
     expect(serialized).not.toContain('baseUrl')
     expect(serialized).not.toContain('apiKey')
     expect(createPublicCapabilities({ imageEditModels: [] }).visualDeckV4.models.imageEdit).toEqual([])
+  })
+
+  test('rejects a model availability list that is unique but not aligned with its published-model order', () => {
+    expect(() => createPublicCapabilities({
+      textModels: ['text-a', 'text-b'],
+      visionModels: [],
+      imageModels: [],
+      imageEditModels: [],
+      modelAvailability: {
+        text: [
+          { model: 'text-b', state: 'HEALTHY', checkedAt: null },
+          { model: 'text-a', state: 'HEALTHY', checkedAt: null },
+        ],
+        vision: [],
+        image: [],
+        imageEdit: [],
+      },
+    })).toThrow('availability must match public model order')
   })
 })

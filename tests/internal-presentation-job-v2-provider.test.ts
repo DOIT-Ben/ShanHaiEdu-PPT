@@ -13,6 +13,7 @@ import { ensureGenerationBatch, finalizeGenerationBatch, reserveGenerationBatch 
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import type { RunRecord } from '../src/core/ports'
 import { RunService } from '../src/core/run-service'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 import { approvedPageDesignSnapshotHash } from '../src/presentation-job-v2-contracts'
 import { presentationBlueprintSchema } from '../src/presentation-contracts'
 import { createMockRuntime } from '../src/runtime/mock-runtime'
@@ -43,6 +44,25 @@ const snapshot = {
 } as const
 
 const createdAt = '2026-08-05T00:00:00.000Z'
+
+function acceptedV4ModelPolicy() {
+  const readiness = {
+    status: 'PASSED' as const,
+    evaluationRelease: 'test',
+    gatewayContractVersion: 'test',
+    structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+    evaluatedAt: '2026-08-07T00:00:00.000Z',
+    evaluationSuite: 'test',
+    expiresAt: '9999-12-31T23:59:59.999Z',
+  }
+  return new V4ModelPolicy({
+    runtimeMode: 'MOCK',
+    models: [
+      { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness },
+      { model: 'gemini-3-pro-image-preview', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
+    ],
+  })
+}
 
 function batchRun(tenantId: string): RunRecord {
   return {
@@ -146,6 +166,53 @@ describe('internal Presentation Job V2 provider', () => {
     })
   })
 
+  test('applies the same published-model policy when V2 creates its internal V4 Run', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock()
+    const readiness = {
+      status: 'PASSED' as const,
+      evaluationRelease: 'test',
+      gatewayContractVersion: 'test',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+      evaluatedAt: '2026-08-07T00:00:00.000Z',
+      evaluationSuite: 'test',
+      expiresAt: '9999-12-31T23:59:59.999Z',
+    }
+    const provider = new InternalPresentationJobV2Provider({
+      runs: new RunService({
+        repository,
+        artifacts,
+        clock,
+        v4ModelPolicy: new V4ModelPolicy({
+          runtimeMode: 'MOCK',
+          models: [
+            { model: 'text', roles: ['TEXT'], evaluationEnabled: true, published: true, readiness },
+            { model: 'vision', roles: ['VISION'], evaluationEnabled: true, published: true, readiness },
+            { model: 'gemini-3-pro-image-preview', roles: ['IMAGE'], evaluationEnabled: true, published: false, readiness },
+          ],
+        }),
+      }),
+      repository,
+      artifacts,
+      internalTenantId: presentationJobV2InternalTenantId('frameflow-model-policy'),
+    })
+
+    await expect(provider.submit({
+      jobId: 'presentation-job-model-policy',
+      owner: { tenantId: 'frameflow-model-policy', externalUserId: 'teacher-1', externalProjectId: null },
+      source: {
+        kind: 'APPROVED_PAGE_DESIGN',
+        artifactVersionId: 'approved-page-design-v1',
+        sha256: approvedPageDesignSnapshotHash(snapshot),
+        snapshot: JSON.parse(JSON.stringify(snapshot)),
+      },
+      idempotencyKey: 'presentation-job-model-policy:provider:1',
+      maximumBillableImageOperations: snapshot.pages.length * 5,
+    })).rejects.toMatchObject({ status: 422, code: 'V4_IMAGE_MODEL_NOT_ALLOWED' })
+    expect(await repository.listRuns()).toEqual([])
+  })
+
   test('runs the frozen V2 source through the existing intelligent-agent pipeline', async () => {
     const repository = new InMemoryAgentRepository()
     const presentationJobs = new InMemoryPresentationJobV2Repository()
@@ -153,7 +220,7 @@ describe('internal Presentation Job V2 provider', () => {
     const clock = new FixedClock()
     const internalTenantId = presentationJobV2InternalTenantId('frameflow')
     const provider = new InternalPresentationJobV2Provider({
-      runs: new RunService({ repository, artifacts, clock }),
+      runs: new RunService({ repository, artifacts, clock, v4ModelPolicy: acceptedV4ModelPolicy() }),
       repository,
       artifacts,
       internalTenantId,

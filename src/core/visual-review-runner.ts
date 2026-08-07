@@ -5,6 +5,8 @@ import { hashInput } from './hash'
 import { StructuredModelError } from './ports'
 import type { AgentRepository, ClockPort, ContractRepairIssue, RunRecord, StepRecord, VisualReviewPort } from './ports'
 import { revisionContractRepairIssues } from './revision-contract-repair'
+import { requireV4StructuredGenerationProtocol, v4ModelOverride } from './v4-model-policy'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
 
 const MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS = 5
 const MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS = 2
@@ -37,6 +39,7 @@ export type ReviewSlideInput = Readonly<{
   visualIntent: string
   layout: string
   visualDirection: string
+  v4CompilerVersion?: string
   structuredGenerationProtocol?: import('./ports').StructuredGenerationProtocol
 }>
 
@@ -59,6 +62,11 @@ export class VisualReviewRunner {
     if (prepared.replayed) return prepared
 
     try {
+      const modelOverride = v4ModelOverride(prepared.run, 'VISION', input.v4CompilerVersion)
+      const structuredGenerationProtocol = requireV4StructuredGenerationProtocol(
+        prepared.run,
+        input.v4CompilerVersion,
+      )
       const review = await this.reviewWithProviderRetry({
         tenantId: prepared.run.host.tenantId,
         artifactId: input.artifactId,
@@ -66,7 +74,9 @@ export class VisualReviewRunner {
         layout: input.layout,
         visualDirection: input.visualDirection,
         idempotencyKey: input.idempotencyKey,
-        ...(input.structuredGenerationProtocol ? { structuredGenerationProtocol: input.structuredGenerationProtocol } : {}),
+        ...(modelOverride ? { modelOverride } : {}),
+        ...(input.v4CompilerVersion ? { v4CompilerVersion: input.v4CompilerVersion } : {}),
+        ...(structuredGenerationProtocol ? { structuredGenerationProtocol } : {}),
       })
       return this.complete(input, review)
     } catch (error) {
@@ -79,6 +89,8 @@ export class VisualReviewRunner {
 
   private async reviewWithProviderRetry(input: Parameters<VisualReviewPort['review']>[0]) {
     let contractRepairIssues: readonly ContractRepairIssue[] | undefined
+    let contentSlotCompletion = false
+    const chain4 = input.v4CompilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
     let lastError: unknown = new Error('VISUAL_REVIEW_FAILED')
     for (let contractAttempt = 0;
       contractAttempt < MAX_VISUAL_REVIEW_CONTRACT_ATTEMPTS;
@@ -91,7 +103,9 @@ export class VisualReviewRunner {
           const raw = await this.dependencies.reviewer.review({
             ...input,
             idempotencyKey,
-            ...(contractRepairIssues ? { contractRepairIssues } : {}),
+            ...(chain4
+              ? (contentSlotCompletion ? { contentSlotCompletion: true } : {})
+              : (contractRepairIssues ? { contractRepairIssues } : {})),
           })
           return slideVisualReviewSchema.parse(raw)
         } catch (error) {
@@ -117,7 +131,8 @@ export class VisualReviewRunner {
               visualReviewFailure(error, providerAttempt, contractAttempt + 1),
             )
           }
-          contractRepairIssues = issues
+          if (chain4) contentSlotCompletion = true
+          else contractRepairIssues = issues
           break
         }
       }
@@ -291,7 +306,11 @@ function visualReviewFailure(
     }
   }
   return {
-    errorCode: error instanceof ZodError ? 'MODEL_JSON_INVALID' : 'VISUAL_REVIEW_FAILED',
+    errorCode: error instanceof ZodError
+      ? 'MODEL_JSON_INVALID'
+      : error instanceof Error && /^[A-Z][A-Z0-9_]{2,99}$/.test(error.message)
+        ? error.message
+        : 'VISUAL_REVIEW_FAILED',
     providerAttempt,
     maxProviderAttempts: MAX_VISUAL_REVIEW_PROVIDER_ATTEMPTS,
     contractAttempt,

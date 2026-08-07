@@ -12,6 +12,9 @@ import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { appendV4LifecycleEvent } from '../src/core/v4-lifecycle'
 import { generationBatchStepKeyFor } from '../src/core/generation-batch'
 import { DeliveryRunner } from '../src/core/delivery-runner'
+import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
+import { compileV4EvidenceWindowForRun, v4EvidenceWindowStepKey } from '../src/core/v4-evidence-window-compiler'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
 
 function run(): RunRecord {
   return {
@@ -23,6 +26,10 @@ function run(): RunRecord {
     slideCount: 2,
     visualDirection: '清晰的课堂科学信息图风格',
     imageModel: 'gpt-image-2',
+    v4ModelSnapshot: {
+      schemaVersion: '1', textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra',
+      imageModel: 'gpt-image-2', imageEditModel: 'gpt-image-2',
+    },
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -83,6 +90,37 @@ function document(): DocumentResult {
   }
 }
 
+function chain4Blueprint() {
+  const source = {
+    kind: 'TEXT' as const,
+    name: '光合作用教材.txt',
+    text: '绿色植物利用光能制造有机物并释放氧气。'.repeat(8),
+  }
+  return createVisualDeckV4Blueprint({
+    runId: 'run-1',
+    inputHash: 'chain4-deck-review-plan',
+    source,
+    document: document(),
+    config: {
+      instruction: '制作两页光合作用视觉演示',
+      sourceMode: 'SOURCE_GROUNDED',
+      deckOptions: {
+        deckType: 'DETAILED_DECK',
+        language: 'zh-CN',
+        length: { slideCount: 2 },
+        aspectRatio: '16:9',
+        audience: '七年级学生',
+        focus: '理解光合作用',
+        styleHint: '课堂科学信息图',
+      },
+    },
+    slideCount: 2,
+    visualDirection: '课堂科学信息图',
+    compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+    createdAt: '2026-07-21T00:00:00.000Z',
+  })
+}
+
 function passingReview() {
   return {
     qualityScore: 88,
@@ -101,7 +139,7 @@ class StaticDocumentPort implements DocumentPort {
   async resolve() { return structuredClone(this.result) }
 }
 
-async function fixture(response: unknown = passingReview()) {
+async function fixture(response: unknown = passingReview(), activeBlueprint: unknown = blueprint()) {
   const repository = new InMemoryAgentRepository()
   const documents = new StaticDocumentPort(document())
   const reviewer = new MockDeckReviewPort(response)
@@ -116,7 +154,7 @@ async function fixture(response: unknown = passingReview()) {
     transaction.putStep({
       id: 'step-plan', runId: 'run-1', idempotencyKey: planningStepKey('run-1'), inputHash: 'plan-hash',
       tool: 'create_blueprint', status: 'COMPLETED', budgetUnits: 0, budgetReservationId: null,
-      externalOperationId: null, errorCode: null, output: blueprint(),
+      externalOperationId: null, errorCode: null, output: activeBlueprint,
       createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
     })
     for (const pageNumber of [1, 2]) {
@@ -153,9 +191,130 @@ async function fixture(response: unknown = passingReview()) {
   }
 }
 
+async function persistChain4EvidenceWindow(
+  repository: InMemoryAgentRepository,
+  document: DocumentResult,
+) {
+  const run = await repository.getRun('run-1')
+  if (!run) throw new Error('RUN_NOT_FOUND')
+  const window = compileV4EvidenceWindowForRun({ run, document })
+  const idempotencyKey = v4EvidenceWindowStepKey(run.id)
+  await repository.transact(run.id, (transaction) => transaction.putStep({
+    id: `step-${idempotencyKey}`,
+    runId: run.id,
+    idempotencyKey,
+    inputHash: hashInput({ idempotencyKey, audit: window.audit }),
+    tool: 'compile_v4_evidence_window',
+    status: 'COMPLETED',
+    budgetUnits: 0,
+    budgetReservationId: null,
+    externalOperationId: null,
+    errorCode: null,
+    output: window.audit,
+    createdAt: transaction.run.createdAt,
+    updatedAt: transaction.run.updatedAt,
+  }))
+  return window
+}
+
+function chain4Config() {
+  return {
+    instruction: '制作两页光合作用视觉演示',
+    sourceMode: 'SOURCE_GROUNDED' as const,
+    deckOptions: {
+      deckType: 'DETAILED_DECK' as const,
+      language: 'zh-CN',
+      length: { slideCount: 2 },
+      aspectRatio: '16:9' as const,
+      audience: '七年级学生',
+      focus: '理解光合作用',
+      styleHint: '课堂科学信息图',
+    },
+  }
+}
+
 describe('deck review runner', () => {
+  test.each([
+    ['missing protocol', undefined],
+    ['Responses Function', 'RESPONSES_FUNCTION'],
+    ['Chat legacy', 'CHAT_LEGACY'],
+  ] as const)('does not call the evaluator when chain-4 persisted %s', async (_label, protocol) => {
+    const { repository, reviewer, runner } = await fixture(passingReview(), chain4Blueprint())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        ...(protocol === undefined ? {} : { v4StructuredGenerationProtocol: protocol }),
+      })
+    })
+
+    const result = await runner.review('run-1')
+
+    expect(result).toMatchObject({
+      passed: false,
+      review: null,
+      step: { errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' },
+    })
+    expect(reviewer.requests.size).toBe(0)
+  })
+
+  test('sends only the persisted CJK evidence window to a chain-4 deck review', async () => {
+    const { repository, documents, reviewer, runner } = await fixture(passingReview(), chain4Blueprint())
+    const source = document()
+    const bounded = (prefix: string) => `${prefix}${'汉'.repeat(12_000 - prefix.length)}`
+    const largeDocument: DocumentResult = {
+      ...source,
+      chunks: Array.from({ length: 9 }, (_, index) => ({
+        id: `chunk-${index + 1}`,
+        text: bounded(index === 8 ? 'WINDOW_OUTSIDE_MARKER' : source.chunks[index]?.text ?? `第${index + 1}份资料`),
+        sha256: `sha-${index + 1}`,
+      })),
+    }
+    documents.result = largeDocument
+    await repository.transact('run-1', (transaction) => transaction.putRun({
+      ...transaction.run,
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: chain4Config(),
+      v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    }))
+    const window = await persistChain4EvidenceWindow(repository, largeDocument)
+
+    const result = await runner.review('run-1')
+
+    expect(result).toMatchObject({ passed: true, review: { qualityScore: 88 } })
+    const request = [...reviewer.requests.values()][0]!
+    expect(request.sourceChunks).toEqual(window.chunks)
+    expect(request.sourceChunks.reduce((total, chunk) => total + chunk.text.length, 0)).toBe(96_000)
+    expect(request.sourceChunks.some((chunk) => chunk.text.includes('WINDOW_OUTSIDE_MARKER'))).toBe(false)
+  })
+
+  test('fails before the chain-4 deck evaluator when persisted evidence has drifted', async () => {
+    const { repository, documents, reviewer, runner } = await fixture(passingReview(), chain4Blueprint())
+    await repository.transact('run-1', (transaction) => transaction.putRun({
+      ...transaction.run,
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: chain4Config(),
+      v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    }))
+    await persistChain4EvidenceWindow(repository, documents.result)
+    documents.result = {
+      ...documents.result,
+      chunks: documents.result.chunks.map((chunk, index) => index === 0
+        ? { ...chunk, text: `已${chunk.text.slice(1)}` }
+        : chunk),
+    }
+
+    const result = await runner.review('run-1')
+
+    expect(result).toMatchObject({ review: null, step: { errorCode: 'V4_EVIDENCE_WINDOW_REPLAY_MISMATCH' } })
+    expect(reviewer.requests.size).toBe(0)
+  })
+
   test('evaluates ordered controlled artifacts and enters delivery after the fixed quality gate passes', async () => {
     const { repository, reviewer, renderer, runner } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
     const result = await runner.review('run-1')
 
     expect(result).toMatchObject({ passed: true, replayed: false, review: { qualityScore: 88 } })
@@ -165,6 +324,7 @@ describe('deck review runner', () => {
       .toEqual(request.slides.map((slide) => expect.stringMatching(/^artifact:frameflow:run-1:slide-previews:/)))
     expect(renderer.slidePreviewCalls).toBe(1)
     expect(request.sourceChunks.map((chunk) => chunk.id)).toEqual(['chunk-1', 'chunk-2'])
+    expect(request.modelOverride).toBe('gpt-5.6-terra')
   })
 
   test('persists a low score and issues without creating media or advancing the phase', async () => {
@@ -912,6 +1072,59 @@ describe('deck review runner', () => {
     expect(contractIssues[1]).toEqual([{
       path: 'reviewedSourceChunkIds', message: 'Too small: expected array to have >=1 items',
     }])
+  })
+
+  test('limits a chain-4 deck review to one semantic slot-completion retry', async () => {
+    const { repository, documents, reviewer, runner } = await fixture(passingReview(), chain4Blueprint())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: chain4Config(),
+        v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      })
+    })
+    await persistChain4EvidenceWindow(repository, documents.result)
+    const requests: Array<{ contentSlotCompletion?: boolean; contractRepairIssues?: unknown }> = []
+    reviewer.evaluate = async (input) => {
+      requests.push(input)
+      return { ...passingReview(), reviewedSourceChunkIds: [] }
+    }
+
+    const result = await runner.review('run-1')
+
+    expect(result).toMatchObject({ review: null, step: { status: 'RUNNING', errorCode: 'MODEL_JSON_INVALID' } })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.contentSlotCompletion).toBeUndefined()
+    expect(requests[1]).toMatchObject({ contentSlotCompletion: true })
+    expect(requests[1]?.contractRepairIssues).toBeUndefined()
+    expect(result.step.output).toMatchObject({ diagnostic: { maxContractAttempts: 2 } })
+  })
+
+  test('requests one longer unique source excerpt after an ambiguous chain-4 deck review', async () => {
+    const { repository, documents, reviewer, runner } = await fixture(passingReview(), chain4Blueprint())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: chain4Config(),
+        v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      })
+    })
+    await persistChain4EvidenceWindow(repository, documents.result)
+    const requests: Array<{ contentSlotCompletion?: boolean; sourceEvidenceDisambiguation?: boolean }> = []
+    reviewer.evaluate = async (input) => {
+      requests.push(input)
+      if (requests.length === 1) throw new Error('V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
+      return passingReview()
+    }
+
+    const result = await runner.review('run-1')
+
+    expect(result).toMatchObject({ passed: true, review: { qualityScore: 88 } })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.sourceEvidenceDisambiguation).toBeUndefined()
+    expect(requests[1]).toMatchObject({ contentSlotCompletion: true, sourceEvidenceDisambiguation: true })
   })
 
   test('persists the final deck provider diagnostic after bounded retries are exhausted', async () => {

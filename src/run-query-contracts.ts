@@ -179,10 +179,25 @@ export const runSourcesEnvelopeSchema = z.object({
   data: runSourcesProjectionSchema,
 }).strict()
 
-const uniqueModelListSchema = z.array(modelNameSchema).min(1).max(20)
+const uniqueModelListSchema = z.array(modelNameSchema).max(20)
   .refine((models) => new Set(models).size === models.length, 'models must be unique')
 const optionalUniqueModelListSchema = z.array(modelNameSchema).max(20)
   .refine((models) => new Set(models).size === models.length, 'models must be unique')
+const publicModelAvailabilityEntrySchema = z.object({
+  model: modelNameSchema,
+  state: z.enum(['UNKNOWN', 'HEALTHY', 'DEGRADED', 'UNAVAILABLE']),
+  checkedAt: z.string().datetime().nullable(),
+}).strict()
+const publicModelAvailabilityListSchema = z.array(publicModelAvailabilityEntrySchema).max(20)
+  .refine((entries) => new Set(entries.map((entry) => entry.model)).size === entries.length, 'models must be unique')
+const publicModelAvailabilitySchema = z.object({
+  text: publicModelAvailabilityListSchema,
+  vision: publicModelAvailabilityListSchema,
+  image: publicModelAvailabilityListSchema,
+  imageEdit: publicModelAvailabilityListSchema,
+}).strict()
+
+export type PublicModelAvailability = z.output<typeof publicModelAvailabilitySchema>
 
 export const publicCapabilitiesSchema = z.object({
   runtimeMode: z.enum(['GATEWAY', 'MOCK']),
@@ -197,6 +212,7 @@ export const publicCapabilitiesSchema = z.object({
       image: uniqueModelListSchema,
       imageEdit: optionalUniqueModelListSchema,
     }).strict(),
+    modelAvailability: publicModelAvailabilitySchema.optional(),
     imageGeneration: z.object({
       asynchronous: z.boolean(),
       protocol: z.enum(['IMAGE_TASK', 'LOCAL_MOCK']),
@@ -212,7 +228,18 @@ export const publicCapabilitiesSchema = z.object({
     slideCount: z.object({ minimum: z.literal(1), maximum: z.literal(10) }).strict(),
     isolatedFromRuns: z.literal(true),
   }).strict(),
-}).strict()
+}).strict().superRefine((value, context) => {
+  if (!value.visualDeckV4.modelAvailability) return
+  const availability = value.visualDeckV4.modelAvailability
+  const models = value.visualDeckV4.models
+  for (const role of ['text', 'vision', 'image', 'imageEdit'] as const) {
+    const listed = models[role]
+    const observed = availability[role].map((entry) => entry.model)
+    if (listed.length !== observed.length || listed.some((model, index) => model !== observed[index])) {
+      context.addIssue({ code: 'custom', path: ['visualDeckV4', 'modelAvailability', role], message: 'availability must match public model order' })
+    }
+  }
+})
 
 export type PublicCapabilities = z.output<typeof publicCapabilitiesSchema>
 
@@ -222,22 +249,36 @@ export function createPublicCapabilities(input: Readonly<{
   visionModels?: readonly string[]
   imageModels?: readonly string[]
   imageEditModels?: readonly string[]
+  modelAvailability?: PublicModelAvailability
   quickDeckAvailable?: boolean
 }> = {}): PublicCapabilities {
+  const runtimeMode = input.runtimeMode ?? 'MOCK'
+  const textModels = input.textModels ?? ['local-mock-text']
+  const visionModels = input.visionModels ?? ['local-mock-vision']
+  const imageModels = input.imageModels ?? ['local-mock-image']
+  const imageEditModels = input.imageEditModels ?? []
+  const defaultAvailabilityState = runtimeMode === 'MOCK' ? 'HEALTHY' as const : 'UNKNOWN' as const
+  const modelAvailability = input.modelAvailability ?? {
+    text: textModels.map((model) => ({ model, state: defaultAvailabilityState, checkedAt: null })),
+    vision: visionModels.map((model) => ({ model, state: defaultAvailabilityState, checkedAt: null })),
+    image: imageModels.map((model) => ({ model, state: defaultAvailabilityState, checkedAt: null })),
+    imageEdit: imageEditModels.map((model) => ({ model, state: defaultAvailabilityState, checkedAt: null })),
+  }
   return publicCapabilitiesSchema.parse({
-    runtimeMode: input.runtimeMode ?? 'MOCK',
+    runtimeMode,
     visualDeckV4: {
       sourceModes: ['SOURCE_GROUNDED', 'OPEN_KNOWLEDGE'],
       sourceKinds: ['TEXT', 'HOST_ATTACHMENT', 'SOURCE_PACKAGE', 'APPROVED_PAGE_DESIGN'],
       slideCount: { minimum: 1, maximum: 50 },
       aspectRatios: ['16:9'],
       models: {
-        text: input.textModels ?? ['local-mock-text'],
-        vision: input.visionModels ?? ['local-mock-vision'],
-        image: input.imageModels ?? ['local-mock-image'],
-        imageEdit: input.imageEditModels ?? [],
+        text: textModels,
+        vision: visionModels,
+        image: imageModels,
+        imageEdit: imageEditModels,
       },
-      imageGeneration: input.runtimeMode === 'GATEWAY'
+      modelAvailability,
+      imageGeneration: runtimeMode === 'GATEWAY'
         ? { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true }
         : { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
       delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },

@@ -1,3 +1,6 @@
+import { z } from 'zod'
+import type { V4ConfiguredModel, V4ModelReadinessRecord, V4ModelRole } from '../core/v4-model-policy'
+
 type Environment = Readonly<Record<string, string | undefined>>
 
 function required(env: Environment, name: string) {
@@ -166,27 +169,126 @@ export function resolveQuickDeckEvaluationConfig(
   }
 }
 
-/** Public model names are tenant-safe capability data, never credentials or route details. */
-export function resolvePublicV4CapabilitiesConfig(
+const configuredReadinessSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('PASSED'),
+    evaluationRelease: z.string().trim().min(1).max(120),
+    gatewayContractVersion: z.string().trim().min(1).max(160),
+    structuredGenerationProtocol: z.literal('RESPONSES_JSON_SCHEMA').nullable(),
+    evaluatedAt: z.string().datetime(),
+    evaluationSuite: z.string().trim().min(1).max(160),
+    expiresAt: z.string().datetime(),
+  }).strict(),
+  z.object({ status: z.literal('NOT_EVALUATED') }).strict(),
+  z.object({ status: z.literal('FAILED') }).strict(),
+])
+
+const configuredModelRegistrySchema = z.object({
+  schemaVersion: z.literal('1'),
+  models: z.array(z.object({
+    model: z.string().trim().min(1).max(120),
+    evaluationEnabled: z.boolean(),
+    published: z.boolean(),
+    readiness: configuredReadinessSchema,
+  }).strict()).max(20)
+    .refine((models) => new Set(models.map((model) => model.model)).size === models.length, 'models must be unique'),
+}).strict()
+
+function configuredReadiness(value: z.output<typeof configuredReadinessSchema>): V4ModelReadinessRecord {
+  if (value.status !== 'PASSED') {
+    return {
+      status: value.status,
+      evaluationRelease: null,
+      gatewayContractVersion: null,
+      structuredGenerationProtocol: null,
+      evaluatedAt: null,
+      evaluationSuite: null,
+      expiresAt: null,
+    }
+  }
+  const evaluatedAt = Date.parse(value.evaluatedAt)
+  const expiresAt = Date.parse(value.expiresAt)
+  if (!Number.isFinite(evaluatedAt) || !Number.isFinite(expiresAt)
+    || expiresAt <= evaluatedAt || evaluatedAt > Date.now()) {
+    throw new Error('PPT_AGENT_V4_MODEL_REGISTRY_READINESS_TIME_INVALID')
+  }
+  return { ...value }
+}
+
+function configuredModelRegistry(env: Environment) {
+  const raw = env.PPT_AGENT_V4_MODEL_REGISTRY_JSON?.trim()
+  if (!raw) return []
+  let value: unknown
+  try {
+    value = JSON.parse(raw) as unknown
+  } catch {
+    throw new Error('PPT_AGENT_V4_MODEL_REGISTRY_INVALID')
+  }
+  const parsed = configuredModelRegistrySchema.safeParse(value)
+  if (!parsed.success) throw new Error('PPT_AGENT_V4_MODEL_REGISTRY_INVALID')
+  return parsed.data.models
+}
+
+/**
+ * Configuration, evaluation permission, publication and live availability are
+ * intentionally separate. This resolver never returns a gateway URL or key.
+ */
+export function resolveV4ModelPolicyConfig(
   env: Environment,
   coursewareModels: ReturnType<typeof resolveGatewayCoursewareModelsConfig>,
   revisionImageModel: string | null,
 ) {
-  const unique = (models: readonly string[]) => [...new Set(models)]
-  // V4 capabilities describe new strict Chain-4 Runs. Compatibility fallback
-  // models remain available to historical chains but are not selectable here.
-  const textModels = unique([coursewareModels.primary.textModel])
-  const visionModels = unique([coursewareModels.primary.visionModel])
+  const byModel = new Map<string, Set<V4ModelRole>>()
+  const register = (model: string, role: V4ModelRole) => {
+    const roles = byModel.get(model) ?? new Set<V4ModelRole>()
+    roles.add(role)
+    byModel.set(model, roles)
+  }
+  register(coursewareModels.primary.textModel, 'TEXT')
+  register(coursewareModels.primary.visionModel, 'VISION')
+  for (const model of configuredModelList(
+    env.PPT_AGENT_V4_INITIAL_IMAGE_MODELS,
+    ['gemini-3-pro-image-preview'],
+    'PPT_AGENT_V4_INITIAL_IMAGE_MODELS',
+  )) register(model, 'IMAGE')
+  if (revisionImageModel) register(revisionImageModel, 'IMAGE_EDIT')
+
+  const registry = configuredModelRegistry(env)
+  const configuredNames = new Set(byModel.keys())
+  if (registry.some((model) => !configuredNames.has(model.model))) {
+    throw new Error('PPT_AGENT_V4_MODEL_REGISTRY_UNKNOWN_MODEL')
+  }
+  const registered = new Map(registry.map((model) => [model.model, model]))
+  const defaultReadiness: V4ModelReadinessRecord = {
+    status: 'NOT_EVALUATED',
+    evaluationRelease: null,
+    gatewayContractVersion: null,
+    structuredGenerationProtocol: null,
+    evaluatedAt: null,
+    evaluationSuite: null,
+    expiresAt: null,
+  }
+  const models: V4ConfiguredModel[] = [...byModel.entries()].map(([model, roles]) => {
+    const record = registered.get(model)
+    if (record?.published && record.readiness.status !== 'PASSED') {
+      throw new Error('PPT_AGENT_V4_MODEL_REGISTRY_PUBLISHED_NOT_READY')
+    }
+    return {
+      model,
+      roles: [...roles],
+      evaluationEnabled: record?.evaluationEnabled ?? false,
+      published: record?.published ?? false,
+      readiness: record ? configuredReadiness(record.readiness) : defaultReadiness,
+    }
+  })
   return {
-    textModels: configuredModelList(textModels.join(','), ['gpt-5.6-terra'], 'PPT_AGENT_CAPABILITY_TEXT_MODELS'),
-    visionModels: configuredModelList(visionModels.join(','), ['gpt-5.6-terra'], 'PPT_AGENT_CAPABILITY_VISION_MODELS'),
-    imageModels: configuredModelList(
-      env.PPT_AGENT_V4_INITIAL_IMAGE_MODELS,
-      ['gemini-3-pro-image-preview'],
-      'PPT_AGENT_V4_INITIAL_IMAGE_MODELS',
-    ),
-    imageEditModels: revisionImageModel
-      ? configuredModelList(revisionImageModel, [], 'PPT_AGENT_V4_REVISION_IMAGE_MODEL')
-      : [],
+    models,
+    availabilityTtlMs: boundedInteger(
+      env.PPT_AGENT_V4_MODEL_AVAILABILITY_TTL_SECONDS,
+      120,
+      10,
+      60 * 60,
+      'PPT_AGENT_V4_MODEL_AVAILABILITY_TTL_SECONDS',
+    ) * 1_000,
   }
 }

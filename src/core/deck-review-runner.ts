@@ -49,10 +49,14 @@ import {
   markAutomatedQualityAcceptance,
   qualityPolicyAuditForRun,
 } from './v4-lifecycle'
+import { requireV4StructuredGenerationProtocol, v4ModelOverride } from './v4-model-policy'
+import { requirePersistedV4EvidenceWindow } from './v4-evidence-window-compiler'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
 
 export const DECK_QUALITY_THRESHOLD = 80
 const MAX_DECK_REVIEW_ATTEMPTS = 5
 const MAX_DECK_REVIEW_CONTRACT_ATTEMPTS = 3
+const MAX_CHAIN4_DECK_REVIEW_CONTRACT_ATTEMPTS = 2
 const DECK_REVIEW_RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 60_000] as const
 
 type DeckReviewFailure = Readonly<{
@@ -85,6 +89,12 @@ function reviewSourceMode(blueprint: PresentationBlueprint) {
   return blueprint.visualDeckV4Proposal?.presentationSpec.sourceMode ?? 'SOURCE_GROUNDED'
 }
 
+function deckReviewContractAttemptLimit(compilerVersion: string | undefined) {
+  return compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    ? MAX_CHAIN4_DECK_REVIEW_CONTRACT_ATTEMPTS
+    : MAX_DECK_REVIEW_CONTRACT_ATTEMPTS
+}
+
 export class DeckReviewRunner {
   private readonly inFlight = new Map<string, Promise<DeckReviewResult>>()
 
@@ -115,9 +125,19 @@ export class DeckReviewRunner {
     let slides: readonly DeckSlideInput[]
     let artifactReferences: readonly PresentationArtifactReference[]
     try {
+      const compilerVersion = blueprint.visualDeckV4Proposal?.compilerVersion
+      const chain4 = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+      if (chain4) requireV4StructuredGenerationProtocol(run, compilerVersion)
       const document = await this.dependencies.documents.resolve({ host: run.host, source: run.source })
       if (!document.isComplete) throw new Error('SOURCE_INCOMPLETE')
-      sourceChunks = this.requireSourceCoverage(blueprint, document.chunks)
+      const allSourceChunks = this.requireSourceCoverage(blueprint, document.chunks)
+      sourceChunks = chain4
+        ? this.requireSourceCoverage(blueprint, requirePersistedV4EvidenceWindow({
+            run,
+            document,
+            steps: await this.dependencies.repository.listSteps(run.id),
+          }).chunks)
+        : allSourceChunks
       artifactReferences = await requirePresentationArtifactReferences(this.dependencies.repository, run, blueprint)
       slides = this.deckSlides(run, blueprint, artifactReferences)
     } catch (error) {
@@ -167,9 +187,16 @@ export class DeckReviewRunner {
     baseIdempotencyKey: string,
   ) {
     let contractRepairIssues: readonly ContractRepairIssue[] | undefined
+    let contentSlotCompletion = false
+    let sourceEvidenceDisambiguation = false
     let lastError: unknown = new Error('DECK_REVIEW_FAILED')
+    const compilerVersion = blueprint.visualDeckV4Proposal?.compilerVersion
+    const chain4 = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    const maxContractAttempts = deckReviewContractAttemptLimit(compilerVersion)
+    const modelOverride = v4ModelOverride(run, 'VISION', compilerVersion)
+    const structuredGenerationProtocol = requireV4StructuredGenerationProtocol(run, compilerVersion)
     for (let contractAttempt = 0;
-      contractAttempt < MAX_DECK_REVIEW_CONTRACT_ATTEMPTS;
+      contractAttempt < maxContractAttempts;
       contractAttempt += 1) {
       const idempotencyKey = deckReviewContractAttemptKey(baseIdempotencyKey, contractAttempt)
       for (let providerAttempt = 1; providerAttempt <= MAX_DECK_REVIEW_ATTEMPTS; providerAttempt += 1) {
@@ -180,8 +207,14 @@ export class DeckReviewRunner {
             sourceChunks,
             slides,
             idempotencyKey,
-            ...(contractRepairIssues ? { contractRepairIssues } : {}),
-            ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
+            ...(modelOverride ? { modelOverride } : {}),
+            ...(chain4
+              ? {
+                  ...(contentSlotCompletion ? { contentSlotCompletion: true } : {}),
+                  ...(sourceEvidenceDisambiguation ? { sourceEvidenceDisambiguation: true } : {}),
+                }
+              : (contractRepairIssues ? { contractRepairIssues } : {})),
+            ...(structuredGenerationProtocol ? { structuredGenerationProtocol } : {}),
           })
           const sourceMode = reviewSourceMode(blueprint)
           const draft = deckReviewDraftSchemaForSourceMode(sourceMode).parse(raw)
@@ -206,7 +239,7 @@ export class DeckReviewRunner {
           if (providerRetryable) {
             if (providerAttempt === MAX_DECK_REVIEW_ATTEMPTS) {
               throw new DeckReviewExecutionError(
-                deckReviewFailure(error, providerAttempt, contractAttempt + 1),
+                deckReviewFailure(error, providerAttempt, contractAttempt + 1, maxContractAttempts),
               )
             }
             await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
@@ -214,19 +247,25 @@ export class DeckReviewRunner {
             )
             continue
           }
+          const sourceEvidenceAmbiguous = chain4
+            && error instanceof Error
+            && error.message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
           const issues = deckReviewContractInvalid(error) ? revisionContractRepairIssues(error) : null
-          if (!issues || contractAttempt + 1 >= MAX_DECK_REVIEW_CONTRACT_ATTEMPTS) {
+          if (!issues || contractAttempt + 1 >= maxContractAttempts) {
             throw new DeckReviewExecutionError(
-              deckReviewFailure(error, providerAttempt, contractAttempt + 1),
+              deckReviewFailure(error, providerAttempt, contractAttempt + 1, maxContractAttempts),
             )
           }
-          contractRepairIssues = issues
+          if (chain4) {
+            contentSlotCompletion = true
+            if (sourceEvidenceAmbiguous) sourceEvidenceDisambiguation = true
+          } else contractRepairIssues = issues
           break
         }
       }
     }
     throw new DeckReviewExecutionError(
-      deckReviewFailure(lastError, 1, MAX_DECK_REVIEW_CONTRACT_ATTEMPTS),
+      deckReviewFailure(lastError, 1, maxContractAttempts, maxContractAttempts),
     )
   }
 
@@ -505,7 +544,7 @@ export class DeckReviewRunner {
       providerAttempt: 0,
       maxProviderAttempts: MAX_DECK_REVIEW_ATTEMPTS,
       contractAttempt: 0,
-      maxContractAttempts: MAX_DECK_REVIEW_CONTRACT_ATTEMPTS,
+      maxContractAttempts: deckReviewContractAttemptLimit(blueprint.visualDeckV4Proposal?.compilerVersion),
       model: null,
       requestId: null,
     })
@@ -707,6 +746,7 @@ function deckReviewContractInvalid(error: unknown) {
     'DECK_REVIEW_SLIDE_REFERENCE_INVALID',
     'REVISION_PLAN_OPERATION_BUDGET_EXCEEDED',
     'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
+    'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS',
   ].includes(error.message)
 }
 
@@ -720,6 +760,7 @@ function deckReviewFailure(
   error: unknown,
   providerAttempt: number,
   contractAttempt: number,
+  maxContractAttempts = MAX_DECK_REVIEW_CONTRACT_ATTEMPTS,
 ): DeckReviewFailure {
   if (error instanceof StructuredModelError) {
     return {
@@ -727,7 +768,7 @@ function deckReviewFailure(
       providerAttempt,
       maxProviderAttempts: MAX_DECK_REVIEW_ATTEMPTS,
       contractAttempt,
-      maxContractAttempts: MAX_DECK_REVIEW_CONTRACT_ATTEMPTS,
+      maxContractAttempts,
       model: error.model,
       requestId: error.requestId,
     }
@@ -741,7 +782,7 @@ function deckReviewFailure(
     providerAttempt,
     maxProviderAttempts: MAX_DECK_REVIEW_ATTEMPTS,
     contractAttempt,
-    maxContractAttempts: MAX_DECK_REVIEW_CONTRACT_ATTEMPTS,
+    maxContractAttempts,
     model: null,
     requestId: null,
   }

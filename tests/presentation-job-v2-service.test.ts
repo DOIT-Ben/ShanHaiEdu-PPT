@@ -6,6 +6,7 @@ import {
 } from '../src/adapters/presentation-job-v2-ports'
 import { MockArtifactPort, FixedClock } from '../src/adapters/mock-ports'
 import { PresentationJobV2Service } from '../src/core/presentation-job-v2-service'
+import { RunServiceError } from '../src/core/run-service'
 import { approvedPageDesignSnapshotHash } from '../src/presentation-job-v2-contracts'
 
 const owner = { tenantId: 'host-a', externalUserId: 'user-a', externalProjectId: 'project-a' }
@@ -283,6 +284,75 @@ describe('Presentation Job V2 service', () => {
 
     expect(await service.getOwned(owner, otherJobId)).toMatchObject({ status: 'COMPLETED' })
     expect(await service.getOwned(owner, failingJobId)).toMatchObject({ status: 'RUNNING' })
+  })
+
+  test('terminally fails deterministic internal Provider 4xx rejections before an operation exists', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    const errorCodes = ['V4_IMAGE_MODEL_NOT_ALLOWED', 'V4_MODEL_NOT_READY', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'] as const
+    let submissions = 0
+    provider.submit = async () => {
+      const code = errorCodes[submissions++]!
+      throw new RunServiceError(422, code, code)
+    }
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const first = await service.create(owner, request(), 'presentation-job-v4-policy-terminal-a')
+    const second = await service.create(owner, request(), 'presentation-job-v4-policy-terminal-b')
+    const third = await service.create(owner, request(), 'presentation-job-v4-policy-terminal-c')
+
+    await expect(service.tick({ limit: 10 })).resolves.toEqual({ scannedJobs: 3, failedJobs: 3 })
+    const failedCodes = await Promise.all([first, second, third].map(async ({ job }) => {
+      const stored = await repository.getPresentationJob(job.jobId)
+      expect(stored).toMatchObject({
+        status: 'FAILED',
+        phase: 'FAILED',
+        providerOperations: [],
+        usage: { status: 'FINALIZED', unknownImageOperations: 0 },
+      })
+      return stored?.errorCode
+    }))
+    expect(failedCodes.sort()).toEqual([...errorCodes].sort())
+
+    clock.advance(1_000)
+    await expect(service.tick({ limit: 10 })).resolves.toEqual({ scannedJobs: 0, failedJobs: 0 })
+    expect(submissions).toBe(3)
+  })
+
+  test('keeps V4 gateway availability errors retryable before an internal Provider operation exists', async () => {
+    const repository = new InMemoryPresentationJobV2Repository()
+    const artifacts = new MockArtifactPort()
+    const provider = new MockPresentationJobV2Provider()
+    let submissions = 0
+    provider.submit = async () => {
+      submissions += 1
+      throw new RunServiceError(503, 'V4_MODEL_UNAVAILABLE', 'V4_MODEL_UNAVAILABLE')
+    }
+    const clock = new FixedClock()
+    const service = new PresentationJobV2Service({
+      repository,
+      artifacts,
+      provider,
+      budget: new FixedServicePresentationJobBudgetPolicy(1),
+      clock,
+    })
+    const created = await service.create(owner, request(), 'presentation-job-v4-policy-retryable')
+
+    await expect(service.tick({ limit: 10 })).resolves.toEqual({ scannedJobs: 1, failedJobs: 1 })
+    expect(await service.getOwned(owner, created.job.jobId)).toMatchObject({
+      status: 'QUEUED', phase: 'ACCEPTED',
+    })
+
+    clock.advance(1_000)
+    await expect(service.tick({ limit: 10 })).resolves.toEqual({ scannedJobs: 1, failedJobs: 1 })
+    expect(submissions).toBe(2)
   })
 
   test('honors the Provider inspection backoff before polling the same Job again', async () => {

@@ -686,6 +686,42 @@ describe('mock runtime', () => {
     })).toThrow('IMAGE_CONCURRENCY_INVALID')
   })
 
+  test('keeps the default Mock capability list and V4 creation policy aligned', async () => {
+    const runtime = createMockRuntime({
+      repository: new InMemoryAgentRepository(), artifacts: new MockArtifactPort(), apiToken: token,
+    })
+    const capabilities = await runtime.handler(request('/v1/capabilities'))
+    expect(capabilities.status).toBe(200)
+    expect(await capabilities.json()).toMatchObject({
+      data: { visualDeckV4: { models: { image: ['local-mock-image'] } } },
+    })
+    const body = {
+      schemaVersion: '1', host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+      source: { kind: 'TEXT', text: '用于校验 Mock 模型白名单的一段完整教材内容。' },
+      slideCount: 1, visualDirection: '清晰的课堂信息图', imageModel: 'local-mock-image',
+      automationLevel: 'BOUNDED_AUTO', budgetUnits: 1, maxRevisionRounds: 0,
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: {
+        instruction: '用一页说明教材的核心结论', sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 1 }, aspectRatio: '16:9' },
+      },
+    }
+    const rejected = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-policy-rejected-image-0001' },
+      body: JSON.stringify({ ...body, imageModel: 'gpt-image-2' }),
+    }))
+    const accepted = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-policy-allowed-image-0001' },
+      body: JSON.stringify(body),
+    }))
+
+    expect(rejected.status).toBe(422)
+    expect((await rejected.json() as { error: { code: string } }).error.code).toBe('V4_IMAGE_MODEL_NOT_ALLOWED')
+    expect(accepted.status).toBe(201)
+  })
+
   test('delivers a notebooklm-style v4 pptx through chain-4 semantic manuscripts', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()

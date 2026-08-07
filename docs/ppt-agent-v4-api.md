@@ -28,6 +28,7 @@ Run 详情的 `release` 另外冻结本次 Run 的模式和编译器版本。两
 | 操作 | API | 幂等要求 |
 | --- | --- | --- |
 | 合同发现 | `GET /openapi/v1.json` | 无；无需认证 |
+| V4 能力 | `GET /v1/capabilities` | 无；认证后返回当前发布模型与可用性快照 |
 | 创建任务 | `POST /v1/runs` | 稳定业务 `Idempotency-Key` |
 | 查询规划、状态、批次和交付 | `GET /v1/runs/{runId}` | 无 |
 | 实时进度 | `GET /v1/runs/{runId}/events?after={sequence}` | 按 `sequence` 断线续传 |
@@ -53,6 +54,15 @@ Run 快照、每条 `AgentEvent`、公开 Delivery 和 JSON 错误体都携带�
 OpenAPI 的 `KnownAgentEventType` 与运行时 Zod 已知事件集合一一对应；枚举内类型必须使用各自的严格
 payload variant，只有枚举外的新类型才进入 forward-compatible 分支。
 
+`GET /v1/capabilities` 的 `visualDeckV4.models` 只列出已发布且真实验收记录仍有效的模型；每个数组保留
+既有模型 ID 顺序。新增的 `visualDeckV4.modelAvailability` 与数组逐项对应，状态为 `UNKNOWN`、`HEALTHY`、
+`DEGRADED` 或 `UNAVAILABLE`，仅反映短 TTL 的只读网关 `/models` 目录探针。目录可见不等同于真实生成通过，
+也不会暴露网关 URL、渠道、账号、凭据、Prompt 或上游原始错误。正式新 Run 在创建前同时要求已发布、验收
+有效和 `HEALTHY`；已有 Run 与已持久化步骤仍按冻结模型、协议和幂等键恢复，不重算发布状态。
+
+模型注册表将 `evaluationEnabled`、`published` 和真实性验收记录分离。隔离 Quick-deck 只可选择
+`evaluationEnabled` 模型，未发布模型不能由正式 `/v1/runs` 使用，也不会出现在正式模型数组中。
+
 ## 自动执行的规划
 
 正常 V4 新 Run 使用两个小型语义文稿调用，控制字段由程序确定：
@@ -77,13 +87,14 @@ Agent 冻结规划，并自行向视觉 Provider 受控并发提交页面。宿�
 
 ## 图片生成与自动返修
 
-V4 初始页面仍使用 Run 请求中的图片模型（当前验收通过的是
-`gemini-3-pro-image-preview`）整页异步生成。局部图片编辑默认关闭，
-`GET /v1/capabilities` 会以 `models.imageEdit: []` 明确反映这一状态；不会把未验收模型宣传为可用。
+V4 初始页面只使用 `GET /v1/capabilities` 已发布图片数组中的模型整页异步生成。局部图片编辑默认关闭，
+`GET /v1/capabilities` 会以 `models.imageEdit: []` 明确反映未发布或未通过验收的状态；不会把候选模型宣传为可用。
 
 只有同时配置 `PPT_AGENT_V4_IMAGE_EDIT_ENABLED=true`、
 `PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED=true` 和
-`PPT_AGENT_V4_REVISION_IMAGE_MODEL=<已验收模型>`，新 V4 返修批次才会调用异步图片编辑任务。关闭时，
+`PPT_AGENT_V4_REVISION_IMAGE_MODEL=<候选模型>`，并在 `PPT_AGENT_V4_MODEL_REGISTRY_JSON` 中将该模型标记为
+`published=true` 且未过期 `PASSED` 后，新 V4 返修批次才会调用异步图片编辑任务。前述路由开关只允许隔离
+验收，不会自行发布模型。关闭或未发布时，
 需要 Provider 局部图片编辑的 V4 Run 在预算冻结和 Provider 提交前以 `IMAGE_EDIT_UNAVAILABLE` 结束，不会静默重绘、换模型或产生图片费用。
 规划模型始终不能指定或改写 Provider 模型。
 

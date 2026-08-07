@@ -64,6 +64,7 @@ import {
   revisionDetails,
   v4LifecyclePayload,
 } from './v4-lifecycle'
+import { v4ImageEditModelOverride, v4ModelOverride } from './v4-model-policy'
 import { resolveV4RenderStrategy, type V4RenderStrategy } from './v4-render-strategy'
 
 export type RevisionMediaResult = Readonly<{
@@ -522,7 +523,7 @@ export class RevisionMediaCoordinator {
       }
     }
     let revisionRoute: RevisionRoute | null = blueprint.renderMode === 'VISUAL_DECK_V4'
-      ? this.persistedRevisionRoute(run, steps)
+      ? this.persistedRevisionRoute(run, steps, blueprint.visualDeckV4Proposal?.compilerVersion)
       : { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
     const requiresProviderRevision = pageEntries.some(([pageNumber]) =>
       blueprint.renderMode !== 'VISUAL_DECK_V4'
@@ -546,11 +547,16 @@ export class RevisionMediaCoordinator {
       }
       if ([...v4EditSources.values()].some((source) => !hasVisualDeckV4AspectRatio(source.width, source.height))) {
         // An image edit inherits its source frame. Rebuild the complete planned set instead of cropping it.
-        revisionRoute = { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+        revisionRoute = {
+          model: v4ModelOverride(run, 'IMAGE', blueprint.visualDeckV4Proposal?.compilerVersion)!,
+          operationMode: 'TEXT_TO_IMAGE' as const,
+        }
       }
     }
     const targetRevisionRoute: RevisionRoute = revisionRoute ?? {
-      model: run.imageModel,
+      model: blueprint.renderMode === 'VISUAL_DECK_V4' && requiresProviderRevision
+        ? v4ModelOverride(run, 'IMAGE', blueprint.visualDeckV4Proposal?.compilerVersion)!
+        : run.imageModel,
       operationMode: 'TEXT_TO_IMAGE',
     }
     return Promise.all(pageEntries.map(async ([pageNumber, instructions]) => {
@@ -690,7 +696,11 @@ export class RevisionMediaCoordinator {
     }))
   }
 
-  private persistedRevisionRoute(run: RunRecord, steps: readonly StepRecord[]): RevisionRoute | null {
+  private persistedRevisionRoute(
+    run: RunRecord,
+    steps: readonly StepRecord[],
+    compilerVersion?: string,
+  ): RevisionRoute | null {
     const currentPageSteps = steps.filter((step) => {
       const identity = visualDeckPageImageIdentity(step.idempotencyKey)
       const output = step.output && typeof step.output === 'object'
@@ -729,6 +739,17 @@ export class RevisionMediaCoordinator {
         return { model: batch.accountingModel, operationMode: batch.operationMode }
       }
       return { model: run.imageModel, operationMode: 'TEXT_TO_IMAGE' as const }
+    }
+    if (run.presentationMode === 'VISUAL_DECK_V4') {
+      const imageEditModel = v4ImageEditModelOverride(run, compilerVersion)
+      if (imageEditModel === undefined) {
+        return this.dependencies.revisionImageModel
+          ? { model: this.dependencies.revisionImageModel, operationMode: 'IMAGE_EDIT' as const }
+          : null
+      }
+      return imageEditModel
+        ? { model: imageEditModel, operationMode: 'IMAGE_EDIT' as const }
+        : null
     }
     return this.dependencies.revisionImageModel
       ? { model: this.dependencies.revisionImageModel, operationMode: 'IMAGE_EDIT' as const }

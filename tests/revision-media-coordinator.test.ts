@@ -200,7 +200,20 @@ async function fixture(
   const artifacts = new MockArtifactPort()
   const renderer = new MockPresentationRendererPort()
   const clock = new FixedClock()
-  await repository.createRun(run(overrides))
+  const revisionImageModel = inputs.revisionImageModel === undefined ? 'gpt-image-2' : inputs.revisionImageModel
+  const initialRun = run({
+    ...overrides,
+    ...(overrides.presentationMode === 'VISUAL_DECK_V4' ? {
+      v4ModelSnapshot: {
+        schemaVersion: '1' as const,
+        textModel: 'gpt-5.6-terra',
+        visionModel: 'gpt-5.6-terra',
+        imageModel: overrides.imageModel ?? 'gpt-image-2',
+        imageEditModel: revisionImageModel,
+      },
+    } : {}),
+  })
+  await repository.createRun(initialRun)
   await repository.transact('run-1', (transaction) => {
     const put = (id: string, key: string, tool: string, output: unknown, budgetUnits = 0) => transaction.putStep({
       id, runId: 'run-1', idempotencyKey: key, inputHash: `hash-${id}`, tool, status: 'COMPLETED',
@@ -243,7 +256,7 @@ async function fixture(
       batchBudget: budget,
       artifacts,
       clock,
-      revisionImageModel: inputs.revisionImageModel === undefined ? 'gpt-image-2' : inputs.revisionImageModel,
+      revisionImageModel,
       ...(inputs.imageConcurrency === undefined ? {} : { imageConcurrency: inputs.imageConcurrency }),
     }),
     generation: new SlideGenerationCoordinator({
@@ -663,6 +676,54 @@ describe('revision media coordinator', () => {
       const output = step.output as { operationMode?: unknown; aspectRatio?: unknown }
       return output.operationMode === 'TEXT_TO_IMAGE' && output.aspectRatio === '16:9'
     })).toBe(true)
+  })
+
+  test('keeps the persisted V4 text-to-image fallback after a restart', async () => {
+    const { repository, budget, images, artifacts, media, clock, coordinator } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
+    }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+      revisionImageModel: 'gpt-image-2',
+    })
+    const nonSixteenNine = new Uint8Array(await sharp({
+      create: { width: 1536, height: 1024, channels: 3, background: '#FFFFFF' },
+    }).png().toBuffer())
+    artifacts.artifacts.set('artifact-r0-2', {
+      mimeType: 'image/png', bytes: nonSixteenNine, sha256: createHash('sha256').update(nonSixteenNine).digest('hex'),
+    })
+
+    await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    const originalKey = await revisionImageKey(repository, 2)
+    expect(images.requests.get(originalKey)).toMatchObject({
+      model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE',
+    })
+
+    const exactSixteenNine = new Uint8Array(await sharp({
+      create: { width: 1600, height: 900, channels: 3, background: '#FFFFFF' },
+    }).png().toBuffer())
+    artifacts.artifacts.set('artifact-r0-2', {
+      mimeType: 'image/png', bytes: exactSixteenNine, sha256: createHash('sha256').update(exactSixteenNine).digest('hex'),
+    })
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(originalKey)!
+      transaction.putStep({ ...step, status: 'RESERVED', externalOperationId: null, errorCode: null })
+    })
+    const restarted = new RevisionMediaCoordinator({
+      repository,
+      media,
+      batchBudget: budget,
+      artifacts,
+      clock,
+      revisionImageModel: 'gpt-image-2',
+    })
+
+    await expect(restarted.submit('run-1', 5)).resolves.toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
+    expect(await revisionImageKey(repository, 2)).toBe(originalKey)
+    expect(images.requests.get(originalKey)).toMatchObject({
+      model: 'gemini-3-pro-image-preview', operationMode: 'TEXT_TO_IMAGE',
+    })
+    expect(images.submitCalls).toBe(2)
   })
 
   test.each([

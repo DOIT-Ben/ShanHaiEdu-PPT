@@ -34,6 +34,10 @@ function run(budgetUnits = 100): RunRecord {
     slideCount: 3,
     visualDirection: '清晰的课堂科学信息图风格',
     imageModel: 'gpt-image-2',
+    v4ModelSnapshot: {
+      schemaVersion: '1', textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra',
+      imageModel: 'gpt-image-2', imageEditModel: 'gpt-image-2',
+    },
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -1065,6 +1069,34 @@ describe('slide generation coordinator', () => {
       payload: expect.objectContaining({ reason: 'INVALID_REQUEST', retryable: false, active: false }),
     }))
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('converges a persisted definitive V4 image failure before an empty pending batch can return', async () => {
+    const { repository, images, coordinator } = await fixture()
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
+    await coordinator.submitBlueprintImages('run-1', 10)
+    const targetKey = [...images.operations.keys()][0]!
+    const target = (await repository.listSteps('run-1')).find((step) => step.idempotencyKey === targetKey)!
+    await repository.transact('run-1', (transaction) => {
+      transaction.putStep({
+        ...target,
+        status: 'FAILED_NOT_CHARGED',
+        errorCode: 'IMAGE_TASK_FAILED',
+        updatedAt: transaction.run.updatedAt,
+      })
+    })
+    const operationCount = images.operations.size
+
+    expect(await coordinator.submitBlueprintImages('run-1', 10)).toMatchObject({
+      status: 'RECOVERING', submitted: 0, total: 3,
+    })
+    expect(images.operations.size).toBe(operationCount)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'RECOVERING',
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONFIGURATION_REQUIRED' },
+    })
   })
 
   test('continues a recovered V4 image batch into page review without resubmitting images', async () => {

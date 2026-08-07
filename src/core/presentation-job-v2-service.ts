@@ -30,6 +30,19 @@ const WORKER_RETRY_DELAY_MS = 1_000
 const MIN_PROVIDER_RETRY_DELAY_MS = 100
 const MAX_PROVIDER_RETRY_DELAY_MS = 300_000
 
+function terminalProviderSubmissionError(error: unknown): error is Readonly<{
+  status: number
+  code: string
+}> {
+  if (!(error instanceof Error)) return false
+  const candidate = error as Readonly<{ status?: unknown; code?: unknown }>
+  return typeof candidate.status === 'number'
+    && candidate.status >= 400
+    && candidate.status < 500
+    && typeof candidate.code === 'string'
+    && candidate.code.length > 0
+}
+
 function emptyUsage(): PresentationJobV2UsageSummary {
   return {
     billableImageOperations: 0,
@@ -178,9 +191,13 @@ export class PresentationJobV2Service {
     for (const job of jobs) {
       try {
         await this.advance(job)
-      } catch {
+      } catch (error) {
         failedJobs += 1
-        await this.defer(job).catch(() => undefined)
+        if (terminalProviderSubmissionError(error)) {
+          await this.fail(job, error.code, emptyUsage()).catch(() => undefined)
+        } else {
+          await this.defer(job).catch(() => undefined)
+        }
       }
     }
     return { scannedJobs: jobs.length, failedJobs }

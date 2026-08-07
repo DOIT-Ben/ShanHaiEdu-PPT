@@ -48,11 +48,13 @@ import {
   visualDeckV4DeckVisualStageSchema,
   visualDeckV4CreativeManuscriptSchema,
   visualDeckV4FinalCoherenceReviewSchema,
+  isV4ManuscriptContextTooLargeError,
   visualDeckV4ProposalDraftSchema,
   visualDeckV4ReviewManuscriptSchema,
   visualDeckV4SlideBriefsReflectionStageOutputSchema,
   visualDeckV4SlideBriefsStageSchema,
   visualDeckV4SourceSpecStageSchema,
+  V4_MANUSCRIPT_CONTEXT_TOO_LARGE,
 } from '../visual-deck-v4-contracts'
 import type { StructuredGenerationPreflightPort, StructuredGenerationProtocol } from './ports'
 import { allPageNumbers, appendV4LifecycleEvent } from './v4-lifecycle'
@@ -65,7 +67,12 @@ import {
 } from '../release-identity'
 import { V4ReflectionCoordinator } from './v4-reflection/coordinator'
 import { ManuscriptCompiler, V4ManuscriptCompilationError } from './v4-manuscript-compiler'
-import { V4EvidenceWindowCompiler, type V4EvidenceWindow } from './v4-evidence-window-compiler'
+import {
+  V4EvidenceWindowCompiler,
+  v4EvidenceWindowStepKey,
+  type V4EvidenceWindow,
+} from './v4-evidence-window-compiler'
+import { v4ModelOverride, v4StructuredGenerationProtocolOverride } from './v4-model-policy'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 5
@@ -352,6 +359,8 @@ export class PlanningRunner {
     config: NonNullable<CreateRunRequest['visualDeckV4']>,
     compilerVersion: string,
   ) {
+    const run = await this.requireRun(input.runId)
+    const modelOverride = v4ModelOverride(run, 'TEXT', compilerVersion)
     const basePayload = {
       presentationMode: 'VISUAL_DECK_V4' as const,
       instruction: config.instruction,
@@ -391,8 +400,9 @@ export class PlanningRunner {
       compilerVersion,
       createdAt: this.dependencies.clock.now().toISOString(),
     }
-    const protocol = await this.resolveV4StructuredGenerationProtocol(input, tenantId)
+    const protocol = await this.resolveV4StructuredGenerationProtocol(input, tenantId, compilerVersion)
     if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+      if (protocol !== 'RESPONSES_JSON_SCHEMA') throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
       return this.createVisualDeckV4Chain4Blueprint({
         input,
         document,
@@ -448,6 +458,7 @@ export class PlanningRunner {
       planningAttempt: input.attempt ?? 0,
       compilerVersion,
       protocol,
+      ...(modelOverride ? { modelOverride } : {}),
       sourceSummary: document.chunks.map((chunk) => chunk.text).join('\n').slice(0, 16_000),
     }
     let deckVisual
@@ -649,17 +660,17 @@ export class PlanningRunner {
       }))
       draft = compiler.compilePlan(compilerInput, creative, review)
     }
-    return createVisualDeckV4BlueprintFromProposal(input.compilerInput, draft)
+    return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
   }
 
   private boundedV4ReviewPayload(
     manuscriptContext: Record<string, unknown>,
     creativeManuscript: unknown,
   ): Record<string, unknown> {
-    const maximumManuscriptBytes = 80_000
-    const maximumPayloadBytes = 220_000
+    const maximumManuscriptCharacters = 80_000
+    const maximumPayloadCharacters = 220_000
     let projected = structuredClone(creativeManuscript)
-    const serializedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8')
+    const serializedCharacters = (value: unknown) => JSON.stringify(value).length
     const truncateStrings = (value: unknown, maximum: number): unknown => {
       if (typeof value === 'string') return value.slice(0, maximum)
       if (Array.isArray(value)) return value.map((item) => truncateStrings(item, maximum))
@@ -669,14 +680,14 @@ export class PlanningRunner {
       return value
     }
     for (const maximum of [1_500, 1_000, 500, 250, 120, 60]) {
-      if (serializedBytes(projected) <= maximumManuscriptBytes) break
+      if (serializedCharacters(projected) <= maximumManuscriptCharacters) break
       projected = truncateStrings(projected, maximum)
     }
-    if (serializedBytes(projected) > maximumManuscriptBytes) {
+    if (serializedCharacters(projected) > maximumManuscriptCharacters) {
       throw new Error('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
     }
     const payload = { ...manuscriptContext, creativeManuscript: projected }
-    if (serializedBytes(payload) > maximumPayloadBytes) throw new Error('V4_MODEL_PAYLOAD_TOO_LARGE')
+    if (serializedCharacters(payload) > maximumPayloadCharacters) throw new Error('V4_MODEL_PAYLOAD_TOO_LARGE')
     return payload
   }
 
@@ -684,7 +695,7 @@ export class PlanningRunner {
     input: PlanPresentationInput,
     audit: V4EvidenceWindow['audit'],
   ) {
-    const idempotencyKey = `${input.runId}:v4:evidence-window`
+    const idempotencyKey = v4EvidenceWindowStepKey(input.runId)
     await this.dependencies.repository.transact(input.runId, (transaction) => {
       const existing = transaction.getStep(idempotencyKey)
       if (existing) {
@@ -716,7 +727,7 @@ export class PlanningRunner {
 
   private async legacyDeckReflection(
     input: PlanPresentationInput,
-    protocol: StructuredGenerationProtocol,
+    protocol: StructuredGenerationProtocol | undefined,
     reflectionContext: Parameters<typeof createVisualDeckV4DeckVisualReflectionInput>[0],
     deckVisualDraft: Parameters<typeof createVisualDeckV4DeckVisualReflectionInput>[1],
     sourceSpec: ReturnType<typeof visualDeckV4SourceSpecStageSchema.parse>,
@@ -745,7 +756,7 @@ export class PlanningRunner {
 
   private async legacySlideReflection(
     input: PlanPresentationInput,
-    protocol: StructuredGenerationProtocol,
+    protocol: StructuredGenerationProtocol | undefined,
     reflectionContext: Parameters<typeof createVisualDeckV4SlideBriefsReflectionInput>[0],
     deckVisual: Parameters<typeof createVisualDeckV4SlideBriefsReflectionInput>[0]['deckVisual'] & {},
     slideBriefs: Parameters<typeof createVisualDeckV4SlideBriefsReflectionInput>[1],
@@ -832,9 +843,25 @@ export class PlanningRunner {
     })
   }
 
-  private async resolveV4StructuredGenerationProtocol(input: PlanPresentationInput, tenantId: string) {
+  private async resolveV4StructuredGenerationProtocol(
+    input: PlanPresentationInput,
+    tenantId: string,
+    compilerVersion: string,
+  ) {
+    const run = await this.requireRun(input.runId)
+    const modelOverride = v4ModelOverride(run, 'TEXT', compilerVersion)
+    const persistedProtocol = v4StructuredGenerationProtocolOverride(run, compilerVersion)
+    if (persistedProtocol) return persistedProtocol
     const key = `${input.runId}:v4:structured-generation-preflight:planning:${input.attempt ?? 0}`
-    const inputHash = hashInput({ tool: 'preflight_v4_structured_generation', model: this.dependencies.model.modelName ?? null })
+    const chain4 = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    if (!chain4) {
+      const existing = (await this.dependencies.repository.listSteps(input.runId))
+        .find((step) => step.idempotencyKey === key && step.tool === 'preflight_v4_structured_generation')
+      return existing?.status === 'COMPLETED'
+        ? this.parseV4StructuredGenerationProtocol(existing.output).protocol
+        : undefined
+    }
+    const inputHash = hashInput({ tool: 'preflight_v4_structured_generation', model: modelOverride })
     const existing = await this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(key)
       if (!step) return null
@@ -849,8 +876,6 @@ export class PlanningRunner {
       return null
     })
     if (existing) {
-      const chain4 = (await this.dependencies.repository.getRun(input.runId))?.release?.compilerVersion
-        === VISUAL_DECK_V4_COMPILER_VERSION
       const persisted = this.parseV4StructuredGenerationProtocol(existing, chain4)
       await this.dependencies.repository.transact(input.runId, (transaction) => {
         if (transaction.run.v4StructuredGenerationProtocol !== persisted.protocol) {
@@ -881,11 +906,10 @@ export class PlanningRunner {
     try {
       const candidate = this.dependencies.model as StructuredModelPort & Partial<StructuredGenerationPreflightPort>
       if (!candidate.preflightStructuredGeneration) throw new Error('STRUCTURED_GENERATION_PREFLIGHT_UNAVAILABLE')
-      const chain4 = (await this.dependencies.repository.getRun(input.runId))?.release?.compilerVersion
-        === VISUAL_DECK_V4_COMPILER_VERSION
       const result = this.parseV4StructuredGenerationProtocol(await candidate.preflightStructuredGeneration({
         tenantId,
         idempotencyKey: key,
+        ...(modelOverride ? { modelOverride } : {}),
         ...(chain4 ? { requiredProtocol: 'RESPONSES_JSON_SCHEMA' as const } : {}),
       }), chain4)
       await this.dependencies.repository.transact(input.runId, (transaction) => {
@@ -949,7 +973,7 @@ export class PlanningRunner {
     schemaName: string
     payload: unknown
     sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
-    protocol: StructuredGenerationProtocol
+    protocol: StructuredGenerationProtocol | undefined
     compilerVersion: string
     repairAttempt?: number
     parse: (value: unknown) => unknown
@@ -1012,14 +1036,17 @@ export class PlanningRunner {
       return executionMetrics
     }
     try {
+      const run = await this.requireRun(input.runId)
+      const modelOverride = v4ModelOverride(run, 'TEXT', request.compilerVersion)
       const raw = await this.dependencies.model.execute({
-        tenantId: (await this.requireRun(input.runId)).host.tenantId,
+        tenantId: run.host.tenantId,
         operation: request.operation,
         schemaName: request.schemaName,
         payload: request.payload,
         ...(request.sourceAssets ? { sourceAssets: request.sourceAssets } : {}),
         idempotencyKey: key,
-        structuredGenerationProtocol: request.protocol,
+        ...(modelOverride ? { modelOverride } : {}),
+        ...(request.protocol ? { structuredGenerationProtocol: request.protocol } : {}),
       })
       executionMetrics = consumeExecutionMetrics()
       const parsed = request.parse(raw)
@@ -1601,7 +1628,9 @@ export class PlanningRunner {
         ? ['blueprint']
         : []
     const message = error instanceof Error ? error.message : ''
-    const errorCode: PlanningFailure['errorCode'] = error instanceof ZodError
+    const errorCode: PlanningFailure['errorCode'] = isV4ManuscriptContextTooLargeError(error)
+      ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
+      : error instanceof ZodError
       ? input.presentationMode === 'LAYERED_COURSEWARE_V3' && error.issues.some((issue) =>
         issue.path.includes('layeredDesign') || issue.path.includes('elements'))
         ? 'V3_LAYER_CONTRACT_INVALID'
@@ -1620,6 +1649,8 @@ export class PlanningRunner {
               ? 'V3_LAYER_CONTRACT_INVALID'
               : message === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
                 ? 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+                : message === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
+                  ? 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
               : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
                 ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
               : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'

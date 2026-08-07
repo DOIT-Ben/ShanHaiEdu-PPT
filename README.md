@@ -71,13 +71,17 @@ bun run check
 | `PPT_AGENT_REVIEW_CONCURRENCY` | 同时执行的页面视觉审查数，默认 `1`，最大 `8` |
 | `PPT_AGENT_TEXT_MODEL` | 规划与修订的文本模型，默认 `gpt-5.6-terra` |
 | `PPT_AGENT_VISION_MODEL` | 页面与整套质量审查的多模态模型，默认 `gpt-5.6-terra` |
-| `PPT_AGENT_V4_INITIAL_IMAGE_MODELS` | `GET /v1/capabilities` 公布的初始 V4 图片模型清单，逗号分隔，默认 `gemini-3-pro-image-preview` |
-| `PPT_AGENT_V4_IMAGE_EDIT_ENABLED` | V4 局部图片编辑总开关，默认 `false`；只有完成真实请求和像素比例验收后才可开启 |
-| `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | 仅在图片编辑开关为 `true` 时必填的已验收编辑模型；关闭时不会出现在能力接口中 |
+| `PPT_AGENT_V4_INITIAL_IMAGE_MODELS` | 配置的初始 V4 图片候选清单，逗号分隔，默认 `gemini-3-pro-image-preview`；候选本身不等于已发布能力 |
+| `PPT_AGENT_V4_MODEL_REGISTRY_JSON` | 模型的 `evaluationEnabled`、`published` 和真实验收记录；正式 Run 与公开模型数组只接受 `published=true`、未过期 `PASSED` 的记录 |
+| `PPT_AGENT_V4_MODEL_AVAILABILITY_TTL_SECONDS` | 只读网关 `/models` 目录预检缓存，默认 `120` 秒；只更新 `modelAvailability`，不替代真实验收 |
+| `PPT_AGENT_V4_IMAGE_EDIT_ENABLED` | V4 局部图片编辑路由开关，默认 `false`；打开后仅允许隔离验收配置，公开发布仍由模型注册表决定 |
+| `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | 仅在两个图片编辑路由开关均为 `true` 时的候选编辑模型；未满足发布记录时不会出现在能力接口或正式返修路径中 |
 | `PPT_AGENT_V4_TEXT_TRANSPORT` | V4 规划、审查与修订的文本 API，默认 `RESPONSES`；仅网关兼容故障时显式设为 `CHAT_COMPLETIONS` |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN` | 启用 quick-deck 的独立 evaluator Token；不可与 V1、管理员、V2 或 FrameFlow Token 复用 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT` | 位于 `PPT_AGENT_DATA_ROOT` 内的 quick-deck SQLite/制品根；TTL 后物理删除，不进入正式备份 |
-| `PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL` / `PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS` | V4 公布白名单内的实际评测模型；图片模型为初始 V4 图片模型的子集 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY` | quick-deck 文本与视觉请求的独立统一网关 Key；必须不同于 `MODEL_GATEWAY_TEXT_KEY` 与 `MODEL_GATEWAY_IMAGE_KEY` |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY` | quick-deck 图片任务的独立统一网关 Key；必须不同于 `MODEL_GATEWAY_TEXT_KEY` 与 `MODEL_GATEWAY_IMAGE_KEY` |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL` / `PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS` | `evaluationEnabled=true` 的实际评测模型；可评测与已发布能力相互独立 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_MAX_ACTIVE_JOBS` / `PPT_AGENT_QUICK_DECK_EVALUATION_MAX_DAILY_JOBS` | 每个 evaluator tenant 的并发与 UTC 日实验额度，默认 `2` / `10` |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS` / `PPT_AGENT_QUICK_DECK_EVALUATION_TICK_BATCH_SIZE` | 短期制品 TTL（默认 `24` 小时）和每 tick 扫描数（默认 `10`） |
 | `MODEL_GATEWAY_BASE_URL` | 文本、视觉和图片模型共用的统一网关 API 根地址 |

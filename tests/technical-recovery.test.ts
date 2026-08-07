@@ -92,6 +92,27 @@ describe('technical recovery', () => {
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })
 
+  test('treats an oversized Chain-4 manuscript as a non-retryable contract failure', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    await repository.createRun(run())
+
+    await repository.transact('run-1', (transaction) => beginTechnicalRecovery(
+      transaction,
+      clock,
+      'V4_MANUSCRIPT_CONTEXT_TOO_LARGE',
+    ))
+
+    expect(isTechnicalFailureCode('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')).toBe(true)
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED',
+      technicalRecovery: { reason: 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE', retryable: false, active: false },
+    })
+    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({
+      type: 'run.failed', payload: { errorCode: 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE' },
+    })
+  })
+
   test('defers a non-retryable technical failure while provider accounting is unknown', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock()

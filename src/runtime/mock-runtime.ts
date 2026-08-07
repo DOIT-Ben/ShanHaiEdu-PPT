@@ -74,7 +74,6 @@ import { resumeTechnicalRecovery } from '../core/technical-recovery'
 import { UsageV2Coordinator } from '../core/usage-v2-coordinator'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 import { buildIdentity, type BuildIdentity } from '../release-identity'
-import type { PublicCapabilities } from '../run-query-contracts'
 import { V4ModelPolicy } from '../core/v4-model-policy'
 import type { UsageAccountingProtocol } from '../usage-accounting-contracts'
 import type { QuickDeckEvaluationAuthenticationPort } from '../http/quick-deck-evaluation-handler'
@@ -594,7 +593,6 @@ type RuntimeInput = Readonly<{
   defaultAccountingProtocol?: UsageAccountingProtocol
   usageAccounting?: UsageAccountingPort
   providerBillingCatalog?: ProviderBillingCatalog
-  capabilities?: PublicCapabilities
   v4ModelPolicy?: V4ModelPolicy
   v1ExecutionEnabled?: boolean
   presentationJobV2?: Readonly<{
@@ -738,7 +736,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const runs = new RunService({
     repository: input.repository,
     clock,
-    ...(input.v4ModelPolicy ? { v4ModelPolicy } : {}),
+    v4ModelPolicy,
     artifacts: input.artifacts,
     buildIdentity: runtimeBuildIdentity,
     ...(input.defaultAccountingProtocol ? { defaultAccountingProtocol: input.defaultAccountingProtocol } : {}),
@@ -903,11 +901,15 @@ export function createAgentRuntime(input: RuntimeInput) {
         await delivery.deliver(run.id)
       }
     } catch (error) {
+      const errorCode = error instanceof Error
+        && ['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'].includes(error.message)
+        ? error.message as 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE' | 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+        : 'WORKER_FATAL' as const
       await failVisualDeckV4Run({
         repository: input.repository,
         clock,
         runId: candidate.id,
-        errorCode: 'WORKER_FATAL',
+        errorCode,
       }).catch(() => false)
       throw new WorkerTickError({
         runId: candidate.id,
@@ -1038,7 +1040,7 @@ export function createAgentRuntime(input: RuntimeInput) {
       operations,
       revisionRoundsSettings,
       rateLimiter,
-      capabilities: input.capabilities ?? v4ModelPolicy.publicCapabilities(Boolean(quickDeckEvaluations)),
+      capabilitiesProvider: () => v4ModelPolicy.publicCapabilities(Boolean(quickDeckEvaluations)),
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
       ...(presentationJobs && presentationJobAuthentication ? {

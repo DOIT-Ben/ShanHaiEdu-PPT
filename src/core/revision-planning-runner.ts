@@ -47,6 +47,8 @@ import {
   markAutomatedQualityAcceptance,
   revisionDetails,
 } from './v4-lifecycle'
+import { requireV4StructuredGenerationProtocol, v4ModelOverride } from './v4-model-policy'
+import { requirePersistedV4EvidenceWindow } from './v4-evidence-window-compiler'
 
 export type RevisionPlanningResult = Readonly<{
   status: RunRecord['status']
@@ -119,12 +121,25 @@ export class RevisionPlanningRunner {
     }
 
     let sourceChunks: readonly SourceChunk[]
+    let steps: readonly StepRecord[] = []
     try {
       const document = await this.dependencies.documents.resolve({ host: run.host, source: run.source })
       if (!document.isComplete) throw new Error('SOURCE_INCOMPLETE')
-      sourceChunks = document.chunks
-      const ids = new Set(sourceChunks.map((chunk) => chunk.id))
+      const allSourceChunks = document.chunks
+      const ids = new Set(allSourceChunks.map((chunk) => chunk.id))
       if (review.reviewedSourceChunkIds.some((id) => !ids.has(id))) throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
+      const chain4 = blueprint.visualDeckV4Proposal?.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+        && run.v4StructuredGenerationProtocol === 'RESPONSES_JSON_SCHEMA'
+      if (chain4) {
+        steps = await this.dependencies.repository.listSteps(run.id)
+        sourceChunks = requirePersistedV4EvidenceWindow({ run, document, steps }).chunks
+        const windowIds = new Set(sourceChunks.map((chunk) => chunk.id))
+        if (review.reviewedSourceChunkIds.some((id) => !windowIds.has(id))) {
+          throw new Error('REVISION_SOURCE_REFERENCE_INVALID')
+        }
+      } else {
+        sourceChunks = allSourceChunks
+      }
     } catch (error) {
       const errorCode = error instanceof Error ? error.message : 'REVISION_INPUT_FAILED'
       if (run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(errorCode)) {
@@ -144,9 +159,13 @@ export class RevisionPlanningRunner {
     })
     const prepared = await this.prepare(run, idempotencyKey, inputHash)
     if (prepared) return prepared
-    const steps = await this.dependencies.repository.listSteps(run.id)
+    if (steps.length === 0) steps = await this.dependencies.repository.listSteps(run.id)
 
     try {
+      const compilerVersion = blueprint.visualDeckV4Proposal?.compilerVersion
+      if (blueprint.renderMode === 'VISUAL_DECK_V4') {
+        requireV4StructuredGenerationProtocol(run, compilerVersion)
+      }
       const planningInput = {
         run,
         blueprint,
@@ -156,7 +175,7 @@ export class RevisionPlanningRunner {
         idempotencyKey,
         steps,
       }
-      const plan = blueprint.visualDeckV4Proposal?.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+      const plan = compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
         ? this.compileVisualDeckV4Fallback(planningInput)
         : await this.planWithContractRepair(planningInput)
       return this.complete(run, idempotencyKey, plan)
@@ -243,6 +262,9 @@ export class RevisionPlanningRunner {
   }>) {
     let contractRepairIssues: readonly ContractRepairIssue[] | undefined
     let lastError: unknown = new Error('REVISION_PLAN_FAILED')
+    const compilerVersion = input.blueprint.visualDeckV4Proposal?.compilerVersion
+    const modelOverride = v4ModelOverride(input.run, 'TEXT', compilerVersion)
+    const structuredGenerationProtocol = requireV4StructuredGenerationProtocol(input.run, compilerVersion)
     for (let contractAttempt = 0; contractAttempt < MAX_REVISION_CONTRACT_ATTEMPTS; contractAttempt += 1) {
       for (let providerAttempt = 1; providerAttempt <= MAX_REVISION_PROVIDER_ATTEMPTS; providerAttempt += 1) {
         try {
@@ -253,8 +275,9 @@ export class RevisionPlanningRunner {
             sourceChunks: input.sourceChunks,
             targetRevisionRound: input.targetRevisionRound,
             idempotencyKey: revisionContractAttemptKey(input.idempotencyKey, contractAttempt),
+            ...(modelOverride ? { modelOverride } : {}),
             ...(contractRepairIssues ? { contractRepairIssues } : {}),
-            ...(input.run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: input.run.v4StructuredGenerationProtocol } : {}),
+            ...(structuredGenerationProtocol ? { structuredGenerationProtocol } : {}),
           })
           const draft = revisionPlanDraftSchema.parse(raw)
           this.validatePlan(draft, input.run.id, input.blueprint, input.review, input.sourceChunks, input.steps)
@@ -719,7 +742,10 @@ function revisionPlanningFailure(
       ? error.message
       : 'REVISION_PLAN_FAILED')
   return {
-    errorCode: structured?.code ?? 'REVISION_PLAN_FAILED',
+    errorCode: structured?.code
+      ?? (error instanceof Error && ['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'].includes(error.message)
+        ? error.message
+        : 'REVISION_PLAN_FAILED'),
     diagnosticCode,
     providerAttempt,
     maxProviderAttempts: MAX_REVISION_PROVIDER_ATTEMPTS,

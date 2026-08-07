@@ -25,6 +25,7 @@ import type {
   UsageRunBill,
 } from '../usage-accounting-contracts'
 import type { ExactDiagramSpec } from './v4-constraint-compiler'
+import type { V4RunModelSnapshot } from './v4-model-policy'
 
 export type SourceChunk = Readonly<{
   id: string
@@ -87,6 +88,8 @@ export interface StructuredModelPort {
     payload: unknown
     sourceAssets?: readonly SourceAsset[]
     idempotencyKey: string
+    /** V4 freezes the selected gateway model at Run creation. */
+    modelOverride?: string
     structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
@@ -120,6 +123,7 @@ export interface StructuredGenerationPreflightPort {
   preflightStructuredGeneration(input: Readonly<{
     tenantId?: string
     idempotencyKey: string
+    modelOverride?: string
     requiredProtocol?: 'RESPONSES_JSON_SCHEMA'
   }>): Promise<Readonly<{ protocol: StructuredGenerationProtocol }>>
 }
@@ -332,6 +336,7 @@ export interface AssetCandidateReviewPort {
     role: string
     visualDirection: string
     idempotencyKey: string
+    modelOverride?: string
   }>): Promise<unknown>
 }
 
@@ -343,7 +348,10 @@ export interface VisualReviewPort {
     layout: string
     visualDirection: string
     idempotencyKey: string
+    modelOverride?: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    contentSlotCompletion?: boolean
+    v4CompilerVersion?: string
     structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
@@ -371,7 +379,10 @@ export interface DeckReviewPort {
       }>[]
     }>[]
     idempotencyKey: string
+    modelOverride?: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    contentSlotCompletion?: boolean
+    sourceEvidenceDisambiguation?: boolean
     structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
@@ -384,6 +395,7 @@ export interface RevisionPlanningPort {
     sourceChunks: readonly SourceChunk[]
     targetRevisionRound: number
     idempotencyKey: string
+    modelOverride?: string
     contractRepairIssues?: readonly ContractRepairIssue[]
     structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
@@ -396,7 +408,10 @@ export interface RevisionApplicationPort {
     plan: RevisionPlan
     sourceChunks: readonly SourceChunk[]
     idempotencyKey: string
+    modelOverride?: string
     contractRepairIssues?: readonly ContractRepairIssue[]
+    contentSlotCompletion?: boolean
+    sourceEvidenceDisambiguation?: boolean
     structuredGenerationProtocol?: StructuredGenerationProtocol
   }>): Promise<unknown>
 }
@@ -612,6 +627,8 @@ export type RunRecord = Readonly<{
   targetAudience?: string
   presentationGoal?: string
   imageModel: string
+  /** Complete V4 model route frozen at creation; legacy V4 records omit it. */
+  v4ModelSnapshot?: V4RunModelSnapshot
   /** Frozen when the Run is created. Missing legacy records are interpreted as V1. */
   accountingProtocol?: UsageAccountingProtocol
   automationLevel: CreateRunRequest['automationLevel']

@@ -29,6 +29,11 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     slideCount: 3,
     visualDirection: '清晰的课堂科学信息图风格',
     imageModel: 'gpt-image-2',
+    v4ModelSnapshot: {
+      schemaVersion: '1', textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra',
+      imageModel: 'gpt-image-2', imageEditModel: 'gpt-image-2',
+    },
+    v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -753,6 +758,33 @@ describe('page review coordinator', () => {
     expect(calls).toBe(6)
     expect(maximumActive).toBe(2)
   })
+
+  test.each(['RESPONSES_FUNCTION', 'CHAT_LEGACY'] as const)(
+    'does not call a page-review provider when chain-4 persisted %s',
+    async (protocol) => {
+      let calls = 0
+      const reviewerPort: VisualReviewPort = {
+        async review() {
+          calls += 1
+          return { approved: true, textDetected: false, visualScore: 90, reasons: [], retryInstruction: null }
+        },
+      }
+      const { coordinator } = await fixture({
+        reviewerPort,
+        plannedBlueprint: visualDeckV4Blueprint(),
+        runOverrides: {
+          presentationMode: 'VISUAL_DECK_V4',
+          v4StructuredGenerationProtocol: protocol,
+        },
+      })
+
+      const result = await coordinator.reviewAll('run-1')
+
+      expect(result.reviews).toHaveLength(3)
+      expect(result.reviews.every((review) => review.step.errorCode === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED')).toBe(true)
+      expect(calls).toBe(0)
+    },
+  )
 
   test('emits one human-review transition when concurrent visual reviews fail', async () => {
     const reviewerPort: VisualReviewPort = {

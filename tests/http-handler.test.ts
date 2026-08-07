@@ -6,12 +6,14 @@ import { AdminOperationsService } from '../src/core/admin-operations'
 import { AdminRevisionRoundsSettingsService } from '../src/core/admin-revision-rounds-settings'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { RunService } from '../src/core/run-service'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 import { planningStepKey } from '../src/core/planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
 import { InMemoryPrincipalRateLimiter } from '../src/http/principal-rate-limiter'
 import { RuntimeHealthMonitor } from '../src/observability/runtime-health'
+import { createPublicCapabilities, type PublicCapabilities } from '../src/run-query-contracts'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 const createBody = {
@@ -24,6 +26,22 @@ const createBody = {
   automationLevel: 'SUPERVISED',
   budgetUnits: 100,
 } as const
+
+function testV4ModelPolicy() {
+  const readiness = {
+    status: 'PASSED' as const,
+    evaluationRelease: 'test', gatewayContractVersion: 'test', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+    evaluatedAt: '2026-08-07T00:00:00.000Z', evaluationSuite: 'test',
+    expiresAt: '9999-12-31T23:59:59.999Z',
+  }
+  return new V4ModelPolicy({
+    runtimeMode: 'MOCK',
+    models: [
+      { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness },
+      { model: 'gpt-image-2', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
+    ],
+  })
+}
 
 class HeaderAuthentication implements HostAuthenticationPort {
   async authenticate(request: Request): Promise<HostContext | null> {
@@ -42,10 +60,13 @@ class HeaderAuthentication implements HostAuthenticationPort {
   }
 }
 
-function fixture(rateLimits?: Readonly<{ createRun: number; runAction: number }>) {
+function fixture(
+  rateLimits?: Readonly<{ createRun: number; runAction: number }>,
+  options?: Readonly<{ capabilitiesProvider?: () => Promise<PublicCapabilities> }>,
+) {
   const repository = new InMemoryAgentRepository()
   const clock = new FixedClock()
-  const runs = new RunService({ repository, clock })
+  const runs = new RunService({ repository, clock, v4ModelPolicy: testV4ModelPolicy() })
   const artifacts = new MockArtifactPort()
   const budget = new MockBudgetPort()
   const images = new MockImageGenerationPort()
@@ -68,6 +89,7 @@ function fixture(rateLimits?: Readonly<{ createRun: number; runAction: number }>
     revisionRoundsSettings,
     eventPollMs: 10,
     ...(rateLimiter ? { rateLimiter } : {}),
+    ...(options?.capabilitiesProvider ? { capabilitiesProvider: options.capabilitiesProvider } : {}),
   })
   return { repository, runs, artifacts, budget, images, health, clock, handle }
 }
@@ -225,6 +247,32 @@ describe('HTTP v1 handler', () => {
     })
     expect(await plan.json()).toMatchObject({ data: { state: 'NOT_READY', reason: 'V4_REQUIRED' } })
     expect(await sources.json()).toMatchObject({ data: { state: 'NOT_READY', reason: 'BLUEPRINT_NOT_READY' } })
+  })
+
+  test('refreshes the current model-availability capability projection without changing the existing model-list field', async () => {
+    let calls = 0
+    const { handle } = fixture(undefined, {
+      capabilitiesProvider: async () => {
+        calls += 1
+        return createPublicCapabilities({
+          runtimeMode: 'GATEWAY',
+          textModels: [], visionModels: [], imageModels: [], imageEditModels: [],
+        })
+      },
+    })
+
+    const response = await handle(request('/v1/capabilities'))
+    expect(response.status).toBe(200)
+    expect(calls).toBe(1)
+    expect(await response.json()).toMatchObject({
+      data: {
+        runtimeMode: 'GATEWAY',
+        visualDeckV4: {
+          models: { text: [], vision: [], image: [], imageEdit: [] },
+          modelAvailability: { text: [], vision: [], image: [], imageEdit: [] },
+        },
+      },
+    })
   })
 
   test('projects a ready one-page V4 plan and sources without exposing its worker prompt', async () => {

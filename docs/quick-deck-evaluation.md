@@ -49,7 +49,7 @@ Authorization: Bearer <PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN>
 }
 ```
 
-图片模型必须位于服务端公布的 V4 初始图片白名单内。查询结果固定返回本次实际选择的文本与图片模型、每页 `width`、`height`、`aspectRatioValidated` 和 SHA-256。证据资源额外返回稳定摘要形式的 Agent 请求与 operation、提交/账务状态、比例正规化诊断和创建时运行版本；不会返回 Provider URL、密钥、内部 Prompt、完整蓝图、来源正文、artifact ID、路由账号或原始 Provider 响应。
+文本和图片模型必须在服务端模型注册表中标记为 `evaluationEnabled=true`；它们可以尚未发布，且不会因此出现于正式 Run 的公开模型数组。查询结果固定返回本次实际选择的文本与图片模型、每页 `width`、`height`、`aspectRatioValidated` 和 SHA-256。证据资源额外返回稳定摘要形式的 Agent 请求与 operation、提交/账务状态、比例正规化诊断和创建时运行版本；不会返回 Provider URL、密钥、内部 Prompt、完整蓝图、来源正文、artifact ID、路由账号或原始 Provider 响应。
 
 ## 事件与内容
 
@@ -65,8 +65,10 @@ Quick-deck 只在主进程 `gateway` 模式配置以下变量后启用：
 | --- | --- |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN` | 仅用于该评测接口的独立入站 Token |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT` | 必须位于 `PPT_AGENT_DATA_ROOT` 下的独立 SQLite/制品根 |
-| `PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL` | V4 文本模型白名单中的模型，默认首个 V4 文本模型 |
-| `PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS` | V4 初始图片白名单的子集，逗号分隔 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY` | 仅供评测文本与视觉请求使用的独立统一网关 Key；必须与正式文本、图片 Key 均不同 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY` | 仅供评测图片任务使用的独立统一网关 Key；必须与正式文本、图片 Key 均不同 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL` | 注册表 `evaluationEnabled=true` 的 V4 文本模型，默认首个可评测模型 |
+| `PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_MODELS` | 注册表 `evaluationEnabled=true` 的初始图片模型子集，逗号分隔 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_MAX_ACTIVE_JOBS` | 每个 evaluator tenant 的并发实验数，默认 `2` |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_MAX_DAILY_JOBS` | 每个 evaluator tenant 的 UTC 日实验数，默认 `10` |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_TTL_HOURS` | 实验及其制品 TTL，默认 `24`，范围 `1-720` 小时 |

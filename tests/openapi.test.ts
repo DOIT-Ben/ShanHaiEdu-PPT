@@ -3,10 +3,12 @@ import { readFile } from 'node:fs/promises'
 import {
   KNOWN_AGENT_EVENT_TYPES,
   deliveryUnavailableReasonSchema,
+  planningFailureSchema,
   presentationModeSchema,
   publicErrorActionSchema,
   publicErrorCategorySchema,
   runStatusSchema,
+  v4RunFailureCodeSchema,
 } from '../src/contracts'
 import {
   quickDeckEvaluationEvidenceSchema,
@@ -36,6 +38,23 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.slideCount.minimum).toBe(1)
     expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.flow.minItems).toBe(1)
     expect(document.components.schemas.VisualDeckV4GenerationPlan.properties.pages.minItems).toBe(1)
+  })
+
+  test('keeps published V4 model lists distinct from live availability snapshots', async () => {
+    const document = JSON.parse(await readFile(filename, 'utf8')) as any
+    const capabilities = document.components.schemas.PptAgentCapabilities.properties.visualDeckV4
+
+    expect(capabilities.properties.models.properties.text.minItems).toBe(0)
+    expect(capabilities.properties.models.properties.vision.minItems).toBe(0)
+    expect(capabilities.properties.models.properties.image.minItems).toBe(0)
+    expect(capabilities.required).not.toContain('modelAvailability')
+    expect(capabilities.properties.modelAvailability.description).toContain('same order')
+    for (const role of ['text', 'vision', 'image', 'imageEdit']) {
+      const entries = capabilities.properties.modelAvailability.properties[role]
+      expect(entries.items.required).toEqual(['model', 'state', 'checkedAt'])
+      expect(entries.items.properties.state.enum).toEqual(['UNKNOWN', 'HEALTHY', 'DEGRADED', 'UNAVAILABLE'])
+      expect(entries.items.properties.checkedAt).toMatchObject({ type: ['string', 'null'], format: 'date-time' })
+    }
   })
 
   test('keeps quick-deck evaluation resources isolated and aligned with their Zod contract', async () => {
@@ -402,6 +421,7 @@ describe('OpenAPI v1 contract', () => {
       'QUALITY_ISSUE_STATE_INCONSISTENT',
       'TECHNICAL_RECOVERY_EXHAUSTED',
       'TECHNICAL_CONFIGURATION_REQUIRED',
+      'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE',
       'IMAGE_EDIT_UNAVAILABLE',
       'TECHNICAL_CONTRACT_INVALID',
       'USAGE_V2_FINALIZATION_REJECTED',
@@ -584,5 +604,21 @@ describe('OpenAPI v1 contract', () => {
       .toContain('#/components/schemas/PublicError')
     expect(publicDocument.components.schemas.TechnicalRecovery?.properties?.category?.$ref)
       .toBe('#/components/schemas/PublicErrorCategory')
+  })
+
+  test('keeps every public V4 failure-code enum in exact parity with Zod', async () => {
+    const document = JSON.parse(await readFile(filename, 'utf8')) as any
+    const runFailed = document.components.schemas.V4LifecycleEvent.allOf
+      .flatMap((part: { oneOf?: readonly any[] }) => part.oneOf ?? [])
+      .find((variant: { properties?: { type?: { const?: string } } }) =>
+        variant.properties?.type?.const === 'run.failed',
+      )
+
+    expect(runFailed?.properties?.payload?.allOf?.[1]?.properties?.errorCode?.enum)
+      .toEqual([...v4RunFailureCodeSchema.options])
+    expect(document.components.schemas.PendingTerminalFailure.properties.errorCode.enum)
+      .toEqual([...v4RunFailureCodeSchema.options])
+    expect(document.components.schemas.PlanningFailure.properties.errorCode.enum)
+      .toEqual([...planningFailureSchema.shape.errorCode.options])
   })
 })

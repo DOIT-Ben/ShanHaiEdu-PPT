@@ -38,9 +38,9 @@ import { V4ModelPolicy } from './core/v4-model-policy'
 import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
-  resolvePublicV4CapabilitiesConfig,
   resolveQuickDeckEvaluationConfig,
   resolveV4ImageEditAsyncTaskEnabled,
+  resolveV4ModelPolicyConfig,
   resolveV4RevisionImageModel,
 } from './runtime/main-server-config'
 import { assertQuickDeckEvaluatorModelsAvailable } from './runtime/quick-deck-evaluator-preflight'
@@ -86,23 +86,6 @@ if (usageV2Runtime.requiresUsageV2Runtime && runtimeMode !== 'gateway') {
 }
 const revisionImageModel = resolveV4RevisionImageModel(process.env)
 const imageEditTaskEnabled = resolveV4ImageEditAsyncTaskEnabled(process.env)
-if (usageV2Runtime.providerBillingCatalog && revisionImageModel) {
-  usageV2Runtime.providerBillingCatalog.snapshot({
-    model: revisionImageModel,
-    operationMode: 'IMAGE_EDIT',
-    resolution: '1K',
-    aspectRatio: '16:9',
-  })
-  for (const run of await repository.listRuns()) {
-    if (run.accountingProtocol !== 'FRAMEFLOW_USAGE_V2') continue
-    usageV2Runtime.providerBillingCatalog.snapshot({
-      model: run.imageModel,
-      operationMode: 'TEXT_TO_IMAGE',
-      resolution: '1K',
-      aspectRatio: run.visualDeckV4?.deckOptions.aspectRatio ?? '16:9',
-    })
-  }
-}
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const visualDeckV4Transport = visualDeckV4TextTransport(process.env.PPT_AGENT_V4_TEXT_TRANSPORT)
 const appVersion = process.env.PPT_AGENT_SOFTWARE_VERSION?.trim()
@@ -113,6 +96,50 @@ const releaseIdentity = buildIdentity({
   gitSha: process.env.PPT_AGENT_GIT_SHA?.trim() || 'unknown',
   releaseId: process.env.PPT_AGENT_RELEASE_ID?.trim() || 'unversioned',
 })
+const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
+// A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
+const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_000, 60 * 60_000)
+const waitingSlaMs = boundedInteger('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
+const stepSlaMs = boundedInteger('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
+const workerConcurrency = boundedInteger('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
+const imageConcurrency = boundedInteger('PPT_AGENT_IMAGE_CONCURRENCY', 50, 1, 50)
+const reviewConcurrency = boundedInteger('PPT_AGENT_REVIEW_CONCURRENCY', 1, 1, 8)
+const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
+const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
+const runActionRateLimitPerMinute = boundedInteger('PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE', 60, 1, 10_000)
+if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
+if (quickDeckEvaluationApiToken && runtimeMode !== 'gateway') {
+  throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_RUNTIME_REQUIRED')
+}
+const gatewayCoursewareModels = runtimeMode === 'gateway'
+  ? resolveGatewayCoursewareModelsConfig(process.env)
+  : null
+const v4ModelPolicyConfig = gatewayCoursewareModels
+  ? resolveV4ModelPolicyConfig(
+      process.env,
+      gatewayCoursewareModels,
+      revisionImageModel,
+    )
+  : null
+const v4ModelPolicy = v4ModelPolicyConfig
+  ? new V4ModelPolicy({
+      runtimeMode: 'GATEWAY',
+      ...v4ModelPolicyConfig,
+      availabilityProbes: {
+        text: new GatewayModelAvailabilityProbe({
+          baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+          apiKey: process.env.MODEL_GATEWAY_TEXT_KEY?.trim() || '',
+        }),
+        image: new GatewayModelAvailabilityProbe({
+          baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+          apiKey: process.env.MODEL_GATEWAY_IMAGE_KEY?.trim() || '',
+        }),
+      },
+    })
+  : V4ModelPolicy.mock()
+const publishedRevisionImageModels = v4ModelPolicy.publishedModels('IMAGE_EDIT')
+if (publishedRevisionImageModels.length > 1) throw new Error('PPT_AGENT_V4_PUBLISHED_IMAGE_EDIT_MODELS_INVALID')
+const publishedRevisionImageModel = publishedRevisionImageModels[0] ?? null
 const presentationJobV2Clock = new SystemClock()
 const presentationJobV2InternalTenant = presentationJobV2InternalTenantId(tenantId)
 const presentationJobV2Runtime = presentationJobV2ApiToken
@@ -126,6 +153,7 @@ const presentationJobV2Runtime = presentationJobV2ApiToken
           artifacts,
           clock: presentationJobV2Clock,
           buildIdentity: releaseIdentity,
+          v4ModelPolicy,
         }),
         repository,
         artifacts,
@@ -148,35 +176,10 @@ const presentationJobV2 = presentationJobV2Runtime
     }
   : undefined
 const presentationJobV2Budget = presentationJobV2Runtime?.budget
-const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
-// A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
-const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_000, 60 * 60_000)
-const waitingSlaMs = boundedInteger('PPT_AGENT_WAITING_SLA_MS', 15 * 60_000, 10_000, 24 * 60 * 60_000)
-const stepSlaMs = boundedInteger('PPT_AGENT_STEP_SLA_MS', 30 * 60_000, 10_000, 24 * 60 * 60_000)
-const workerConcurrency = boundedInteger('PPT_AGENT_WORKER_CONCURRENCY', 2, 1, 8)
-const imageConcurrency = boundedInteger('PPT_AGENT_IMAGE_CONCURRENCY', 50, 1, 50)
-const reviewConcurrency = boundedInteger('PPT_AGENT_REVIEW_CONCURRENCY', 1, 1, 8)
-const runLeaseTtlMs = boundedInteger('PPT_AGENT_RUN_LEASE_TTL_MS', 60_000, 5_000, 15 * 60_000)
-const createRunRateLimitPerMinute = boundedInteger('PPT_AGENT_CREATE_RUN_RATE_LIMIT_PER_MINUTE', 10, 1, 10_000)
-const runActionRateLimitPerMinute = boundedInteger('PPT_AGENT_RUN_ACTION_RATE_LIMIT_PER_MINUTE', 60, 1, 10_000)
-if (runtimeMode !== 'mock' && runtimeMode !== 'gateway') throw new Error('PPT_AGENT_RUNTIME_MODE_INVALID')
-if (quickDeckEvaluationApiToken && runtimeMode !== 'gateway') {
-  throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_RUNTIME_REQUIRED')
-}
-const gatewayCoursewareModels = runtimeMode === 'gateway'
-  ? resolveGatewayCoursewareModelsConfig(process.env)
-  : null
-const publicV4CapabilitiesConfig = gatewayCoursewareModels
-  ? resolvePublicV4CapabilitiesConfig(
-      process.env,
-      gatewayCoursewareModels,
-      revisionImageModel,
-    )
-  : null
 const quickDeckEvaluationConfig = quickDeckEvaluationApiToken
   ? resolveQuickDeckEvaluationConfig(process.env, {
-      textModels: publicV4CapabilitiesConfig!.textModels,
-      imageModels: publicV4CapabilitiesConfig!.imageModels,
+      textModels: v4ModelPolicy.quickDeckResponsesTextModels(),
+      imageModels: v4ModelPolicy.quickDeckImageModels(),
     })
   : null
 if (quickDeckEvaluationConfig) {
@@ -194,10 +197,23 @@ if (quickDeckEvaluationConfig) {
     }),
   })
 }
-const v4ModelPolicy = publicV4CapabilitiesConfig
-  ? new V4ModelPolicy({ runtimeMode: 'GATEWAY', ...publicV4CapabilitiesConfig })
-  : V4ModelPolicy.mock()
-const publicCapabilities = v4ModelPolicy.publicCapabilities(Boolean(quickDeckEvaluationConfig))
+if (usageV2Runtime.providerBillingCatalog && publishedRevisionImageModel) {
+  usageV2Runtime.providerBillingCatalog.snapshot({
+    model: publishedRevisionImageModel,
+    operationMode: 'IMAGE_EDIT',
+    resolution: '1K',
+    aspectRatio: '16:9',
+  })
+  for (const run of await repository.listRuns()) {
+    if (run.accountingProtocol !== 'FRAMEFLOW_USAGE_V2') continue
+    usageV2Runtime.providerBillingCatalog.snapshot({
+      model: run.imageModel,
+      operationMode: 'TEXT_TO_IMAGE',
+      resolution: '1K',
+      aspectRatio: run.visualDeckV4?.deckOptions.aspectRatio ?? '16:9',
+    })
+  }
+}
 const quickDeckEvaluationDataRoot = quickDeckEvaluationConfig
   ? path.resolve(quickDeckEvaluationConfig.dataRoot)
   : null
@@ -341,12 +357,11 @@ const runtime = runtimeMode === 'gateway'
         stepSlaMs,
         workerConcurrency,
         imageConcurrency,
-        revisionImageModel,
+        revisionImageModel: publishedRevisionImageModel,
         reviewConcurrency,
         runLeaseTtlMs,
         createRunRateLimitPerMinute,
         runActionRateLimitPerMinute,
-        capabilities: publicCapabilities,
         v4ModelPolicy,
       })
     })()
@@ -355,8 +370,7 @@ const runtime = runtimeMode === 'gateway'
       controlledRaster,
       ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
-      revisionImageModel,
-      capabilities: publicCapabilities,
+      revisionImageModel: publishedRevisionImageModel,
       v4ModelPolicy,
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
       budget: presentationJobV2Budget

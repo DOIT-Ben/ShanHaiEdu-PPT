@@ -13,6 +13,7 @@ import {
   type StructuredModelPort,
 } from '../src/core/ports'
 import { RunService } from '../src/core/run-service'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 import { V4ReflectionCoordinator } from '../src/core/v4-reflection/coordinator'
 import { deckOptimizerResultSchema } from '../src/core/v4-reflection/contracts'
 import { bindDeckCriticIssues } from '../src/core/v4-reflection/deck'
@@ -25,6 +26,22 @@ import { compileVisualDeckV4Proposal } from '../src/core/visual-deck-v4-planner'
 import { hashInput } from '../src/core/hash'
 
 const cleanupPaths: string[] = []
+
+function testV4ModelPolicy() {
+  const readiness = {
+    status: 'PASSED' as const,
+    evaluationRelease: 'test', gatewayContractVersion: 'test', structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+    evaluatedAt: '2026-08-03T00:00:00.000Z', evaluationSuite: 'test',
+    expiresAt: '9999-12-31T23:59:59.999Z',
+  }
+  return new V4ModelPolicy({
+    runtimeMode: 'MOCK',
+    models: [
+      { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness },
+      { model: 'gpt-image-2', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
+    ],
+  })
+}
 
 afterEach(async () => {
   await Promise.all(cleanupPaths.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
@@ -75,7 +92,7 @@ async function setup(
 ) {
   const clock = new FixedClock(new Date('2026-08-03T00:00:00.000Z'))
   const data = fixture()
-  const created = await new RunService({ repository, clock }).create({
+  const created = await new RunService({ repository, clock, v4ModelPolicy: testV4ModelPolicy() }).create({
     schemaVersion: CONTRACT_VERSION,
     host: { tenantId: 'frameflow', externalUserId: 'reflection-user' },
     source: data.source,
@@ -94,6 +111,7 @@ async function setup(
     planningAttempt: 0,
     compilerVersion: 'visual-deck-v4-chain-3',
     protocol: 'RESPONSES_JSON_SCHEMA' as const,
+    modelOverride: created.run.v4ModelSnapshot!.textModel,
     sourceSummary: data.source.text,
   }
   return { repository, clock, coordinator, common, ...data }

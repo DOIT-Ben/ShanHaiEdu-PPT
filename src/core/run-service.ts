@@ -48,7 +48,11 @@ import {
   usageV2FinalizeStepKey,
 } from './usage-v2-coordinator'
 import { deriveV4TerminalAccounting } from './v4-terminal-accounting'
-import type { V4ModelPolicy } from './v4-model-policy'
+import {
+  V4ModelPolicyError,
+  type V4ModelPolicy,
+  type V4RunModelSnapshot,
+} from './v4-model-policy'
 import {
   allPageNumbers,
   activeRevisionLifecycle,
@@ -125,11 +129,20 @@ export class RunService {
     const existing = await this.dependencies.repository.getRun(runId)
     if (existing) return this.replayOrConflict(existing, requestHash)
 
+    let v4ModelSnapshot: V4RunModelSnapshot | undefined
+    if (parsed.data.presentationMode === 'VISUAL_DECK_V4' && !this.dependencies.v4ModelPolicy) {
+      throw new RunServiceError(503, 'V4_MODEL_POLICY_REQUIRED', 'V4 model policy is unavailable')
+    }
     try {
-      this.dependencies.v4ModelPolicy?.assertNewRunAllowed(parsed.data)
+      v4ModelSnapshot = (await this.dependencies.v4ModelPolicy?.createNewRunSnapshot(parsed.data)) ?? undefined
     } catch (error) {
-      if (error instanceof Error && error.message === 'V4_IMAGE_MODEL_NOT_ALLOWED') {
-        throw new RunServiceError(422, 'V4_IMAGE_MODEL_NOT_ALLOWED', 'image model is not allowed for new V4 runs')
+      if (error instanceof V4ModelPolicyError) {
+        const message = error.code === 'V4_IMAGE_MODEL_NOT_ALLOWED'
+          ? 'image model is not allowed for new V4 runs'
+          : error.code === 'V4_MODEL_NOT_READY'
+            ? 'a required V4 model has not passed current readiness requirements'
+            : 'a required V4 model is temporarily unavailable'
+        throw new RunServiceError(error.status, error.code, message)
       }
       throw error
     }
@@ -153,7 +166,7 @@ export class RunService {
       }
       try {
         this.dependencies.providerBillingCatalog.snapshot({
-          model: parsed.data.imageModel,
+          model: v4ModelSnapshot?.imageModel ?? parsed.data.imageModel,
           operationMode: 'TEXT_TO_IMAGE',
           resolution: '1K',
           aspectRatio: parsed.data.visualDeckV4!.deckOptions.aspectRatio,
@@ -177,6 +190,7 @@ export class RunService {
       ...(parsed.data.targetAudience ? { targetAudience: parsed.data.targetAudience } : {}),
       ...(parsed.data.presentationGoal ? { presentationGoal: parsed.data.presentationGoal } : {}),
       imageModel: parsed.data.imageModel,
+      ...(v4ModelSnapshot ? { v4ModelSnapshot } : {}),
       accountingProtocol,
       automationLevel: parsed.data.automationLevel,
       presentationMode: parsed.data.presentationMode,

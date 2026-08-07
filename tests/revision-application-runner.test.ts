@@ -8,6 +8,11 @@ import type { DocumentPort, DocumentResult, RunRecord } from '../src/core/ports'
 import { StructuredModelError } from '../src/core/ports'
 import { RevisionApplicationRunner } from '../src/core/revision-application-runner'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
+import {
+  compileV4EvidenceWindowForRun,
+  V4EvidenceWindowCompiler,
+  v4EvidenceWindowStepKey,
+} from '../src/core/v4-evidence-window-compiler'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { revisionPlanSchema } from '../src/presentation-contracts'
 import {
@@ -22,6 +27,11 @@ function run(): RunRecord {
     host: { tenantId: 'frameflow', externalUserId: 'user-1' },
     source: { kind: 'TEXT', text: '这是局部修订执行器使用的完整测试教材。' },
     slideCount: 2, visualDirection: '课堂科学信息图', imageModel: 'gpt-image-2',
+    v4ModelSnapshot: {
+      schemaVersion: '1', textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra',
+      imageModel: 'gpt-image-2', imageEditModel: 'gpt-image-2',
+    },
+    v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
     automationLevel: 'SUPERVISED', maxRevisionRounds: 2, revisionRound: 1,
     qualityScore: 72, status: 'REVISING', resumeState: null, version: 8,
     budgetUnits: 100, committedBudgetUnits: 20, qualityOverride: false,
@@ -245,6 +255,7 @@ async function fixture(
 ) {
   const repository = new InMemoryAgentRepository()
   const application = new MockRevisionApplicationPort(response)
+  const documents = options.documents ?? new StaticDocumentPort()
   await repository.createRun({ ...run(), ...options.runOverrides })
   await repository.transact('run-1', (transaction) => {
     transaction.putStep({
@@ -260,10 +271,35 @@ async function fixture(
       createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
     })
   })
+  const currentRun = await repository.getRun('run-1')
+  const compilerVersion = (baseBlueprint as { visualDeckV4Proposal?: { compilerVersion?: string } })
+    .visualDeckV4Proposal?.compilerVersion
+  if (currentRun?.visualDeckV4
+    && currentRun.v4StructuredGenerationProtocol === 'RESPONSES_JSON_SCHEMA'
+    && compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+    const document = await documents.resolve({ host: currentRun.host, source: currentRun.source })
+    const window = compileV4EvidenceWindowForRun({ run: currentRun, document })
+    const idempotencyKey = v4EvidenceWindowStepKey(currentRun.id)
+    await repository.transact(currentRun.id, (transaction) => transaction.putStep({
+      id: `step-${idempotencyKey}`,
+      runId: currentRun.id,
+      idempotencyKey,
+      inputHash: hashInput({ idempotencyKey, audit: window.audit }),
+      tool: 'compile_v4_evidence_window',
+      status: 'COMPLETED',
+      budgetUnits: 0,
+      budgetReservationId: null,
+      externalOperationId: null,
+      errorCode: null,
+      output: window.audit,
+      createdAt: transaction.run.createdAt,
+      updatedAt: transaction.run.updatedAt,
+    }))
+  }
   return {
-    repository, application,
+    repository, application, documents,
     runner: new RevisionApplicationRunner({
-      repository, documents: options.documents ?? new StaticDocumentPort(), application, clock: new FixedClock(),
+      repository, documents, application, clock: new FixedClock(),
       sleep: async () => {},
     }),
   }
@@ -365,6 +401,34 @@ describe('revision application runner', () => {
     expect(application.requests.size).toBe(0)
   })
 
+  test.each([
+    ['missing protocol', undefined],
+    ['Responses Function', 'RESPONSES_FUNCTION'],
+    ['Chat legacy', 'CHAT_LEGACY'],
+  ] as const)('fails closed before the chain-4 redraw-only shortcut for a persisted %s', async (_label, protocol) => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
+    const { repository, application, runner } = await fixture({}, plan('REGENERATE_IMAGE'), base, {
+      runOverrides: {
+        presentationMode: 'VISUAL_DECK_V4',
+        ...(protocol === undefined ? {} : { v4StructuredGenerationProtocol: protocol }),
+      },
+    })
+    if (protocol === undefined) {
+      await repository.transact('run-1', (transaction) => {
+        const { v4StructuredGenerationProtocol: _protocol, ...withoutProtocol } = transaction.run
+        transaction.putRun(withoutProtocol)
+      })
+    }
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({
+      blueprint: null,
+      step: { errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' },
+    })
+    expect(application.requests.size).toBe(0)
+  })
+
   test('compiles a chain-4 revision manuscript into the approved target slot', async () => {
     const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
     const input = visualDeckV4Input()
@@ -407,6 +471,190 @@ describe('revision application runner', () => {
       sourceChunkIds: ['chunk-2'],
     })
     expect(application.requests.size).toBe(1)
+    expect([...application.requests.values()][0]?.modelOverride).toBe('gpt-5.6-terra')
+  })
+
+  test('fails a chain-4 revision with a stable contract code before an oversized manuscript can be compiled', async () => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
+    const input = visualDeckV4Input()
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const oversized = {
+      title: '标题'.repeat(80),
+      narrative: Array.from({ length: 20 }, () => '叙事'.repeat(250)),
+      slides: Array.from({ length: 5 }, () => ({
+        title: '页'.repeat(160), narrative: '叙'.repeat(1_200),
+        userVisibleCopy: Array.from({ length: 8 }, () => '文'.repeat(500)),
+        factualStatements: Array.from({ length: 20 }, () => '事'.repeat(500)),
+        visualDescription: '视'.repeat(1_500),
+        sourceEvidence: Array.from({ length: 8 }, () => ({ excerpt: '证'.repeat(1_200) })),
+      })),
+      revisionSuggestions: [],
+    }
+    const { application, runner } = await fixture(oversized, revisionPlan, base, {
+      runOverrides: { source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ step: { errorCode: 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE' } })
+    expect(application.requests.size).toBe(1)
+  })
+
+  test('uses one semantic slot-completion retry for a chain-4 revision manuscript', async () => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
+    const input = visualDeckV4Input()
+    const response = {
+      title: '光合作用', narrative: ['明确绿色植物的作用', '说明光合作用的产物'],
+      slides: [{
+        title: '光合作用会产生什么？', narrative: '绿色植物制造有机物并释放氧气。',
+        userVisibleCopy: ['制造有机物', '释放氧气'], factualStatements: ['绿色植物制造有机物并释放氧气。'],
+        visualDescription: '以一片完整叶子和两条清晰方向箭头表现两种产物',
+        sourceEvidence: [{ excerpt: '制造有机物并释放氧气。' }],
+      }],
+      revisionSuggestions: ['用单一叶片场景清晰区分两种产物。'],
+    }
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const { application, runner } = await fixture(response, revisionPlan, base, {
+      runOverrides: { source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config },
+      documents: new StaticDocumentPort(input.document),
+    })
+    const requests: Array<{ contentSlotCompletion?: boolean; contractRepairIssues?: unknown }> = []
+    const applyOnce = application.apply.bind(application)
+    application.apply = async (modelInput) => {
+      requests.push(modelInput)
+      if (requests.length === 1) return { ...response, slides: [] }
+      return applyOnce(modelInput)
+    }
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.contentSlotCompletion).toBeUndefined()
+    expect(requests[1]).toMatchObject({ contentSlotCompletion: true })
+    expect(requests[1]?.contractRepairIssues).toBeUndefined()
+  })
+
+  test('requests one longer unique source excerpt after an ambiguous chain-4 revision manuscript', async () => {
+    const input = visualDeckV4Input()
+    const commonEvidence = '共同教材摘录用于制造来源歧义。'.repeat(4)
+    const document: DocumentResult = {
+      ...input.document,
+      chunks: [
+        { ...input.document.chunks[0]!, text: `${commonEvidence}绿色植物利用光能。` },
+        { ...input.document.chunks[1]!, text: `${commonEvidence}制造有机物并释放氧气。` },
+      ],
+    }
+    const base = createVisualDeckV4Blueprint({
+      runId: 'run-1', inputHash: 'ambiguous-revision-plan', source: input.source, document,
+      config: input.config, slideCount: 2, visualDirection: '课堂科学信息图',
+      compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION, createdAt: '2026-07-21T00:00:00.000Z',
+    })
+    const ambiguous = {
+      title: '光合作用', narrative: ['明确绿色植物的作用', '说明光合作用的产物'],
+      slides: [{
+        title: '光合作用会产生什么？', narrative: '绿色植物制造有机物并释放氧气。',
+        userVisibleCopy: ['制造有机物', '释放氧气'], factualStatements: ['绿色植物制造有机物并释放氧气。'],
+        visualDescription: '以一片完整叶子和两条清晰方向箭头表现两种产物',
+        sourceEvidence: [{ excerpt: commonEvidence }],
+      }],
+      revisionSuggestions: ['用单一叶片场景清晰区分两种产物。'],
+    }
+    const resolved = {
+      ...ambiguous,
+      slides: [{
+        ...ambiguous.slides[0]!,
+        sourceEvidence: [{ excerpt: '制造有机物并释放氧气。' }],
+      }],
+    }
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const { application, runner } = await fixture(resolved, revisionPlan, base, {
+      runOverrides: { source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config },
+      documents: new StaticDocumentPort(document),
+    })
+    const requests: Array<{ contentSlotCompletion?: boolean; sourceEvidenceDisambiguation?: boolean }> = []
+    let calls = 0
+    application.apply = async (modelInput) => {
+      requests.push(modelInput)
+      return calls++ === 0 ? ambiguous : resolved
+    }
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.sourceEvidenceDisambiguation).toBeUndefined()
+    expect(requests[1]).toMatchObject({ contentSlotCompletion: true, sourceEvidenceDisambiguation: true })
+  })
+
+  test('passes only the persisted CJK evidence window to a chain-4 semantic revision', async () => {
+    const input = visualDeckV4Input()
+    const outsideMarker = 'WINDOW_OUTSIDE_MARKER'
+    const largeDocument: DocumentResult = {
+      ...input.document,
+      chunks: Array.from({ length: 201 }, (_, index) => ({
+        id: `chunk-${index + 1}`,
+        sourceId: index === 1 ? 'source-2' : 'source-1',
+        text: index === 98
+          ? outsideMarker
+          : input.document.chunks[index]?.text ?? `第${index + 1}份受信资料。`,
+        sha256: `sha-${index + 1}`,
+      })),
+    }
+    const evidenceWindow = new V4EvidenceWindowCompiler().compile({
+      document: largeDocument,
+      instruction: input.config.instruction,
+      focus: input.config.deckOptions.focus,
+    })
+    const base = createVisualDeckV4Blueprint({
+      runId: 'run-1', inputHash: 'large-window-plan', source: input.source,
+      document: { ...largeDocument, chunks: evidenceWindow.chunks },
+      config: input.config, slideCount: 2, visualDirection: '课堂科学信息图',
+      compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION, createdAt: '2026-07-21T00:00:00.000Z',
+    })
+    const response = {
+      title: '光合作用',
+      narrative: ['明确绿色植物的作用', '说明光合作用的产物'],
+      slides: [{
+        title: '光合作用会产生什么？',
+        narrative: '绿色植物制造有机物并释放氧气。',
+        userVisibleCopy: ['制造有机物', '释放氧气'],
+        factualStatements: ['绿色植物制造有机物并释放氧气。'],
+        visualDescription: '以一片完整叶子和两条清晰方向箭头表现两种产物',
+        sourceEvidence: [{ excerpt: '制造有机物并释放氧气。' }],
+      }],
+      revisionSuggestions: ['用单一叶片场景清晰区分两种产物。'],
+    }
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const { application, runner } = await fixture(response, revisionPlan, base, {
+      runOverrides: {
+        source: input.source,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(largeDocument),
+    })
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true })
+    const request = [...application.requests.values()][0]!
+    expect(request.sourceChunks).toHaveLength(200)
+    expect(request.sourceChunks.some((chunk) => chunk.text.includes(outsideMarker))).toBe(false)
+    expect(result.blueprint?.curriculum.sourceSummary).not.toContain(outsideMarker)
   })
 
   test('applies a source-free chain-4 revision for open knowledge without inventing lineage', async () => {

@@ -98,7 +98,23 @@ describe('fallback courseware model', () => {
     expect(fallbackCalls).toBe(0)
   })
 
-  test('does not route historical Responses Function requests to Chat-only MiniMax', async () => {
+  test('does not replace a frozen V4 model route with the fallback', async () => {
+    let fallbackCalls = 0
+    const original = new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', 'primary-request')
+    const port = new FallbackCoursewareModel({
+      primary: model('gpt-5.6-terra', async () => { throw original }),
+      fallback: model('MiniMax-M3', async () => { fallbackCalls += 1; return {} }),
+    })
+
+    await expect(port.execute({
+      operation: 'create_visual_deck_v4_source_spec', schemaName: 'schema', payload: {},
+      idempotencyKey: 'frozen-v4-route-key', modelOverride: 'gpt-5.6-terra',
+      structuredGenerationProtocol: 'RESPONSES_FUNCTION',
+    })).rejects.toBe(original)
+    expect(fallbackCalls).toBe(0)
+  })
+
+  test('keeps historical Responses Function requests eligible for the gateway fallback', async () => {
     let fallbackCalls = 0
     const original = new StructuredModelError('PROVIDER_TIMEOUT', true, 'primary', 'primary-request')
     const port = new FallbackCoursewareModel({
@@ -108,8 +124,8 @@ describe('fallback courseware model', () => {
     await expect(port.execute({
       operation: 'create_visual_deck_v4_slide_briefs', schemaName: 'schema', payload: {},
       idempotencyKey: 'historical-function-key', structuredGenerationProtocol: 'RESPONSES_FUNCTION',
-    })).rejects.toBe(original)
-    expect(fallbackCalls).toBe(0)
+    })).resolves.toEqual({})
+    expect(fallbackCalls).toBe(1)
   })
 
   test('preserves the fallback model and request id when MiniMax fails', async () => {

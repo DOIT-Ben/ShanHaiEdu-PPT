@@ -1,4 +1,5 @@
 import { ZodError } from 'zod'
+import { V4_MANUSCRIPT_CONTEXT_TOO_LARGE } from '../visual-deck-v4-contracts'
 import { hashInput } from './hash'
 import { StructuredModelError, type ContractRepairIssue } from './ports'
 
@@ -11,6 +12,7 @@ export function revisionContractRepairIssues(error: unknown): readonly ContractR
       : null
   }
   if (error instanceof ZodError) {
+    if (error.issues.some((issue) => issue.message === V4_MANUSCRIPT_CONTEXT_TOO_LARGE)) return null
     return error.issues.slice(0, 20).map((issue) => {
       const path = issue.path.length > 0 ? issue.path.join('.') : '$'
       return { path: path.slice(0, 160), message: issue.message.slice(0, 500) }

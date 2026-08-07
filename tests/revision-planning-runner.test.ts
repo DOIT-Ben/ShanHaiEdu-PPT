@@ -8,8 +8,12 @@ import { planningStepKey } from '../src/core/planning-runner'
 import { StructuredModelError, type DocumentPort, type DocumentResult, type RunRecord } from '../src/core/ports'
 import { RevisionPlanningRunner, revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
+import { compileV4EvidenceWindowForRun, v4EvidenceWindowStepKey } from '../src/core/v4-evidence-window-compiler'
 import type { DeckReview, RevisionPlanDraft } from '../src/presentation-contracts'
-import { CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
+import {
+  CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
+  VISUAL_DECK_V4_COMPILER_VERSION,
+} from '../src/release-identity'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -21,6 +25,11 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     slideCount: 2,
     visualDirection: '清晰的课堂科学信息图风格',
     imageModel: 'gpt-image-2',
+    v4ModelSnapshot: {
+      schemaVersion: '1', textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra',
+      imageModel: 'gpt-image-2', imageEditModel: 'gpt-image-2',
+    },
+    v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -104,6 +113,16 @@ function layeredBlueprint() {
   }
 }
 
+function visualDeckV4Config(sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' = 'SOURCE_GROUNDED') {
+  return {
+    instruction: '制作两页光合作用视觉演示', sourceMode,
+    deckOptions: {
+      deckType: 'DETAILED_DECK' as const, language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9' as const,
+      audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
+    },
+  }
+}
+
 function visualDeckV4Blueprint(sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' = 'SOURCE_GROUNDED') {
   const source = {
     kind: 'TEXT' as const,
@@ -121,13 +140,7 @@ function visualDeckV4Blueprint(sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' 
       isComplete: true,
       missingRanges: [],
     },
-    config: {
-      instruction: '制作两页光合作用视觉演示', sourceMode,
-      deckOptions: {
-        deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
-        audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
-      },
-    },
+    config: visualDeckV4Config(sourceMode),
     slideCount: 2, visualDirection: '课堂科学信息图', createdAt: '2026-07-21T00:00:00.000Z',
   })
 }
@@ -191,7 +204,16 @@ async function fixture(
   const repository = new InMemoryAgentRepository()
   const documents = new StaticDocumentPort()
   const planner = new MockRevisionPlanningPort(response)
-  const currentRun = run(runOverrides)
+  const compilerVersion = (activeBlueprint as { visualDeckV4Proposal?: { compilerVersion?: string } })
+    .visualDeckV4Proposal?.compilerVersion
+  const sourceMode = (activeBlueprint as { visualDeckV4Proposal?: { presentationSpec?: { sourceMode?: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' } } })
+    .visualDeckV4Proposal?.presentationSpec?.sourceMode ?? 'SOURCE_GROUNDED'
+  const currentRun = run({
+    ...runOverrides,
+    ...(compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION && !runOverrides.visualDeckV4
+      ? { visualDeckV4: visualDeckV4Config(sourceMode) }
+      : {}),
+  })
   await repository.createRun(currentRun)
   await repository.transact('run-1', (transaction) => {
     transaction.putStep({
@@ -210,6 +232,27 @@ async function fixture(
       createdAt: transaction.run.createdAt, updatedAt: transaction.run.updatedAt,
     })
   })
+  if (compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    && currentRun.v4StructuredGenerationProtocol === 'RESPONSES_JSON_SCHEMA') {
+    const document = await documents.resolve()
+    const window = compileV4EvidenceWindowForRun({ run: currentRun, document })
+    const idempotencyKey = v4EvidenceWindowStepKey(currentRun.id)
+    await repository.transact(currentRun.id, (transaction) => transaction.putStep({
+      id: `step-${idempotencyKey}`,
+      runId: currentRun.id,
+      idempotencyKey,
+      inputHash: hashInput({ idempotencyKey, audit: window.audit }),
+      tool: 'compile_v4_evidence_window',
+      status: 'COMPLETED',
+      budgetUnits: 0,
+      budgetReservationId: null,
+      externalOperationId: null,
+      errorCode: null,
+      output: window.audit,
+      createdAt: transaction.run.createdAt,
+      updatedAt: transaction.run.updatedAt,
+    }))
+  }
   return {
     repository,
     documents,
@@ -228,6 +271,7 @@ describe('revision planning runner', () => {
     expect(result).toMatchObject({ status: 'AWAITING_REVISION_APPROVAL', replayed: false, plan: { revisionRound: 1 } })
     expect(await repository.getRun('run-1')).toMatchObject({ revisionRound: 0, version: 7 })
     expect(planner.requests.size).toBe(1)
+    expect([...planner.requests.values()][0]?.modelOverride).toBe('gpt-5.6-terra')
     const eventTypes = (await repository.listEvents('run-1')).map((event) => event.type)
     expect(eventTypes).toContain('approval.required')
     expect(eventTypes.filter((type) => type.startsWith('revision.'))).toEqual([])
@@ -361,6 +405,33 @@ describe('revision planning runner', () => {
         }],
       },
     })
+  })
+
+  test.each([
+    ['missing protocol', undefined],
+    ['Responses Function', 'RESPONSES_FUNCTION'],
+    ['Chat legacy', 'CHAT_LEGACY'],
+  ] as const)('fails closed before the deterministic chain-4 plan for a persisted %s', async (_label, protocol) => {
+    const activeBlueprint = visualDeckV4Blueprint()
+    activeBlueprint.visualDeckV4Proposal!.compilerVersion = VISUAL_DECK_V4_COMPILER_VERSION
+    const { repository, planner, runner } = await fixture({
+      presentationMode: 'VISUAL_DECK_V4',
+      ...(protocol === undefined ? {} : { v4StructuredGenerationProtocol: protocol }),
+    }, plan(), activeBlueprint)
+    if (protocol === undefined) {
+      await repository.transact('run-1', (transaction) => {
+        const { v4StructuredGenerationProtocol: _protocol, ...withoutProtocol } = transaction.run
+        transaction.putRun(withoutProtocol)
+      })
+    }
+
+    const result = await runner.plan('run-1')
+
+    expect(result).toMatchObject({
+      step: { errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' },
+      plan: null,
+    })
+    expect(planner.requests.size).toBe(0)
   })
 
   test('compiles a source-free open-knowledge issue into a deterministic chain-4 plan', async () => {

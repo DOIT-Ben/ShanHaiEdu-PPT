@@ -46,6 +46,7 @@ import {
   v4LifecyclePayload,
 } from './v4-lifecycle'
 import { resolveV4RenderStrategy, type V4RenderStrategy } from './v4-render-strategy'
+import { v4ModelOverride } from './v4-model-policy'
 
 export type SubmitBlueprintImagesResult = Readonly<{
   status: RunRecord['status']
@@ -159,6 +160,53 @@ export class SlideGenerationCoordinator {
         renderStrategy: strategy.kind,
       }
     })
+    const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
+    const existingSteps = (await this.dependencies.repository.listSteps(runId))
+      .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
+    const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status)
+      && !(isVisualDeckV4(run) && ['RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
+      && !canRetryReleasedV4Submission(run, step))
+    if (blockingStep) {
+      await this.requireHuman(runId, blockingStep)
+      const latest = await this.dependencies.repository.getRun(runId)
+      return {
+        status: latest?.status ?? 'FAILED',
+        submitted: 0,
+        total: blueprint.slides.length,
+        steps: existingSteps,
+      }
+    }
+    const existingByKey = new Map(existingSteps.map((step) => [step.idempotencyKey, step]))
+    const pendingRequirements = requirements.filter((requirement) => {
+      const existing = existingByKey.get(requirement.idempotencyKey)
+      return !existing
+        || ['RESERVED', 'SUBMITTING', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(existing.status)
+        || canRetryReleasedV4Submission(run, existing)
+    })
+
+    if (pendingRequirements.length === 0) {
+      if (isVisualDeckV4(run)) {
+        await refreshGenerationBatch({
+          repository: this.dependencies.repository,
+          clock: this.dependencies.clock,
+          runId,
+          revisionRound: run.revisionRound,
+        })
+      }
+      return {
+        status: run.status,
+        submitted: existingSteps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
+        total: requirements.length,
+        steps: existingSteps,
+      }
+    }
+    const requiresProviderSubmission = pendingRequirements.some((requirement) => {
+      const strategy = renderStrategies.get(requirement.idempotencyKey)
+      return strategy?.kind !== 'CONTROLLED_RASTER' && requirement.sourceAssetStrategy !== 'REUSE_ORIGINAL'
+    })
+    const imageModel = isVisualDeckV4(run) && requiresProviderSubmission
+      ? v4ModelOverride(run, 'IMAGE', blueprint.visualDeckV4Proposal?.compilerVersion)!
+      : run.imageModel
     if (isVisualDeckV4(run)) {
       await ensureGenerationBatch({
         repository: this.dependencies.repository,
@@ -167,7 +215,7 @@ export class SlideGenerationCoordinator {
         blueprint,
         requirements: batchRequirements,
         unitBudgetUnits,
-        accountingModel: run.imageModel,
+        accountingModel: imageModel,
         operationMode: 'TEXT_TO_IMAGE',
       })
       const batchStep = (await this.dependencies.repository.listSteps(runId))
@@ -222,42 +270,7 @@ export class SlideGenerationCoordinator {
       }
       batchReservation = reservation
     }
-    const requirementKeys = new Set(requirements.map((requirement) => requirement.idempotencyKey))
-    const existingSteps = (await this.dependencies.repository.listSteps(runId))
-      .filter((step) => step.tool === 'generate_slide_image' && requirementKeys.has(step.idempotencyKey))
     const concurrentPageExecution = isVisualDeckV4(run) || run.source.kind === 'APPROVED_PAGE_DESIGN'
-    const blockingStep = existingSteps.find((step) => isMediaFailureStepStatus(step.status)
-      && !(isVisualDeckV4(run) && ['RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status))
-      && !canRetryReleasedV4Submission(run, step))
-    if (blockingStep) {
-      await this.requireHuman(runId, blockingStep)
-      return { status: 'NEEDS_HUMAN', submitted: 0, total: blueprint.slides.length, steps: existingSteps }
-    }
-    const existingByKey = new Map(existingSteps.map((step) => [step.idempotencyKey, step]))
-    const pendingRequirements = requirements.filter((requirement) => {
-      const existing = existingByKey.get(requirement.idempotencyKey)
-      return !existing
-        || ['RESERVED', 'SUBMITTING', 'RESERVATION_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(existing.status)
-        || canRetryReleasedV4Submission(run, existing)
-    })
-
-    if (pendingRequirements.length === 0) {
-      if (isVisualDeckV4(run)) {
-        await refreshGenerationBatch({
-          repository: this.dependencies.repository,
-          clock: this.dependencies.clock,
-          runId,
-          revisionRound: run.revisionRound,
-        })
-      }
-      return {
-        status: run.status,
-        submitted: existingSteps.filter((step) => ['WAITING', 'COMPLETED'].includes(step.status)).length,
-        total: requirements.length,
-        steps: existingSteps,
-      }
-    }
-
     const steps = [...existingSteps]
     const unresolvedRequirements = []
     const currentRequirements = pendingRequirements
@@ -300,6 +313,7 @@ export class SlideGenerationCoordinator {
             : await this.submitGeneratedImage(
                 run,
                 requirement,
+                imageModel,
                 unitBudgetUnits,
                 undefined,
                 existingByKey.get(requirement.idempotencyKey),
@@ -371,7 +385,7 @@ export class SlideGenerationCoordinator {
         await this.appendProgress(runId, completed.id, steps.length, requirements.length)
         continue
       }
-      const result = { step: await this.submitGeneratedImage(run, requirement, unitBudgetUnits, sourceAsset) }
+      const result = { step: await this.submitGeneratedImage(run, requirement, imageModel, unitBudgetUnits, sourceAsset) }
       const existingIndex = steps.findIndex((step) => step.idempotencyKey === result.step.idempotencyKey)
       if (existingIndex === -1) steps.push(result.step)
       else steps[existingIndex] = result.step
@@ -528,6 +542,7 @@ export class SlideGenerationCoordinator {
   private async submitGeneratedImage(
     run: RunRecord,
     requirement: ReturnType<typeof blueprintImageRequirements>[number],
+    model: string,
     unitBudgetUnits: number,
     sourceAsset?: SourceAsset | null,
     existingStep?: StepRecord,
@@ -549,7 +564,7 @@ export class SlideGenerationCoordinator {
       versionId,
       prompt: requirement.prompt,
       ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
-      model: run.imageModel,
+      model,
       budgetUnits: unitBudgetUnits,
       aspectRatio: requirement.aspectRatio,
       ...(run.presentationMode === 'VISUAL_DECK_V4' ? { exactAspectRatio: true } : {}),

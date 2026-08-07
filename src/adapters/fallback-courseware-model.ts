@@ -46,7 +46,7 @@ export class FallbackCoursewareModel implements CoursewareModelPorts {
     try {
       return await primary.preflightStructuredGeneration(input)
     } catch (error) {
-      if (input.requiredProtocol === 'RESPONSES_JSON_SCHEMA') throw error
+      if (input.requiredProtocol === 'RESPONSES_JSON_SCHEMA' || input.modelOverride) throw error
       if (!(error instanceof StructuredModelError) || !FALLBACK_ERROR_CODES.has(error.code)) throw error
       return fallback.preflightStructuredGeneration(input)
     }
@@ -79,7 +79,7 @@ export class FallbackCoursewareModel implements CoursewareModelPorts {
       return await (this.dependencies.primary[method] as (value: typeof input) => Promise<unknown>)(input)
     } catch (error) {
       if ('structuredGenerationProtocol' in input
-        && input.structuredGenerationProtocol?.startsWith('RESPONSES_')) throw error
+        && (input.structuredGenerationProtocol === 'RESPONSES_JSON_SCHEMA' || input.modelOverride)) throw error
       if (!(error instanceof StructuredModelError) || !FALLBACK_ERROR_CODES.has(error.code)) throw error
       return (this.dependencies.fallback[method] as (value: typeof input) => Promise<unknown>)(input)
     }

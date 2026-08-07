@@ -4,6 +4,7 @@ import { FixedClock, MockVisualReviewPort } from '../src/adapters/mock-ports'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
 import { StructuredModelError } from '../src/core/ports'
 import type { RunRecord } from '../src/core/ports'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
 
 const request = {
   runId: 'run-1',
@@ -27,6 +28,10 @@ function run(): RunRecord {
     slideCount: 2,
     visualDirection: request.visualDirection,
     imageModel: 'gpt-image-2',
+    v4ModelSnapshot: {
+      schemaVersion: '1', textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra',
+      imageModel: 'gpt-image-2', imageEditModel: 'gpt-image-2',
+    },
     automationLevel: 'SUPERVISED',
     maxRevisionRounds: 2,
     revisionRound: 0,
@@ -67,13 +72,44 @@ describe('side-effect-free visual review runner', () => {
       reasons: [],
       retryInstruction: null,
     })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({ ...transaction.run, presentationMode: 'VISUAL_DECK_V4' })
+    })
     const result = await runner.review(request)
 
     expect(result).toMatchObject({ replayed: false, review: { approved: true, visualScore: 92 } })
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW', committedBudgetUnits: 10 })
     expect(reviewer.reviews.size).toBe(1)
+    expect([...reviewer.requests.values()][0]?.modelOverride).toBe('gpt-5.6-terra')
     expect((await repository.listEvents('run-1')).map((event) => event.type)).toEqual(['tool.started', 'tool.completed'])
   })
+
+  test.each(['RESPONSES_FUNCTION', 'CHAT_LEGACY'] as const)(
+    'rejects a persisted %s protocol before a chain-4 page-review provider call',
+    async (protocol) => {
+      const { repository, reviewer, runner } = await fixture({
+        approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null,
+      })
+      await repository.transact('run-1', (transaction) => {
+        transaction.putRun({
+          ...transaction.run,
+          presentationMode: 'VISUAL_DECK_V4',
+          v4StructuredGenerationProtocol: protocol,
+        })
+      })
+
+      const result = await runner.review({
+        ...request,
+        v4CompilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+      })
+
+      expect(result).toMatchObject({
+        review: null,
+        step: { status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' },
+      })
+      expect(reviewer.reviews.size).toBe(0)
+    },
+  )
 
   test('reports a rejected image but does not create a redraw', async () => {
     const { repository, runner } = await fixture({
@@ -203,6 +239,43 @@ describe('side-effect-free visual review runner', () => {
       { path: 'approved', message: 'an image with detected text cannot be approved' },
     ])
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'PAGE_REVIEW' })
+  })
+
+  test('uses one semantic slot-completion retry for a chain-4 visual review', async () => {
+    const repository = new InMemoryAgentRepository()
+    await repository.createRun(run())
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        v4StructuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      })
+    })
+    const requests: Array<{ contentSlotCompletion?: boolean; contractRepairIssues?: unknown }> = []
+    const runner = new VisualReviewRunner({
+      repository,
+      clock: new FixedClock(),
+      reviewer: {
+        async review(input) {
+          requests.push(input)
+          return requests.length === 1
+            ? { approved: true, textDetected: true, visualScore: 80, reasons: [], retryInstruction: null }
+            : { approved: true, textDetected: false, visualScore: 92, reasons: [], retryInstruction: null }
+        },
+      },
+      sleep: async () => {},
+    })
+
+    const result = await runner.review({
+      ...request,
+      v4CompilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+    })
+
+    expect(result.review).toMatchObject({ approved: true, visualScore: 92 })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.contentSlotCompletion).toBeUndefined()
+    expect(requests[1]).toMatchObject({ contentSlotCompletion: true })
+    expect(requests[1]?.contractRepairIssues).toBeUndefined()
   })
 
   test('preserves the final provider diagnostic after bounded retries are exhausted', async () => {

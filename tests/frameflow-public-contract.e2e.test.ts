@@ -14,6 +14,7 @@ import {
   type UsageAccountingPort,
   type VisualReviewPort,
 } from '../src/core/ports'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 import { providerTechnicalFailure } from '../src/core/technical-recovery'
 import { createMockRuntime } from '../src/runtime/mock-runtime'
 import { ServiceTokenAuthentication } from '../src/http/service-token-authentication'
@@ -52,6 +53,31 @@ const frameFlowV4Request = {
     },
   },
 } as const
+
+const frameFlowV4Readiness = {
+  status: 'PASSED' as const,
+  evaluationRelease: 'frameflow-contract-test',
+  gatewayContractVersion: 'LOCAL_MOCK',
+  structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+  evaluatedAt: '2026-01-01T00:00:00.000Z',
+  evaluationSuite: 'frameflow-contract-test',
+  expiresAt: '9999-12-31T23:59:59.999Z',
+}
+
+function frameFlowV4ModelPolicy() {
+  return new V4ModelPolicy({
+    runtimeMode: 'MOCK',
+    models: [
+      { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness: frameFlowV4Readiness },
+      { model: 'gemini-3-pro-image-preview', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness: frameFlowV4Readiness },
+      { model: 'gpt-image-2', roles: ['IMAGE_EDIT'], evaluationEnabled: true, published: true, readiness: frameFlowV4Readiness },
+    ],
+  })
+}
+
+function createFrameFlowRuntime(input: Parameters<typeof createMockRuntime>[0]) {
+  return createMockRuntime({ ...input, v4ModelPolicy: frameFlowV4ModelPolicy() })
+}
 
 function request(path: string, init: RequestInit = {}, requestId = 'frameflow-request-1') {
   const headers = new Headers(init.headers)
@@ -351,7 +377,7 @@ describe('FrameFlow public V4 contract', () => {
   test('creates, resumes events, completes, enumerates and downloads one real PPTX through HTTP', async () => {
     const repository = new InMemoryAgentRepository()
     const artifacts = new MockArtifactPort()
-    const runtime = createMockRuntime({ repository, artifacts, apiToken: token })
+    const runtime = createFrameFlowRuntime({ repository, artifacts, apiToken: token })
 
     const invalidRequestId = 'request-invalid-contract'
     const invalid = await runtime.handler(createRequest(
@@ -500,7 +526,7 @@ describe('FrameFlow public V4 contract', () => {
 
   test('reports an exhausted hard quality blocker as a stable technical result without human approval', async () => {
     const repository = new InMemoryAgentRepository()
-    const runtime = createMockRuntime({
+    const runtime = createFrameFlowRuntime({
       repository,
       artifacts: new MockArtifactPort(),
       apiToken: token,
@@ -587,7 +613,7 @@ describe('FrameFlow public V4 contract', () => {
     const repository = new InMemoryAgentRepository()
     const images = new UnknownSubmissionImages()
     const clock = new FixedClock()
-    const runtime = createMockRuntime({
+    const runtime = createFrameFlowRuntime({
       repository,
       artifacts: new MockArtifactPort(),
       images,
@@ -646,7 +672,7 @@ describe('FrameFlow public V4 contract', () => {
 
   test('keeps Usage V2 authorization exhaustion paused with ADD_BUDGET through public history', async () => {
     const repository = new InMemoryAgentRepository()
-    const runtime = createMockRuntime({
+    const runtime = createFrameFlowRuntime({
       repository,
       artifacts: new MockArtifactPort(),
       apiToken: token,
@@ -706,7 +732,7 @@ describe('FrameFlow public V4 contract', () => {
     const images = new CountingCompletedImages(artifacts)
     const clock = new FixedClock()
     const usage = new TerminalFinalizeUsage(['REVIEW_REQUIRED', 'UNKNOWN', 'SETTLED'], clock)
-    const runtime = createMockRuntime({
+    const runtime = createFrameFlowRuntime({
       repository,
       artifacts,
       images,
@@ -907,7 +933,7 @@ describe('FrameFlow public V4 contract', () => {
     const images = new CountingCompletedImages(artifacts)
     const clock = new FixedClock()
     const usage = new TerminalFinalizeUsage(['REJECTED'], clock)
-    const runtime = createMockRuntime({
+    const runtime = createFrameFlowRuntime({
       repository, artifacts, images, clock, apiToken: token,
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
       usageAccounting: usage,
@@ -945,7 +971,7 @@ describe('FrameFlow public V4 contract', () => {
     const images = new CountingCompletedImages(artifacts)
     const clock = new FixedClock()
     const usage = new TerminalFinalizeUsage(['RECONCILING', 'SETTLED'], clock, timestampFormat)
-    const runtime = createMockRuntime({
+    const runtime = createFrameFlowRuntime({
       repository, artifacts, images, clock, apiToken: token,
       defaultAccountingProtocol: 'FRAMEFLOW_USAGE_V2',
       usageAccounting: usage,
