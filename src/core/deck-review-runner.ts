@@ -1,10 +1,8 @@
 import { agentEventSchema, CONTRACT_VERSION, issueSummarySchema, type AgentEvent } from '../contracts'
 import { ZodError } from 'zod'
 import {
-  deckReviewDraftSchema,
-  deckReviewSchema,
-  openKnowledgeDeckReviewDraftSchema,
-  openKnowledgeDeckReviewSchema,
+  deckReviewDraftSchemaForSourceMode,
+  deckReviewSchemaForSourceMode,
   revisionPlanSchema,
   type DeckReview,
   type DeckReviewDraft,
@@ -83,6 +81,10 @@ export type DeckReviewResult = Readonly<{
 
 type DeckSlideInput = Parameters<DeckReviewPort['evaluate']>[0]['slides'][number]
 
+function reviewSourceMode(blueprint: PresentationBlueprint) {
+  return blueprint.visualDeckV4Proposal?.presentationSpec.sourceMode ?? 'SOURCE_GROUNDED'
+}
+
 export class DeckReviewRunner {
   private readonly inFlight = new Map<string, Promise<DeckReviewResult>>()
 
@@ -120,7 +122,7 @@ export class DeckReviewRunner {
       slides = this.deckSlides(run, blueprint, artifactReferences)
     } catch (error) {
       const code = error instanceof Error ? error.message : 'DECK_REVIEW_INPUT_FAILED'
-      return this.failBeforeStart(run, code)
+      return this.failBeforeStart(run, blueprint, code)
     }
     const idempotencyKey = deckReviewStepKey(run)
     const inputHash = hashInput({
@@ -130,7 +132,7 @@ export class DeckReviewRunner {
       sourceChunks: sourceChunks.map(({ id, sha256 }) => ({ id, sha256 })),
       slides,
     })
-    const prepared = await this.prepare(run, idempotencyKey, inputHash)
+    const prepared = await this.prepare(run, blueprint, idempotencyKey, inputHash)
     if (prepared) return prepared
 
     try {
@@ -148,12 +150,12 @@ export class DeckReviewRunner {
         return { ...slide, artifactId }
       })
       const review = await this.evaluateWithRetry(run, blueprint, sourceChunks, reviewSlides, idempotencyKey)
-      return this.complete(run, idempotencyKey, review)
+      return this.complete(run, blueprint, idempotencyKey, review)
     } catch (error) {
       const diagnostic = error instanceof DeckReviewExecutionError
         ? error.diagnostic
         : deckReviewFailure(error, 1, 1)
-      return this.fail(run, idempotencyKey, diagnostic)
+      return this.fail(run, blueprint, idempotencyKey, diagnostic)
     }
   }
 
@@ -181,8 +183,8 @@ export class DeckReviewRunner {
             ...(contractRepairIssues ? { contractRepairIssues } : {}),
             ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
           })
-          const openKnowledge = blueprint.visualDeckV4Proposal?.presentationSpec.sourceMode === 'OPEN_KNOWLEDGE'
-          const draft = (openKnowledge ? openKnowledgeDeckReviewDraftSchema : deckReviewDraftSchema).parse(raw)
+          const sourceMode = reviewSourceMode(blueprint)
+          const draft = deckReviewDraftSchemaForSourceMode(sourceMode).parse(raw)
           this.validateReferences(draft, run.id, blueprint, sourceChunks)
           if (blueprint.renderMode === 'VISUAL_DECK_V4') {
             const repairableIssues = draft.issues.filter((issue) => issue.severity !== 'INFO'
@@ -190,7 +192,7 @@ export class DeckReviewRunner {
                 || isHardQualityIssue(issue)))
             compileVisualDeckV4RevisionIssueGroups(repairableIssues)
           }
-          return (openKnowledge ? openKnowledgeDeckReviewSchema : deckReviewSchema).parse({
+          return deckReviewSchemaForSourceMode(sourceMode).parse({
             ...draft,
             id: `${run.id}:deck-review:r${run.revisionRound}`,
             revisionRound: run.revisionRound,
@@ -228,7 +230,12 @@ export class DeckReviewRunner {
     )
   }
 
-  private async prepare(run: RunRecord, idempotencyKey: string, inputHash: string) {
+  private async prepare(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    idempotencyKey: string,
+    inputHash: string,
+  ) {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const existing = transaction.getStep(idempotencyKey)
       if (existing) {
@@ -236,7 +243,7 @@ export class DeckReviewRunner {
           throw new Error('STEP_IDEMPOTENCY_CONFLICT')
         }
         if (existing.status === 'COMPLETED') {
-          const review = openKnowledgeDeckReviewSchema.parse(existing.output)
+          const review = deckReviewSchemaForSourceMode(reviewSourceMode(blueprint)).parse(existing.output)
           const remediationExhausted = isVisualDeckV4(transaction.run)
             && transaction.run.automationLevel === 'BOUNDED_AUTO'
             && transaction.run.revisionRound >= transaction.run.maxRevisionRounds
@@ -337,12 +344,17 @@ export class DeckReviewRunner {
     })
   }
 
-  private async complete(run: RunRecord, idempotencyKey: string, review: DeckReview): Promise<DeckReviewResult> {
+  private async complete(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    idempotencyKey: string,
+    review: DeckReview,
+  ): Promise<DeckReviewResult> {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'COMPLETED') {
-        const persisted = openKnowledgeDeckReviewSchema.parse(step.output)
+        const persisted = deckReviewSchemaForSourceMode(reviewSourceMode(blueprint)).parse(step.output)
         return {
           step,
           review: persisted,
@@ -479,12 +491,16 @@ export class DeckReviewRunner {
     })
   }
 
-  private async failBeforeStart(run: RunRecord, errorCode: string): Promise<DeckReviewResult> {
+  private async failBeforeStart(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    errorCode: string,
+  ): Promise<DeckReviewResult> {
     const idempotencyKey = deckReviewStepKey(run)
     const inputHash = hashInput({ tool: 'review_deck', errorCode, revisionRound: run.revisionRound })
-    const prepared = await this.prepare(run, idempotencyKey, inputHash)
+    const prepared = await this.prepare(run, blueprint, idempotencyKey, inputHash)
     if (prepared) return prepared
-    return this.fail(run, idempotencyKey, {
+    return this.fail(run, blueprint, idempotencyKey, {
       errorCode,
       providerAttempt: 0,
       maxProviderAttempts: MAX_DECK_REVIEW_ATTEMPTS,
@@ -495,12 +511,17 @@ export class DeckReviewRunner {
     })
   }
 
-  private async fail(run: RunRecord, idempotencyKey: string, diagnostic: DeckReviewFailure): Promise<DeckReviewResult> {
+  private async fail(
+    run: RunRecord,
+    blueprint: PresentationBlueprint,
+    idempotencyKey: string,
+    diagnostic: DeckReviewFailure,
+  ): Promise<DeckReviewResult> {
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'COMPLETED') {
-        const persisted = openKnowledgeDeckReviewSchema.parse(step.output)
+        const persisted = deckReviewSchemaForSourceMode(reviewSourceMode(blueprint)).parse(step.output)
         return {
           step,
           review: persisted,

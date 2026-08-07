@@ -186,6 +186,7 @@ export interface ImageGenerationPort {
     negativePrompt?: string
     model: string
     aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+    exactAspectRatio?: boolean
     backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
     referenceImage?: Readonly<{
       mimeType: SourceAsset['mimeType']
@@ -217,6 +218,7 @@ export interface ImageGenerationPort {
     operationId: string
     idempotencyKey?: string
     aspectRatio: '16:9' | '4:3' | '1:1' | '3:4'
+    exactAspectRatio?: boolean
     backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
   }>): Promise<
     | Readonly<{ state: 'QUEUED' | 'PROCESSING'; retryAfterMs?: number }>

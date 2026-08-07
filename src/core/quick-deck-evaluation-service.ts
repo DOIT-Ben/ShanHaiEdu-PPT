@@ -75,6 +75,7 @@ function event(
 
 function contentConfig(request: QuickDeckEvaluationRequest) {
   const name = request.source.name ?? 'quick-deck-evaluation.txt'
+  const topic = name.replace(/\.[^.]+$/, '').trim().slice(0, 300) || '受控测试材料'
   const sourceId = 'quick-deck-source'
   const chunkId = 'quick-deck-source-chunk'
   const source = { kind: 'TEXT' as const, name, text: request.source.text, roleHint: 'CONTENT_SOURCE' as const }
@@ -97,7 +98,7 @@ function contentConfig(request: QuickDeckEvaluationRequest) {
     missingRanges: [],
   }
   const config = {
-    instruction: '基于受控测试材料生成一套快速视觉演示。',
+    instruction: `基于受控测试材料《${topic}》生成一套快速视觉演示。`,
     sourceMode: 'SOURCE_GROUNDED' as const,
     deckOptions: {
       deckType: 'DETAILED_DECK' as const,
@@ -105,7 +106,7 @@ function contentConfig(request: QuickDeckEvaluationRequest) {
       length: { slideCount: request.slideCount },
       aspectRatio: '16:9' as const,
       audience: request.audience ?? '快速评测观察者',
-      focus: '受控测试材料的核心表达',
+      focus: `提炼《${topic}》的核心表达`,
       styleHint: request.visualDirection,
     },
   }
@@ -378,6 +379,7 @@ export class QuickDeckEvaluationService {
       ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
       model: submitting.imageModel,
       aspectRatio: '16:9',
+      exactAspectRatio: true,
       backgroundMode: 'OPAQUE',
       idempotencyKey: submitting.pages.find((page) => page.pageNumber === requirement.pageNumber)!.idempotencyKey,
     })))
@@ -435,6 +437,7 @@ export class QuickDeckEvaluationService {
         operationId: page.operationId,
         idempotencyKey: page.idempotencyKey,
         aspectRatio: '16:9',
+        exactAspectRatio: true,
         backgroundMode: 'OPAQUE',
       })
       if (result.state === 'QUEUED' || result.state === 'PROCESSING') {
@@ -617,20 +620,25 @@ export class QuickDeckEvaluationService {
     ])
     if (this.dependencies.images.lookupByIdempotency) {
       for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED')) {
-        const lookup = await this.dependencies.images.lookupByIdempotency({
-          tenantId: record.tenantId,
-          idempotencyKey: page.idempotencyKey,
-          operationMode: 'TEXT_TO_IMAGE',
-        })
-        if (lookup.state !== 'SUBMITTED') continue
-        const inspected = await this.dependencies.images.inspect({
-          tenantId: record.tenantId,
-          operationId: lookup.operationId,
-          idempotencyKey: page.idempotencyKey,
-          aspectRatio: '16:9',
-          backgroundMode: 'OPAQUE',
-        })
-        if (inspected.state === 'COMPLETED') artifactIds.add(inspected.artifactId)
+        try {
+          const lookup = await this.dependencies.images.lookupByIdempotency({
+            tenantId: record.tenantId,
+            idempotencyKey: page.idempotencyKey,
+            operationMode: 'TEXT_TO_IMAGE',
+          })
+          if (lookup.state !== 'SUBMITTED') continue
+          const inspected = await this.dependencies.images.inspect({
+            tenantId: record.tenantId,
+            operationId: lookup.operationId,
+            idempotencyKey: page.idempotencyKey,
+            aspectRatio: '16:9',
+            backgroundMode: 'OPAQUE',
+            exactAspectRatio: true,
+          })
+          if (inspected.state === 'COMPLETED') artifactIds.add(inspected.artifactId)
+        } catch {
+          // Provider cleanup inspection is best-effort; known local artifacts must still expire.
+        }
       }
     }
     if (this.dependencies.artifactCleanup) {

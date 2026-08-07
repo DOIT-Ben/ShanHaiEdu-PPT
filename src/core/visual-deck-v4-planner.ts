@@ -196,7 +196,9 @@ export function normalizeVisualDeckV4SourceSpecRequestBinding(
     name: source.name,
     role: source.role,
     status: source.status,
-    sourceChunkIds: source.sourceChunkIds,
+    sourceChunkIds: input.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+      ? candidatesById.get(source.sourceId)!.sourceChunkIds
+      : source.sourceChunkIds,
     ...(source.failureCode ? { failureCode: source.failureCode } : {}),
   }))
   const explicitAudience = input.config.deckOptions.audience ?? input.targetAudience
@@ -375,9 +377,11 @@ export function createVisualDeckV4BlueprintFromProposal(
   const availableChunkIds = new Set(input.document.chunks.map((chunk) => chunk.id))
   const understoodChunks = proposal.sourceUnderstanding.sources.flatMap((source) => source.sourceChunkIds)
   const understoodChunkIds = new Set(understoodChunks)
-  if (availableChunkIds.size !== understoodChunkIds.size
-    || understoodChunks.length !== understoodChunkIds.size
-    || [...availableChunkIds].some((chunkId) => !understoodChunkIds.has(chunkId))) {
+  const requiresCompleteChunkCoverage = proposal.compilerVersion !== VISUAL_DECK_V4_COMPILER_VERSION
+  if (understoodChunks.length !== understoodChunkIds.size
+    || understoodChunks.some((chunkId) => !availableChunkIds.has(chunkId))
+    || (requiresCompleteChunkCoverage && (availableChunkIds.size !== understoodChunkIds.size
+      || [...availableChunkIds].some((chunkId) => !understoodChunkIds.has(chunkId))))) {
     throw new Error('VISUAL_DECK_V4_SOURCE_COVERAGE_INVALID')
   }
   const expectedSourceIds = new Set(
@@ -388,7 +392,9 @@ export function createVisualDeckV4BlueprintFromProposal(
     || proposal.slideBriefs.some((brief) => brief.sourceChunkIds.some((chunkId) => !availableChunkIds.has(chunkId)))) {
     throw new Error('VISUAL_DECK_V4_SOURCE_REFERENCE_INVALID')
   }
-  const sourceChunkIds = input.document.chunks.map((chunk) => chunk.id)
+  const sourceChunkIds = proposal.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    ? [...understoodChunkIds]
+    : input.document.chunks.map((chunk) => chunk.id)
   const sourceSummary = clipped(input.document.chunks.map((chunk) => chunk.text).join(' '), 4_000)
   return presentationBlueprintSchema.parse({
     id: `blueprint-${hashInput({ runId: input.runId, inputHash: input.inputHash, compiler: resolvedCompilerVersion }).slice(0, 28)}`,

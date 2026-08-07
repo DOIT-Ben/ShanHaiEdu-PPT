@@ -1,7 +1,6 @@
 import { CONTRACT_VERSION } from '../contracts'
 import {
-  deckReviewSchema,
-  openKnowledgeDeckReviewSchema,
+  deckReviewSchemaForSourceMode,
   revisionPlanDraftSchema,
   revisionPlanSchema,
   type DeckReview,
@@ -108,7 +107,7 @@ export class RevisionPlanningRunner {
   private async planOnce(runId: string): Promise<RevisionPlanningResult> {
     const run = await this.requireRun(runId)
     const blueprint = await getActiveBlueprint(this.dependencies.repository, runId, run.revisionRound)
-    const completedReview = await this.requireReview(run)
+    const completedReview = await this.requireReview(run, blueprint)
     if (passesDeckQuality(completedReview)) throw new Error('DECK_REVIEW_ALREADY_PASSED')
     const review = revisionScope(completedReview)
     if (run.revisionRound >= run.maxRevisionRounds) {
@@ -621,11 +620,12 @@ export class RevisionPlanningRunner {
     return run
   }
 
-  private async requireReview(run: RunRecord): Promise<DeckReview> {
+  private async requireReview(run: RunRecord, blueprint: PresentationBlueprint): Promise<DeckReview> {
     const step = (await this.dependencies.repository.listSteps(run.id))
       .find((candidate) => candidate.idempotencyKey === deckReviewStepKey(run) && candidate.status === 'COMPLETED')
     if (!step) throw new Error('DECK_REVIEW_NOT_READY')
-    return openKnowledgeDeckReviewSchema.or(deckReviewSchema).parse(step.output)
+    const sourceMode = blueprint.visualDeckV4Proposal?.presentationSpec.sourceMode ?? 'SOURCE_GROUNDED'
+    return deckReviewSchemaForSourceMode(sourceMode).parse(step.output)
   }
 
   private validatePlan(
@@ -663,14 +663,18 @@ export class RevisionPlanningRunner {
         throw new Error('REVISION_PLAN_SOURCE_REFERENCE_INVALID')
       }
       const needsSources = issues.some((issue) => revisionRepairDomain(issue!) === 'KNOWLEDGE')
-      if (needsSources && operation.sourceChunkIds.length === 0) {
+      const openKnowledge = blueprint.visualDeckV4Proposal?.presentationSpec.sourceMode === 'OPEN_KNOWLEDGE'
+      if (openKnowledge && operation.sourceChunkIds.length > 0) {
+        throw new Error('REVISION_PLAN_OPEN_KNOWLEDGE_SOURCE_FORBIDDEN')
+      }
+      if (!openKnowledge && needsSources && operation.sourceChunkIds.length === 0) {
         throw new Error('REVISION_PLAN_SOURCE_REFERENCE_REQUIRED')
       }
       const issueSourceIds = new Set(issues.flatMap((issue) => issue!.sourceChunkIds))
-      if (needsSources && operation.sourceChunkIds.some((id) => !issueSourceIds.has(id))) {
+      if (!openKnowledge && needsSources && operation.sourceChunkIds.some((id) => !issueSourceIds.has(id))) {
         throw new Error('REVISION_PLAN_SOURCE_MISMATCH')
       }
-      if (needsSources && [...issueSourceIds].some((id) => !operation.sourceChunkIds.includes(id))) {
+      if (!openKnowledge && needsSources && [...issueSourceIds].some((id) => !operation.sourceChunkIds.includes(id))) {
         throw new Error('REVISION_PLAN_SOURCE_COVERAGE_INCOMPLETE')
       }
       if (blueprint.renderMode === 'LAYERED_COURSEWARE_V3' && operation.kind === 'REGENERATE_IMAGE') {

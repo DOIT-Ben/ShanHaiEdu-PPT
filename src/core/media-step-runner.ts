@@ -106,6 +106,7 @@ export type SubmitSlideImageInput = Readonly<{
   model: string
   budgetUnits: number
   aspectRatio?: '16:9' | '4:3' | '1:1' | '3:4'
+  exactAspectRatio?: boolean
   backgroundMode?: 'OPAQUE' | 'TRANSPARENT'
   operationMode?: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
   repairContract?: V4RepairContract
@@ -265,6 +266,7 @@ export class MediaStepRunner {
         ...(input.negativePrompt ? { negativePrompt: input.negativePrompt } : {}),
         model: input.model,
         aspectRatio: input.aspectRatio ?? '16:9',
+        ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
         ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
         ...(input.referenceImage ? { referenceImage: input.referenceImage } : {}),
         idempotencyKey: input.idempotencyKey,
@@ -354,6 +356,7 @@ export class MediaStepRunner {
       operationId: step.externalOperationId,
       idempotencyKey,
       aspectRatio: mediaInput.aspectRatio ?? '16:9',
+      ...(mediaInput.exactAspectRatio ? { exactAspectRatio: true } : {}),
       ...(mediaInput.backgroundMode ? { backgroundMode: mediaInput.backgroundMode } : {}),
     })
     if (status.state === 'QUEUED' || status.state === 'PROCESSING') {
@@ -454,6 +457,7 @@ export class MediaStepRunner {
       prompt: input.prompt,
       model: input.model,
       aspectRatio: input.aspectRatio ?? '16:9',
+      ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
       ...(input.negativePrompt ? { negativePrompt: input.negativePrompt } : {}),
       ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
       ...(input.operationMode ? { operationMode: input.operationMode } : {}),
@@ -540,6 +544,7 @@ export class MediaStepRunner {
           slideId: input.slideId,
           versionId: input.versionId,
           aspectRatio: input.aspectRatio ?? '16:9',
+          ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
           model: input.model,
           operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
@@ -713,6 +718,7 @@ export class MediaStepRunner {
       slideId?: unknown
       versionId?: unknown
       aspectRatio?: unknown
+      exactAspectRatio?: unknown
       backgroundMode?: unknown
       model?: unknown
       operationMode?: unknown
@@ -738,6 +744,7 @@ export class MediaStepRunner {
         || output.aspectRatio === '1:1' || output.aspectRatio === '3:4'
         ? { aspectRatio: output.aspectRatio }
         : {}),
+      ...(output.exactAspectRatio === true ? { exactAspectRatio: true } : {}),
       ...(typeof output.budgetReservationKey === 'string' ? { budgetReservationKey: output.budgetReservationKey } : {}),
       ...(typeof output.batchId === 'string' && typeof step.budgetReservationId === 'string'
         ? { batchReservation: { batchId: output.batchId, reservationId: step.budgetReservationId } }

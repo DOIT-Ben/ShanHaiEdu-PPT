@@ -88,7 +88,7 @@ describe('gateway image generation adapter', () => {
 
     await expect(adapter.inspect({
       tenantId: 'frameflow', operationId: submitted.operationId,
-      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
+      idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9', exactAspectRatio: true,
     })).resolves.toEqual({
       state: 'FAILED',
       errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
@@ -98,6 +98,33 @@ describe('gateway image generation adapter', () => {
       },
     })
     expect(artifacts.artifacts.size).toBe(0)
+  })
+
+  test('preserves the legacy tolerance for a near-16:9 non-V4 image', async () => {
+    const artifacts = new MockArtifactPort()
+    const nearSixteenNine = await sharp({
+      create: { width: 1360, height: 768, channels: 3, background: '#DDE7F7' },
+    }).png().toBuffer()
+    const operationId = 'imgop_22222222222222222222222222222222'
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url) => String(url).endsWith('/image-tasks')
+        ? Response.json({ id: operationId, status: 'QUEUED', submission_state: 'SUBMITTED' }, { status: 202 })
+        : Response.json({
+            id: operationId, status: 'COMPLETED', submission_state: 'SUBMITTED',
+            result: { data: [{ b64_json: nearSixteenNine.toString('base64') }] },
+          }),
+    })
+    const submitted = await adapter.submit({
+      tenantId: 'frameflow', prompt: 'A legacy 16 by 9 classroom asset', model: 'gpt-image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-legacy:slide:1:image:r0:v1',
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow', operationId: submitted.operationId,
+      idempotencyKey: 'run-legacy:slide:1:image:r0:v1', aspectRatio: '16:9',
+    })).resolves.toMatchObject({ state: 'COMPLETED' })
   })
 
   test('classifies validation rejection as not submitted and network failure as unknown', async () => {

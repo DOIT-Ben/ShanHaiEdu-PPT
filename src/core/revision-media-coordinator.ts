@@ -919,6 +919,7 @@ export class RevisionMediaCoordinator {
       model: target.model,
       budgetUnits: unitBudgetUnits,
       aspectRatio: target.aspectRatio,
+      ...(run.presentationMode === 'VISUAL_DECK_V4' ? { exactAspectRatio: true } : {}),
       backgroundMode: target.backgroundMode,
       ...(target.operationMode ? { operationMode: target.operationMode } : {}),
       ...(target.repairContract ? { repairContract: target.repairContract } : {}),

@@ -76,10 +76,14 @@ function expectedAspectRatio(value: Parameters<ImageGenerationPort['submit']>[0]
   }
 }
 
-async function assertImageAspectRatio(image: Uint8Array, aspectRatio: Parameters<ImageGenerationPort['submit']>[0]['aspectRatio']) {
+async function assertImageAspectRatio(
+  image: Uint8Array,
+  aspectRatio: Parameters<ImageGenerationPort['submit']>[0]['aspectRatio'],
+  exactAspectRatio = false,
+) {
   const metadata = await sharp(image).metadata()
   if (!metadata.width || !metadata.height) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
-  if (aspectRatio === '16:9') {
+  if (aspectRatio === '16:9' && exactAspectRatio) {
     if (!hasVisualDeckV4AspectRatio(metadata.width, metadata.height)) throw new GatewayImageAspectRatioError()
     return
   }
@@ -317,6 +321,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
           tenantId: input.tenantId,
           idempotencyKey: input.idempotencyKey ?? input.operationId,
           aspectRatio: input.aspectRatio,
+          ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
         }, operation.result)
         return { state: 'COMPLETED' as const, artifactId: artifact.artifactId }
@@ -420,11 +425,12 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
   }
 
   private async storeOutput(
-    input: Pick<Parameters<ImageGenerationPort['submit']>[0], 'tenantId' | 'idempotencyKey' | 'aspectRatio' | 'backgroundMode'>,
+    input: Pick<Parameters<ImageGenerationPort['submit']>[0],
+      'tenantId' | 'idempotencyKey' | 'aspectRatio' | 'backgroundMode' | 'exactAspectRatio'>,
     result: z.infer<typeof gatewayResponseSchema>,
   ) {
     const image = decodedImage(result.data[0]!.b64_json)
-    await assertImageAspectRatio(image.bytes, input.aspectRatio)
+    await assertImageAspectRatio(image.bytes, input.aspectRatio, input.exactAspectRatio)
     const bytes = input.backgroundMode === 'TRANSPARENT'
       ? await removeConnectedNeutralBackdrop(image.bytes)
       : image.bytes

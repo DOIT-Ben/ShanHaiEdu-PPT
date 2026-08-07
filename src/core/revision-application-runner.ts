@@ -648,11 +648,18 @@ export class RevisionApplicationRunner {
       const contentOperations = operations.filter((operation) => operation.kind === 'UPDATE_CONTENT')
       const requiredSourceChunkIds = new Set(contentOperations.flatMap((operation) => operation.sourceChunkIds))
       if (contentOperations.length > 0) {
-        validatePreservedSourceLineage(
-          previousBrief.sourceChunkIds,
-          nextBrief.sourceChunkIds,
-          requiredSourceChunkIds,
-        )
+        if (before.presentationSpec.sourceMode === 'OPEN_KNOWLEDGE') {
+          if (requiredSourceChunkIds.size > 0
+            || JSON.stringify(previousBrief.sourceChunkIds) !== JSON.stringify(nextBrief.sourceChunkIds)) {
+            throw new Error('REVISION_OPEN_KNOWLEDGE_SOURCE_FORBIDDEN')
+          }
+        } else {
+          validatePreservedSourceLineage(
+            previousBrief.sourceChunkIds,
+            nextBrief.sourceChunkIds,
+            requiredSourceChunkIds,
+          )
+        }
       }
       const previousComparable = structuredClone(previousBrief) as Record<string, unknown>
       const nextComparable = structuredClone(nextBrief) as Record<string, unknown>

@@ -104,7 +104,7 @@ function layeredBlueprint() {
   }
 }
 
-function visualDeckV4Blueprint() {
+function visualDeckV4Blueprint(sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' = 'SOURCE_GROUNDED') {
   const source = {
     kind: 'TEXT' as const,
     name: '光合作用教材.txt',
@@ -122,7 +122,7 @@ function visualDeckV4Blueprint() {
       missingRanges: [],
     },
     config: {
-      instruction: '制作两页光合作用视觉演示', sourceMode: 'SOURCE_GROUNDED',
+      instruction: '制作两页光合作用视觉演示', sourceMode,
       deckOptions: {
         deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
         audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
@@ -360,6 +360,35 @@ describe('revision planning runner', () => {
           sourceChunkIds: ['chunk-2'],
         }],
       },
+    })
+  })
+
+  test('compiles a source-free open-knowledge issue into a deterministic chain-4 plan', async () => {
+    const { repository, planner, runner } = await fixture(
+      { presentationMode: 'VISUAL_DECK_V4' },
+      { summary: '模型不得参与 Chain-4 计划控制字段生成。', operations: [] },
+      visualDeckV4Blueprint('OPEN_KNOWLEDGE'),
+    )
+    await repository.transact('run-1', (transaction) => {
+      const key = deckReviewStepKey(transaction.run)
+      const step = transaction.getStep(key)!
+      const output = structuredClone(step.output as ReturnType<typeof review>)
+      output.reviewedSourceChunkIds = ['chunk-1']
+      output.issues[0] = {
+        ...output.issues[0]!,
+        summary: '开放知识事实需要修订，但不得伪造来源引用。',
+        sourceChunkIds: [],
+        repairDomain: 'KNOWLEDGE',
+      }
+      transaction.putStep({ ...step, output })
+    })
+
+    const result = await runner.plan('run-1')
+
+    expect(planner.requests.size).toBe(0)
+    expect(result).toMatchObject({
+      status: 'AWAITING_REVISION_APPROVAL',
+      plan: { operations: [{ kind: 'UPDATE_CONTENT', sourceChunkIds: [] }] },
     })
   })
 

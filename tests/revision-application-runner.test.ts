@@ -115,15 +115,19 @@ function layeredDraft() {
 function visualDeckV4Blueprint(
   slideCount = 2,
   compilerVersion = CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION,
+  sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' = 'SOURCE_GROUNDED',
 ) {
-  const { source, document, config } = visualDeckV4Input(slideCount)
+  const { source, document, config } = visualDeckV4Input(slideCount, sourceMode)
   return createVisualDeckV4Blueprint({
     runId: 'run-1', inputHash: 'plan-hash', source, document, config,
     slideCount, visualDirection: '课堂科学信息图', compilerVersion, createdAt: '2026-07-21T00:00:00.000Z',
   })
 }
 
-function visualDeckV4Input(slideCount = 2) {
+function visualDeckV4Input(
+  slideCount = 2,
+  sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE' = 'SOURCE_GROUNDED',
+) {
   const source = {
     kind: 'SOURCE_PACKAGE' as const,
     name: '光合作用教材',
@@ -146,7 +150,7 @@ function visualDeckV4Input(slideCount = 2) {
       ],
     },
     config: {
-      instruction: '制作两页光合作用视觉演示', sourceMode: 'SOURCE_GROUNDED',
+      instruction: '制作两页光合作用视觉演示', sourceMode,
       deckOptions: {
         deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount }, aspectRatio: '16:9',
         audience: '七年级学生', focus: '理解光合作用', styleHint: '课堂科学信息图',
@@ -401,6 +405,44 @@ describe('revision application runner', () => {
       pageNumber: 2,
       title: '光合作用会产生什么？',
       sourceChunkIds: ['chunk-2'],
+    })
+    expect(application.requests.size).toBe(1)
+  })
+
+  test('applies a source-free chain-4 revision for open knowledge without inventing lineage', async () => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION, 'OPEN_KNOWLEDGE')
+    const input = visualDeckV4Input(2, 'OPEN_KNOWLEDGE')
+    const response = {
+      title: '开放知识修订',
+      narrative: ['建立主题', '修正事实表达'],
+      slides: [{
+        title: '修正后的开放知识事实',
+        narrative: '以审慎措辞表达待核验的开放知识。',
+        userVisibleCopy: ['开放知识需要核验'],
+        factualStatements: ['该事实仍需由下游核验。'],
+        visualDescription: '用一个清晰的核验标记组织单一事实表达',
+        sourceEvidence: [],
+      }],
+      revisionSuggestions: ['保持来源为空，不得伪造引用。'],
+    }
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: [] }],
+    }
+    const { application, runner } = await fixture(response, revisionPlan, base, {
+      runOverrides: {
+        source: input.source,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'REVISING', requiresMedia: true })
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs[1]).toMatchObject({
+      title: '修正后的开放知识事实', sourceChunkIds: ['chunk-2'],
     })
     expect(application.requests.size).toBe(1)
   })

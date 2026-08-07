@@ -6,11 +6,10 @@ import {
   quickDeckEvaluationEventSchema,
   type QuickDeckEvaluationPublicJob,
 } from '../src/quick-deck-evaluation-contracts'
+import { hasVisualDeckV4AspectRatio } from '../src/core/blueprint-assets'
 
 const DEFAULT_SERVICE_URL = 'http://127.0.0.1:4311'
 const DEFAULT_PAGE_COUNTS = [1, 3, 10]
-const EXPECTED_ASPECT_RATIO = 16 / 9
-const ASPECT_RATIO_TOLERANCE = 0.03
 const CONTROLLED_SOURCE_TEXT = [
   '水循环由蒸发、凝结、降水和汇集组成。',
   '太阳提供能量，使地表水蒸发形成水汽。',
@@ -213,7 +212,7 @@ function validateCompletedJob(job: QuickDeckEvaluationPublicJob, config: Evaluat
   for (const page of job.pages) {
     assert(page.status === 'COMPLETED' && page.width !== null && page.height !== null && page.aspectRatioValidated,
       `QUICK_DECK_PAGE_NOT_VALIDATED_${page.pageNumber}`)
-    assert(Math.abs((page.width / page.height) / EXPECTED_ASPECT_RATIO - 1) <= ASPECT_RATIO_TOLERANCE,
+    assert(hasVisualDeckV4AspectRatio(page.width, page.height),
       `QUICK_DECK_PAGE_ASPECT_RATIO_INVALID_${page.pageNumber}`)
   }
 }

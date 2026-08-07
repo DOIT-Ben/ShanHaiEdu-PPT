@@ -338,6 +338,7 @@ describe('page review coordinator', () => {
       .find((step) => step.idempotencyKey === revisionPlanStepKey('run-1', 1))
     expect(plan?.tool).toBe('plan_page_revision')
     const operations = (plan!.output as {
+      summary: string
       operations: readonly {
         slideId: string
         kind: string
@@ -345,6 +346,7 @@ describe('page review coordinator', () => {
         issueIds: readonly string[]
       }[]
     }).operations
+    expect((plan!.output as { summary: string }).summary).toContain('不满足精确 16:9')
     expect(operations).toHaveLength(3)
     expect(operations.map((operation) => operation.slideId)).toEqual([
       'run-1:slide:1', 'run-1:slide:2', 'run-1:slide:3',

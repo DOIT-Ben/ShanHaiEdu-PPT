@@ -47,6 +47,7 @@ class AsyncImages implements ImageGenerationPort {
   readonly submissions: Parameters<ImageGenerationPort['submit']>[0][] = []
   readonly inspections: Parameters<ImageGenerationPort['inspect']>[0][] = []
   readonly operations = new Map<string, string>()
+  failCleanupLookup = false
 
   constructor(
     private readonly artifacts: LocalArtifactPort,
@@ -80,6 +81,12 @@ class AsyncImages implements ImageGenerationPort {
     const artifactId = this.operations.get(input.operationId)
     if (!artifactId) throw new Error('TEST_IMAGE_OPERATION_NOT_FOUND')
     return { state: 'COMPLETED' as const, artifactId }
+  }
+
+  async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+    if (this.failCleanupLookup) throw new Error('TEST_GATEWAY_LOOKUP_UNAVAILABLE')
+    const operationId = this.operations.get(input.idempotencyKey)
+    return operationId ? { state: 'SUBMITTED' as const, operationId } : { state: 'UNKNOWN' as const }
   }
 }
 
@@ -146,6 +153,7 @@ describe('quick-deck evaluation service', () => {
       expect(model.calls.every((call) => !(call.payload as Record<string, unknown>).document)).toBe(true)
       expect(images.submissions).toHaveLength(4)
       expect(images.submissions.every((input) => input.idempotencyKey.startsWith('quick-deck-evaluation:'))).toBe(true)
+      expect(images.submissions.every((input) => input.exactAspectRatio === true)).toBe(true)
 
       await service.tick({ limit: 10 })
       const completed = await service.getOwned('evaluation-tenant', first.jobId)
@@ -180,16 +188,16 @@ describe('quick-deck evaluation service', () => {
       const created = await service.create('evaluation-tenant', {
         ...request(1),
         source: {
-          kind: 'TEXT', name: 'large.txt',
-          text: `${'x'.repeat(199_940)}受控测试材料的核心表达必须保留`,
+          kind: 'TEXT', name: '重点目标.txt',
+          text: `${'x'.repeat(199_940)}重点目标位于材料末尾并且必须保留`,
         },
       })
       await service.tick({ limit: 10 })
 
       expect(created.status).toBe('QUEUED')
-      expect(JSON.stringify(model.calls[0]!.payload).length).toBeLessThanOrEqual(220_000)
+      expect(Buffer.byteLength(JSON.stringify(model.calls[0]!.payload), 'utf8')).toBeLessThanOrEqual(220_000)
       expect((model.calls[0]!.payload as Record<string, unknown>).document).toBeUndefined()
-      expect(JSON.stringify(model.calls[0]!.payload)).toContain('受控测试材料的核心表达必须保留')
+      expect(JSON.stringify(model.calls[0]!.payload)).toContain('重点目标位于材料末尾并且必须保留')
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -270,6 +278,27 @@ describe('quick-deck evaluation service', () => {
       clock.advance(60_001)
       await service.tick({ limit: 10 })
 
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'EXPIRED' })
+      for (const artifactId of artifactIds) {
+        expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('expires known artifacts even when gateway cleanup lookup is unavailable', async () => {
+    const { directory, artifacts, repository, clock, images, service } = await fixture(undefined, true)
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+      const stored = await repository.get(created.jobId)
+      const artifactIds = [stored!.pages[0]!.artifactId!, stored!.pptx!.artifactId, stored!.preview!.artifactId]
+      images.failCleanupLookup = true
+      clock.advance(60_001)
+
+      await expect(service.tick({ limit: 10 })).resolves.toMatchObject({ expiredJobs: 1 })
       expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'EXPIRED' })
       for (const artifactId of artifactIds) {
         expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()

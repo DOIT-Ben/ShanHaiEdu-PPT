@@ -552,6 +552,7 @@ export class SlideGenerationCoordinator {
       model: run.imageModel,
       budgetUnits: unitBudgetUnits,
       aspectRatio: requirement.aspectRatio,
+      ...(run.presentationMode === 'VISUAL_DECK_V4' ? { exactAspectRatio: true } : {}),
       backgroundMode: requirement.backgroundMode,
       ...(requirement.elementId ? { elementId: requirement.elementId } : {}),
       ...(requirement.reuseKey ? { assetReuseKey: requirement.reuseKey } : {}),

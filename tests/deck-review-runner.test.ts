@@ -965,6 +965,24 @@ describe('deck review runner', () => {
     expect(reviewer.evaluations.size).toBe(1)
   })
 
+  test('rejects a source-grounded completed review replay that loses required source references', async () => {
+    const { repository, runner } = await fixture()
+    await runner.review('run-1')
+    await repository.transact('run-1', (transaction) => {
+      const key = deckReviewStepKey(transaction.run)
+      const step = transaction.getStep(key)!
+      const output = structuredClone(step.output) as { issues: unknown[] } & Record<string, unknown>
+      output.issues = [{
+        id: 'issue-source-free', category: 'FACTUAL_RISK', severity: 'CRITICAL',
+        summary: '来源约束被破坏的事实风险不得在重放时通过。',
+        slideIds: ['run-1:slide:1'], sourceChunkIds: [], status: 'OPEN', repairDomain: 'KNOWLEDGE',
+      }]
+      transaction.putStep({ ...step, output })
+    })
+
+    await expect(runner.review('run-1')).rejects.toThrow('curriculum and factual issues require source references')
+  })
+
   test('does not duplicate an in-flight deck review', async () => {
     const { reviewer, runner } = await fixture()
     const evaluateOnce = reviewer.evaluate.bind(reviewer)

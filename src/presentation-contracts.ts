@@ -480,6 +480,14 @@ export const deckReviewSchema = deckReviewObjectSchema
 export const openKnowledgeDeckReviewSchema = deckReviewObjectSchema
   .superRefine(requireUniqueDeckReviewIssueIds)
 
+export function deckReviewDraftSchemaForSourceMode(sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE') {
+  return sourceMode === 'OPEN_KNOWLEDGE' ? openKnowledgeDeckReviewDraftSchema : deckReviewDraftSchema
+}
+
+export function deckReviewSchemaForSourceMode(sourceMode: 'SOURCE_GROUNDED' | 'OPEN_KNOWLEDGE') {
+  return sourceMode === 'OPEN_KNOWLEDGE' ? openKnowledgeDeckReviewSchema : deckReviewSchema
+}
+
 export const revisionOperationSchema = z.object({
   id: identifierSchema,
   slideId: identifierSchema,

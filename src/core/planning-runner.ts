@@ -656,10 +656,10 @@ export class PlanningRunner {
     manuscriptContext: Record<string, unknown>,
     creativeManuscript: unknown,
   ): Record<string, unknown> {
-    const maximumManuscriptCharacters = 80_000
-    const maximumPayloadCharacters = 220_000
+    const maximumManuscriptBytes = 80_000
+    const maximumPayloadBytes = 220_000
     let projected = structuredClone(creativeManuscript)
-    const serializedLength = (value: unknown) => JSON.stringify(value).length
+    const serializedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8')
     const truncateStrings = (value: unknown, maximum: number): unknown => {
       if (typeof value === 'string') return value.slice(0, maximum)
       if (Array.isArray(value)) return value.map((item) => truncateStrings(item, maximum))
@@ -669,14 +669,14 @@ export class PlanningRunner {
       return value
     }
     for (const maximum of [1_500, 1_000, 500, 250, 120, 60]) {
-      if (serializedLength(projected) <= maximumManuscriptCharacters) break
+      if (serializedBytes(projected) <= maximumManuscriptBytes) break
       projected = truncateStrings(projected, maximum)
     }
-    if (serializedLength(projected) > maximumManuscriptCharacters) {
+    if (serializedBytes(projected) > maximumManuscriptBytes) {
       throw new Error('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
     }
     const payload = { ...manuscriptContext, creativeManuscript: projected }
-    if (serializedLength(payload) > maximumPayloadCharacters) throw new Error('V4_MODEL_PAYLOAD_TOO_LARGE')
+    if (serializedBytes(payload) > maximumPayloadBytes) throw new Error('V4_MODEL_PAYLOAD_TOO_LARGE')
     return payload
   }
 

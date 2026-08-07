@@ -267,7 +267,7 @@ export class PageReviewCoordinator {
       revisionRound: targetRevisionRound,
       createdAt: this.dependencies.clock.now().toISOString(),
       summary: aspectRatioRepair
-        ? `检测到页面比例超出 16:9 的 3% 容差，自动整套重绘 ${targets.length} 个页面。`
+        ? `检测到页面不满足精确 16:9，自动整套重绘 ${targets.length} 个页面。`
         : `自动局部重绘 ${targets.length} 个未通过视觉质检的页面，其他页面保持不变。`,
       operations: targets.map(({ slide, reviewResult }) => ({
         id: `${run.id}:page-revision:r${targetRevisionRound}:p${slide.pageNumber}`,

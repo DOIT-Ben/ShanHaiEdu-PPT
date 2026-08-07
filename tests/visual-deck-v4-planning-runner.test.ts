@@ -356,6 +356,101 @@ describe('visual deck v4 planning runner', () => {
       .map((event) => event.type === 'tool.progress' ? event.payload.completed : null)).toEqual([1, 2])
   })
 
+  test('plans with a 200-chunk evidence window without demanding omitted chunk coverage', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-window-0001')
+    const { model } = stagedModel(created, inputRequest, clock)
+    const chunks = Array.from({ length: 201 }, (_, index) => ({
+      id: `chunk-${String(index + 1).padStart(3, '0')}`,
+      sourceId: index % 2 === 0 ? 'textbook' : 'design',
+      text: index === 200
+        ? '统一比较标准是本次演示的重点目标。'
+        : `唯一编号 ${String(index + 1).padStart(3, '0')} 的普通短来源块内容。`,
+      sha256: hashInput(`chunk-${index + 1}`),
+    }))
+    const runner = new PlanningRunner({
+      repository,
+      documents: {
+        async resolve() {
+          return {
+            name: '大规模来源窗口', chunks, assets: [], isComplete: true, missingRanges: [],
+            sources: [
+              { id: 'textbook', name: '教材.md', kind: 'TEXT' as const, status: 'READY' as const },
+              { id: 'design', name: '设计稿.md', kind: 'TEXT' as const, status: 'READY' as const },
+            ],
+          }
+        },
+      },
+      model,
+      clock,
+    })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.step).toMatchObject({ status: 'COMPLETED' })
+    expect(result.blueprint?.visualDeckV4Proposal?.sourceUnderstanding.sources
+      .flatMap((source) => source.sourceChunkIds)).toHaveLength(200)
+    const audit = (await repository.listSteps(created.run.id))
+      .find((step) => step.idempotencyKey === `${created.run.id}:v4:evidence-window`)
+    expect(audit?.output).toMatchObject({ omittedChunkCount: 1 })
+  })
+
+  test('bounds CJK review payloads by UTF-8 bytes before the gateway boundary', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-cjk-budget-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let reviewPayload: unknown = null
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'review_visual_deck_v4_manuscript') {
+        reviewPayload = structuredClone(modelInput.payload)
+        return execute(modelInput)
+      }
+      const result = await execute(modelInput)
+      if (modelInput.operation !== 'create_visual_deck_v4_creative_manuscript') return result
+      const manuscript = structuredClone(result) as { slides: Record<string, unknown>[] }
+      manuscript.slides = manuscript.slides.map((slide) => ({
+        ...slide,
+        narrative: '汉'.repeat(1_200),
+        userVisibleCopy: Array.from({ length: 8 }, () => '汉'.repeat(500)),
+        factualStatements: Array.from({ length: 20 }, (_, index) => `${index}${'汉'.repeat(498)}`),
+        visualDescription: '汉'.repeat(1_500),
+      }))
+      return manuscript
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    const payload = reviewPayload as { creativeManuscript: unknown }
+    expect(Buffer.byteLength(JSON.stringify(payload.creativeManuscript), 'utf8')).toBeLessThanOrEqual(80_000)
+    expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeLessThanOrEqual(220_000)
+  })
+
   test('fails a new chain-4 run closed when preflight is not Responses JSON Schema', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))

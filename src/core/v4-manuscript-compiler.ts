@@ -114,11 +114,15 @@ export class V4PlanCompiler {
     allTitles: readonly string[]
   }>): VisualDeckV4SlideBrief {
     const visibleCopy = unique(input.manuscript.userVisibleCopy).slice(0, 8)
-    const sourceChunkIds = this.evidenceResolver.resolve({
-      sourceMode: input.input.config.sourceMode === 'AUTO' ? 'SOURCE_GROUNDED' : input.input.config.sourceMode,
+    const sourceMode = input.input.config.sourceMode === 'AUTO' ? 'SOURCE_GROUNDED' : input.input.config.sourceMode
+    const resolvedSourceChunkIds = this.evidenceResolver.resolve({
+      sourceMode,
       evidence: input.manuscript.sourceEvidence,
       chunks: input.input.document.chunks,
     })
+    const sourceChunkIds = sourceMode === 'OPEN_KNOWLEDGE'
+      ? input.template.sourceChunkIds
+      : resolvedSourceChunkIds
     const role = input.template.role
     const previousTitle = input.allTitles[input.pageNumber - 2]
     const nextTitle = input.allTitles[input.pageNumber]
