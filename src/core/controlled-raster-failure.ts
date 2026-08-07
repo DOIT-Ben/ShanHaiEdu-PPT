@@ -6,11 +6,20 @@ import type { AgentRepository, ClockPort, RunRecord, StepRecord, TechnicalFailur
 
 export type ControlledRasterFailureCode =
   | 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID'
+  | 'CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE'
   | 'CONTROLLED_RASTER_RENDER_FAILED'
 
 function technicalFailureFor(code: ControlledRasterFailureCode): TechnicalFailure {
-  if (code === 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID') return contractTechnicalFailure(code)
+  if (code === 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID' || code === 'CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE') {
+    return contractTechnicalFailure(code)
+  }
   return { category: 'INTERNAL', disposition: 'NON_RETRYABLE', diagnosticCode: code }
+}
+
+export function controlledRasterFailureCodeFor(error: unknown): ControlledRasterFailureCode {
+  return error instanceof Error && error.message === 'CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE'
+    ? error.message
+    : 'CONTROLLED_RASTER_RENDER_FAILED'
 }
 
 /** Records a local raster failure as a zero-cost page result so its batch can close. */

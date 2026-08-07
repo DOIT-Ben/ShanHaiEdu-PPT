@@ -108,9 +108,10 @@ async function seedBlueprint(repository: InMemoryAgentRepository, record: RunRec
   })
 }
 
-function failingControlledRaster(kind: 'ASPECT' | 'RENDER'): ControlledRasterPort {
+function failingControlledRaster(kind: 'ASPECT' | 'TEXT' | 'RENDER'): ControlledRasterPort {
   return {
     async render() {
+      if (kind === 'TEXT') throw new Error('CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE')
       if (kind === 'RENDER') throw new Error('controlled raster test renderer failed')
       return { artifactId: 'controlled-raster-invalid-aspect', sha256: 'a'.repeat(64), width: 4, height: 3 }
     },
@@ -141,7 +142,8 @@ describe('V4 controlled raster', () => {
       idempotencyKey: 'controlled-raster-visible-copy',
     }
     const svg = controlledRasterSvg(input)
-    const textNodes = [...svg.matchAll(/<text[^>]*>(.*?)<\/text>/g)].map((match) => match[1])
+    const textNodes = [...svg.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)]
+      .map((match) => match[1]!.replace(/<[^>]*>/g, ''))
 
     expect(textNodes).toEqual(['五个苹果', '桌上有5个苹果。'])
     expect(svg).not.toContain('精确关系图示')
@@ -210,6 +212,7 @@ describe('V4 controlled raster', () => {
 
   for (const [kind, errorCode] of [
     ['ASPECT', 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID'],
+    ['TEXT', 'CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE'],
     ['RENDER', 'CONTROLLED_RASTER_RENDER_FAILED'],
   ] as const) {
     test(`persists a ${kind.toLowerCase()} controlled initial raster failure before terminal batch accounting`, async () => {
@@ -237,7 +240,7 @@ describe('V4 controlled raster', () => {
         output: {
           renderStrategy: 'CONTROLLED_RASTER',
           technicalFailure: {
-            category: kind === 'ASPECT' ? 'CONTRACT' : 'INTERNAL',
+            category: kind === 'RENDER' ? 'INTERNAL' : 'CONTRACT',
             disposition: 'NON_RETRYABLE',
             diagnosticCode: errorCode,
           },

@@ -183,9 +183,10 @@ function exactCountVisualDeckV4Blueprint() {
   })
 }
 
-function failingControlledRaster(kind: 'ASPECT' | 'RENDER'): ControlledRasterPort {
+function failingControlledRaster(kind: 'ASPECT' | 'TEXT' | 'RENDER'): ControlledRasterPort {
   return {
     async render() {
+      if (kind === 'TEXT') throw new Error('CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE')
       if (kind === 'RENDER') throw new Error('controlled raster test renderer failed')
       return { artifactId: 'controlled-raster-invalid-aspect', sha256: 'a'.repeat(64), width: 4, height: 3 }
     },
@@ -474,6 +475,7 @@ describe('revision media coordinator', () => {
 
   for (const [kind, errorCode] of [
     ['ASPECT', 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID'],
+    ['TEXT', 'CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE'],
     ['RENDER', 'CONTROLLED_RASTER_RENDER_FAILED'],
   ] as const) {
     test(`persists a ${kind.toLowerCase()} controlled revision raster failure before terminal batch accounting`, async () => {
@@ -501,7 +503,7 @@ describe('revision media coordinator', () => {
         output: {
           renderStrategy: 'CONTROLLED_RASTER',
           technicalFailure: {
-            category: kind === 'ASPECT' ? 'CONTRACT' : 'INTERNAL',
+            category: kind === 'RENDER' ? 'INTERNAL' : 'CONTRACT',
             disposition: 'NON_RETRYABLE',
             diagnosticCode: errorCode,
           },

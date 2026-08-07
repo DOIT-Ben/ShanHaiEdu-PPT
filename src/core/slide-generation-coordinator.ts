@@ -17,7 +17,7 @@ import {
   beginTechnicalRecovery,
   technicalFailureFromStep,
 } from './technical-recovery'
-import { persistControlledRasterFailure } from './controlled-raster-failure'
+import { controlledRasterFailureCodeFor, persistControlledRasterFailure } from './controlled-raster-failure'
 import { hashInput } from './hash'
 import {
   isMediaFailureStepStatus,
@@ -598,7 +598,7 @@ export class SlideGenerationCoordinator {
       visibleCopy: brief.lockedCopy,
       diagram: strategy.diagram,
     })
-    const failed = (errorCode: 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID' | 'CONTROLLED_RASTER_RENDER_FAILED',
+    const failed = (errorCode: 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID' | 'CONTROLLED_RASTER_VISIBLE_TEXT_TOO_LARGE' | 'CONTROLLED_RASTER_RENDER_FAILED',
       observedDimensions?: Readonly<{ width: number; height: number }>) => persistControlledRasterFailure({
       repository: this.dependencies.repository,
       clock: this.dependencies.clock,
@@ -625,8 +625,8 @@ export class SlideGenerationCoordinator {
         diagram: strategy.diagram,
         idempotencyKey: requirement.idempotencyKey,
       })
-    } catch {
-      return failed('CONTROLLED_RASTER_RENDER_FAILED')
+    } catch (error) {
+      return failed(controlledRasterFailureCodeFor(error))
     }
     if (!hasVisualDeckV4AspectRatio(artifact.width, artifact.height)) {
       return failed('CONTROLLED_RASTER_ASPECT_RATIO_INVALID', { width: artifact.width, height: artifact.height })
