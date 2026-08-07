@@ -717,6 +717,10 @@ export class QuickDeckEvaluationService {
     const outcomes = await Promise.all(requirements.map(async (requirement) => {
       const page = this.pageForRequirement(preflighted, requirement.pageNumber)
       try {
+        await this.assertModelEligibility({
+          textModel: preflighted.textModel,
+          imageModels: [preflighted.imageModel],
+        })
         const result = await this.dependencies.images.submit({
           tenantId: preflighted.tenantId,
           prompt: requirement.prompt,
@@ -742,6 +746,21 @@ export class QuickDeckEvaluationService {
           },
         }
       } catch (error) {
+        const eligibilityFailure = this.modelEligibilityFailureCode(error)
+        if (eligibilityFailure) {
+          return {
+            pageNumber: page.pageNumber,
+            page: {
+              ...page,
+              status: 'FAILED' as const,
+              submissionState: 'NOT_SUBMITTED' as const,
+              billingState: 'NOT_CHARGED' as const,
+              operationId: null,
+              providerRequestId: null,
+              errorCode: eligibilityFailure,
+            },
+          }
+        }
         const mediaError = error instanceof MediaSubmissionError ? error : null
         const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
         const errorCode = storedDiagnosticCode(mediaError?.code) ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
@@ -958,6 +977,12 @@ export class QuickDeckEvaluationService {
   }
 
   private submissionFailureCode(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode {
+    if (pages.some((page) => page.errorCode === 'EVALUATION_MODEL_NOT_READY')) {
+      return 'EVALUATION_MODEL_NOT_READY'
+    }
+    if (pages.some((page) => page.errorCode === 'EVALUATION_MODEL_UNAVAILABLE')) {
+      return 'EVALUATION_MODEL_UNAVAILABLE'
+    }
     if (pages.some((page) => page.submissionState === 'SUBMITTED')) {
       return 'EVALUATION_IMAGE_SUBMISSION_PARTIAL'
     }
@@ -969,6 +994,12 @@ export class QuickDeckEvaluationService {
   private failureFromPages(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode | null {
     const failed = pages.filter((page) => page.status === 'FAILED')
     if (failed.length === 0) return null
+    if (failed.some((page) => page.errorCode === 'EVALUATION_MODEL_NOT_READY')) {
+      return 'EVALUATION_MODEL_NOT_READY'
+    }
+    if (failed.some((page) => page.errorCode === 'EVALUATION_MODEL_UNAVAILABLE')) {
+      return 'EVALUATION_MODEL_UNAVAILABLE'
+    }
     if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_DRAIN_TIMEOUT')) {
       return 'EVALUATION_IMAGE_DRAIN_TIMEOUT'
     }

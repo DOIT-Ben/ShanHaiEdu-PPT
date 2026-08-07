@@ -47,6 +47,17 @@ class ToggleModelEligibility implements QuickDeckEvaluationModelEligibilityPort 
   }
 }
 
+class SequenceModelEligibility implements QuickDeckEvaluationModelEligibilityPort {
+  readonly calls: Readonly<{ textModel: string; imageModels: readonly string[] }>[] = []
+
+  constructor(private readonly values: readonly QuickDeckEvaluationModelEligibility[]) {}
+
+  async check(input: Readonly<{ textModel: string; imageModels: readonly string[] }>) {
+    this.calls.push({ textModel: input.textModel, imageModels: [...input.imageModels] })
+    return this.values[this.calls.length - 1] ?? 'UNAVAILABLE'
+  }
+}
+
 const readyModelEligibility: QuickDeckEvaluationModelEligibilityPort = {
   async check() { return 'READY' },
 }
@@ -490,6 +501,44 @@ describe('quick-deck evaluation service', () => {
         .rejects.toEqual(new QuickDeckEvaluationError(503, 'EVALUATION_MODEL_UNAVAILABLE'))
       expect(model.calls).toHaveLength(0)
       expect(images.submissions).toHaveLength(0)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test.each([
+    ['NOT_READY', 'EVALUATION_MODEL_NOT_READY'],
+    ['UNAVAILABLE', 'EVALUATION_MODEL_UNAVAILABLE'],
+  ] as const)('rechecks model eligibility before each image submission and persists %s', async (eligibilityState, failureCode) => {
+    const eligibility = new SequenceModelEligibility([
+      'READY', 'READY', 'READY', 'READY', eligibilityState,
+    ])
+    const { directory, images, service } = await fixture(undefined, false, false, undefined, eligibility)
+    try {
+      const created = await service.create('evaluation-tenant', request(2))
+      await service.tick({ limit: 10 })
+
+      expect(images.submissions).toHaveLength(1)
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'GENERATING',
+        failure: null,
+        pages: [
+          expect.objectContaining({ submissionState: 'SUBMITTED' }),
+          expect.objectContaining({
+            status: 'FAILED',
+            submissionState: 'NOT_SUBMITTED',
+            billingState: 'NOT_CHARGED',
+            errorCode: failureCode,
+          }),
+        ],
+      })
+
+      await service.tick({ limit: 10 })
+      expect(images.submissions).toHaveLength(1)
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        failure: { code: failureCode },
+      })
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
