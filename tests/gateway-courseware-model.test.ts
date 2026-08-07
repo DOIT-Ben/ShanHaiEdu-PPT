@@ -374,12 +374,15 @@ describe('gateway courseware model', () => {
     const original = console.error
     console.error = () => undefined
     try {
-      expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-0001' }))
+      expect(await model.preflightStructuredGeneration({
+        idempotencyKey: 'v4-preflight-0001', modelOverride: 'frozen-v4-text',
+      }))
         .toEqual({ protocol: 'RESPONSES_FUNCTION' })
     } finally {
       console.error = original
     }
     expect(requests).toHaveLength(2)
+    expect(requests.map((request) => request.body.model)).toEqual(['frozen-v4-text', 'frozen-v4-text'])
     expect((requests[0]!.body.text as { format: { type: string; strict: boolean } }).format)
       .toMatchObject({ type: 'json_schema', strict: true })
     const preflightSchema = (requests[0]!.body.text as {
@@ -430,6 +433,33 @@ describe('gateway courseware model', () => {
     })
     expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-missing-text-0001' }))
       .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+  })
+
+  test('flushes the final Responses JSON Schema event when the stream ends without a blank line', async () => {
+    let requests = 0
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        requests += 1
+        return streamedResponsesTextCompletion(JSON.stringify({
+          ready: true,
+          contract: {
+            decision: 'UNCHANGED',
+            checks: [
+              { dimension: 'REQUEST_BINDING', passed: true, evidence: 'request contract accepted' },
+              { dimension: 'SOURCE_GROUNDING', passed: true, evidence: 'nested array contract accepted' },
+            ],
+          },
+        }), undefined, false)
+      },
+    })
+
+    await expect(model.preflightStructuredGeneration({
+      idempotencyKey: 'v4-preflight-eof-flush-0001',
+      requiredProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).resolves.toEqual({ protocol: 'RESPONSES_JSON_SCHEMA' })
+    expect(requests).toBe(1)
   })
 
   test('keeps transient strict preflight failures distinct from protocol incompatibility', async () => {
@@ -629,6 +659,266 @@ describe('gateway courseware model', () => {
     }
   })
 
+  test('accepts a CJK chain-4 manuscript payload by characters rather than UTF-8 bytes', async () => {
+    let requests = 0
+    const creative = {
+      title: '中文资料',
+      narrative: ['保留完整中文资料窗口'],
+      slides: [{
+        title: '中文资料',
+        narrative: '中文资料用于验证网关模型上下文的字符合同。',
+        userVisibleCopy: ['中文资料'],
+        factualStatements: ['该请求在字符上限内。'],
+        visualDescription: '一页清晰的中文资料视觉概览',
+        sourceEvidence: [{ excerpt: '中文资料用于验证' }],
+      }],
+    }
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        requests += 1
+        return streamedResponsesTextCompletion(JSON.stringify(creative))
+      },
+    })
+
+    await model.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      idempotencyKey: 'chain-4-cjk-character-boundary',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+        trustedEvidence: { sourceChunks: [{ id: 'chunk-cjk', text: '汉'.repeat(80_000) }] },
+      },
+    })
+
+    expect(requests).toBe(1)
+  })
+
+  test('counts the final Chain-4 system and user messages in the 220k input budget', async () => {
+    let requests = 0
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        requests += 1
+        throw new Error('MODEL_FETCH_SHOULD_NOT_RUN')
+      },
+    })
+
+    await expect(model.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      idempotencyKey: 'chain-4-final-message-over-220k',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+        trustedEvidence: { sourceChunks: [{ id: 'chunk-1', text: 'x'.repeat(219_500) }] },
+      },
+    })).rejects.toThrow('V4_MODEL_PAYLOAD_TOO_LARGE')
+
+    expect(requests).toBe(0)
+  })
+
+  test('requires streamed Responses JSON Schema for strict chain-4 preflight and manuscripts', async () => {
+    let requests = 0
+    const probeResult = {
+      ready: true,
+      contract: {
+        decision: 'UNCHANGED',
+        checks: [
+          { dimension: 'REQUEST_BINDING', passed: true, evidence: 'request contract accepted' },
+          { dimension: 'SOURCE_GROUNDING', passed: true, evidence: 'nested array contract accepted' },
+        ],
+      },
+    }
+    const creative = {
+      title: '流式合同', narrative: ['必须由 SSE 交付结构化语义结果'],
+      slides: [{
+        title: '流式合同', narrative: '模型只经 SSE 输出语义内容。', userVisibleCopy: ['SSE'],
+        factualStatements: ['严格 Chain-4 使用流式 Responses。'], visualDescription: '连续的流式数据路径视觉隐喻',
+        sourceEvidence: [{ excerpt: '严格 Chain-4 使用流式 Responses' }],
+      }],
+    }
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        requests += 1
+        return Response.json(requests === 1 ? probeResult : creative)
+      },
+    })
+
+    await expect(model.preflightStructuredGeneration({
+      idempotencyKey: 'chain-4-preflight-json-response', requiredProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+    await expect(model.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      idempotencyKey: 'chain-4-manuscript-json-response',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+        trustedEvidence: { sourceChunks: [{ id: 'chunk-1', text: '严格 Chain-4 使用流式 Responses。' }] },
+      },
+    })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+    expect(requests).toBe(2)
+
+    const nonSseHeaderModel = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => new Response('data: {"type":"response.completed"}\n\n', {
+        headers: { 'content-type': 'text/plain' },
+      }),
+    })
+    await expect(nonSseHeaderModel.preflightStructuredGeneration({
+      idempotencyKey: 'chain-4-preflight-non-sse-content-type', requiredProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+
+    const lookalikeSseModel = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        const response = streamedResponsesTextCompletion(JSON.stringify(probeResult))
+        return new Response(response.body, { headers: { 'content-type': 'text/event-streaming; charset=utf-8' } })
+      },
+    })
+    await expect(lookalikeSseModel.preflightStructuredGeneration({
+      idempotencyKey: 'chain-4-preflight-lookalike-sse-content-type', requiredProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+  })
+
+  test('rejects 220k-to-240k chain-4 deck review and revision payloads before the gateway', async () => {
+    let requests = 0
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        requests += 1
+        throw new Error('MODEL_FETCH_SHOULD_NOT_RUN')
+      },
+    })
+    const blueprint = {
+      renderMode: 'VISUAL_DECK_V4',
+      visualDeckV4Proposal: {
+        compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+        presentationSpec: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED', language: 'zh-CN' },
+        slideBriefs: [],
+      },
+    } as never
+
+    await expect(model.evaluate({
+      tenantId: 'frameflow', blueprint,
+      sourceChunks: [{ id: 'chunk-review', text: 'x'.repeat(230_000), sha256: 'a'.repeat(64) }],
+      slides: [], idempotencyKey: 'chain-4-deck-review-over-220k',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toThrow('V4_MODEL_PAYLOAD_TOO_LARGE')
+
+    await expect(model.apply({
+      tenantId: 'frameflow', blueprint,
+      plan: { operations: [] } as never,
+      sourceChunks: Array.from({ length: 56 }, (_, index) => ({
+        id: `chunk-revision-${index + 1}`, text: 'x'.repeat(4_000), sha256: 'a'.repeat(64),
+      })),
+      idempotencyKey: 'chain-4-revision-over-220k',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toThrow('V4_MODEL_PAYLOAD_TOO_LARGE')
+
+    await expect(model.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      idempotencyKey: 'chain-4-serialized-request-over-220k',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+        trustedEvidence: { sourceChunks: [{ id: 'chunk-serialized', text: 'x'.repeat(218_500) }] },
+      },
+    })).rejects.toThrow('V4_MODEL_PAYLOAD_TOO_LARGE')
+
+    expect(requests).toBe(0)
+  })
+
+  test('bounds Chain-4 deck review imagery before the complete Responses payload gate', async () => {
+    const artifacts = new MockArtifactPort()
+    const pixels = Buffer.alloc(800 * 450 * 3)
+    let seed = 0x9e3779b9
+    for (let index = 0; index < pixels.length; index += 1) {
+      seed = (seed * 1664525 + 1013904223) >>> 0
+      pixels[index] = seed >>> 24
+    }
+    const bytes = await sharp(pixels, { raw: { width: 800, height: 450, channels: 3 } }).jpeg({ quality: 90 }).toBuffer()
+    const stored = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-v4', name: 'noisy-slide.jpg', mimeType: 'image/jpeg', bytes,
+      idempotencyKey: 'chain-4-deck-review-image-payload',
+    })
+    const manuscript = {
+      qualityScore: 92,
+      curriculumCoverageScore: 92,
+      narrativeCoherenceScore: 92,
+      visualConsistencyScore: 92,
+      compositionScore: 92,
+      summary: '总览图和逐页数据均已在受控请求载荷内完成审查。',
+      slides: [{ findings: [] }],
+    }
+    let requestBody: Record<string, any> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra', artifacts,
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return streamedResponsesTextCompletion(JSON.stringify(manuscript))
+      },
+    })
+
+    const reviewed = await model.evaluate({
+      tenantId: 'frameflow',
+      blueprint: {
+        renderMode: 'VISUAL_DECK_V4',
+        visualDeckV4Proposal: { compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION },
+      } as never,
+      sourceChunks: [{ id: 'chunk-image-payload', text: '受信来源用于验证整稿总览审查。', sha256: 'a'.repeat(64) }],
+      slides: [{
+        pageNumber: 1, slideId: 'run-v4:slide:1', artifactId: stored.artifactId,
+        title: '高熵图片', body: ['必须计算图片 data URI。'], layout: 'HERO',
+        visualIntent: '验证完整请求载荷门禁', sourceChunkIds: ['chunk-image-payload'],
+      }],
+      idempotencyKey: 'chain-4-deck-review-image-payload',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })
+    expect(reviewed).toMatchObject({ issues: [] })
+
+    const body = requestBody! as { input: Array<{ content: Array<{ type: string; image_url?: string }> }> }
+    const images = body.input[1]!.content.filter((part) => part.type === 'input_image')
+    expect(images).toHaveLength(1)
+    expect(images[0]!.image_url!.length).toBeLessThanOrEqual(72_000)
+    expect(JSON.stringify(body).length).toBeLessThanOrEqual(220_000)
+  })
+
+  test('rejects non-Responses protocols for chain-4 manuscripts before any gateway request', async () => {
+    let requests = 0
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        requests += 1
+        return new Response('unexpected gateway request', { status: 500 })
+      },
+    })
+
+    for (const protocol of [undefined, 'RESPONSES_FUNCTION', 'CHAT_LEGACY'] as const) {
+      await expect(model.execute({
+        operation: 'create_visual_deck_v4_creative_manuscript',
+        schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+        idempotencyKey: `chain-4-protocol-${protocol ?? 'missing'}`,
+        ...(protocol === undefined ? {} : { structuredGenerationProtocol: protocol }),
+        payload: { frozenConstraints: { slideCount: 1 } },
+      })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+    }
+
+    expect(requests).toBe(0)
+  })
+
   test('projects chain-4 revision input to semantic content slots before the Responses call', async () => {
     const source = { kind: 'TEXT' as const, name: '水循环.txt', text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地面。'.repeat(4) }
     const document = {
@@ -683,6 +973,7 @@ describe('gateway courseware model', () => {
       sourceChunks: document.chunks,
       idempotencyKey: 'run-v4-revision-manuscript',
       structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      contractRepairIssues: [{ path: 'modelOnlyRevisionPath', message: 'MODEL_ONLY_REVISION_PATH' }],
     })
 
     const body = requestBody! as Record<string, any>
@@ -693,8 +984,11 @@ describe('gateway courseware model', () => {
     expect(payload).toHaveProperty('contentSlots')
     expect(payload).not.toHaveProperty('blueprint')
     expect(payload).not.toHaveProperty('plan')
+    expect(payload).toMatchObject({ contentSlotCompletion: true })
     expect(JSON.stringify(payload)).not.toContain('pageNumber')
     expect(JSON.stringify(payload)).not.toContain('sourceChunkId')
+    expect(JSON.stringify(payload)).not.toContain('modelOnlyRevisionPath')
+    expect(JSON.stringify(payload)).not.toContain('MODEL_ONLY_REVISION_PATH')
   })
 
   test('requires visual element independence throughout V4 visual planning', async () => {
@@ -1396,6 +1690,9 @@ describe('gateway courseware model', () => {
       tenantId: 'frameflow', artifactId: stored.artifactId,
       visualIntent: '允许文字：5可以分成3和2；非展示事实核对项：整页只有5个实体圆片',
       layout: 'VISUAL_DECK_V4', visualDirection: '儿童课堂风格', idempotencyKey: 'review-1',
+      v4CompilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      contractRepairIssues: [{ path: 'modelOnlyVisualPath', message: 'MODEL_ONLY_VISUAL_PATH' }],
     })).toEqual(review)
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/responses')
     expect(requestBody).not.toBeNull()
@@ -1407,6 +1704,11 @@ describe('gateway courseware model', () => {
     expect(input[0]?.content[0]?.text).toContain('绑定、粘合、嵌套或合成')
     expect(input[0]?.content[0]?.text).toContain('NON_BLOCKING_RECOMMENDATION')
     const userContent = input[1]!.content
+    const userMetadata = JSON.stringify(userContent)
+    expect(userMetadata).toContain('contentSlotCompletion')
+    expect(userMetadata).not.toContain('contractRepairIssues')
+    expect(userMetadata).not.toContain('modelOnlyVisualPath')
+    expect(userMetadata).not.toContain('MODEL_ONLY_VISUAL_PATH')
     const imageUrl = userContent.find((part) => part.type === 'input_image')?.image_url
     expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)
     const { data } = await sharp(Buffer.from(imageUrl!.split(',')[1]!, 'base64')).raw().toBuffer({ resolveWithObject: true })
@@ -1462,6 +1764,7 @@ describe('gateway courseware model', () => {
       }],
       idempotencyKey: 'run-v4-deck-review',
       structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      contractRepairIssues: [{ path: 'modelOnlyDeckPath', message: 'MODEL_ONLY_DECK_PATH' }],
     })
 
     const body = requestBody! as Record<string, any>
@@ -1472,6 +1775,11 @@ describe('gateway courseware model', () => {
     expect(schema).not.toContain('issueId')
     expect(schema).not.toContain('slideId')
     expect(schema).not.toContain('sourceChunkId')
+    const userMetadata = JSON.stringify((body.input as unknown as unknown[])[1])
+    expect(userMetadata).toContain('contentSlotCompletion')
+    expect(userMetadata).not.toContain('contractRepairIssues')
+    expect(userMetadata).not.toContain('modelOnlyDeckPath')
+    expect(userMetadata).not.toContain('MODEL_ONLY_DECK_PATH')
     expect(result).toMatchObject({
       reviewedSourceChunkIds: ['chunk-1'],
       issues: [{
@@ -1482,6 +1790,76 @@ describe('gateway courseware model', () => {
     if (!('issues' in result)) throw new Error('CHAIN4_DECK_REVIEW_NOT_COMPILED')
     expect(result.issues[0]?.id).toMatch(/^issue-[a-f0-9]{32}$/)
   })
+
+  test.each(['RESPONSES_FUNCTION', 'CHAT_LEGACY'] as const)(
+    'fails closed before any direct chain-4 %s request',
+    async (structuredGenerationProtocol) => {
+      const artifacts = new MockArtifactPort()
+      const stored = await artifacts.put({
+        tenantId: 'frameflow',
+        runId: 'run-v4',
+        name: 'slide-1.png',
+        mimeType: 'image/png',
+        bytes: new Uint8Array(await sharp({
+          create: { width: 160, height: 90, channels: 3, background: '#F5F8FF' },
+        }).png().toBuffer()),
+        idempotencyKey: 'run-v4-slide-1',
+      })
+      let fetchCalls = 0
+      const model = new GatewayCoursewareModel({
+        baseUrl: 'https://newapi.doitbenai.cloud/v1',
+        apiKey: 'test-text-key',
+        textModel: 'gpt-5.6-terra',
+        artifacts,
+        fetchImpl: async () => {
+          fetchCalls += 1
+          throw new Error('MODEL_FETCH_SHOULD_NOT_RUN')
+        },
+      })
+      const blueprint = {
+        renderMode: 'VISUAL_DECK_V4',
+        visualDeckV4Proposal: { compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION },
+      } as never
+
+      await expect(model.review({
+        tenantId: 'frameflow',
+        artifactId: stored.artifactId,
+        visualIntent: '验证 Chain-4 严格协议。',
+        layout: 'HERO',
+        visualDirection: '课堂科学信息图',
+        idempotencyKey: `chain4-direct-review-${structuredGenerationProtocol}`,
+        v4CompilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+        structuredGenerationProtocol,
+      })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+      await expect(model.evaluate({
+        tenantId: 'frameflow',
+        blueprint,
+        sourceChunks: [],
+        slides: [],
+        idempotencyKey: `chain4-direct-deck-review-${structuredGenerationProtocol}`,
+        structuredGenerationProtocol,
+      })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+      await expect(model.plan({
+        tenantId: 'frameflow',
+        blueprint,
+        review: {} as never,
+        sourceChunks: [],
+        targetRevisionRound: 1,
+        idempotencyKey: `chain4-direct-revision-plan-${structuredGenerationProtocol}`,
+        structuredGenerationProtocol,
+      })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+      await expect(model.apply({
+        tenantId: 'frameflow',
+        blueprint,
+        plan: {} as never,
+        sourceChunks: [],
+        idempotencyKey: `chain4-direct-revision-apply-${structuredGenerationProtocol}`,
+        structuredGenerationProtocol,
+      })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+
+      expect(fetchCalls).toBe(0)
+    },
+  )
 
   test('keeps open-knowledge chain-4 findings source-free without contract repair', async () => {
     const artifacts = new MockArtifactPort()
