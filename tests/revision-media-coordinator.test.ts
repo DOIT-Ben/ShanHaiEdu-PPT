@@ -357,6 +357,9 @@ describe('revision media coordinator', () => {
       blueprint: exactCountVisualDeckV4Blueprint(),
       revisionImageModel: null,
     })
+    await expect(base.coordinator.submit('run-1', 5)).rejects.toThrow('CONTROLLED_RASTER_PORT_REQUIRED')
+    expect(base.images.submitCalls).toBe(0)
+    expect(base.budget.batchReservationRequests).toHaveLength(0)
     const coordinator = new RevisionMediaCoordinator({
       repository: base.repository,
       media: base.media,

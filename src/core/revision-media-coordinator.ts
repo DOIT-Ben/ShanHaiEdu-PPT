@@ -515,9 +515,7 @@ export class RevisionMediaCoordinator {
           throw new Error('CONTROLLED_RASTER_CONTRACT_MISSING')
         }
         if (resolved.kind === 'CONTROLLED_RASTER' && !this.dependencies.controlledRaster) {
-          if (stored === 'CONTROLLED_RASTER') throw new Error('CONTROLLED_RASTER_PORT_REQUIRED')
-          v4RenderStrategies.set(pageNumber, { kind: 'FULL_GENERATIVE' })
-          continue
+          throw new Error('CONTROLLED_RASTER_PORT_REQUIRED')
         }
         v4RenderStrategies.set(pageNumber, resolved)
       }

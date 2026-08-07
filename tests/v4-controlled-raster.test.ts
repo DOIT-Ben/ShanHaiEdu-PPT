@@ -171,4 +171,33 @@ describe('V4 controlled raster', () => {
     await expect(coordinator.refreshBlueprintImages(record.id)).resolves.toMatchObject({ status: 'PAGE_REVIEW', completed: 3 })
     expect(budget.batchFinalizations).toEqual([expect.objectContaining({ settledUnits: 20, releasedUnits: 0 })])
   })
+
+  test('fails closed before reserving or submitting when a resolved controlled page has no renderer', async () => {
+    const repository = new InMemoryAgentRepository()
+    const budget = new MockBudgetPort()
+    const images = new MockImageGenerationPort()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const record = run()
+    await repository.createRun(record)
+    const blueprint = controlledBlueprint()
+    await repository.transact(record.id, (transaction) => {
+      transaction.putStep({
+        id: 'step-plan', runId: record.id, idempotencyKey: planningStepKey(record.id),
+        inputHash: hashInput({ blueprint }), tool: 'create_blueprint', status: 'COMPLETED',
+        budgetUnits: 0, budgetReservationId: null, externalOperationId: null, errorCode: null,
+        output: blueprint, createdAt: record.createdAt, updatedAt: record.updatedAt,
+      })
+    })
+    const media = new MediaStepRunner({ repository, budget, images, clock })
+    const coordinator = new SlideGenerationCoordinator({
+      repository, media, batchBudget: budget,
+      documents: { resolve: async () => ({ name: 'source', chunks: [], isComplete: true, missingRanges: [] }) },
+      artifacts, clock,
+    })
+
+    await expect(coordinator.submitBlueprintImages(record.id, 10)).rejects.toThrow('CONTROLLED_RASTER_PORT_REQUIRED')
+    expect(images.operations.size).toBe(0)
+    expect(budget.batchReservationRequests).toHaveLength(0)
+  })
 })

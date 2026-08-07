@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
+import { SharpControlledRasterPort } from '../src/adapters/v4-controlled-raster'
 import {
   FixedClock,
   MockArtifactPort,
@@ -183,6 +184,7 @@ describe('V4 GPT revision delivery integration', () => {
     const budget = new MockBudgetPort()
     const images = new MockImageGenerationPort()
     const artifacts = new MockArtifactPort()
+    const controlledRaster = new SharpControlledRasterPort({ artifacts })
     const renderer = new CapturingRenderer()
     const planned = blueprint()
     await repository.createRun(run())
@@ -222,30 +224,45 @@ describe('V4 GPT revision delivery integration', () => {
 
     const media = new MediaStepRunner({ repository, budget, images, clock })
     const generation = new SlideGenerationCoordinator({
-      repository, media, batchBudget: budget, documents, artifacts, clock,
+      repository, media, batchBudget: budget, documents, artifacts, controlledRaster, clock,
     })
     expect(await generation.submitBlueprintImages(runId, 1)).toMatchObject({ submitted: 2, total: 2 })
     const initialRequests = [...images.requests.entries()]
-    expect(initialRequests).toHaveLength(2)
+    expect(initialRequests).toHaveLength(1)
     expect(initialRequests.every(([, request]) => request.model === 'gemini-3-pro-image-preview' && !request.referenceImage)).toBe(true)
 
     const initialBytes = await Promise.all([
       sharp({ create: { width: 1600, height: 900, channels: 3, background: '#E5484D' } }).png().toBuffer(),
       sharp({ create: { width: 1600, height: 900, channels: 3, background: '#1F6FEB' } }).png().toBuffer(),
     ])
-    const initialArtifacts = await Promise.all(initialBytes.map((bytes, index) => artifacts.put({
-      tenantId: host.tenantId,
-      runId,
-      name: `initial-${index + 1}.png`,
-      mimeType: 'image/png',
-      bytes,
-      idempotencyKey: `${runId}:initial-artifact:${index + 1}`,
-    })))
-    for (const [index, artifact] of initialArtifacts.entries()) {
-      images.complete(`${runId}:slide:${index + 1}:image:r0:v1`, artifact.artifactId)
+    for (const [key] of initialRequests) {
+      const pageNumber = Number(/:slide:(\d+):image:/.exec(key)?.[1])
+      if (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > initialBytes.length) {
+        throw new Error('V4_E2E_INITIAL_IMAGE_PAGE_INVALID')
+      }
+      const artifact = await artifacts.put({
+        tenantId: host.tenantId,
+        runId,
+        name: `initial-${pageNumber}.png`,
+        mimeType: 'image/png',
+        bytes: initialBytes[pageNumber - 1]!,
+        idempotencyKey: `${runId}:initial-artifact:${pageNumber}`,
+      })
+      images.complete(key, artifact.artifactId)
     }
     expect(await generation.refreshBlueprintImages(runId)).toMatchObject({ status: 'PAGE_REVIEW', completed: 2 })
-    expect(budget.batchFinalizations).toEqual([expect.objectContaining({ settledUnits: 2, releasedUnits: 0 })])
+    expect(budget.batchFinalizations).toEqual([expect.objectContaining({ settledUnits: 1, releasedUnits: 0 })])
+    const initialPageArtifact = async (pageNumber: number) => {
+      const step = (await repository.listSteps(runId)).find((candidate) =>
+        candidate.idempotencyKey === `${runId}:slide:${pageNumber}:image:r0:v1`)
+      const artifactId = (step?.output as { artifactId?: string } | undefined)?.artifactId
+      if (!artifactId) throw new Error('V4_E2E_INITIAL_ARTIFACT_MISSING')
+      const artifact = await artifacts.get({ tenantId: host.tenantId, artifactId })
+      if (!artifact) throw new Error('V4_E2E_INITIAL_ARTIFACT_UNREADABLE')
+      return artifact
+    }
+    const initialPageOne = await initialPageArtifact(1)
+    const initialPageTwo = await initialPageArtifact(2)
 
     const visualReviewer = new MockVisualReviewPort({
       approved: true, textDetected: false, visualScore: 93, reasons: [], retryInstruction: null,
@@ -296,7 +313,7 @@ describe('V4 GPT revision delivery integration', () => {
     expect(applicationPort.requests.size).toBe(0)
 
     const revision = new RevisionMediaCoordinator({
-      repository, media, batchBudget: budget, artifacts, clock, revisionImageModel: 'gpt-image-2',
+      repository, media, batchBudget: budget, artifacts, controlledRaster, clock, revisionImageModel: 'gpt-image-2',
     })
     expect(await revision.submit(runId, 1)).toMatchObject({ status: 'REVISING', submitted: 1, total: 1 })
     const editEntry = [...images.requests.entries()].find(([key]) => key.startsWith(`${runId}:slide:2:image:r1:v1:edit:`))
@@ -304,9 +321,9 @@ describe('V4 GPT revision delivery integration', () => {
     const [editKey, editRequest] = editEntry!
     expect(editRequest).toMatchObject({
       model: 'gpt-image-2',
-      referenceImage: { sha256: initialArtifacts[1]!.sha256 },
+      referenceImage: { sha256: initialPageTwo.sha256 },
     })
-    expect(editRequest.referenceImage?.bytes).toEqual(new Uint8Array(initialBytes[1]!))
+    expect(editRequest.referenceImage?.bytes).toEqual(initialPageTwo.bytes)
 
     const revisedBytes = await sharp({
       create: { width: 1600, height: 900, channels: 3, background: '#20A464' },
@@ -322,7 +339,7 @@ describe('V4 GPT revision delivery integration', () => {
     images.complete(editKey, revisedArtifact.artifactId)
     expect(await revision.refresh(runId)).toMatchObject({ status: 'PAGE_REVIEW', completed: 1, total: 1 })
     expect(budget.batchFinalizations).toEqual([
-      expect.objectContaining({ settledUnits: 2, releasedUnits: 0 }),
+      expect.objectContaining({ settledUnits: 1, releasedUnits: 0 }),
       expect.objectContaining({ settledUnits: 1, releasedUnits: 0 }),
     ])
     expect(await pages.reviewAll(runId)).toMatchObject({ status: 'DECK_REVIEW', rejected: 0 })
@@ -333,11 +350,11 @@ describe('V4 GPT revision delivery integration', () => {
     const delivered = await new DeliveryRunner({ repository, artifacts, renderer, clock }).deliver(runId)
     expect(delivered).toMatchObject({ status: 'COMPLETED', delivery: { qualityStatus: 'APPROVED' } })
     expect(renderer.pptxSlideHashes).toEqual([
-      createHash('sha256').update(initialBytes[0]!).digest('hex'),
+      createHash('sha256').update(initialPageOne.bytes).digest('hex'),
       createHash('sha256').update(revisedBytes).digest('hex'),
     ])
     expect(await repository.getRun(runId)).toMatchObject({
-      status: 'COMPLETED', revisionRound: 1, committedBudgetUnits: 3, qualityScore: 92,
+      status: 'COMPLETED', revisionRound: 1, committedBudgetUnits: 2, qualityScore: 92,
     })
 
     const pptx = await artifacts.get({ tenantId: host.tenantId, artifactId: delivered.delivery!.pptx.artifactId })
