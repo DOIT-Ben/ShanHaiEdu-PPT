@@ -300,6 +300,26 @@ class FailedAtExpiryImages extends AsyncImages {
   }
 }
 
+class FirstPageFailedAtExpiryImages extends AsyncImages {
+  failInspection = false
+
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
+    if (!this.failInspection || input.operationId !== 'image-operation-1') return await super.inspect(input)
+    this.inspections.push(structuredClone(input))
+    return {
+      state: 'FAILED' as const,
+      errorCode: 'UPSTREAM_IMAGE_FAILED',
+      billingState: 'CHARGED' as const,
+      providerRequestId: 'provider-terminal-failure',
+      technicalFailure: {
+        category: 'PROVIDER' as const,
+        disposition: 'NON_RETRYABLE' as const,
+        diagnosticCode: 'UPSTREAM_IMAGE_FAILED',
+      },
+    }
+  }
+}
+
 class FailOnceCompletedSaveRepository extends InMemoryQuickDeckEvaluationRepository {
   #failed = false
 
@@ -1389,6 +1409,43 @@ describe('quick-deck evaluation service', () => {
 
       await service.tick({ limit: 10 })
       expect(images.inspections).toHaveLength(1)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('does not re-inspect a terminal failed image while another expired artifact remains pending cleanup', async () => {
+    const { directory, repository, clock, images: imagePort, service } = await fixture(undefined, true, true,
+      (artifacts) => new FirstPageFailedAtExpiryImages(artifacts))
+    const images = imagePort as FirstPageFailedAtExpiryImages
+    try {
+      const created = await service.create('evaluation-tenant', request(2))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+      const completed = await repository.get(created.jobId)
+      if (!completed) throw new Error('QUICK_DECK_TEST_RECORD_MISSING')
+      await repository.save({
+        record: {
+          ...completed,
+          pages: completed.pages.map((page) => page.pageNumber === 1 ? {
+            ...page,
+            status: 'FAILED',
+            billingState: 'CHARGED',
+            artifactId: null,
+            errorCode: 'EVALUATION_PROVIDER_ERROR',
+          } : page),
+        },
+      })
+      images.failInspection = true
+      clock.advance(60_001)
+      const inspectionsBeforeExpiry = images.inspections.length
+
+      await service.tick({ limit: 10 })
+      expect((await repository.get(created.jobId))?.cleanupPending).toBe(true)
+      expect(images.inspections).toHaveLength(inspectionsBeforeExpiry)
+
+      await service.tick({ limit: 10 })
+      expect(images.inspections).toHaveLength(inspectionsBeforeExpiry)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

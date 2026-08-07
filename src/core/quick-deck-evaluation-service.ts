@@ -1305,7 +1305,9 @@ export class QuickDeckEvaluationService {
     }
 
     const lookup = this.dependencies.images.lookupByIdempotency?.bind(this.dependencies.images)
-    for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED' && candidate.artifactId === null)) {
+    for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED'
+      && candidate.artifactId === null
+      && !(candidate.status === 'FAILED' && candidate.operationId !== null))) {
       if (!lookup) {
         cleanupAuditRequired = true
         continue
