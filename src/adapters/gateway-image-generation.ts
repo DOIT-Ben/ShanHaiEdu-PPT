@@ -178,6 +178,8 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     artifacts: ArtifactPort
     fetchImpl?: Fetch
     timeoutMs?: number
+    /** Explicitly enables the gateway's IMAGE_TASK + IMAGE_EDIT contract. */
+    imageEditTaskEnabled?: boolean
   }>) {
     this.baseUrl = normalizedBaseUrl(dependencies.baseUrl)
     if (dependencies.apiKey.trim().length < 8) throw new Error('GATEWAY_API_KEY_INVALID')
@@ -211,6 +213,27 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
           resolution: '1K',
           n: 1,
         })
+    if (input.operationMode === 'IMAGE_EDIT') {
+      if (!reference) {
+        throw new MediaSubmissionError(
+          'IMAGE_EDIT_REFERENCE_REQUIRED',
+          'NOT_SUBMITTED',
+          'an asynchronous image edit requires one controlled reference image',
+          providerTechnicalFailure('IMAGE_EDIT_REFERENCE_REQUIRED'),
+          { billingState: 'NOT_CHARGED' },
+        )
+      }
+      if (this.dependencies.imageEditTaskEnabled !== true) {
+        throw new MediaSubmissionError(
+          'IMAGE_EDIT_ASYNC_TASK_UNSUPPORTED',
+          'NOT_SUBMITTED',
+          'the gateway has not declared asynchronous image-edit task support',
+          providerTechnicalFailure('IMAGE_EDIT_ASYNC_TASK_UNSUPPORTED'),
+          { billingState: 'NOT_CHARGED' },
+        )
+      }
+      return this.submitImageTask(input, body)
+    }
     if (!reference) return this.submitImageTask(input, body)
 
     let response: Response
@@ -373,8 +396,9 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${this.dependencies.apiKey}`,
-          'Content-Type': 'application/json',
           'Idempotency-Key': input.idempotencyKey,
+          'X-Image-Operation-Mode': input.operationMode ?? 'TEXT_TO_IMAGE',
+          ...(typeof body === 'string' ? { 'Content-Type': 'application/json' } : {}),
         },
         body,
         signal: AbortSignal.timeout(this.dependencies.timeoutMs ?? 30_000),
@@ -408,7 +432,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       return { operationId: operation.data.id, state: operationState(operation.data.status) }
     } catch (error) {
       if (error instanceof MediaSubmissionError) throw error
-      const recovered = await this.lookupImageTask(input.idempotencyKey, 'TEXT_TO_IMAGE')
+      const recovered = await this.lookupImageTask(input.idempotencyKey, input.operationMode ?? 'TEXT_TO_IMAGE')
       if (recovered) return { operationId: recovered.id, state: operationState(recovered.status) }
       throw new MediaSubmissionError(
         'GATEWAY_SUBMISSION_UNKNOWN',

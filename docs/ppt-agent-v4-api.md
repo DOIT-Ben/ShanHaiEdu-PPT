@@ -81,8 +81,9 @@ V4 初始页面仍使用 Run 请求中的图片模型（当前验收通过的是
 `gemini-3-pro-image-preview`）整页异步生成。局部图片编辑默认关闭，
 `GET /v1/capabilities` 会以 `models.imageEdit: []` 明确反映这一状态；不会把未验收模型宣传为可用。
 
-只有同时配置 `PPT_AGENT_V4_IMAGE_EDIT_ENABLED=true` 和
-`PPT_AGENT_V4_REVISION_IMAGE_MODEL=<已验收模型>`，新 V4 返修批次才会调用图片编辑接口。关闭时，
+只有同时配置 `PPT_AGENT_V4_IMAGE_EDIT_ENABLED=true`、
+`PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED=true` 和
+`PPT_AGENT_V4_REVISION_IMAGE_MODEL=<已验收模型>`，新 V4 返修批次才会调用异步图片编辑任务。关闭时，
 需要 Provider 局部图片编辑的 V4 Run 在预算冻结和 Provider 提交前以 `IMAGE_EDIT_UNAVAILABLE` 结束，不会静默重绘、换模型或产生图片费用。
 规划模型始终不能指定或改写 Provider 模型。
 

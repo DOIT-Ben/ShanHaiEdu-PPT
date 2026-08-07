@@ -342,6 +342,75 @@ describe('gateway image generation adapter', () => {
     })
   })
 
+  test('submits an explicit image edit as an asynchronous image task with the original idempotency key', async () => {
+    const artifacts = new MockArtifactPort()
+    const reference = await sharp({
+      create: { width: 64, height: 36, channels: 3, background: '#4C956C' },
+    }).png().toBuffer()
+    const operationId = 'imgop_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    let captured: { url: string; init: RequestInit } | null = null
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      imageEditTaskEnabled: true,
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init: init! }
+        return Response.json({ id: operationId, status: 'QUEUED', submission_state: 'SUBMITTED' }, { status: 202 })
+      },
+    })
+
+    await expect(adapter.submit({
+      tenantId: 'frameflow',
+      prompt: 'Correct only the supplied slide image',
+      model: 'gpt-image-2',
+      aspectRatio: '16:9',
+      exactAspectRatio: true,
+      operationMode: 'IMAGE_EDIT',
+      idempotencyKey: 'run-1:slide:1:image:r1:v1:edit:aaaaaaaaaaaaaaaaaaaaaaaa',
+      referenceImage: { mimeType: 'image/png', bytes: new Uint8Array(reference), sha256: 'a'.repeat(64) },
+    })).resolves.toEqual({ operationId, state: 'QUEUED' })
+
+    const request = captured as unknown as { url: string; init: RequestInit }
+    expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/image-tasks')
+    expect(new Headers(request.init.headers).get('X-Image-Operation-Mode')).toBe('IMAGE_EDIT')
+    expect(new Headers(request.init.headers).has('Content-Type')).toBe(false)
+    expect(request.init.body).toBeInstanceOf(FormData)
+    const form = request.init.body as FormData
+    expect(form.get('model')).toBe('gpt-image-2')
+    expect(form.get('image')).toBeInstanceOf(Blob)
+    expect((form.get('image') as Blob).size).toBe(reference.length)
+  })
+
+  test('rejects an explicit image edit before any gateway request when the async task capability is disabled', async () => {
+    const reference = await sharp({
+      create: { width: 64, height: 36, channels: 3, background: '#4C956C' },
+    }).png().toBuffer()
+    let calls = 0
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => {
+        calls += 1
+        return Response.error()
+      },
+    })
+
+    await expect(adapter.submit({
+      tenantId: 'frameflow',
+      prompt: 'Correct only the supplied slide image',
+      model: 'gpt-image-2',
+      aspectRatio: '16:9',
+      operationMode: 'IMAGE_EDIT',
+      idempotencyKey: 'run-1:slide:1:image:r1:v1:edit:bbbbbbbbbbbbbbbbbbbbbbbb',
+      referenceImage: { mimeType: 'image/png', bytes: new Uint8Array(reference), sha256: 'b'.repeat(64) },
+    })).rejects.toMatchObject({
+      code: 'IMAGE_EDIT_ASYNC_TASK_UNSUPPORTED',
+      submissionState: 'NOT_SUBMITTED',
+      billingState: 'NOT_CHARGED',
+    })
+    expect(calls).toBe(0)
+  })
+
   test('uses a multipart image edit request for a selected source reference', async () => {
     const artifacts = new MockArtifactPort()
     const reference = await sharp({ create: { width: 32, height: 32, channels: 3, background: '#4C956C' } }).png().toBuffer()

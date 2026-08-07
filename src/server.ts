@@ -39,6 +39,7 @@ import {
   resolveMainServerConfig,
   resolvePublicV4CapabilitiesConfig,
   resolveQuickDeckEvaluationConfig,
+  resolveV4ImageEditAsyncTaskEnabled,
   resolveV4RevisionImageModel,
 } from './runtime/main-server-config'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
@@ -82,6 +83,7 @@ if (usageV2Runtime.requiresUsageV2Runtime && runtimeMode !== 'gateway') {
   throw new Error('USAGE_V2_GATEWAY_RUNTIME_REQUIRED')
 }
 const revisionImageModel = resolveV4RevisionImageModel(process.env)
+const imageEditTaskEnabled = resolveV4ImageEditAsyncTaskEnabled(process.env)
 if (usageV2Runtime.providerBillingCatalog && revisionImageModel) {
   usageV2Runtime.providerBillingCatalog.snapshot({
     model: revisionImageModel,
@@ -217,6 +219,7 @@ const images = runtimeMode === 'gateway'
       baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
       apiKey: process.env.MODEL_GATEWAY_IMAGE_KEY?.trim() || '',
       artifacts,
+      imageEditTaskEnabled,
     })
   : undefined
 const runtime = runtimeMode === 'gateway'

@@ -665,6 +665,7 @@ describe('media step runner', () => {
     expect(recovered.step).toMatchObject({
       status: 'WAITING', externalOperationId: operationId, output: { aspectRatio: '4:3' },
     })
+    expect(images.requests.get(editRequest.idempotencyKey)?.operationMode).toBe('IMAGE_EDIT')
     expect(images.submitCalls).toBe(1)
     expect(images.lookupRequests).toEqual([{
       tenantId: 'frameflow',

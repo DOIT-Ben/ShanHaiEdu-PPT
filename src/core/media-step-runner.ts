@@ -293,6 +293,7 @@ export class MediaStepRunner {
         ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
         ...(input.backgroundMode ? { backgroundMode: input.backgroundMode } : {}),
         ...(input.referenceImage ? { referenceImage: input.referenceImage } : {}),
+        operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
         idempotencyKey: input.idempotencyKey,
       })
     } catch (error) {

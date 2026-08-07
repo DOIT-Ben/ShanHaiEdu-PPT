@@ -170,6 +170,7 @@ describe('quick-deck evaluation service', () => {
       expect(images.submissions).toHaveLength(4)
       expect(images.submissions.every((input) => input.idempotencyKey.startsWith('quick-deck-evaluation:'))).toBe(true)
       expect(images.submissions.every((input) => input.exactAspectRatio === true)).toBe(true)
+      expect(images.submissions.every((input) => input.operationMode === 'TEXT_TO_IMAGE')).toBe(true)
 
       await service.tick({ limit: 10 })
       const completed = await service.getOwned('evaluation-tenant', first.jobId)

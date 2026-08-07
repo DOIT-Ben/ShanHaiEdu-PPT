@@ -137,13 +137,23 @@ describe('main PPT Agent server configuration', () => {
     expect(resolveV4RevisionImageModel({
       PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
       PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'verified-image-edit-model',
+    })).toBeNull()
+    expect(resolveV4RevisionImageModel({
+      PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
+      PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED: 'true',
+      PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'verified-image-edit-model',
     })).toBe('verified-image-edit-model')
     expect(() => resolveV4RevisionImageModel({
       PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'invalid',
     })).toThrow('PPT_AGENT_V4_IMAGE_EDIT_ENABLED_INVALID')
     expect(() => resolveV4RevisionImageModel({
       PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
+      PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED: 'true',
     })).toThrow('PPT_AGENT_V4_REVISION_IMAGE_MODEL_REQUIRED')
+    expect(() => resolveV4RevisionImageModel({
+      PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
+      PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED: 'invalid',
+    })).toThrow('PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED_INVALID')
   })
 
   test('derives public model names from unified-gateway configuration without route or credential fields', () => {
@@ -190,6 +200,7 @@ describe('main PPT Agent server configuration', () => {
     expect(environmentExample).toContain('PPT_AGENT_FALLBACK_TEXT_MODEL=MiniMax-M3')
     expect(environmentExample).toContain('PPT_AGENT_FALLBACK_VISION_MODEL=MiniMax-M3')
     expect(environmentExample).toContain('PPT_AGENT_V4_IMAGE_EDIT_ENABLED=false')
+    expect(environmentExample).toContain('PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED=false')
     expect(environmentExample).not.toContain('MINIMAX_BASE_URL')
     expect(environmentExample).not.toContain('MINIMAX_API_KEY')
     expect(environmentExample).not.toContain('MINIMAX_TEXT_MODEL')

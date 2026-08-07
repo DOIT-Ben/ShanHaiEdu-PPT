@@ -59,12 +59,20 @@ export function resolveGatewayCoursewareModelsConfig(env: Environment = process.
  * Image edits are opt-in because an edit route must prove both its request
  * contract and its delivered-pixel contract before V4 may spend against it.
  */
+export function resolveV4ImageEditAsyncTaskEnabled(env: Environment = process.env) {
+  const enabled = env.PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED?.trim()
+  if (enabled && enabled !== 'true' && enabled !== 'false') {
+    throw new Error('PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED_INVALID')
+  }
+  return enabled === 'true'
+}
+
 export function resolveV4RevisionImageModel(env: Environment = process.env) {
   const enabled = env.PPT_AGENT_V4_IMAGE_EDIT_ENABLED?.trim()
   if (enabled && enabled !== 'true' && enabled !== 'false') {
     throw new Error('PPT_AGENT_V4_IMAGE_EDIT_ENABLED_INVALID')
   }
-  if (enabled !== 'true') return null
+  if (enabled !== 'true' || !resolveV4ImageEditAsyncTaskEnabled(env)) return null
   return required(env, 'PPT_AGENT_V4_REVISION_IMAGE_MODEL')
 }
 

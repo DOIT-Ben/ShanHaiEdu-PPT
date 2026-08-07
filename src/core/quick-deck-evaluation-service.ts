@@ -385,6 +385,7 @@ export class QuickDeckEvaluationService {
       aspectRatio: '16:9',
       exactAspectRatio: true,
       backgroundMode: 'OPAQUE',
+      operationMode: 'TEXT_TO_IMAGE',
       idempotencyKey: submitting.pages.find((page) => page.pageNumber === requirement.pageNumber)!.idempotencyKey,
     })))
     const nextPages = submitting.pages.map((page) => {

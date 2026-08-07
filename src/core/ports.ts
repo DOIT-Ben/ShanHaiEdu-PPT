@@ -205,6 +205,8 @@ export interface ImageGenerationPort {
       bytes: Uint8Array
       sha256: string
     }>
+    /** V4 persists this route choice before any Provider request. */
+    operationMode?: 'TEXT_TO_IMAGE' | 'IMAGE_EDIT'
     idempotencyKey: string
   }>): Promise<Readonly<{
     operationId: string
