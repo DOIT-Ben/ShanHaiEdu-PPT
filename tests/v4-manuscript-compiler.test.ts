@@ -91,6 +91,15 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
     })).toThrow('V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
   })
 
+  test('does not treat different formula operators as the same source evidence', () => {
+    const resolver = new SourceEvidenceResolver()
+    expect(() => resolver.resolve({
+      sourceMode: 'SOURCE_GROUNDED',
+      evidence: [{ excerpt: '公式 5-2=7' }],
+      chunks: [{ id: 'chunk-1', text: '公式 5+2=7', sha256: 'a'.repeat(64) }],
+    })).toThrow('V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED')
+  })
+
   test('schema rejects runtime control fields in model output', () => {
     expect(() => visualDeckV4CreativeManuscriptSchema.parse({
       ...manuscript(),

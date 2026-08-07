@@ -31,7 +31,8 @@ function normalizedEvidence(value: string) {
   return value
     .normalize('NFKC')
     .toLocaleLowerCase()
-    .replace(/[\s\p{P}\p{S}_]+/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
 }
 
 function extractNumbers(values: readonly string[]) {
