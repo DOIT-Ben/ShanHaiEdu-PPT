@@ -544,9 +544,31 @@ export class QuickDeckEvaluationService {
     }
     const tickStartedAt = this.dependencies.clock.now()
     const now = tickStartedAt.toISOString()
-    const expired = await this.dependencies.repository.listExpired({ now, limit: input.limit })
-    for (const record of expired) await this.expire(record, now)
     let failedJobs = 0
+    let expiredJobs = 0
+    const expiredJobIds = new Set<string>()
+    while (expiredJobs < input.limit) {
+      const claimedAt = this.dependencies.clock.now()
+      const leaseToken = `quick-deck-expiry-${randomUUID()}`
+      const [record] = await this.dependencies.repository.claimExpired({
+        now: claimedAt.toISOString(),
+        leaseToken,
+        leaseUntil: new Date(claimedAt.getTime() + QUICK_DECK_EVALUATION_LEASE_MS).toISOString(),
+        limit: 1,
+        excludeJobIds: [...expiredJobIds],
+      })
+      if (!record) break
+      expiredJobs += 1
+      expiredJobIds.add(record.id)
+      const claim: QuickDeckClaim = { leaseToken }
+      try {
+        await this.expire(record, claimedAt.toISOString(), claim)
+      } catch (error) {
+        if (!(error instanceof QuickDeckClaimLostError)) failedJobs += 1
+      } finally {
+        await this.dependencies.repository.releaseClaim({ jobId: record.id, leaseToken })
+      }
+    }
     let scannedJobs = 0
     const processedJobIds = new Set<string>()
     while (scannedJobs < input.limit) {
@@ -578,7 +600,7 @@ export class QuickDeckEvaluationService {
         await this.dependencies.repository.releaseClaim({ jobId: record.id, leaseToken })
       }
     }
-    return { scannedJobs, failedJobs, expiredJobs: expired.length }
+    return { scannedJobs, failedJobs, expiredJobs }
   }
 
   private async planAndSubmit(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
@@ -1164,7 +1186,7 @@ export class QuickDeckEvaluationService {
     }, claim)
   }
 
-  private async expire(record: QuickDeckEvaluationRecord, now: string) {
+  private async expire(record: QuickDeckEvaluationRecord, now: string, claim: QuickDeckClaim) {
     const discoveredArtifacts = new Map<number, string>()
     let discoveredPreview: QuickDeckEvaluationArtifactRecord | null = null
     let discoveredPptx: QuickDeckEvaluationArtifactRecord | null = null
@@ -1255,10 +1277,10 @@ export class QuickDeckEvaluationService {
       cleanupAuditRequired,
       updatedAt: now,
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: expired,
       ...(record.status === 'EXPIRED' ? {} : { event: event(expired.id, 'evaluation.expired', {}, now) }),
-    })
+    }, claim)
     const failedArtifactIds = new Set<string>()
     if (this.dependencies.artifactCleanup) {
       for (const artifactId of artifactIds) {
@@ -1277,7 +1299,7 @@ export class QuickDeckEvaluationService {
       cleanupPending = false
       cleanupAuditRequired = true
     }
-    await this.dependencies.repository.save({
+    await this.saveClaimed({
       record: {
         ...expired,
         pages: expired.pages.map((page) => ({
@@ -1290,7 +1312,7 @@ export class QuickDeckEvaluationService {
         cleanupDeadline: cleanupPending ? cleanupDeadline : null,
         cleanupAuditRequired,
       },
-    })
+    }, claim)
   }
 
   private async requireOwned(tenantId: string, jobId: string) {

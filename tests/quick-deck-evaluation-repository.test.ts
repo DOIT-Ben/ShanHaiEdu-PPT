@@ -216,6 +216,40 @@ describe('quick-deck evaluation repositories', () => {
       })
     })
 
+    test(`${kind} atomically claims expiry cleanup and fences a stale cleanup writer`, async () => {
+      await withRepository(kind, async (repository) => {
+        const job = record('quick-deck-eval-expiry-fence', { expiresAt: now, nextAttemptAt: now })
+        await repository.create({
+          record: job, event: acceptedEvent(job.id), maxActiveJobs: 2, maxDailyJobs: 10,
+          dayStart: '2026-08-07T00:00:00.000Z',
+        })
+
+        const [first, second] = await Promise.all([
+          repository.claimExpired({ now, leaseToken: 'expiry-worker-first', leaseUntil: later, limit: 1 }),
+          repository.claimExpired({ now, leaseToken: 'expiry-worker-second', leaseUntil: later, limit: 1 }),
+        ])
+        expect([...first, ...second].map((claimed) => claimed.id)).toEqual([job.id])
+        const winner = first.length === 1 ? 'expiry-worker-first' : 'expiry-worker-second'
+        const loser = winner === 'expiry-worker-first' ? 'expiry-worker-second' : 'expiry-worker-first'
+        const expired = {
+          ...job,
+          status: 'EXPIRED' as const,
+          phase: 'EXPIRED' as const,
+          nextAttemptAt: null,
+          updatedAt: now,
+        }
+
+        expect(await repository.saveClaimed({
+          record: expired, leaseToken: winner, now, leaseUntil: later,
+        })).toBe(true)
+        expect(await repository.saveClaimed({
+          record: { ...job, status: 'GENERATING', phase: 'IMAGE_GENERATION', updatedAt: later },
+          leaseToken: loser, now, leaseUntil: later,
+        })).toBe(false)
+        expect(await repository.get(job.id)).toMatchObject({ status: 'EXPIRED', phase: 'EXPIRED' })
+      })
+    })
+
     test(`${kind} leaves an actively leased evaluation out of expiry cleanup`, async () => {
       await withRepository(kind, async (repository) => {
         const beforeExpiry = '2026-08-06T23:59:00.000Z'
@@ -275,6 +309,37 @@ describe('quick-deck evaluation repositories', () => {
           leaseToken: 'worker-second', now: later, leaseUntil: afterLater,
         })).toBe(true)
         expect(await repository.get(job.id)).toMatchObject({ status: 'GENERATING', phase: 'IMAGE_GENERATION' })
+      })
+    })
+
+    test(`${kind} releases restart leases and immediately resumes ordinary generating work`, async () => {
+      await withRepository(kind, async (repository) => {
+        const job = record('quick-deck-eval-restart-generating')
+        await repository.create({
+          record: job, event: acceptedEvent(job.id), maxActiveJobs: 2, maxDailyJobs: 10, dayStart: now,
+        })
+        const generating = record(job.id, {
+          status: 'GENERATING', phase: 'IMAGE_GENERATION', startedAt: now, nextAttemptAt: now, updatedAt: now,
+          pages: [{
+            ...job.pages[0]!, status: 'PROCESSING', submissionState: 'SUBMITTED', billingState: 'UNKNOWN',
+            operationId: 'operation-restart', providerRequestId: 'request-restart',
+          }],
+        })
+        await repository.save({ record: generating })
+        expect(await repository.claimRunnable({
+          now, leaseToken: 'interrupted-worker', leaseUntil: later, limit: 1,
+        })).toMatchObject([{ id: job.id }])
+        await repository.save({ record: { ...generating, nextAttemptAt: null } })
+
+        expect(await repository.recoverInterrupted({
+          now, defaultDrainDeadline: '2026-08-07T00:15:00.000Z',
+        })).toBe(1)
+        expect(await repository.get(job.id)).toMatchObject({
+          status: 'GENERATING', phase: 'IMAGE_GENERATION', nextAttemptAt: now,
+        })
+        expect(await repository.claimRunnable({
+          now, leaseToken: 'recovery-worker', leaseUntil: later, limit: 1,
+        })).toMatchObject([{ id: job.id }])
       })
     })
   }

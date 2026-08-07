@@ -3,7 +3,7 @@ import type { QuickDeckEvaluationFailureCode } from '../quick-deck-evaluation-co
 
 export type QuickDeckInterruptedRecovery = Readonly<{
   record: QuickDeckEvaluationRecord
-  action: 'RESUMED' | 'DRAINING' | 'PACKAGING' | 'FAILED'
+  action: 'RESUMED' | 'CONTINUED' | 'DRAINING' | 'PACKAGING' | 'FAILED'
 }>
 
 function isTerminal(page: QuickDeckEvaluationRecord['pages'][number]) {
@@ -102,7 +102,15 @@ export function recoverInterruptedQuickDeckEvaluation(
   }
   if (record.status === 'GENERATING' && record.pendingFailure === null
     && pages.every((page) => page.status !== 'PENDING' || page.submissionState !== 'UNKNOWN')) {
-    return null
+    return {
+      action: 'CONTINUED',
+      record: {
+        ...record,
+        pages,
+        nextAttemptAt: input.now,
+        updatedAt: input.now,
+      },
+    }
   }
   return {
     action: 'DRAINING',

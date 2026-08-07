@@ -109,6 +109,14 @@ export interface QuickDeckEvaluationRepository {
   }>): Promise<boolean>
   releaseClaim(input: Readonly<{ jobId: string; leaseToken: string }>): Promise<boolean>
   listExpired(input: Readonly<{ now: string; limit: number }>): Promise<readonly QuickDeckEvaluationRecord[]>
+  /** Atomically fences one TTL cleanup worker before it can mutate an expired evaluation. */
+  claimExpired(input: Readonly<{
+    now: string
+    leaseToken: string
+    leaseUntil: string
+    limit: number
+    excludeJobIds?: readonly string[]
+  }>): Promise<readonly QuickDeckEvaluationRecord[]>
   readEvents(input: Readonly<{
     jobId: string
     afterSequence: number

@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { QuickDeckEvaluationRepository, QuickDeckEvaluationRecord } from '../core/quick-deck-evaluation-ports'
 import { recoverInterruptedQuickDeckEvaluation } from '../core/quick-deck-evaluation-recovery'
-import { quickDeckEvaluationEventSchema, type QuickDeckEvaluationEvent } from '../quick-deck-evaluation-contracts'
+import {
+  quickDeckEvaluationEventSchema,
+  type QuickDeckEvaluationEvent,
+  type QuickDeckEvaluationEventInput,
+} from '../quick-deck-evaluation-contracts'
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -108,6 +112,27 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
       .map(clone)
   }
 
+  async claimExpired(input: Parameters<QuickDeckEvaluationRepository['claimExpired']>[0]) {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100
+      || !input.leaseToken.trim() || Date.parse(input.leaseUntil) <= Date.parse(input.now)) {
+      throw new Error('QUICK_DECK_EVALUATION_LEASE_INPUT_INVALID')
+    }
+    const excluded = new Set(input.excludeJobIds ?? [])
+    const claimed: QuickDeckEvaluationRecord[] = []
+    for (const record of [...this.#records.values()]
+      .filter((candidate) => candidate.expiresAt <= input.now)
+      .filter((candidate) => candidate.status !== 'EXPIRED' || candidate.cleanupPending === true)
+      .filter((candidate) => !excluded.has(candidate.id))
+      .sort((left, right) => left.expiresAt.localeCompare(right.expiresAt) || left.id.localeCompare(right.id))) {
+      if (claimed.length >= input.limit) break
+      const existing = this.#leases.get(record.id)
+      if (existing && existing.until > input.now) continue
+      this.#leases.set(record.id, { token: input.leaseToken, until: input.leaseUntil })
+      claimed.push(clone(record))
+    }
+    return claimed
+  }
+
   async readEvents(input: Parameters<QuickDeckEvaluationRepository['readEvents']>[0]) {
     const events = this.#events.get(input.jobId) ?? []
     const matching = events.filter((event) => event.sequence > input.afterSequence)
@@ -121,16 +146,14 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
   }
 
   async recoverInterrupted(input: Parameters<QuickDeckEvaluationRepository['recoverInterrupted']>[0]) {
-    for (const [jobId, lease] of this.#leases) {
-      if (lease.until <= input.now) this.#leases.delete(jobId)
-    }
+    this.#leases.clear()
     let changed = 0
     for (const record of [...this.#records.values()]) {
       const recovered = recoverInterruptedQuickDeckEvaluation(record, input)
       if (!recovered) continue
-      await this.save({
-        record: recovered.record,
-        event: {
+      const recoveryEvent: QuickDeckEvaluationEventInput | undefined = recovered.action === 'CONTINUED'
+        ? undefined
+        : {
           schemaVersion: '1', jobId: recovered.record.id, eventId: `event-${randomUUID()}`,
           ...(recovered.action === 'FAILED'
             ? { type: 'evaluation.failed' as const, payload: { code: recovered.record.errorCode! } }
@@ -154,8 +177,8 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
                 },
               }),
           occurredAt: input.now,
-        },
-      })
+        }
+      await this.save({ record: recovered.record, ...(recoveryEvent ? { event: recoveryEvent } : {}) })
       changed += 1
     }
     return changed

@@ -308,6 +308,46 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
     `).all(input.now, input.now, input.limit).map((row) => parseRecord(row)!)
   }
 
+  async claimExpired(input: Parameters<QuickDeckEvaluationRepository['claimExpired']>[0]) {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100
+      || !input.leaseToken.trim() || Date.parse(input.leaseUntil) <= Date.parse(input.now)) {
+      throw new Error('QUICK_DECK_EVALUATION_LEASE_INPUT_INVALID')
+    }
+    const excluded = [...new Set(input.excludeJobIds ?? [])]
+    if (excluded.length > 100 || excluded.some((jobId) => !jobId.trim() || jobId.length > 160)) {
+      throw new Error('QUICK_DECK_EVALUATION_LEASE_INPUT_INVALID')
+    }
+    const excludedCondition = excluded.length > 0
+      ? `AND evaluation.id NOT IN (${excluded.map(() => '?').join(', ')})`
+      : ''
+    const values = [input.leaseToken, input.leaseUntil, input.now, input.now, ...excluded, String(input.limit), input.now]
+    this.#database.query<unknown, string[]>(`
+      INSERT INTO quick_deck_evaluation_leases (job_id, lease_token, lease_until)
+      SELECT evaluation.id, ?, ?
+      FROM quick_deck_evaluations AS evaluation
+      LEFT JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
+      WHERE evaluation.expires_at <= ?
+        AND (lease.lease_until IS NULL OR lease.lease_until <= ?)
+        AND (
+          evaluation.status <> 'EXPIRED'
+          OR COALESCE(json_extract(evaluation.data, '$.cleanupPending'), 0) = 1
+        )
+        ${excludedCondition}
+      ORDER BY evaluation.expires_at ASC, evaluation.id ASC
+      LIMIT ?
+      ON CONFLICT(job_id) DO UPDATE SET
+        lease_token = excluded.lease_token,
+        lease_until = excluded.lease_until
+      WHERE quick_deck_evaluation_leases.lease_until <= ?
+    `).run(...values)
+    return this.#database.query<JsonRow, [string, string]>(`
+      SELECT evaluation.data FROM quick_deck_evaluations AS evaluation
+      INNER JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
+      WHERE lease.lease_token = ? AND lease.lease_until = ?
+      ORDER BY evaluation.expires_at ASC, evaluation.id ASC
+    `).all(input.leaseToken, input.leaseUntil).map((row) => parseRecord(row)!)
+  }
+
   async readEvents(input: Parameters<QuickDeckEvaluationRepository['readEvents']>[0]) {
     if (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0
       || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
@@ -327,9 +367,7 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
 
   async recoverInterrupted(input: Parameters<QuickDeckEvaluationRepository['recoverInterrupted']>[0]) {
     const transaction = this.#database.transaction(() => {
-      this.#database.query<unknown, [string]>(`
-        DELETE FROM quick_deck_evaluation_leases WHERE lease_until <= ?
-      `).run(input.now)
+      this.#database.query<unknown, []>('DELETE FROM quick_deck_evaluation_leases').run()
       const rows = this.#database.query<JsonRow, []>(`
         SELECT data FROM quick_deck_evaluations
         WHERE status IN ('QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
@@ -342,7 +380,7 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
         const sequence = (this.#database.query<SequenceRow, [string]>(`
           SELECT MAX(sequence) AS sequence FROM quick_deck_evaluation_events WHERE job_id = ?
         `).get(recovered.record.id)?.sequence ?? 0) + 1
-        const event = quickDeckEvaluationEventSchema.parse({
+        const event = recovered.action === 'CONTINUED' ? undefined : quickDeckEvaluationEventSchema.parse({
           schemaVersion: '1', jobId: recovered.record.id, sequence, eventId: `event-${randomUUID()}`,
           ...(recovered.action === 'FAILED'
             ? { type: 'evaluation.failed' as const, payload: { code: recovered.record.errorCode! } }
@@ -373,9 +411,11 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
           WHERE id = ?
         `).run(JSON.stringify(recovered.record), recovered.record.tenantId, recovered.record.status, recovered.record.nextAttemptAt,
           recovered.record.expiresAt, recovered.record.updatedAt, recovered.record.id)
-        this.#database.query<unknown, [string, number, string]>(`
-          INSERT INTO quick_deck_evaluation_events (job_id, sequence, data) VALUES (?, ?, ?)
-        `).run(recovered.record.id, sequence, JSON.stringify(event))
+        if (event) {
+          this.#database.query<unknown, [string, number, string]>(`
+            INSERT INTO quick_deck_evaluation_events (job_id, sequence, data) VALUES (?, ?, ?)
+          `).run(recovered.record.id, sequence, JSON.stringify(event))
+        }
         changed += 1
       }
       return changed
