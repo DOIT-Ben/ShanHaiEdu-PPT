@@ -76,7 +76,7 @@ bun run check
 | `PPT_AGENT_V4_MODEL_AVAILABILITY_TTL_SECONDS` | 只读网关 `/models` 目录预检缓存，默认 `120` 秒；只更新 `modelAvailability`，不替代真实验收 |
 | `PPT_AGENT_V4_IMAGE_EDIT_ENABLED` | V4 局部图片编辑路由开关，默认 `false`；打开后仅允许隔离验收配置，公开发布仍由模型注册表决定 |
 | `PPT_AGENT_V4_REVISION_IMAGE_MODEL` | 仅在两个图片编辑路由开关均为 `true` 时的候选编辑模型；未满足发布记录时不会出现在能力接口或正式返修路径中 |
-| `PPT_AGENT_V4_TEXT_TRANSPORT` | 主 V4 文本 API 固定为 `RESPONSES`；可省略或显式设为 `RESPONSES`，设为 `CHAT_COMPLETIONS` 将拒绝启动。MiniMax Chat 仅用于统一网关内的旧链路兜底，不由此变量启用。 |
+| `PPT_AGENT_V4_TEXT_TRANSPORT` | Chain-1/2/3 的 V4 文本 API，默认 `RESPONSES`；可显式设为 `CHAT_COMPLETIONS` 以恢复历史链路。Chain-4 始终要求流式 Responses JSON Schema；Chat 配置下新 Chain-4 预检会以 `V4_CHAIN4_PROTOCOL_UNSUPPORTED` 失败关闭。MiniMax Chat 仅用于统一网关内的旧链路兜底。 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN` | 启用 quick-deck 的独立 evaluator Token；不可与 V1、管理员、V2 或 FrameFlow Token 复用 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT` | 位于 `PPT_AGENT_DATA_ROOT` 内的 quick-deck SQLite/制品根；TTL 后物理删除，不进入正式备份 |
 | `PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY` | quick-deck 文本与视觉请求的独立统一网关 Key；必须不同于 `MODEL_GATEWAY_TEXT_KEY` 与 `MODEL_GATEWAY_IMAGE_KEY` |

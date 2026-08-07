@@ -328,10 +328,10 @@ describe('gateway courseware model', () => {
     expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra' })).toBe('DEFAULT')
   })
 
-  test('accepts only Responses for the primary V4 text transport', () => {
+  test('parses legacy V4 transports while Chain-4 remains protocol-gated', () => {
     expect(visualDeckV4TextTransport(undefined)).toBe('RESPONSES')
     expect(visualDeckV4TextTransport('RESPONSES')).toBe('RESPONSES')
-    expect(() => visualDeckV4TextTransport('CHAT_COMPLETIONS')).toThrow('PPT_AGENT_V4_TEXT_TRANSPORT_RESPONSES_REQUIRED')
+    expect(visualDeckV4TextTransport('CHAT_COMPLETIONS')).toBe('CHAT_COMPLETIONS')
     expect(() => visualDeckV4TextTransport('AUTO')).toThrow('PPT_AGENT_V4_TEXT_TRANSPORT_INVALID')
   })
 
@@ -575,10 +575,12 @@ describe('gateway courseware model', () => {
     expect(body.input[0]?.content[0]?.text).toContain('不要规划章节或页面')
     expect(JSON.stringify(body.text.format.schema)).toContain('chunk-1')
 
+    let compatibilityRequests = 0
     const compatibilityModel = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(), visualDeckV4Transport: 'CHAT_COMPLETIONS',
       fetchImpl: async (url) => {
+        compatibilityRequests += 1
         requestUrl = String(url)
         return completion(sourceSpec)
       },
@@ -593,6 +595,11 @@ describe('gateway courseware model', () => {
       },
     })
     expect(requestUrl).toBe('https://newapi.doitbenai.cloud/v1/chat/completions')
+    expect(compatibilityRequests).toBe(1)
+    await expect(compatibilityModel.preflightStructuredGeneration({
+      idempotencyKey: 'v4-chain-4-chat-config-preflight', requiredProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toThrow('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+    expect(compatibilityRequests).toBe(1)
   })
 
   test('uses small Responses schemas for chain-4 manuscripts with null lifecycle usage', async () => {
