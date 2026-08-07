@@ -1503,6 +1503,10 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
         if (Buffer.byteLength(buffer) > MAX_GATEWAY_STREAM_BUFFER_BYTES) {
           throw new Error('GATEWAY_MODEL_ARGUMENTS_TOO_LARGE')
         }
+        if (done && buffer.trim()) {
+          events.push(buffer)
+          buffer = ''
+        }
         for (const event of events) {
           for (const line of event.split(/\r?\n/)) {
             if (!line.startsWith('data:')) continue
@@ -1580,6 +1584,10 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
         if (Buffer.byteLength(buffer) > MAX_GATEWAY_STREAM_BUFFER_BYTES) {
           throw new Error('GATEWAY_MODEL_ARGUMENTS_TOO_LARGE')
         }
+        if (done && buffer.trim()) {
+          events.push(buffer)
+          buffer = ''
+        }
         for (const event of events) {
           for (const line of event.split(/\r?\n/)) {
             if (!line.startsWith('data:')) continue
@@ -1640,6 +1648,10 @@ sourceUnderstanding、presentationSpec、deckPlan、visualContract 必须逐字�
         buffer = events.pop() ?? ''
         if (Buffer.byteLength(buffer) > MAX_GATEWAY_STREAM_BUFFER_BYTES) {
           throw new Error('GATEWAY_MODEL_ARGUMENTS_TOO_LARGE')
+        }
+        if (done && buffer.trim()) {
+          events.push(buffer)
+          buffer = ''
         }
         for (const event of events) {
           for (const line of event.split(/\r?\n/)) {

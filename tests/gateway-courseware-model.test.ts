@@ -203,8 +203,9 @@ function responsesCompletion(name: string, argumentsValue: unknown) {
 function streamedResponsesTextCompletion(
   value: string,
   usage?: Readonly<{ input_tokens: number; output_tokens: number; total_tokens: number }>,
+  terminateWithBlank = true,
 ) {
-  return new Response([
+  const events = [
     `data: ${JSON.stringify({ type: 'response.created', response: { status: 'in_progress', usage: null } })}`,
     `data: ${JSON.stringify({
       type: 'response.output_text.delta', delta: value.slice(0, Math.ceil(value.length / 2)),
@@ -216,8 +217,9 @@ function streamedResponsesTextCompletion(
       type: 'response.output_text.done', text: value,
     })}`,
     `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', usage: usage ?? null } })}`,
-    '',
-  ].join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
+  ]
+  if (terminateWithBlank) events.push('')
+  return new Response(events.join('\n\n'), { headers: { 'Content-Type': 'text/event-stream' } })
 }
 
 function strictLayeredBlueprintDraft() {
@@ -572,7 +574,7 @@ describe('gateway courseware model', () => {
         requests.push(body)
         return streamedResponsesTextCompletion(JSON.stringify(
           body.text.format.name === 'ppt_agent_v4_creative_manuscript_v1' ? creative : review,
-        ))
+        ), undefined, false)
       },
     })
     const payload = {
