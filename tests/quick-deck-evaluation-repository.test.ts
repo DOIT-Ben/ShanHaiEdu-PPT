@@ -136,6 +136,78 @@ describe('quick-deck evaluation repositories', () => {
       })
     })
 
+    test(`${kind} preserves a fully persisted model eligibility failure after interrupted submission`, async () => {
+      await withRepository(kind, async (repository) => {
+        const job = record('quick-deck-eval-model-not-ready')
+        await repository.create({
+          record: job, event: acceptedEvent(job.id), maxActiveJobs: 2, maxDailyJobs: 10,
+          dayStart: '2026-08-07T00:00:00.000Z',
+        })
+        await repository.save({
+          record: record(job.id, {
+            status: 'SUBMITTING_IMAGES', phase: 'IMAGE_GENERATION', startedAt: later, nextAttemptAt: null, updatedAt: later,
+            pages: [{
+              ...job.pages[0]!, status: 'FAILED', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED',
+              errorCode: 'EVALUATION_MODEL_NOT_READY',
+            }],
+            pendingFailure: null,
+          }),
+        })
+
+        expect(await repository.recoverInterrupted({
+          now: '2026-08-07T00:02:00.000Z', defaultDrainDeadline: '2026-08-07T00:17:00.000Z',
+        })).toBe(1)
+        expect(await repository.get(job.id)).toMatchObject({
+          status: 'FAILED', phase: 'FAILED', errorCode: 'EVALUATION_MODEL_NOT_READY', pendingFailure: null,
+        })
+        const events = await repository.readEvents({ jobId: job.id, afterSequence: 0, limit: 10 })
+        expect(events.events.at(-1)).toMatchObject({
+          type: 'evaluation.failed', payload: { code: 'EVALUATION_MODEL_NOT_READY' },
+        })
+      })
+    })
+
+    test(`${kind} preserves a model eligibility failure while draining unknown submissions`, async () => {
+      await withRepository(kind, async (repository) => {
+        const job = record('quick-deck-eval-model-unavailable')
+        await repository.create({
+          record: job, event: acceptedEvent(job.id), maxActiveJobs: 2, maxDailyJobs: 10,
+          dayStart: '2026-08-07T00:00:00.000Z',
+        })
+        const secondPage = {
+          ...job.pages[0]!, pageNumber: 2, idempotencyKey: `${job.pages[0]!.idempotencyKey}:second`,
+          status: 'PENDING' as const, submissionState: 'UNKNOWN' as const, billingState: 'UNKNOWN' as const,
+        }
+        await repository.save({
+          record: record(job.id, {
+            request: { ...job.request, slideCount: 2 },
+            status: 'SUBMITTING_IMAGES', phase: 'IMAGE_GENERATION', startedAt: later, nextAttemptAt: null, updatedAt: later,
+            pages: [
+              {
+                ...job.pages[0]!, status: 'FAILED', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED',
+                errorCode: 'EVALUATION_MODEL_UNAVAILABLE',
+              },
+              secondPage,
+            ],
+            pendingFailure: null,
+          }),
+        })
+
+        expect(await repository.recoverInterrupted({
+          now: '2026-08-07T00:02:00.000Z', defaultDrainDeadline: '2026-08-07T00:17:00.000Z',
+        })).toBe(1)
+        expect(await repository.get(job.id)).toMatchObject({
+          status: 'GENERATING', phase: 'IMAGE_GENERATION', errorCode: null,
+          pendingFailure: 'EVALUATION_MODEL_UNAVAILABLE',
+          drainDeadline: '2026-08-07T00:17:00.000Z',
+        })
+        const events = await repository.readEvents({ jobId: job.id, afterSequence: 0, limit: 10 })
+        expect(events.events.at(-1)).toMatchObject({
+          type: 'images.draining', payload: { failedPages: 1, pendingPages: 1, totalPages: 2 },
+        })
+      })
+    })
+
     test(`${kind} resumes a fully persisted image submission without creating a drain`, async () => {
       await withRepository(kind, async (repository) => {
         const job = record('quick-deck-eval-submitted')

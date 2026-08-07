@@ -1,5 +1,5 @@
 import type { QuickDeckEvaluationRecord } from './quick-deck-evaluation-ports'
-import type { QuickDeckEvaluationFailureCode } from '../quick-deck-evaluation-contracts'
+import { quickDeckSubmissionFailureCode } from './quick-deck-evaluation-submission-failure'
 
 export type QuickDeckInterruptedRecovery = Readonly<{
   record: QuickDeckEvaluationRecord
@@ -8,14 +8,6 @@ export type QuickDeckInterruptedRecovery = Readonly<{
 
 function isTerminal(page: QuickDeckEvaluationRecord['pages'][number]) {
   return page.status === 'COMPLETED' || page.status === 'FAILED'
-}
-
-function failureForPages(pages: QuickDeckEvaluationRecord['pages']): QuickDeckEvaluationFailureCode {
-  const accepted = pages.some((page) => page.submissionState !== 'NOT_SUBMITTED')
-  const failed = pages.some((page) => page.status === 'FAILED')
-  if (accepted && failed) return 'EVALUATION_IMAGE_SUBMISSION_PARTIAL'
-  if (pages.some((page) => page.submissionState === 'UNKNOWN')) return 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
-  return 'EVALUATION_IMAGE_SUBMISSION_FAILED'
 }
 
 /**
@@ -83,7 +75,7 @@ export function recoverInterruptedQuickDeckEvaluation(
     }
   }
   const unresolved = pages.some((page) => !isTerminal(page))
-  const pendingFailure = record.pendingFailure ?? failureForPages(pages)
+  const pendingFailure = record.pendingFailure ?? quickDeckSubmissionFailureCode(pages)
   if (!unresolved) {
     return {
       action: 'FAILED',

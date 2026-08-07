@@ -26,6 +26,7 @@ import {
   visualDeckV4CreativeManuscriptSchema,
   visualDeckV4ReviewManuscriptSchema,
 } from '../visual-deck-v4-contracts'
+import { quickDeckSubmissionFailureCode } from './quick-deck-evaluation-submission-failure'
 import type {
   QuickDeckEvaluationArtifactRecord,
   QuickDeckEvaluationArtifactCleanupPort,
@@ -797,7 +798,7 @@ export class QuickDeckEvaluationService {
       await this.saveClaimed({ record: persisted }, claim)
     }
     const submissionFailure = outcomes.some((outcome) => outcome.page.errorCode !== null)
-      ? this.submissionFailureCode(persisted.pages)
+      ? quickDeckSubmissionFailureCode(persisted.pages)
       : null
     if (submissionFailure) {
       if (!this.hasUnresolvedPages(persisted.pages)) return await this.fail(persisted, submissionFailure, claim)
@@ -941,7 +942,7 @@ export class QuickDeckEvaluationService {
           errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
         }
       : page)
-    const pendingFailure = record.pendingFailure ?? this.submissionFailureCode(pages)
+    const pendingFailure = record.pendingFailure ?? quickDeckSubmissionFailureCode(pages)
     if (!this.hasUnresolvedPages(pages)) {
       await this.fail({ ...record, pages }, pendingFailure, claim)
       return true
@@ -974,21 +975,6 @@ export class QuickDeckEvaluationService {
 
   private hasUnresolvedPages(pages: readonly QuickDeckEvaluationPageRecord[]) {
     return pages.some((page) => !this.isTerminalPage(page))
-  }
-
-  private submissionFailureCode(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode {
-    if (pages.some((page) => page.errorCode === 'EVALUATION_MODEL_NOT_READY')) {
-      return 'EVALUATION_MODEL_NOT_READY'
-    }
-    if (pages.some((page) => page.errorCode === 'EVALUATION_MODEL_UNAVAILABLE')) {
-      return 'EVALUATION_MODEL_UNAVAILABLE'
-    }
-    if (pages.some((page) => page.submissionState === 'SUBMITTED')) {
-      return 'EVALUATION_IMAGE_SUBMISSION_PARTIAL'
-    }
-    return pages.some((page) => page.submissionState === 'UNKNOWN')
-      ? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
-      : 'EVALUATION_IMAGE_SUBMISSION_FAILED'
   }
 
   private failureFromPages(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode | null {
