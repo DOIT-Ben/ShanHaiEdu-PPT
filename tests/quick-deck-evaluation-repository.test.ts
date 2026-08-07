@@ -170,6 +170,37 @@ describe('quick-deck evaluation repositories', () => {
       })
     })
 
+    test(`${kind} resumes an interrupted packaging stage for deterministic artifact recovery`, async () => {
+      await withRepository(kind, async (repository) => {
+        const job = record('quick-deck-eval-packaging-recovery')
+        await repository.create({
+          record: job, event: acceptedEvent(job.id), maxActiveJobs: 2, maxDailyJobs: 10,
+          dayStart: '2026-08-07T00:00:00.000Z',
+        })
+        await repository.save({
+          record: record(job.id, {
+            status: 'PACKAGING', phase: 'PPTX_PACKAGING', startedAt: later,
+            nextAttemptAt: null, updatedAt: later,
+            pages: [{
+              ...job.pages[0]!, status: 'COMPLETED', submissionState: 'SUBMITTED', billingState: 'CHARGED',
+              operationId: 'operation-1', providerRequestId: 'request-1', artifactId: 'artifact-image',
+              width: 1600, height: 900, aspectRatioValidated: true, sha256: 'b'.repeat(64), errorCode: null,
+            }],
+          }),
+        })
+
+        expect(await repository.recoverInterrupted({
+          now: '2026-08-07T00:02:00.000Z', defaultDrainDeadline: '2026-08-07T00:17:00.000Z',
+        })).toBe(1)
+        expect(await repository.get(job.id)).toMatchObject({
+          status: 'PACKAGING', phase: 'PPTX_PACKAGING', errorCode: null,
+          nextAttemptAt: '2026-08-07T00:02:00.000Z',
+        })
+        const events = await repository.readEvents({ jobId: job.id, afterSequence: 0, limit: 10 })
+        expect(events.events.at(-1)).toMatchObject({ type: 'packaging.started', payload: {} })
+      })
+    })
+
     test(`${kind} lists expired records without exposing them as runnable`, async () => {
       await withRepository(kind, async (repository) => {
         const job = record('quick-deck-eval-expired', { expiresAt: now, nextAttemptAt: now })

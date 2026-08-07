@@ -198,6 +198,38 @@ function artifactPublic(record: QuickDeckEvaluationArtifactRecord | null) {
   return record ? { mimeType: record.mimeType, sha256: record.sha256, byteLength: record.byteLength } : null
 }
 
+type StoredArtifact = Readonly<{
+  artifactId: string
+  mimeType: string
+  bytes: Uint8Array
+  sha256: string
+}>
+
+type QuickDeckSlide = Readonly<{
+  pageNumber: number
+  image: Uint8Array
+  imageMimeType: string
+}>
+
+function quickDeckArtifactKey(record: Pick<QuickDeckEvaluationRecord, 'id'>, kind: 'preview' | 'pptx') {
+  return `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}:${kind}`
+}
+
+function storedArtifactRecord(
+  artifact: StoredArtifact,
+  name: string,
+  mimeType: QuickDeckEvaluationArtifactRecord['mimeType'],
+): QuickDeckEvaluationArtifactRecord {
+  if (artifact.mimeType !== mimeType) throw new Error('QUICK_DECK_ARTIFACT_MIME_INVALID')
+  return {
+    artifactId: artifact.artifactId,
+    name,
+    mimeType,
+    sha256: artifact.sha256,
+    byteLength: artifact.bytes.byteLength,
+  }
+}
+
 function publicDiagnosticCode(value: string | null | undefined) {
   const normalized = storedDiagnosticCode(value)
   if (!normalized) return null
@@ -760,7 +792,8 @@ export class QuickDeckEvaluationService {
     }, claim)
     try {
       await this.package(packaging, claim)
-    } catch {
+    } catch (error) {
+      if (error instanceof QuickDeckClaimLostError) throw error
       await this.fail(packaging, 'EVALUATION_PACKAGING_FAILED', claim)
     }
   }
@@ -900,6 +933,7 @@ export class QuickDeckEvaluationService {
             ...page,
             status: 'FAILED' as const,
             submissionState: 'NOT_SUBMITTED' as const,
+            billingState: 'NOT_CHARGED' as const,
             errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
           }
         }
@@ -1034,49 +1068,68 @@ export class QuickDeckEvaluationService {
 
   private async package(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
     if (!record.blueprint) throw new Error('QUICK_DECK_BLUEPRINT_MISSING')
-    const slides = await Promise.all(record.pages.map(async (page) => {
-      if (!page.artifactId) throw new Error('QUICK_DECK_PAGE_ARTIFACT_MISSING')
-      const artifact = await this.dependencies.artifacts.get({ tenantId: record.tenantId, artifactId: page.artifactId })
-      if (!artifact || !page.aspectRatioValidated) throw new Error('QUICK_DECK_PAGE_ARTIFACT_INVALID')
-      return { pageNumber: page.pageNumber, image: artifact.bytes, imageMimeType: artifact.mimeType }
-    }))
-    const previews = await this.dependencies.renderer.renderSlidePreviews({ blueprint: record.blueprint, slides })
-    const [previewBytes, pptxBytes] = await Promise.all([
-      this.dependencies.renderer.renderPreviewFromSlidePreviews({ slides: previews }),
-      this.dependencies.renderer.renderPptx({ blueprint: record.blueprint, slides }),
+    const [storedPreview, storedPptx] = await Promise.all([
+      this.dependencies.artifacts.getByIdempotencyKey({
+        tenantId: record.tenantId,
+        idempotencyKey: quickDeckArtifactKey(record, 'preview'),
+      }),
+      this.dependencies.artifacts.getByIdempotencyKey({
+        tenantId: record.tenantId,
+        idempotencyKey: quickDeckArtifactKey(record, 'pptx'),
+      }),
     ])
-    await assertReadablePptxArtifact(pptxBytes, record.request.slideCount)
-    const [preview, pptx] = await Promise.all([
-      this.dependencies.artifacts.put({
+    let preview = storedPreview
+      ? storedArtifactRecord(storedPreview, 'quick-deck-preview.png', PREVIEW_MIME)
+      : null
+    let pptx = storedPptx
+      ? storedArtifactRecord(storedPptx, 'quick-deck-evaluation.pptx', PPTX_MIME)
+      : null
+    if (storedPptx) await assertReadablePptxArtifact(storedPptx.bytes, record.request.slideCount)
+
+    let slides: readonly QuickDeckSlide[] | null = null
+    const loadSlides = async () => {
+      if (slides) return slides
+      slides = await Promise.all(record.pages.map(async (page) => {
+        if (!page.artifactId) throw new Error('QUICK_DECK_PAGE_ARTIFACT_MISSING')
+        const artifact = await this.dependencies.artifacts.get({ tenantId: record.tenantId, artifactId: page.artifactId })
+        if (!artifact || !page.aspectRatioValidated) throw new Error('QUICK_DECK_PAGE_ARTIFACT_INVALID')
+        return { pageNumber: page.pageNumber, image: artifact.bytes, imageMimeType: artifact.mimeType }
+      }))
+      return slides
+    }
+    if (!preview) {
+      const previews = await this.dependencies.renderer.renderSlidePreviews({ blueprint: record.blueprint, slides: await loadSlides() })
+      const previewBytes = await this.dependencies.renderer.renderPreviewFromSlidePreviews({ slides: previews })
+      const stored = await this.dependencies.artifacts.put({
         tenantId: record.tenantId,
         runId: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}`,
         name: 'quick-deck-preview.png',
         mimeType: PREVIEW_MIME,
         bytes: previewBytes,
-        idempotencyKey: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}:preview`,
-      }),
-      this.dependencies.artifacts.put({
+        idempotencyKey: quickDeckArtifactKey(record, 'preview'),
+      })
+      preview = { artifactId: stored.artifactId, name: 'quick-deck-preview.png', mimeType: PREVIEW_MIME, sha256: stored.sha256, byteLength: previewBytes.byteLength }
+    }
+    if (!pptx) {
+      const pptxBytes = await this.dependencies.renderer.renderPptx({ blueprint: record.blueprint, slides: await loadSlides() })
+      await assertReadablePptxArtifact(pptxBytes, record.request.slideCount)
+      const stored = await this.dependencies.artifacts.put({
         tenantId: record.tenantId,
         runId: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}`,
         name: 'quick-deck-evaluation.pptx',
         mimeType: PPTX_MIME,
         bytes: pptxBytes,
-        idempotencyKey: `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}:pptx`,
-      }),
-    ])
+        idempotencyKey: quickDeckArtifactKey(record, 'pptx'),
+      })
+      pptx = { artifactId: stored.artifactId, name: 'quick-deck-evaluation.pptx', mimeType: PPTX_MIME, sha256: stored.sha256, byteLength: pptxBytes.byteLength }
+    }
     const completedAt = this.dependencies.clock.now().toISOString()
     const completed: QuickDeckEvaluationRecord = {
       ...record,
       status: 'COMPLETED',
       phase: 'COMPLETE',
-      pptx: {
-        artifactId: pptx.artifactId, name: 'quick-deck-evaluation.pptx', mimeType: PPTX_MIME,
-        sha256: pptx.sha256, byteLength: pptxBytes.length,
-      },
-      preview: {
-        artifactId: preview.artifactId, name: 'quick-deck-preview.png', mimeType: PREVIEW_MIME,
-        sha256: preview.sha256, byteLength: previewBytes.length,
-      },
+      pptx,
+      preview,
       completedAt,
       nextAttemptAt: null,
       updatedAt: completedAt,
@@ -1106,47 +1159,93 @@ export class QuickDeckEvaluationService {
 
   private async expire(record: QuickDeckEvaluationRecord, now: string) {
     const discoveredArtifacts = new Map<number, string>()
+    let discoveredPreview: QuickDeckEvaluationArtifactRecord | null = null
+    let discoveredPptx: QuickDeckEvaluationArtifactRecord | null = null
     const artifactIds = new Set([
       ...record.pages.flatMap((page) => page.artifactId ? [page.artifactId] : []),
       ...(record.pptx ? [record.pptx.artifactId] : []),
       ...(record.preview ? [record.preview.artifactId] : []),
     ])
-    if (record.status !== 'EXPIRED' && this.dependencies.images.lookupByIdempotency) {
-      for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED')) {
-        try {
-          const lookup = await this.dependencies.images.lookupByIdempotency({
-            tenantId: record.tenantId,
-            idempotencyKey: page.idempotencyKey,
-            operationMode: 'TEXT_TO_IMAGE',
-          })
-          if (lookup.state !== 'SUBMITTED') continue
-          const inspected = await this.dependencies.images.inspect({
-            tenantId: record.tenantId,
-            operationId: lookup.operationId,
-            idempotencyKey: page.idempotencyKey,
-            aspectRatio: '16:9',
-            backgroundMode: 'OPAQUE',
-            exactAspectRatio: true,
-          })
-          if (inspected.state === 'COMPLETED') {
-            artifactIds.add(inspected.artifactId)
-            discoveredArtifacts.set(page.pageNumber, inspected.artifactId)
-          }
-        } catch {
-          // Provider cleanup inspection is best-effort; known local artifacts must still expire.
-        }
+    const cleanupDeadline = record.cleanupDeadline ?? new Date(Date.parse(now) + QUICK_DECK_DRAIN_TIMEOUT_MS).toISOString()
+    const cleanupWindowOpen = Date.parse(cleanupDeadline) > Date.parse(now)
+    let cleanupPending = false
+    let cleanupAuditRequired = record.cleanupAuditRequired === true
+
+    for (const [kind, name, mimeType] of [
+      ['preview', 'quick-deck-preview.png', PREVIEW_MIME],
+      ['pptx', 'quick-deck-evaluation.pptx', PPTX_MIME],
+    ] as const) {
+      try {
+        const artifact = await this.dependencies.artifacts.getByIdempotencyKey({
+          tenantId: record.tenantId,
+          idempotencyKey: quickDeckArtifactKey(record, kind),
+        })
+        if (!artifact) continue
+        artifactIds.add(artifact.artifactId)
+        const resolved = storedArtifactRecord(artifact, name, mimeType)
+        if (kind === 'preview') discoveredPreview = resolved
+        else discoveredPptx = resolved
+      } catch {
+        if (cleanupWindowOpen) cleanupPending = true
+        else cleanupAuditRequired = true
       }
     }
+
+    const lookup = this.dependencies.images.lookupByIdempotency?.bind(this.dependencies.images)
+    for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED' && candidate.artifactId === null)) {
+      if (!lookup) {
+        cleanupAuditRequired = true
+        continue
+      }
+      if (!cleanupWindowOpen) {
+        cleanupAuditRequired = true
+        continue
+      }
+      try {
+        const lookupResult = await lookup({
+          tenantId: record.tenantId,
+          idempotencyKey: page.idempotencyKey,
+          operationMode: 'TEXT_TO_IMAGE',
+        })
+        if (lookupResult.state !== 'SUBMITTED') {
+          if (lookupResult.state === 'UNKNOWN') cleanupPending = true
+          continue
+        }
+        const inspected = await this.dependencies.images.inspect({
+          tenantId: record.tenantId,
+          operationId: lookupResult.operationId,
+          idempotencyKey: page.idempotencyKey,
+          aspectRatio: '16:9',
+          backgroundMode: 'OPAQUE',
+          exactAspectRatio: true,
+        })
+        if (inspected.state === 'COMPLETED') {
+          artifactIds.add(inspected.artifactId)
+          discoveredArtifacts.set(page.pageNumber, inspected.artifactId)
+        } else {
+          cleanupPending = true
+        }
+      } catch {
+        // A failed lookup is unknown, not evidence that the Provider discarded work.
+        cleanupPending = true
+      }
+    }
+
     const expired: QuickDeckEvaluationRecord = {
       ...record,
       pages: record.pages.map((page) => ({
         ...page,
         artifactId: page.artifactId ?? discoveredArtifacts.get(page.pageNumber) ?? null,
       })),
+      pptx: record.pptx ?? discoveredPptx,
+      preview: record.preview ?? discoveredPreview,
       status: 'EXPIRED',
       phase: 'EXPIRED',
       errorCode: null,
       nextAttemptAt: null,
+      cleanupPending,
+      cleanupDeadline: cleanupPending ? cleanupDeadline : null,
+      cleanupAuditRequired,
       updatedAt: now,
     }
     await this.dependencies.repository.save({
@@ -1162,16 +1261,27 @@ export class QuickDeckEvaluationService {
           failedArtifactIds.add(artifactId)
         }
       }
+    } else if (artifactIds.size > 0) {
+      cleanupAuditRequired = true
+    }
+    const retainedArtifactIds = this.dependencies.artifactCleanup ? failedArtifactIds : artifactIds
+    cleanupPending ||= failedArtifactIds.size > 0
+    if (!cleanupWindowOpen && cleanupPending) {
+      cleanupPending = false
+      cleanupAuditRequired = true
     }
     await this.dependencies.repository.save({
       record: {
         ...expired,
         pages: expired.pages.map((page) => ({
           ...page,
-          artifactId: page.artifactId && failedArtifactIds.has(page.artifactId) ? page.artifactId : null,
+          artifactId: page.artifactId && retainedArtifactIds.has(page.artifactId) ? page.artifactId : null,
         })),
-        pptx: expired.pptx && failedArtifactIds.has(expired.pptx.artifactId) ? expired.pptx : null,
-        preview: expired.preview && failedArtifactIds.has(expired.preview.artifactId) ? expired.preview : null,
+        pptx: expired.pptx && retainedArtifactIds.has(expired.pptx.artifactId) ? expired.pptx : null,
+        preview: expired.preview && retainedArtifactIds.has(expired.preview.artifactId) ? expired.preview : null,
+        cleanupPending,
+        cleanupDeadline: cleanupPending ? cleanupDeadline : null,
+        cleanupAuditRequired,
       },
     })
   }

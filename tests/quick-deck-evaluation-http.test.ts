@@ -159,6 +159,25 @@ describe('quick-deck evaluation HTTP facade', () => {
     expect(response.headers.get('X-Request-ID')).toBe('quick-deck-router-test')
   })
 
+  test('sets X-Request-ID on direct facade success and authentication failures', async () => {
+    const { handle } = fixture()
+    const rejected = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'quick-direct-unauthenticated' },
+      body: JSON.stringify(body()),
+    }, userToken))
+    expect(rejected.status).toBe(401)
+    expect(rejected.headers.get('X-Request-ID')).toBe('quick-direct-unauthenticated')
+
+    const accepted = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'quick-direct-created' },
+      body: JSON.stringify(body()),
+    }))
+    expect(accepted.status).toBe(201)
+    expect(accepted.headers.get('X-Request-ID')).toBe('quick-direct-created')
+  })
+
   test('uses a dedicated evaluator credential and treats every create as a separate experiment', async () => {
     const { handle } = fixture()
     const create = (token = evaluationToken) => handle(request('/v1/evaluations/quick-decks', {

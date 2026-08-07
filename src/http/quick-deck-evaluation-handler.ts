@@ -322,6 +322,9 @@ export function createQuickDeckEvaluationHttpHandler(dependencies: QuickDeckEval
   return async (request: Request) => {
     const supplied = request.headers.get('X-Request-ID')?.trim()
     const requestId = supplied && validIdentifier(supplied) ? supplied : randomUUID()
-    return await handle(request, requestId)
+    const result = await handle(request, requestId)
+    const headers = new Headers(result.headers)
+    headers.set('X-Request-ID', requestId)
+    return new Response(result.body, { status: result.status, statusText: result.statusText, headers })
   }
 }

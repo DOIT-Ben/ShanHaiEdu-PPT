@@ -301,12 +301,6 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
         AND (lease.lease_until IS NULL OR lease.lease_until <= ?)
         AND (
         evaluation.status <> 'EXPIRED'
-        OR json_extract(evaluation.data, '$.pptx') IS NOT NULL
-        OR json_extract(evaluation.data, '$.preview') IS NOT NULL
-        OR EXISTS (
-          SELECT 1 FROM json_each(json_extract(evaluation.data, '$.pages')) AS page
-          WHERE json_extract(page.value, '$.artifactId') IS NOT NULL
-        )
         OR COALESCE(json_extract(evaluation.data, '$.cleanupPending'), 0) = 1
       )
       ORDER BY evaluation.expires_at ASC, evaluation.id ASC
@@ -360,7 +354,9 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
                     totalPages: recovered.record.request.slideCount,
                   },
                 }
-              : {
+              : recovered.action === 'PACKAGING'
+                ? { type: 'packaging.started' as const, payload: {} }
+                : {
                 type: 'images.draining' as const,
                 payload: {
                   pendingPages: recovered.record.pages.filter((page) => !['COMPLETED', 'FAILED'].includes(page.status)).length,

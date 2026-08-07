@@ -102,11 +102,7 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
         const lease = this.#leases.get(record.id)
         return !lease || lease.until <= input.now
       })
-      .filter((record) => record.status !== 'EXPIRED'
-        || record.pages.some((page) => page.artifactId !== null)
-        || record.pptx !== null
-        || record.preview !== null
-        || record.cleanupPending === true)
+      .filter((record) => record.status !== 'EXPIRED' || record.cleanupPending === true)
       .sort((left, right) => left.expiresAt.localeCompare(right.expiresAt) || left.id.localeCompare(right.id))
       .slice(0, input.limit)
       .map(clone)
@@ -146,7 +142,9 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
                     totalPages: recovered.record.request.slideCount,
                   },
                 }
-              : {
+              : recovered.action === 'PACKAGING'
+                ? { type: 'packaging.started' as const, payload: {} }
+                : {
                 type: 'images.draining' as const,
                 payload: {
                   pendingPages: recovered.record.pages.filter((page) => !['COMPLETED', 'FAILED'].includes(page.status)).length,

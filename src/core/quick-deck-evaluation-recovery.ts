@@ -3,7 +3,7 @@ import type { QuickDeckEvaluationFailureCode } from '../quick-deck-evaluation-co
 
 export type QuickDeckInterruptedRecovery = Readonly<{
   record: QuickDeckEvaluationRecord
-  action: 'DRAINING' | 'FAILED'
+  action: 'RESUMED' | 'DRAINING' | 'PACKAGING' | 'FAILED'
 }>
 
 function isTerminal(page: QuickDeckEvaluationRecord['pages'][number]) {
@@ -27,7 +27,19 @@ export function recoverInterruptedQuickDeckEvaluation(
   input: Readonly<{ now: string; defaultDrainDeadline: string }>,
 ): QuickDeckInterruptedRecovery | null {
   if (record.status === 'QUEUED') return null
-  if (record.status === 'PLANNING' || record.status === 'PACKAGING') {
+  if (record.status === 'PACKAGING') {
+    return {
+      action: 'PACKAGING',
+      record: {
+        ...record,
+        phase: 'PPTX_PACKAGING',
+        errorCode: null,
+        nextAttemptAt: input.now,
+        updatedAt: input.now,
+      },
+    }
+  }
+  if (record.status === 'PLANNING') {
     return {
       action: 'FAILED',
       record: {
@@ -47,6 +59,29 @@ export function recoverInterruptedQuickDeckEvaluation(
   const pages = record.pages.map((page) => page.status === 'PENDING' && page.submissionState === 'NOT_SUBMITTED'
     ? { ...page, status: 'FAILED' as const, errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }
     : page)
+  const fullyPersistedSuccessfulSubmission = record.status === 'SUBMITTING_IMAGES'
+    && record.pendingFailure === null
+    && pages.length === record.request.slideCount
+    && pages.every((page) => page.submissionState === 'SUBMITTED'
+      && page.operationId !== null
+      && page.errorCode === null)
+  if (fullyPersistedSuccessfulSubmission) {
+    return {
+      action: 'RESUMED',
+      record: {
+        ...record,
+        pages,
+        status: 'GENERATING',
+        phase: 'IMAGE_GENERATION',
+        errorCode: null,
+        pendingFailure: null,
+        drainStartedAt: null,
+        drainDeadline: null,
+        nextAttemptAt: input.now,
+        updatedAt: input.now,
+      },
+    }
+  }
   const unresolved = pages.some((page) => !isTerminal(page))
   const pendingFailure = record.pendingFailure ?? failureForPages(pages)
   if (!unresolved) {
