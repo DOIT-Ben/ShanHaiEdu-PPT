@@ -8,7 +8,12 @@ import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-rend
 import { LocalQuickDeckEvaluationArtifactCleanupPort } from '../src/adapters/quick-deck-evaluation-local-artifact-cleanup'
 import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-deck-evaluation-in-memory-repository'
 import { MediaSubmissionError, type ImageAspectDiagnostics, type ImageGenerationPort, type StructuredModelPort } from '../src/core/ports'
-import { QuickDeckEvaluationError, QuickDeckEvaluationService } from '../src/core/quick-deck-evaluation-service'
+import {
+  QuickDeckEvaluationError,
+  QuickDeckEvaluationService,
+  type QuickDeckEvaluationModelEligibility,
+  type QuickDeckEvaluationModelEligibilityPort,
+} from '../src/core/quick-deck-evaluation-service'
 
 const sourceText = '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4)
 const oversizedProviderErrorCode = `UPSTREAM_${'X'.repeat(200)}`
@@ -25,6 +30,21 @@ class ControlledClock {
   constructor(private value = new Date('2026-08-07T00:00:00.000Z')) {}
   now() { return new Date(this.value) }
   advance(milliseconds: number) { this.value = new Date(this.value.getTime() + milliseconds) }
+}
+
+class ToggleModelEligibility implements QuickDeckEvaluationModelEligibilityPort {
+  readonly calls: Readonly<{ textModel: string; imageModels: readonly string[] }>[] = []
+
+  constructor(private value: QuickDeckEvaluationModelEligibility = 'READY') {}
+
+  set(value: QuickDeckEvaluationModelEligibility) {
+    this.value = value
+  }
+
+  async check(input: Readonly<{ textModel: string; imageModels: readonly string[] }>) {
+    this.calls.push({ textModel: input.textModel, imageModels: [...input.imageModels] })
+    return this.value
+  }
 }
 
 class CreativeModel implements StructuredModelPort {
@@ -321,6 +341,7 @@ async function fixture(
   removeExpiredArtifacts = false,
   failFirstArtifactCleanup = false,
   imageFactory?: (artifacts: LocalArtifactPort) => AsyncImages,
+  modelEligibility?: QuickDeckEvaluationModelEligibilityPort,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-service-'))
   const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
@@ -341,6 +362,7 @@ async function fixture(
     } : {}),
     textModel: 'gpt-5.6-terra',
     allowedImageModels: ['gemini-3-pro-image-preview'],
+    ...(modelEligibility ? { modelEligibility } : {}),
     maxActiveJobs: 2,
     maxDailyJobs: 3,
     ttlMs: 60_000,
@@ -360,6 +382,33 @@ function request(slideCount = 2) {
 }
 
 describe('quick-deck evaluation service', () => {
+  test('rejects stale evaluator models before either model or image provider work begins', async () => {
+    const eligibility = new ToggleModelEligibility()
+    const { directory, images, model, service } = await fixture(undefined, false, false, undefined, eligibility)
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      expect(eligibility.calls).toHaveLength(1)
+
+      eligibility.set('NOT_READY')
+      await service.tick({ limit: 10 })
+
+      expect(model.calls).toHaveLength(0)
+      expect(images.submissions).toHaveLength(0)
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        failure: { code: 'EVALUATION_MODEL_NOT_READY' },
+      })
+
+      eligibility.set('UNAVAILABLE')
+      await expect(service.create('evaluation-tenant', request(1)))
+        .rejects.toEqual(new QuickDeckEvaluationError(503, 'EVALUATION_MODEL_UNAVAILABLE'))
+      expect(model.calls).toHaveLength(0)
+      expect(images.submissions).toHaveLength(0)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('runs one Responses manuscript call, submits asynchronous images, validates pixels, and packages a PPTX', async () => {
     const { directory, artifacts, model, images, service } = await fixture()
     try {

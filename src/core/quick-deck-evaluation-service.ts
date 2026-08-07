@@ -55,6 +55,20 @@ export class QuickDeckEvaluationError extends Error {
   }
 }
 
+export type QuickDeckEvaluationModelEligibility = 'READY' | 'NOT_READY' | 'UNAVAILABLE'
+
+/**
+ * Evaluator credentials are isolated from the formal Run credentials, so the
+ * quick-deck service receives a narrow, current eligibility decision instead
+ * of holding a startup-time model whitelist as its source of truth.
+ */
+export interface QuickDeckEvaluationModelEligibilityPort {
+  check(input: Readonly<{
+    textModel: string
+    imageModels: readonly string[]
+  }>): Promise<QuickDeckEvaluationModelEligibility>
+}
+
 type EventInput = QuickDeckEvaluationEventInput
 type QuickDeckClaim = Readonly<{ leaseToken: string }>
 
@@ -373,6 +387,7 @@ export class QuickDeckEvaluationService {
     artifactCleanup?: QuickDeckEvaluationArtifactCleanupPort
     textModel: string
     allowedImageModels: readonly string[]
+    modelEligibility?: QuickDeckEvaluationModelEligibilityPort
     maxActiveJobs: number
     maxDailyJobs: number
     ttlMs: number
@@ -408,6 +423,10 @@ export class QuickDeckEvaluationService {
     if (!this.#allowedImageModels.has(parsed.data.imageModel)) {
       throw new QuickDeckEvaluationError(422, 'EVALUATION_MODEL_NOT_ALLOWED')
     }
+    await this.assertModelEligibility({
+      textModel: this.dependencies.textModel,
+      imageModels: [parsed.data.imageModel],
+    })
     const now = this.dependencies.clock.now()
     const timestamp = now.toISOString()
     const id = `quick-deck-evaluation-${randomUUID().replace(/-/g, '')}`
@@ -461,6 +480,18 @@ export class QuickDeckEvaluationService {
     if (outcome === 'DAILY_LIMIT') throw new QuickDeckEvaluationError(429, 'EVALUATION_DAILY_LIMIT')
     if (outcome === 'CONCURRENCY_LIMIT') throw new QuickDeckEvaluationError(429, 'EVALUATION_CONCURRENCY_LIMIT')
     return publicJob(record)
+  }
+
+  async isAvailable() {
+    try {
+      await this.assertModelEligibility({
+        textModel: this.dependencies.textModel,
+        imageModels: [...this.#allowedImageModels],
+      })
+      return true
+    } catch {
+      return false
+    }
   }
 
   async getOwned(tenantId: string, jobId: string) {
@@ -626,15 +657,26 @@ export class QuickDeckEvaluationService {
     }, claim)
     let blueprint
     try {
+      await this.assertModelEligibility({
+        textModel: planning.textModel,
+        imageModels: [planning.imageModel],
+      })
       blueprint = await this.createBlueprint(planning)
+      // The creative call can take long enough for a short attestation or
+      // evaluator-directory TTL to change before any image spend occurs.
+      await this.assertModelEligibility({
+        textModel: planning.textModel,
+        imageModels: [planning.imageModel],
+      })
     } catch (error) {
       return await this.fail(
         planning,
-        isV4ResponsesProtocolError(error)
-          ? 'EVALUATION_MODEL_PROTOCOL_INVALID'
-          : isV4ManuscriptContextTooLargeError(error)
-            ? 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE'
-            : 'EVALUATION_PLANNING_FAILED',
+        this.modelEligibilityFailureCode(error)
+          ?? (isV4ResponsesProtocolError(error)
+            ? 'EVALUATION_MODEL_PROTOCOL_INVALID'
+            : isV4ManuscriptContextTooLargeError(error)
+              ? 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE'
+              : 'EVALUATION_PLANNING_FAILED'),
         claim,
       )
     }
@@ -1195,6 +1237,25 @@ export class QuickDeckEvaluationService {
       record: failed,
       event: event(failed.id, 'evaluation.failed', { code }, completedAt),
     }, claim)
+  }
+
+  private async assertModelEligibility(input: Readonly<{
+    textModel: string
+    imageModels: readonly string[]
+  }>) {
+    const eligibility = await this.dependencies.modelEligibility?.check(input)
+    if (eligibility === undefined || eligibility === 'READY') return
+    if (eligibility === 'NOT_READY') {
+      throw new QuickDeckEvaluationError(422, 'EVALUATION_MODEL_NOT_ALLOWED')
+    }
+    throw new QuickDeckEvaluationError(503, 'EVALUATION_MODEL_UNAVAILABLE')
+  }
+
+  private modelEligibilityFailureCode(error: unknown): QuickDeckEvaluationFailureCode | null {
+    if (!(error instanceof QuickDeckEvaluationError)) return null
+    if (error.code === 'EVALUATION_MODEL_NOT_ALLOWED') return 'EVALUATION_MODEL_NOT_READY'
+    if (error.code === 'EVALUATION_MODEL_UNAVAILABLE') return 'EVALUATION_MODEL_UNAVAILABLE'
+    return null
   }
 
   private async expire(record: QuickDeckEvaluationRecord, now: string, claim: QuickDeckClaim) {

@@ -4,6 +4,7 @@ import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-deck-evaluation-in-memory-repository'
 import { MockArtifactPort } from '../src/adapters/mock-ports'
 import type { ImageGenerationPort } from '../src/core/ports'
+import type { QuickDeckEvaluationModelEligibilityPort } from '../src/core/quick-deck-evaluation-service'
 import { createMockRuntime } from '../src/runtime/mock-runtime'
 import { ServiceTokenAuthentication } from '../src/http/service-token-authentication'
 
@@ -108,5 +109,63 @@ describe('quick-deck evaluation runtime integration', () => {
       },
     })
     expect((await evaluationRepository.get(jobId))?.status).toBe('COMPLETED')
+  })
+
+  test('does not advertise an evaluator after its current model eligibility has failed', async () => {
+    const ordinaryArtifacts = new MockArtifactPort()
+    const evaluationArtifacts = new MockArtifactPort()
+    const authentication = new ServiceTokenAuthentication([{
+      tenantId: 'evaluation-runtime',
+      userToken,
+      evaluationToken,
+    }])
+    const modelEligibility: QuickDeckEvaluationModelEligibilityPort = {
+      async check() { return 'NOT_READY' },
+    }
+    const runtime = createMockRuntime({
+      repository: new InMemoryAgentRepository(),
+      artifacts: ordinaryArtifacts,
+      apiToken: userToken,
+      authentication,
+      clock: new FixedClock(),
+      quickDeckEvaluation: {
+        repository: new InMemoryQuickDeckEvaluationRepository(),
+        artifacts: evaluationArtifacts,
+        images: new CompletedImages(evaluationArtifacts),
+        authentication,
+        textModel: 'gpt-5.6-terra',
+        allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility,
+        maxActiveJobs: 2,
+        maxDailyJobs: 5,
+        ttlMs: 60_000,
+        tickBatchSize: 10,
+      },
+    })
+
+    const capabilities = await runtime.handler(new Request('http://ppt-agent.test/v1/capabilities', {
+      headers: {
+        Authorization: `Bearer ${userToken}`,
+        'X-PPT-Agent-Tenant': 'evaluation-runtime',
+        'X-PPT-Agent-User': 'evaluation-user',
+      },
+    }))
+    expect(capabilities.status).toBe(200)
+    expect(await capabilities.json()).toMatchObject({
+      data: { quickDeckEvaluation: { available: false } },
+    })
+    const created = await runtime.handler(request('/v1/evaluations/quick-decks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        schemaVersion: '1',
+        source: { kind: 'TEXT', name: 'water-cycle.txt', text: '水汽凝结形成云，降水回到地表，水循环因此持续发生。'.repeat(4) },
+        slideCount: 1,
+        visualDirection: '清晰的自然科学信息图',
+        imageModel: 'gemini-3-pro-image-preview',
+      }),
+    }))
+    expect(created.status).toBe(422)
+    expect(await created.json()).toMatchObject({ error: { code: 'EVALUATION_MODEL_NOT_ALLOWED' } })
   })
 })

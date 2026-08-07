@@ -65,7 +65,11 @@ import type {
   QuickDeckEvaluationArtifactCleanupPort,
   QuickDeckEvaluationRepository,
 } from '../core/quick-deck-evaluation-ports'
-import { QuickDeckEvaluationService, type QuickDeckEvidenceContext } from '../core/quick-deck-evaluation-service'
+import {
+  QuickDeckEvaluationService,
+  type QuickDeckEvidenceContext,
+  type QuickDeckEvaluationModelEligibilityPort,
+} from '../core/quick-deck-evaluation-service'
 import { RunService } from '../core/run-service'
 import { SlideGenerationCoordinator } from '../core/slide-generation-coordinator'
 import { VisualReviewRunner } from '../core/visual-review-runner'
@@ -609,6 +613,7 @@ type RuntimeInput = Readonly<{
     model?: StructuredModelPort
     textModel: string
     allowedImageModels: readonly string[]
+    modelEligibility?: QuickDeckEvaluationModelEligibilityPort
     maxActiveJobs: number
     maxDailyJobs: number
     ttlMs: number
@@ -705,6 +710,7 @@ export function createAgentRuntime(input: RuntimeInput) {
         ...(input.quickDeckEvaluation.artifactCleanup ? { artifactCleanup: input.quickDeckEvaluation.artifactCleanup } : {}),
         textModel: input.quickDeckEvaluation.textModel,
         allowedImageModels: input.quickDeckEvaluation.allowedImageModels,
+        ...(input.quickDeckEvaluation.modelEligibility ? { modelEligibility: input.quickDeckEvaluation.modelEligibility } : {}),
         maxActiveJobs: input.quickDeckEvaluation.maxActiveJobs,
         maxDailyJobs: input.quickDeckEvaluation.maxDailyJobs,
         ttlMs: input.quickDeckEvaluation.ttlMs,
@@ -1040,7 +1046,9 @@ export function createAgentRuntime(input: RuntimeInput) {
       operations,
       revisionRoundsSettings,
       rateLimiter,
-      capabilitiesProvider: () => v4ModelPolicy.publicCapabilities(Boolean(quickDeckEvaluations)),
+      capabilitiesProvider: async () => v4ModelPolicy.publicCapabilities(
+        quickDeckEvaluations ? await quickDeckEvaluations.isAvailable() : false,
+      ),
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
       ...(presentationJobs && presentationJobAuthentication ? {

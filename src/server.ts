@@ -43,7 +43,7 @@ import {
   resolveV4ModelPolicyConfig,
   resolveV4RevisionImageModel,
 } from './runtime/main-server-config'
-import { assertQuickDeckEvaluatorModelsAvailable } from './runtime/quick-deck-evaluator-preflight'
+import { QuickDeckEvaluatorModelEligibility } from './runtime/quick-deck-evaluator-preflight'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
 const {
@@ -182,20 +182,26 @@ const quickDeckEvaluationConfig = quickDeckEvaluationApiToken
       imageModels: v4ModelPolicy.quickDeckImageModels(),
     })
   : null
-if (quickDeckEvaluationConfig) {
-  const baseUrl = process.env.MODEL_GATEWAY_BASE_URL?.trim() || ''
-  await assertQuickDeckEvaluatorModelsAvailable({
+const quickDeckEvaluatorModelEligibility = quickDeckEvaluationConfig
+  ? new QuickDeckEvaluatorModelEligibility({
+      v4ModelPolicy,
+      textProbe: new GatewayModelAvailabilityProbe({
+        baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+        apiKey: quickDeckEvaluationConfig.gatewayTextKey,
+      }),
+      imageProbe: new GatewayModelAvailabilityProbe({
+        baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
+        apiKey: quickDeckEvaluationConfig.gatewayImageKey,
+      }),
+      ...(v4ModelPolicyConfig ? { directoryTtlMs: v4ModelPolicyConfig.availabilityTtlMs } : {}),
+    })
+  : null
+if (quickDeckEvaluationConfig && quickDeckEvaluatorModelEligibility) {
+  const eligibility = await quickDeckEvaluatorModelEligibility.check({
     textModel: quickDeckEvaluationConfig.textModel,
-    allowedImageModels: quickDeckEvaluationConfig.allowedImageModels,
-    textProbe: new GatewayModelAvailabilityProbe({
-      baseUrl,
-      apiKey: quickDeckEvaluationConfig.gatewayTextKey,
-    }),
-    imageProbe: new GatewayModelAvailabilityProbe({
-      baseUrl,
-      apiKey: quickDeckEvaluationConfig.gatewayImageKey,
-    }),
+    imageModels: quickDeckEvaluationConfig.allowedImageModels,
   })
+  if (eligibility !== 'READY') throw new Error(`PPT_AGENT_QUICK_DECK_EVALUATION_MODEL_${eligibility}`)
 }
 if (usageV2Runtime.providerBillingCatalog && publishedRevisionImageModel) {
   usageV2Runtime.providerBillingCatalog.snapshot({
@@ -319,6 +325,7 @@ const runtime = runtimeMode === 'gateway'
             model: quickDeckEvaluationModel,
             textModel: quickDeckEvaluationConfig.textModel,
             allowedImageModels: quickDeckEvaluationConfig.allowedImageModels,
+            modelEligibility: quickDeckEvaluatorModelEligibility!,
             maxActiveJobs: quickDeckEvaluationConfig.maxActiveJobs,
             maxDailyJobs: quickDeckEvaluationConfig.maxDailyJobs,
             ttlMs: quickDeckEvaluationConfig.ttlMs,

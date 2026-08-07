@@ -151,6 +151,15 @@ export type V4ConfiguredModel = Readonly<{
   readiness: V4ModelReadinessRecord
 }>
 
+/**
+ * A quick-deck job persists these names at acceptance, but they must still be
+ * eligible at the moment a new evaluator call is about to be made.
+ */
+export type V4QuickDeckModelSelection = Readonly<{
+  textModel: string
+  imageModels: readonly string[]
+}>
+
 /** A directory lookup only establishes gateway visibility; it is not a generation test. */
 export interface V4ModelAvailabilityProbe {
   listModels(): Promise<readonly string[]>
@@ -289,6 +298,15 @@ export class V4ModelPolicy {
         && model.roles.includes('IMAGE')
         && this.readinessPassed(model))
       .map((model) => model.model))
+  }
+
+  allowsQuickDeckModels(selection: V4QuickDeckModelSelection) {
+    const textModel = selection.textModel.trim()
+    const imageModels = uniqueModels(selection.imageModels.map((model) => model.trim()))
+    return textModel.length > 0
+      && imageModels.length > 0
+      && this.quickDeckResponsesTextModels().includes(textModel)
+      && imageModels.every((model) => model.length > 0 && this.quickDeckImageModels().includes(model))
   }
 
   publishedModels(role: V4ModelRole) {

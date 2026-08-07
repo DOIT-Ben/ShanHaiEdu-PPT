@@ -156,6 +156,19 @@ describe('V4 model policy', () => {
     expect(configured.quickDeckImageModels()).toEqual(['image-ready'])
   })
 
+  test('rechecks quick-deck model eligibility when an attestation expires after startup', () => {
+    let now = new Date('2026-08-07T01:00:00.000Z')
+    const configured = policy({ now: () => now })
+    const selection = {
+      textModel: 'gpt-5.6-terra',
+      imageModels: ['gemini-3-pro-image-preview'],
+    }
+
+    expect(configured.allowsQuickDeckModels(selection)).toBe(true)
+    now = new Date('2026-08-08T00:00:00.000Z')
+    expect(configured.allowsQuickDeckModels(selection)).toBe(false)
+  })
+
   test('does not advertise or select a V4 text route without Responses attestation', async () => {
     const configured = policy({
       models: [
