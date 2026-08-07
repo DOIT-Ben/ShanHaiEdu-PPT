@@ -730,7 +730,7 @@ export function createAgentRuntime(input: RuntimeInput) {
   const runs = new RunService({
     repository: input.repository,
     clock,
-    v4ModelPolicy,
+    ...(input.v4ModelPolicy ? { v4ModelPolicy } : {}),
     artifacts: input.artifacts,
     buildIdentity: runtimeBuildIdentity,
     ...(input.defaultAccountingProtocol ? { defaultAccountingProtocol: input.defaultAccountingProtocol } : {}),
