@@ -328,10 +328,10 @@ describe('gateway courseware model', () => {
     expect(gatewayCoursewareModelProfile({ textModel: 'gpt-5.6-terra', visionModel: 'gpt-5.6-terra' })).toBe('DEFAULT')
   })
 
-  test('defaults V4 text calls to Responses and limits Chat to the compatibility setting', () => {
+  test('accepts only Responses for the primary V4 text transport', () => {
     expect(visualDeckV4TextTransport(undefined)).toBe('RESPONSES')
     expect(visualDeckV4TextTransport('RESPONSES')).toBe('RESPONSES')
-    expect(visualDeckV4TextTransport('CHAT_COMPLETIONS')).toBe('CHAT_COMPLETIONS')
+    expect(() => visualDeckV4TextTransport('CHAT_COMPLETIONS')).toThrow('PPT_AGENT_V4_TEXT_TRANSPORT_RESPONSES_REQUIRED')
     expect(() => visualDeckV4TextTransport('AUTO')).toThrow('PPT_AGENT_V4_TEXT_TRANSPORT_INVALID')
   })
 

@@ -102,10 +102,10 @@ export function gatewayCoursewareModelProfile(input: Readonly<{
     : 'DEFAULT'
 }
 
-export function visualDeckV4TextTransport(value: string | undefined): GatewayCoursewareTransport {
+export function visualDeckV4TextTransport(value: string | undefined): 'RESPONSES' {
   const normalized = value?.trim()
   if (!normalized || normalized === 'RESPONSES') return 'RESPONSES'
-  if (normalized === 'CHAT_COMPLETIONS') return 'CHAT_COMPLETIONS'
+  if (normalized === 'CHAT_COMPLETIONS') throw new Error('PPT_AGENT_V4_TEXT_TRANSPORT_RESPONSES_REQUIRED')
   throw new Error('PPT_AGENT_V4_TEXT_TRANSPORT_INVALID')
 }
 
