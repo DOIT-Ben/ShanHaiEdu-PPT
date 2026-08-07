@@ -350,19 +350,22 @@ describe('quick-deck evaluation service', () => {
   test('bounds a valid 200,000-character input before the Responses call', async () => {
     const { directory, model, service } = await fixture()
     try {
+      const tailEvidence = '重点目标位于材料末尾并且必须保留'
       const created = await service.create('evaluation-tenant', {
         ...request(1),
         source: {
           kind: 'TEXT', name: '重点目标.txt',
-          text: `${'x'.repeat(199_940)}重点目标位于材料末尾并且必须保留`,
+          text: `${'甲'.repeat(200_000 - tailEvidence.length)}${tailEvidence}`,
         },
       })
       await service.tick({ limit: 10 })
 
       expect(created.status).toBe('QUEUED')
-      expect(Buffer.byteLength(JSON.stringify(model.calls[0]!.payload), 'utf8')).toBeLessThanOrEqual(220_000)
+      const payload = JSON.stringify(model.calls[0]!.payload)
+      expect(payload.length).toBeLessThanOrEqual(220_000)
+      expect(Buffer.byteLength(payload, 'utf8')).toBeGreaterThan(220_000)
       expect((model.calls[0]!.payload as Record<string, unknown>).document).toBeUndefined()
-      expect(JSON.stringify(model.calls[0]!.payload)).toContain('重点目标位于材料末尾并且必须保留')
+      expect(payload).toContain(tailEvidence)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -381,8 +384,44 @@ describe('quick-deck evaluation service', () => {
       })
       await service.tick({ limit: 10 })
 
-      expect(Buffer.byteLength(JSON.stringify(model.calls[0]!.payload), 'utf8')).toBeLessThanOrEqual(220_000)
-      expect(JSON.stringify(model.calls[0]!.payload)).toContain(tailEvidence)
+      const payload = JSON.stringify(model.calls[0]!.payload)
+      expect(payload.length).toBeLessThanOrEqual(220_000)
+      expect(payload).toContain(tailEvidence)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('compiles Quick-deck manuscripts against only the evidence window sent to the model', async () => {
+    const { directory, model, images, repository, service } = await fixture()
+    try {
+      const duplicatePrefix = `EVIDENCE_DUPLICATE_${'k'.repeat(100)}`
+      const outsideMarker = 'OUTSIDE_MARKER_MUST_NOT_REACH_THE_COMPILER'
+      const chunk = (prefix: string, fill: string) => `${prefix}${fill.repeat(12_000 - prefix.length)}`
+      const source = [
+        chunk(duplicatePrefix, '甲'),
+        ...Array.from({ length: 7 }, () => '乙'.repeat(12_000)),
+        chunk(`${duplicatePrefix}${outsideMarker}`, '丙'),
+      ].join('')
+      const created = await service.create('evaluation-tenant', {
+        ...request(1),
+        source: { kind: 'TEXT', name: 'source.txt', text: source },
+      })
+
+      await service.tick({ limit: 10 })
+
+      const payload = model.calls[0]!.payload as {
+        trustedEvidence: { sourceChunks: readonly { id: string; text: string }[] }
+      }
+      expect(payload.trustedEvidence.sourceChunks).toHaveLength(8)
+      expect(JSON.stringify(payload)).not.toContain(outsideMarker)
+      expect(images.submissions).toHaveLength(1)
+      const stored = await repository.get(created.jobId)
+      expect(stored).toMatchObject({
+        status: 'GENERATING',
+        phase: 'IMAGE_GENERATION',
+      })
+      expect(stored?.blueprint?.curriculum.sourceSummary).not.toContain(outsideMarker)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

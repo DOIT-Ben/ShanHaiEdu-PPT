@@ -1,21 +1,24 @@
 import { hashInput } from './hash'
-import type { DocumentResult, SourceChunk } from './ports'
+import type { DocumentResult, RunRecord, SourceChunk, StepRecord } from './ports'
 
 export const V4_EVIDENCE_WINDOW_VERSION = 'v4-evidence-window-v1'
 export const V4_EVIDENCE_WINDOW_MAX_CHARACTERS = 96_000
 export const V4_EVIDENCE_CHUNK_MAX_CHARACTERS = 12_000
 export const V4_EVIDENCE_WINDOW_MAX_CHUNKS = 200
+export const v4EvidenceWindowStepKey = (runId: string) => `${runId}:v4:evidence-window`
 
 export type V4EvidenceWindow = Readonly<{
   chunks: readonly SourceChunk[]
-  audit: Readonly<{
-    version: typeof V4_EVIDENCE_WINDOW_VERSION
-    selectedChunkIds: readonly string[]
-    selectedContentHash: string
-    omittedChunkCount: number
-    characterCount: number
-    serializedByteCount: number
-  }>
+  audit: V4EvidenceWindowAudit
+}>
+
+export type V4EvidenceWindowAudit = Readonly<{
+  version: typeof V4_EVIDENCE_WINDOW_VERSION
+  selectedChunkIds: readonly string[]
+  selectedContentHash: string
+  omittedChunkCount: number
+  characterCount: number
+  serializedByteCount: number
 }>
 
 function keywords(values: readonly (string | undefined)[]) {
@@ -24,10 +27,17 @@ function keywords(values: readonly (string | undefined)[]) {
   return [...new Set(matches)].sort()
 }
 
-function sourceOrder(document: DocumentResult) {
-  const ready = (document.sources ?? []).filter((source) => source.status === 'READY').map((source) => source.id)
-  const remaining = document.chunks.map((chunk) => chunk.sourceId ?? '').filter(Boolean)
-  return [...new Set([...ready, ...remaining])]
+function eligibleChunks(document: DocumentResult) {
+  if (!document.sources) return document.chunks
+  const readySourceIds = new Set(document.sources.filter((source) => source.status === 'READY').map((source) => source.id))
+  return document.chunks.filter((chunk) => Boolean(chunk.sourceId) && readySourceIds.has(chunk.sourceId!))
+}
+
+function sourceOrder(document: DocumentResult, chunks: readonly SourceChunk[]) {
+  if (document.sources) {
+    return [...new Set(document.sources.filter((source) => source.status === 'READY').map((source) => source.id))]
+  }
+  return [...new Set(chunks.map((chunk) => chunk.sourceId ?? '').filter(Boolean))]
 }
 
 function score(text: string, terms: readonly string[]) {
@@ -49,29 +59,21 @@ export class V4EvidenceWindowCompiler {
     focus?: string
     goal?: string
   }>): V4EvidenceWindow {
-    const order = sourceOrder(input.document)
+    const chunks = eligibleChunks(input.document)
+    const order = sourceOrder(input.document, chunks)
     const terms = keywords([input.instruction, input.focus, input.goal])
     const grouped = new Map(order.map((sourceId) => [
       sourceId,
-      input.document.chunks.filter((chunk) => (chunk.sourceId ?? '') === sourceId),
+      chunks.filter((chunk) => (chunk.sourceId ?? '') === sourceId),
     ]))
-    const unbound = input.document.chunks.filter((chunk) => !chunk.sourceId)
+    const unbound = input.document.sources ? [] : chunks.filter((chunk) => !chunk.sourceId)
     if (unbound.length > 0) grouped.set('', unbound)
     const groupOrder = [...order, ...(unbound.length > 0 ? [''] : [])]
     const selected: SourceChunk[] = []
     const selectedIds = new Set<string>()
-    let remainingBytes = V4_EVIDENCE_WINDOW_MAX_CHARACTERS
+    let remainingCharacters = V4_EVIDENCE_WINDOW_MAX_CHARACTERS
     const serializedBytes = (value: string) => Buffer.byteLength(JSON.stringify(value)) - 2
-    const boundedText = (value: string, characterLimit: number, byteLimit: number) => {
-      let low = 0
-      let high = Math.min(value.length, characterLimit)
-      while (low < high) {
-        const middle = Math.ceil((low + high) / 2)
-        if (serializedBytes(value.slice(0, middle)) <= byteLimit) low = middle
-        else high = middle - 1
-      }
-      return value.slice(0, low)
-    }
+    const boundedText = (value: string, characterLimit: number) => value.slice(0, Math.min(value.length, characterLimit))
 
     const nonEmptyGroups = groupOrder.filter((sourceId) => (grouped.get(sourceId)?.length ?? 0) > 0)
     const mandatoryLimit = Math.min(
@@ -80,12 +82,12 @@ export class V4EvidenceWindowCompiler {
     )
     const append = (chunk: SourceChunk, limit: number) => {
       if (selected.length >= V4_EVIDENCE_WINDOW_MAX_CHUNKS
-        || selectedIds.has(chunk.id) || remainingBytes <= 0 || limit <= 0) return
-      const text = boundedText(chunk.text, limit, remainingBytes)
+        || selectedIds.has(chunk.id) || remainingCharacters <= 0 || limit <= 0) return
+      const text = boundedText(chunk.text, Math.min(limit, remainingCharacters))
       if (!text) return
       selected.push({ ...chunk, text })
       selectedIds.add(chunk.id)
-      remainingBytes -= serializedBytes(text)
+      remainingCharacters -= text.length
     }
 
     for (const sourceId of nonEmptyGroups) append(grouped.get(sourceId)![0]!, mandatoryLimit)
@@ -95,12 +97,12 @@ export class V4EvidenceWindowCompiler {
       stableChunks(grouped.get(sourceId)!.slice(1), terms),
     ]))
     while (selected.length < V4_EVIDENCE_WINDOW_MAX_CHUNKS
-      && remainingBytes > 0
+      && remainingCharacters > 0
       && [...queues.values()].some((queue) => queue.length > 0)) {
       for (const sourceId of nonEmptyGroups) {
         const chunk = queues.get(sourceId)?.shift()
         if (chunk) append(chunk, V4_EVIDENCE_CHUNK_MAX_CHARACTERS)
-        if (selected.length >= V4_EVIDENCE_WINDOW_MAX_CHUNKS || remainingBytes <= 0) break
+        if (selected.length >= V4_EVIDENCE_WINDOW_MAX_CHUNKS || remainingCharacters <= 0) break
       }
     }
 
@@ -116,4 +118,51 @@ export class V4EvidenceWindowCompiler {
       },
     }
   }
+}
+
+function isPersistedAudit(value: unknown): value is V4EvidenceWindowAudit {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<V4EvidenceWindowAudit>
+  return candidate.version === V4_EVIDENCE_WINDOW_VERSION
+    && Array.isArray(candidate.selectedChunkIds)
+    && candidate.selectedChunkIds.length <= V4_EVIDENCE_WINDOW_MAX_CHUNKS
+    && new Set(candidate.selectedChunkIds).size === candidate.selectedChunkIds.length
+    && candidate.selectedChunkIds.every((id) => typeof id === 'string' && id.length > 0)
+    && typeof candidate.selectedContentHash === 'string'
+    && /^[a-f0-9]{64}$/.test(candidate.selectedContentHash)
+    && typeof candidate.omittedChunkCount === 'number' && Number.isSafeInteger(candidate.omittedChunkCount) && candidate.omittedChunkCount >= 0
+    && typeof candidate.characterCount === 'number' && Number.isSafeInteger(candidate.characterCount) && candidate.characterCount >= 0
+    && typeof candidate.serializedByteCount === 'number' && Number.isSafeInteger(candidate.serializedByteCount) && candidate.serializedByteCount >= 0
+}
+
+export function compileV4EvidenceWindowForRun(input: Readonly<{
+  run: Pick<RunRecord, 'visualDeckV4' | 'presentationGoal'>
+  document: DocumentResult
+}>): V4EvidenceWindow {
+  const config = input.run.visualDeckV4
+  if (!config) throw new Error('V4_EVIDENCE_WINDOW_CONFIG_MISSING')
+  return new V4EvidenceWindowCompiler().compile({
+    document: input.document,
+    instruction: config.instruction,
+    ...(config.deckOptions.focus ? { focus: config.deckOptions.focus } : {}),
+    ...(input.run.presentationGoal ? { goal: input.run.presentationGoal } : {}),
+  })
+}
+
+/** Rebuilds the durable selection so later Chain-4 calls cannot widen its source window. */
+export function requirePersistedV4EvidenceWindow(input: Readonly<{
+  run: Pick<RunRecord, 'id' | 'visualDeckV4' | 'presentationGoal'>
+  document: DocumentResult
+  steps: readonly StepRecord[]
+}>): V4EvidenceWindow {
+  const persisted = input.steps.find((step) => step.idempotencyKey === v4EvidenceWindowStepKey(input.run.id)
+    && step.tool === 'compile_v4_evidence_window'
+    && step.status === 'COMPLETED')
+  if (!persisted) throw new Error('V4_EVIDENCE_WINDOW_MISSING')
+  if (!isPersistedAudit(persisted.output)) throw new Error('V4_EVIDENCE_WINDOW_REPLAY_MISMATCH')
+  const rebuilt = compileV4EvidenceWindowForRun(input)
+  if (hashInput(persisted.output) !== hashInput(rebuilt.audit)) {
+    throw new Error('V4_EVIDENCE_WINDOW_REPLAY_MISMATCH')
+  }
+  return rebuilt
 }
