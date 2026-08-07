@@ -67,15 +67,16 @@ describe('public run query contracts', () => {
     expect(serialized).not.toContain('internal OCR source text')
   })
 
-  test('advertises V4 response, async image-task, ratio-gate, delivery, and isolated evaluation semantics without provider configuration', () => {
+  test('advertises truthful local mock capabilities without provider configuration', () => {
     const serialized = JSON.stringify(DEFAULT_PUBLIC_CAPABILITIES)
 
     expect(DEFAULT_PUBLIC_CAPABILITIES).toMatchObject({
+      runtimeMode: 'MOCK',
       visualDeckV4: {
         slideCount: { minimum: 1, maximum: 50 },
         aspectRatios: ['16:9'],
-        models: { image: ['gemini-3-pro-image-preview'], imageEdit: [] },
-        imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+        models: { text: ['local-mock-text'], vision: ['local-mock-vision'], image: ['local-mock-image'], imageEdit: [] },
+        imageGeneration: { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
         delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },
       },
       quickDeckEvaluation: { available: false, slideCount: { minimum: 1, maximum: 10 }, isolatedFromRuns: true },

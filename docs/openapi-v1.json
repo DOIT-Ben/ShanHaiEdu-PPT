@@ -2328,8 +2328,9 @@
       "PptAgentCapabilities": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["visualDeckV4", "quickDeckEvaluation"],
+        "required": ["runtimeMode", "visualDeckV4", "quickDeckEvaluation"],
         "properties": {
+          "runtimeMode": { "enum": ["GATEWAY", "MOCK"] },
           "visualDeckV4": {
             "type": "object", "additionalProperties": false,
             "required": ["sourceModes", "sourceKinds", "slideCount", "aspectRatios", "models", "imageGeneration", "delivery"],
@@ -2347,7 +2348,7 @@
                   "imageEdit": { "type": "array", "minItems": 0, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 120 } }
                 }
               },
-              "imageGeneration": { "type": "object", "additionalProperties": false, "required": ["asynchronous", "protocol", "validatesActualPixels"], "properties": { "asynchronous": { "const": true }, "protocol": { "const": "IMAGE_TASK" }, "validatesActualPixels": { "const": true } } },
+              "imageGeneration": { "type": "object", "additionalProperties": false, "required": ["asynchronous", "protocol", "validatesActualPixels"], "properties": { "asynchronous": { "type": "boolean" }, "protocol": { "enum": ["IMAGE_TASK", "LOCAL_MOCK"] }, "validatesActualPixels": { "const": true } } },
               "delivery": { "type": "object", "additionalProperties": false, "required": ["formats", "rasterSlides"], "properties": { "formats": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "enum": ["PPTX", "PREVIEW_PNG", "SOURCES_JSON"] } }, "rasterSlides": { "const": true } } }
             }
           },

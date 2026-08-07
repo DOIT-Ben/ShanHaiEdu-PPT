@@ -13,6 +13,7 @@ import { parseProviderBillingCatalog } from '../src/adapters/provider-billing-ca
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { enqueueUsageV2RunFinalization } from '../src/core/usage-v2-coordinator'
 import type { UsageRunBill } from '../src/usage-accounting-contracts'
+import { V4ModelPolicy } from '../src/core/v4-model-policy'
 
 const host = { tenantId: 'frameflow', externalUserId: 'user-1' }
 const request = {
@@ -246,6 +247,38 @@ function settledUsageV2Bill(runId: string): UsageRunBill {
 }
 
 describe('run service', () => {
+  test('rejects unpublished image models only for new V4 Runs and preserves exact replay', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock()
+    const allowed = new RunService({
+      repository,
+      clock,
+      v4ModelPolicy: new V4ModelPolicy({
+        runtimeMode: 'GATEWAY', textModels: ['text'], visionModels: ['vision'], imageModels: ['gpt-image-2'],
+      }),
+    })
+    const v4Request = {
+      ...request,
+      presentationMode: 'VISUAL_DECK_V4' as const,
+      visualDeckV4: {
+        instruction: '根据来源生成两页演示', sourceMode: 'SOURCE_GROUNDED' as const,
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' as const },
+      },
+    }
+    const created = await allowed.create(v4Request, 'v4-model-policy-create-0001')
+    const restricted = new RunService({
+      repository,
+      clock,
+      v4ModelPolicy: new V4ModelPolicy({
+        runtimeMode: 'GATEWAY', textModels: ['text'], visionModels: ['vision'], imageModels: ['other-image'],
+      }),
+    })
+
+    await expect(restricted.create(v4Request, 'v4-model-policy-create-0001'))
+      .resolves.toMatchObject({ replayed: true, run: { id: created.run.id } })
+    await expect(restricted.create(v4Request, 'v4-model-policy-create-0002'))
+      .rejects.toMatchObject({ status: 422, code: 'V4_IMAGE_MODEL_NOT_ALLOWED' })
+  })
   test('creates and safely replays a host-scoped Run', async () => {
     const { repository, service } = fixture()
     const first = await service.create(request, 'frameflow-create-0001')

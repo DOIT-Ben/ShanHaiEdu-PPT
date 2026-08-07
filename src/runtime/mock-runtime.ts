@@ -75,6 +75,7 @@ import { UsageV2Coordinator } from '../core/usage-v2-coordinator'
 import { RuntimeHealthMonitor, safeWorkerErrorCode, WorkerTickError } from '../observability/runtime-health'
 import { buildIdentity, type BuildIdentity } from '../release-identity'
 import type { PublicCapabilities } from '../run-query-contracts'
+import { V4ModelPolicy } from '../core/v4-model-policy'
 import type { UsageAccountingProtocol } from '../usage-accounting-contracts'
 import type { QuickDeckEvaluationAuthenticationPort } from '../http/quick-deck-evaluation-handler'
 
@@ -218,25 +219,41 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
         visualDirection: string
         targetAudience?: string
         presentationGoal?: string
-        document: {
+        document?: {
           name: string
           sources: { id: string; name: string; kind: 'TEXT' | 'IMAGE' | 'PDF' | 'MARKDOWN'; status: 'READY' | 'FAILED'; failureCode?: string }[]
           chunks: { id: string; sourceId?: string; text: string; sha256: string }[]
           missingRanges: string[]
         }
         trustedEvidence?: {
-          sourceChunks: { text: string }[]
+          sources: { name: string; kind: 'TEXT' | 'IMAGE' | 'PDF' | 'MARKDOWN'; status: 'READY' | 'FAILED' }[]
+          sourceChunks: { id?: string; sourceId?: string | null; text: string }[]
+          missingRanges: string[]
         }
+      }
+      const document = payload.document ?? {
+        name: 'trusted-evidence-window',
+        sources: payload.trustedEvidence!.sources.map((item, index) => ({
+          id: payload.sourceReferences[index]?.sourceId ?? `source-${index + 1}`,
+          ...item,
+        })),
+        chunks: payload.trustedEvidence!.sourceChunks.map((chunk, index) => ({
+          id: chunk.id ?? `chunk-${index + 1}`,
+          ...(chunk.sourceId ? { sourceId: chunk.sourceId } : {}),
+          text: chunk.text,
+          sha256: hashInput(chunk.text),
+        })),
+        missingRanges: payload.trustedEvidence!.missingRanges,
       }
       const source = {
         kind: 'SOURCE_PACKAGE' as const,
-        name: payload.document.name,
+        name: document.name,
         sources: payload.sourceReferences.map((reference) => ({
           kind: 'TEXT' as const,
           sourceId: reference.sourceId,
           name: reference.name,
           roleHint: reference.roleHint,
-          text: payload.document.chunks
+          text: document.chunks
             .filter((chunk) => chunk.sourceId === reference.sourceId || payload.sourceReferences.length === 1)
             .map((chunk) => chunk.text)
             .join('\n') || '当前资料只提供视觉参考，规划时不得将其作为新的事实来源。',
@@ -246,7 +263,7 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
         runId: 'mock-v4-run',
         inputHash: input.idempotencyKey,
         source,
-        document: { ...payload.document, isComplete: payload.document.missingRanges.length === 0 },
+        document: { ...document, isComplete: document.missingRanges.length === 0 },
         config: {
           instruction: payload.instruction,
           sourceMode: payload.sourceMode,
@@ -260,7 +277,7 @@ class DeterministicPlanningModel implements StructuredModelPort, StructuredGener
       })
       const { compilerVersion: _compilerVersion, ...draft } = proposal
       if (input.operation === 'create_visual_deck_v4_creative_manuscript') {
-        const excerpt = (payload.trustedEvidence?.sourceChunks ?? payload.document.chunks)
+        const excerpt = (payload.trustedEvidence?.sourceChunks ?? document.chunks)
           .map((chunk) => chunk.text.trim())
           .find((text) => text.length >= 6)
           ?.slice(0, 1_200)
@@ -578,6 +595,7 @@ type RuntimeInput = Readonly<{
   usageAccounting?: UsageAccountingPort
   providerBillingCatalog?: ProviderBillingCatalog
   capabilities?: PublicCapabilities
+  v4ModelPolicy?: V4ModelPolicy
   v1ExecutionEnabled?: boolean
   presentationJobV2?: Readonly<{
     repository: PresentationJobV2Repository
@@ -708,9 +726,11 @@ export function createAgentRuntime(input: RuntimeInput) {
         clock,
       })
     : undefined
+  const v4ModelPolicy = input.v4ModelPolicy ?? V4ModelPolicy.mock()
   const runs = new RunService({
     repository: input.repository,
     clock,
+    v4ModelPolicy,
     artifacts: input.artifacts,
     buildIdentity: runtimeBuildIdentity,
     ...(input.defaultAccountingProtocol ? { defaultAccountingProtocol: input.defaultAccountingProtocol } : {}),
@@ -1010,7 +1030,7 @@ export function createAgentRuntime(input: RuntimeInput) {
       operations,
       revisionRoundsSettings,
       rateLimiter,
-      ...(input.capabilities ? { capabilities: input.capabilities } : {}),
+      capabilities: input.capabilities ?? v4ModelPolicy.publicCapabilities(Boolean(quickDeckEvaluations)),
       ...(input.waitingSlaMs === undefined ? {} : { waitingSlaMs: input.waitingSlaMs }),
       ...(input.stepSlaMs === undefined ? {} : { stepSlaMs: input.stepSlaMs }),
       ...(presentationJobs && presentationJobAuthentication ? {

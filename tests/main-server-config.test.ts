@@ -144,8 +144,8 @@ describe('main PPT Agent server configuration', () => {
     )
 
     expect(capabilities).toEqual({
-      textModels: ['gpt-5.6-terra', 'MiniMax-M3'],
-      visionModels: ['deepseek-v3.2', 'MiniMax-M3'],
+      textModels: ['gpt-5.6-terra'],
+      visionModels: ['deepseek-v3.2'],
       imageModels: ['gemini-3-pro-image-preview', 'gpt-image-2'],
       imageEditModels: ['gpt-image-2'],
     })

@@ -33,7 +33,7 @@ import { createPresentationJobV2ProviderFromEnv } from './runtime/presentation-j
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
 import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
-import { createPublicCapabilities } from './run-query-contracts'
+import { V4ModelPolicy } from './core/v4-model-policy'
 import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
@@ -175,12 +175,10 @@ const quickDeckEvaluationConfig = quickDeckEvaluationApiToken
       imageModels: publicV4CapabilitiesConfig!.imageModels,
     })
   : null
-const publicCapabilities = publicV4CapabilitiesConfig
-  ? createPublicCapabilities({
-      ...publicV4CapabilitiesConfig,
-      quickDeckAvailable: Boolean(quickDeckEvaluationConfig),
-    })
-  : undefined
+const v4ModelPolicy = publicV4CapabilitiesConfig
+  ? new V4ModelPolicy({ runtimeMode: 'GATEWAY', ...publicV4CapabilitiesConfig })
+  : V4ModelPolicy.mock()
+const publicCapabilities = v4ModelPolicy.publicCapabilities(Boolean(quickDeckEvaluationConfig))
 const quickDeckEvaluationDataRoot = quickDeckEvaluationConfig
   ? path.resolve(quickDeckEvaluationConfig.dataRoot)
   : null
@@ -320,7 +318,8 @@ const runtime = runtimeMode === 'gateway'
         runLeaseTtlMs,
         createRunRateLimitPerMinute,
         runActionRateLimitPerMinute,
-        ...(publicCapabilities ? { capabilities: publicCapabilities } : {}),
+        capabilities: publicCapabilities,
+        v4ModelPolicy,
       })
     })()
   : createMockRuntime({
@@ -329,6 +328,8 @@ const runtime = runtimeMode === 'gateway'
       ...(presentationJobV2 ? { presentationJobV2 } : {}),
       workerConcurrency, imageConcurrency, reviewConcurrency, runLeaseTtlMs, createRunRateLimitPerMinute, runActionRateLimitPerMinute,
       revisionImageModel,
+      capabilities: publicCapabilities,
+      v4ModelPolicy,
       defaultAccountingProtocol: usageV2Runtime.defaultAccountingProtocol,
       budget: presentationJobV2Budget
         ? new TenantRoutingBudgetPort({

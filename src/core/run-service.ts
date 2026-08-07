@@ -48,6 +48,7 @@ import {
   usageV2FinalizeStepKey,
 } from './usage-v2-coordinator'
 import { deriveV4TerminalAccounting } from './v4-terminal-accounting'
+import type { V4ModelPolicy } from './v4-model-policy'
 import {
   allPageNumbers,
   activeRevisionLifecycle,
@@ -99,6 +100,7 @@ export class RunService {
     buildIdentity?: BuildIdentity
     defaultAccountingProtocol?: UsageAccountingProtocol
     providerBillingCatalog?: ProviderBillingCatalogPort
+    v4ModelPolicy?: V4ModelPolicy
   }>) {
     this.defaultAccountingProtocol = usageAccountingProtocolSchema.parse(
       dependencies.defaultAccountingProtocol ?? 'LEGACY_RESERVATION_V1',
@@ -122,6 +124,15 @@ export class RunService {
     const requestHash = hashInput(parsed.data)
     const existing = await this.dependencies.repository.getRun(runId)
     if (existing) return this.replayOrConflict(existing, requestHash)
+
+    try {
+      this.dependencies.v4ModelPolicy?.assertNewRunAllowed(parsed.data)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'V4_IMAGE_MODEL_NOT_ALLOWED') {
+        throw new RunServiceError(422, 'V4_IMAGE_MODEL_NOT_ALLOWED', 'image model is not allowed for new V4 runs')
+      }
+      throw error
+    }
 
     const tenantSettings = await this.dependencies.repository.getTenantRevisionRoundsSettings(parsed.data.host.tenantId)
     const maxRevisionRounds = tenantSettings.isConfigured

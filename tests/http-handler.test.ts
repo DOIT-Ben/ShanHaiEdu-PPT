@@ -212,9 +212,10 @@ describe('HTTP v1 handler', () => {
       schemaVersion: CONTRACT_VERSION,
       requestId: expect.any(String),
       data: {
+        runtimeMode: 'MOCK',
         visualDeckV4: {
           slideCount: { minimum: 1, maximum: 50 },
-          imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+          imageGeneration: { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
         },
         quickDeckEvaluation: { available: false, isolatedFromRuns: true },
       },

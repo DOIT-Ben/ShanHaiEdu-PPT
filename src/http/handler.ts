@@ -46,8 +46,8 @@ import {
   runDetailSchema,
 } from '../run-detail-contracts'
 import {
-  capabilitiesEnvelopeSchema,
   DEFAULT_PUBLIC_CAPABILITIES,
+  capabilitiesEnvelopeSchema,
   publicBlueprintProjection,
   publicRunSources,
   runPlanEnvelopeSchema,

@@ -151,14 +151,10 @@ export function resolvePublicV4CapabilitiesConfig(
   revisionImageModel: string | null,
 ) {
   const unique = (models: readonly string[]) => [...new Set(models)]
-  const textModels = unique([
-    coursewareModels.primary.textModel,
-    ...(coursewareModels.fallback ? [coursewareModels.fallback.textModel] : []),
-  ])
-  const visionModels = unique([
-    coursewareModels.primary.visionModel,
-    ...(coursewareModels.fallback ? [coursewareModels.fallback.visionModel] : []),
-  ])
+  // V4 capabilities describe new strict Chain-4 Runs. Compatibility fallback
+  // models remain available to historical chains but are not selectable here.
+  const textModels = unique([coursewareModels.primary.textModel])
+  const visionModels = unique([coursewareModels.primary.visionModel])
   return {
     textModels: configuredModelList(textModels.join(','), ['gpt-5.6-terra'], 'PPT_AGENT_CAPABILITY_TEXT_MODELS'),
     visionModels: configuredModelList(visionModels.join(','), ['gpt-5.6-terra'], 'PPT_AGENT_CAPABILITY_VISION_MODELS'),

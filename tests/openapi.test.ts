@@ -420,6 +420,8 @@ describe('OpenAPI v1 contract', () => {
     expect(document.components.schemas.CapabilitiesEnvelope).toBeDefined()
     const capabilitiesContract = JSON.stringify(document.components.schemas.PptAgentCapabilities)
     expect(capabilitiesContract).toContain('IMAGE_TASK')
+    expect(capabilitiesContract).toContain('LOCAL_MOCK')
+    expect(capabilitiesContract).toContain('runtimeMode')
     expect(capabilitiesContract).toContain('validatesActualPixels')
     expect(capabilitiesContract).not.toContain('baseUrl')
     expect(capabilitiesContract).not.toContain('apiKey')

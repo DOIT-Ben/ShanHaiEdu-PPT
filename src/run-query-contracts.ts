@@ -185,6 +185,7 @@ const optionalUniqueModelListSchema = z.array(modelNameSchema).max(20)
   .refine((models) => new Set(models).size === models.length, 'models must be unique')
 
 export const publicCapabilitiesSchema = z.object({
+  runtimeMode: z.enum(['GATEWAY', 'MOCK']),
   visualDeckV4: z.object({
     sourceModes: z.array(z.enum(['SOURCE_GROUNDED', 'OPEN_KNOWLEDGE'])).min(1).max(2),
     sourceKinds: z.array(z.enum(['TEXT', 'HOST_ATTACHMENT', 'SOURCE_PACKAGE', 'APPROVED_PAGE_DESIGN'])).min(1).max(4),
@@ -197,8 +198,8 @@ export const publicCapabilitiesSchema = z.object({
       imageEdit: optionalUniqueModelListSchema,
     }).strict(),
     imageGeneration: z.object({
-      asynchronous: z.literal(true),
-      protocol: z.literal('IMAGE_TASK'),
+      asynchronous: z.boolean(),
+      protocol: z.enum(['IMAGE_TASK', 'LOCAL_MOCK']),
       validatesActualPixels: z.literal(true),
     }).strict(),
     delivery: z.object({
@@ -216,6 +217,7 @@ export const publicCapabilitiesSchema = z.object({
 export type PublicCapabilities = z.output<typeof publicCapabilitiesSchema>
 
 export function createPublicCapabilities(input: Readonly<{
+  runtimeMode?: 'GATEWAY' | 'MOCK'
   textModels?: readonly string[]
   visionModels?: readonly string[]
   imageModels?: readonly string[]
@@ -223,18 +225,21 @@ export function createPublicCapabilities(input: Readonly<{
   quickDeckAvailable?: boolean
 }> = {}): PublicCapabilities {
   return publicCapabilitiesSchema.parse({
+    runtimeMode: input.runtimeMode ?? 'MOCK',
     visualDeckV4: {
       sourceModes: ['SOURCE_GROUNDED', 'OPEN_KNOWLEDGE'],
       sourceKinds: ['TEXT', 'HOST_ATTACHMENT', 'SOURCE_PACKAGE', 'APPROVED_PAGE_DESIGN'],
       slideCount: { minimum: 1, maximum: 50 },
       aspectRatios: ['16:9'],
       models: {
-        text: input.textModels ?? ['gpt-5.6-terra'],
-        vision: input.visionModels ?? ['gpt-5.6-terra'],
-        image: input.imageModels ?? ['gemini-3-pro-image-preview'],
+        text: input.textModels ?? ['local-mock-text'],
+        vision: input.visionModels ?? ['local-mock-vision'],
+        image: input.imageModels ?? ['local-mock-image'],
         imageEdit: input.imageEditModels ?? [],
       },
-      imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+      imageGeneration: input.runtimeMode === 'GATEWAY'
+        ? { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true }
+        : { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
       delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },
     },
     quickDeckEvaluation: {
