@@ -118,9 +118,10 @@ function pendingOperationState(status: 'CREATED' | 'SUBMITTING' | 'QUEUED' | 'PR
   return status === 'PROCESSING' ? 'PROCESSING' as const : 'QUEUED' as const
 }
 
-function billingState(operation: z.infer<typeof imageOperationSchema>) {
-  if (operation.submission_state === 'NOT_SUBMITTED') return 'NOT_CHARGED' as const
-  return operation.submission_state === 'SUBMITTED' ? 'CHARGED' as const : 'UNKNOWN' as const
+function billingState() {
+  // `submission_state` says whether the gateway accepted work, not whether a
+  // provider charge was settled. This endpoint exposes no billing receipt.
+  return 'UNKNOWN' as const
 }
 
 async function removeConnectedNeutralBackdrop(image: Uint8Array) {
@@ -245,6 +246,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
           httpStatus: response.status,
           ...(state === 'UNKNOWN' ? { disposition: 'RETRYABLE' as const } : {}),
         }),
+        state === 'NOT_SUBMITTED' ? { billingState: 'NOT_CHARGED' as const } : {},
       )
     }
 
@@ -255,7 +257,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       const errorCode = error instanceof GatewayImageAspectRatioError ? error.code : 'GATEWAY_OUTPUT_INVALID'
       throw new MediaSubmissionError(
         errorCode,
-        'UNKNOWN',
+        'SUBMITTED',
         'gateway returned an invalid image result',
         providerTechnicalFailure(errorCode, error instanceof GatewayImageAspectRatioError
           ? { category: 'CONTRACT', disposition: 'NON_RETRYABLE' }
@@ -280,7 +282,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         : {
             state: 'FAILED' as const,
             errorCode: 'GATEWAY_ARTIFACT_MISSING',
-            billingState: 'CHARGED' as const,
+            billingState: 'UNKNOWN' as const,
             technicalFailure: providerTechnicalFailure('GATEWAY_ARTIFACT_MISSING'),
           }
     }
@@ -327,7 +329,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         return {
           state: 'FAILED' as const,
           errorCode: 'GATEWAY_OUTPUT_MISSING',
-          billingState: 'CHARGED' as const,
+          billingState: 'UNKNOWN' as const,
           technicalFailure: providerTechnicalFailure('GATEWAY_OUTPUT_MISSING'),
         }
       }
@@ -345,7 +347,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         return {
           state: 'FAILED' as const,
           errorCode,
-          billingState: 'CHARGED' as const,
+          billingState: 'UNKNOWN' as const,
           technicalFailure: providerTechnicalFailure(errorCode, error instanceof GatewayImageAspectRatioError
             ? { category: 'CONTRACT', disposition: 'NON_RETRYABLE' }
             : {}),
@@ -356,7 +358,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     return {
       state: 'FAILED' as const,
       errorCode,
-      billingState: billingState(operation),
+      billingState: billingState(),
       technicalFailure: providerTechnicalFailure(errorCode),
     }
   }
@@ -391,6 +393,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
             httpStatus: response.status,
             ...(state === 'UNKNOWN' ? { disposition: 'RETRYABLE' as const } : {}),
           }),
+          state === 'NOT_SUBMITTED' ? { billingState: 'NOT_CHARGED' as const } : {},
         )
       }
       const operation = imageOperationSchema.safeParse(payload)

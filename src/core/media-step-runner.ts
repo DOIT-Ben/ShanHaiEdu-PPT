@@ -6,7 +6,9 @@ import {
   type BudgetPort,
   type ClockPort,
   type ImageGenerationPort,
+  type MediaBillingState,
   MediaSubmissionError,
+  type MediaSubmissionState,
   type RunRecord,
   type StepRecord,
   type StepStatus,
@@ -143,6 +145,28 @@ function outputWithTechnicalFailure(output: unknown, technicalFailure: Technical
   return { ...persisted, technicalFailure }
 }
 
+type MediaFailureState = Readonly<{
+  submissionState: MediaSubmissionState
+  billingState: MediaBillingState
+}>
+
+function outputWithMediaFailure(output: unknown, mediaFailure: MediaFailureState | undefined) {
+  if (!mediaFailure) return output
+  const persisted = output && typeof output === 'object' ? output as Record<string, unknown> : {}
+  return { ...persisted, mediaFailure }
+}
+
+function persistedMediaSubmissionState(step: StepRecord) {
+  const output = step.output && typeof step.output === 'object'
+    ? step.output as { mediaFailure?: unknown }
+    : null
+  const mediaFailure = output?.mediaFailure
+  return mediaFailure && typeof mediaFailure === 'object'
+    && (mediaFailure as { submissionState?: unknown }).submissionState === 'SUBMITTED'
+    ? 'SUBMITTED' as const
+    : null
+}
+
 function mergePolicy(run: RunRecord, policy: ReturnType<typeof reserveBudget>, updatedAt: string): RunRecord {
   return { ...run, ...policy, updatedAt }
 }
@@ -272,28 +296,44 @@ export class MediaStepRunner {
         idempotencyKey: input.idempotencyKey,
       })
     } catch (error) {
-      const submissionState = error instanceof MediaSubmissionError ? error.submissionState : 'UNKNOWN'
-      const errorCode = error instanceof MediaSubmissionError ? error.code : 'MEDIA_SUBMISSION_UNKNOWN'
-      const technicalFailure = error instanceof MediaSubmissionError
-        ? error.technicalFailure
+      const mediaError = error instanceof MediaSubmissionError ? error : null
+      const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
+      const billingState = mediaError?.billingState ?? 'UNKNOWN'
+      const errorCode = mediaError?.code ?? 'MEDIA_SUBMISSION_UNKNOWN'
+      const technicalFailure = mediaError
+        ? mediaError.technicalFailure
         : providerTechnicalFailure(errorCode, { disposition: 'RETRYABLE' })
+      const mediaFailure = { submissionState, billingState } as const
       if (submissionState === 'NOT_SUBMITTED' && reservationId && !isBatchReserved(input)) {
-        await this.markReleasing(input, reservationId, errorCode, technicalFailure)
+        await this.markReleasing(input, reservationId, errorCode, technicalFailure, mediaFailure)
         await this.dependencies.budget.release({
           host: prepared.run.host,
           reservationId,
           idempotencyKey: `release:${budgetReservationKey(input)}`,
         })
-        const step = await this.markDefiniteFailure(input, reservationId, errorCode, technicalFailure)
+        const step = await this.markDefiniteFailure(input, reservationId, errorCode, technicalFailure, mediaFailure)
         return { step, replayed: false }
       }
 
       if (submissionState === 'NOT_SUBMITTED' && reservationId) {
-        const step = await this.markDefiniteFailure(input, reservationId, errorCode, technicalFailure)
+        const step = await this.markDefiniteFailure(input, reservationId, errorCode, technicalFailure, mediaFailure)
         return { step, replayed: false }
       }
 
-      const step = await this.markUnknown(input, reservationId, errorCode, 'MEDIA', technicalFailure)
+      if (submissionState === 'SUBMITTED') {
+        const step = await this.markResultFailure(
+          input.runId,
+          input.idempotencyKey,
+          errorCode,
+          billingState,
+          technicalFailure,
+          mediaFailure,
+          mediaError?.operationId ?? null,
+        )
+        return { step, replayed: false }
+      }
+
+      const step = await this.markUnknown(input, reservationId, errorCode, 'MEDIA', technicalFailure, mediaFailure)
       return { step, replayed: false }
     }
     const step = await this.markWaiting(input, reservationId, submitted.operationId)
@@ -431,6 +471,7 @@ export class MediaStepRunner {
         status.errorCode,
         status.billingState,
         status.technicalFailure,
+        { submissionState: 'SUBMITTED', billingState: status.billingState },
       ),
       changed: true,
     }
@@ -481,6 +522,7 @@ export class MediaStepRunner {
         const canRetryReleasedV4Submission = existing.status === 'FAILED'
           && transaction.run.presentationMode === 'VISUAL_DECK_V4'
           && ['EXECUTING', 'REVISING'].includes(transaction.run.status)
+          && persistedMediaSubmissionState(existing) !== 'SUBMITTED'
           && (retryingAuthorizationCap || retryingTechnicalFailure)
         if (canRetryReleasedV4Submission) {
           const output = existing.output && typeof existing.output === 'object'
@@ -982,8 +1024,10 @@ export class MediaStepRunner {
     runId: string,
     idempotencyKey: string,
     errorCode: string,
-    billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN',
+    billingState: MediaBillingState,
     technicalFailure: TechnicalFailure,
+    mediaFailure?: MediaFailureState,
+    operationId: string | null = null,
   ) {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
@@ -999,11 +1043,12 @@ export class MediaStepRunner {
       const run: RunRecord = { ...transaction.run, ...policy, updatedAt: now }
       const updated: StepRecord = {
         ...step,
+        ...(operationId ? { externalOperationId: operationId } : {}),
         status: billingState === 'CHARGED'
           ? 'FAILED_CHARGED'
           : billingState === 'NOT_CHARGED' ? 'FAILED_NOT_CHARGED' : 'BILLING_UNKNOWN',
         errorCode,
-        output: outputWithTechnicalFailure(step.output, technicalFailure),
+        output: outputWithMediaFailure(outputWithTechnicalFailure(step.output, technicalFailure), mediaFailure),
         updatedAt: now,
       }
       transaction.putRun(run)
@@ -1058,6 +1103,7 @@ export class MediaStepRunner {
     reservationId: string,
     errorCode: string,
     technicalFailure?: TechnicalFailure,
+    mediaFailure?: MediaFailureState,
   ) {
     await this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1067,7 +1113,12 @@ export class MediaStepRunner {
         status: 'RELEASING',
         budgetReservationId: reservationId,
         errorCode,
-        ...(technicalFailure ? { output: outputWithTechnicalFailure(step.output, technicalFailure) } : {}),
+        ...(technicalFailure || mediaFailure ? {
+          output: outputWithMediaFailure(
+            technicalFailure ? outputWithTechnicalFailure(step.output, technicalFailure) : step.output,
+            mediaFailure,
+          ),
+        } : {}),
         updatedAt: this.dependencies.clock.now().toISOString(),
       })
     })
@@ -1078,6 +1129,7 @@ export class MediaStepRunner {
     reservationId: string | null,
     errorCode: string,
     technicalFailure?: TechnicalFailure,
+    mediaFailure?: MediaFailureState,
   ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1092,8 +1144,11 @@ export class MediaStepRunner {
         status: transaction.run.status === 'CANCELLED' ? 'FAILED_NOT_CHARGED' : 'FAILED',
         budgetReservationId: input.batchReservation?.reservationId ?? null,
         errorCode,
-        ...(resolvedTechnicalFailure ? {
-          output: outputWithTechnicalFailure(step.output, resolvedTechnicalFailure),
+        ...(resolvedTechnicalFailure || mediaFailure ? {
+          output: outputWithMediaFailure(
+            resolvedTechnicalFailure ? outputWithTechnicalFailure(step.output, resolvedTechnicalFailure) : step.output,
+            mediaFailure,
+          ),
         } : {}),
         updatedAt: now,
       }
@@ -1130,6 +1185,7 @@ export class MediaStepRunner {
     errorCode: string,
     kind: 'BUDGET' | 'MEDIA',
     technicalFailure?: TechnicalFailure,
+    mediaFailure?: MediaFailureState,
   ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1161,9 +1217,10 @@ export class MediaStepRunner {
             nextInspectionAt: new Date(this.dependencies.clock.now().getTime()
               + submissionLookupRetryDelayMs(submissionLookupAttempt)).toISOString(),
           }
-      const persistedOutput = resolvedTechnicalFailure
+      const outputWithFailure = resolvedTechnicalFailure
         ? outputWithTechnicalFailure(output, resolvedTechnicalFailure)
         : output
+      const persistedOutput = outputWithMediaFailure(outputWithFailure, mediaFailure)
       const updated: StepRecord = {
         ...step,
         status: kind === 'BUDGET' ? 'RESERVATION_UNKNOWN' : 'SUBMISSION_UNKNOWN',

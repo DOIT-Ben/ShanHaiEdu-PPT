@@ -127,7 +127,7 @@ describe('gateway image generation adapter', () => {
     })).resolves.toEqual({
       state: 'FAILED',
       errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
-      billingState: 'CHARGED',
+      billingState: 'UNKNOWN',
       technicalFailure: {
         category: 'CONTRACT', disposition: 'NON_RETRYABLE', diagnosticCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
       },
@@ -174,6 +174,7 @@ describe('gateway image generation adapter', () => {
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
     })).rejects.toMatchObject({
       submissionState: 'NOT_SUBMITTED',
+      billingState: 'NOT_CHARGED',
       code: 'INVALID_IMAGE_REQUEST',
       technicalFailure: {
         category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'INVALID_IMAGE_REQUEST',
@@ -192,7 +193,9 @@ describe('gateway image generation adapter', () => {
     await expect(unknown.submit({
       tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
       aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
-    })).rejects.toMatchObject({ submissionState: 'UNKNOWN', code: 'GATEWAY_SUBMISSION_UNKNOWN' })
+    })).rejects.toMatchObject({
+      submissionState: 'UNKNOWN', billingState: 'UNKNOWN', code: 'GATEWAY_SUBMISSION_UNKNOWN',
+    })
 
     const submissionUnknown = new GatewayImageGenerationPort({
       ...config,
@@ -300,9 +303,41 @@ describe('gateway image generation adapter', () => {
     })).resolves.toEqual({
       state: 'FAILED',
       errorCode: 'INVALID_REQUEST',
-      billingState: 'CHARGED',
+      billingState: 'UNKNOWN',
       technicalFailure: {
         category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'INVALID_REQUEST',
+      },
+    })
+  })
+
+  test('records an accepted synchronous edit output-contract failure as submitted with unknown billing', async () => {
+    const artifacts = new MockArtifactPort()
+    const reference = await sharp({
+      create: { width: 64, height: 36, channels: 3, background: '#4C956C' },
+    }).png().toBuffer()
+    const invalid = await sharp({
+      create: { width: 2048, height: 2048, channels: 3, background: '#D62828' },
+    }).png().toBuffer()
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async () => Response.json({ data: [{ b64_json: invalid.toString('base64') }] }),
+    })
+
+    await expect(adapter.submit({
+      tenantId: 'frameflow',
+      prompt: 'Correct only the supplied slide image',
+      model: 'gpt-image-2',
+      aspectRatio: '16:9',
+      exactAspectRatio: true,
+      idempotencyKey: 'run-1:slide:1:image:r1:v1:edit:aaaaaaaaaaaaaaaaaaaaaaaa',
+      referenceImage: { mimeType: 'image/png', bytes: new Uint8Array(reference), sha256: 'a'.repeat(64) },
+    })).rejects.toMatchObject({
+      code: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      submissionState: 'SUBMITTED',
+      billingState: 'UNKNOWN',
+      technicalFailure: {
+        category: 'CONTRACT', disposition: 'NON_RETRYABLE', diagnosticCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
       },
     })
   })

@@ -199,7 +199,13 @@ export class MockImageGenerationPort implements ImageGenerationPort {
     })
   }
 
-  failNext(code: string, submissionState: 'NOT_SUBMITTED' | 'UNKNOWN') {
+  failNext(
+    code: string,
+    submissionState: 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN',
+    billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN' = submissionState === 'NOT_SUBMITTED'
+      ? 'NOT_CHARGED'
+      : 'UNKNOWN',
+  ) {
     this.nextFailure = new MediaSubmissionError(
       code,
       submissionState,
@@ -207,6 +213,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
       providerTechnicalFailure(code, {
         ...(submissionState === 'UNKNOWN' ? { disposition: 'RETRYABLE' as const } : {}),
       }),
+      { billingState },
     )
   }
 }

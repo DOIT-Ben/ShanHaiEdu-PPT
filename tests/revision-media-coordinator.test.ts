@@ -18,11 +18,11 @@ import { MediaStepRunner } from '../src/core/media-step-runner'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
 import { generationBatchStepKeyFor, getGenerationBatch } from '../src/core/generation-batch'
 import { planningStepKey } from '../src/core/planning-runner'
-import type { RunRecord } from '../src/core/ports'
+import { MediaSubmissionError, type RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 import { applyRunAction } from '../src/core/policy'
-import { resumeTechnicalRecovery } from '../src/core/technical-recovery'
+import { providerTechnicalFailure, resumeTechnicalRecovery } from '../src/core/technical-recovery'
 import { revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { VisualReviewRunner } from '../src/core/visual-review-runner'
@@ -1262,6 +1262,38 @@ describe('revision media coordinator', () => {
       })
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'technical.recovery.started')).toBe(true)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
+  })
+
+  test('keeps an accepted V4 edit with an output-contract failure in terminal-accounting recovery without resubmitting it', async () => {
+    const { repository, images, coordinator } = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+      blueprint: visualDeckV4Blueprint(),
+      plan: revisionPlan(),
+    })
+    images.nextFailure = new MediaSubmissionError(
+      'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      'SUBMITTED',
+      'gateway returned an invalid image result',
+      providerTechnicalFailure('GATEWAY_IMAGE_ASPECT_RATIO_INVALID', {
+        category: 'CONTRACT', disposition: 'NON_RETRYABLE',
+      }),
+      { billingState: 'UNKNOWN' },
+    )
+
+    const submitted = await coordinator.submit('run-1', 5)
+    const key = await revisionImageKey(repository, 2)
+    const refresh = await coordinator.refresh('run-1')
+
+    expect(submitted.status).toBe('RECOVERING')
+    expect(refresh.status).toBe('RECOVERING')
+    expect(await repository.getRun('run-1')).toMatchObject({
+      pendingTerminalFailure: { errorCode: 'TECHNICAL_CONTRACT_INVALID' },
+    })
+    expect((await repository.listSteps('run-1')).find((step) => step.idempotencyKey === key)).toMatchObject({
+      status: 'BILLING_UNKNOWN',
+      output: { mediaFailure: { submissionState: 'SUBMITTED', billingState: 'UNKNOWN' } },
+    })
+    expect(images.submitCalls).toBe(1)
+    expect(images.lookupRequests).toEqual([])
   })
 
   test('resubmits a confirmed-unsubmitted V4 redraw after recovery with the original image key', async () => {

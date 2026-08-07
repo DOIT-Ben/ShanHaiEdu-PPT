@@ -754,6 +754,32 @@ describe('media step runner', () => {
     expect(budget.released.size).toBe(1)
   })
 
+  test('keeps an accepted invalid media result out of submission-unknown recovery and does not resubmit it', async () => {
+    const { repository, budget, images, runner } = await fixture()
+    images.failNext('GATEWAY_IMAGE_ASPECT_RATIO_INVALID', 'SUBMITTED', 'UNKNOWN')
+
+    const first = await runner.submitSlideImage(request)
+    const replay = await runner.submitSlideImage(request)
+
+    expect(first.step).toMatchObject({
+      status: 'BILLING_UNKNOWN',
+      externalOperationId: null,
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      output: {
+        mediaFailure: {
+          submissionState: 'SUBMITTED',
+          billingState: 'UNKNOWN',
+        },
+      },
+    })
+    expect(replay).toMatchObject({ replayed: true, step: { status: 'BILLING_UNKNOWN' } })
+    expect(images.submitCalls).toBe(1)
+    expect(images.lookupRequests).toEqual([])
+    expect(budget.released.size).toBe(0)
+    expect(budget.settled.size).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10 })
+  })
+
   test('releases an unknown V4 submission only after lookup proves it was not submitted', async () => {
     const { repository, budget, images, clock, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     images.failNext('IDEMPOTENCY_SUBMISSION_UNKNOWN', 'UNKNOWN')

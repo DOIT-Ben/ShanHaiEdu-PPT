@@ -159,6 +159,9 @@ export type ContractRepairIssue = Readonly<{
 
 export type MediaSubmissionState = 'NOT_SUBMITTED' | 'SUBMITTED' | 'UNKNOWN'
 
+/** Billing is independent of whether the gateway accepted a media request. */
+export type MediaBillingState = 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN'
+
 export type TechnicalFailureDisposition = 'RETRYABLE' | 'NON_RETRYABLE'
 
 export type TechnicalFailure = Readonly<{
@@ -168,14 +171,23 @@ export type TechnicalFailure = Readonly<{
 }>
 
 export class MediaSubmissionError extends Error {
+  readonly billingState: MediaBillingState
+  readonly operationId: string | null
+
   constructor(
     readonly code: string,
-    readonly submissionState: Exclude<MediaSubmissionState, 'SUBMITTED'>,
+    readonly submissionState: MediaSubmissionState,
     message: string,
     readonly technicalFailure: TechnicalFailure,
+    details: Readonly<{
+      billingState?: MediaBillingState
+      operationId?: string
+    }> = {},
   ) {
     super(message)
     this.name = 'MediaSubmissionError'
+    this.billingState = details.billingState ?? 'UNKNOWN'
+    this.operationId = details.operationId ?? null
   }
 }
 
@@ -226,7 +238,7 @@ export interface ImageGenerationPort {
     | Readonly<{
         state: 'FAILED'
         errorCode: string
-        billingState: 'NOT_CHARGED' | 'CHARGED' | 'UNKNOWN'
+        billingState: MediaBillingState
         technicalFailure: TechnicalFailure
       }>
   >
