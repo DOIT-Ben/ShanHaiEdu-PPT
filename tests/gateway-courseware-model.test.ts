@@ -43,6 +43,7 @@ const LEDGER_SYSTEM_PROMPT_IDS = [
   'VIS-01',
   'VIS-02',
   'VIS-03',
+  'VIS-05',
   'VIS-04',
 ] as const
 
@@ -429,6 +430,19 @@ describe('gateway courseware model', () => {
     })
     expect(await model.preflightStructuredGeneration({ idempotencyKey: 'v4-preflight-missing-text-0001' }))
       .toEqual({ protocol: 'RESPONSES_FUNCTION' })
+  })
+
+  test('keeps transient strict preflight failures distinct from protocol incompatibility', async () => {
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => { throw new DOMException('private timeout detail', 'TimeoutError') },
+    })
+
+    await expect(model.preflightStructuredGeneration({
+      idempotencyKey: 'v4-preflight-strict-timeout-0001',
+      requiredProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toMatchObject({ code: 'PROVIDER_TIMEOUT' })
   })
 
   test('does not hide an exact wrapped model 404 behind the Function compatibility fallback', async () => {
@@ -1397,6 +1411,76 @@ describe('gateway courseware model', () => {
     expect(imageUrl?.startsWith('data:image/jpeg;base64,')).toBe(true)
     const { data } = await sharp(Buffer.from(imageUrl!.split(',')[1]!, 'base64')).raw().toBuffer({ resolveWithObject: true })
     expect([...data.subarray(0, 3)].every((channel) => channel >= 240)).toBe(true)
+  })
+
+  test('compiles chain-4 deck review control fields from semantic findings', async () => {
+    const artifacts = new MockArtifactPort()
+    const bytes = await sharp({
+      create: { width: 160, height: 90, channels: 3, background: '#F5F8FF' },
+    }).png().toBuffer()
+    const stored = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-v4', name: 'slide-1.png', mimeType: 'image/png', bytes,
+      idempotencyKey: 'run-v4-slide-1',
+    })
+    const manuscript = {
+      qualityScore: 72,
+      curriculumCoverageScore: 70,
+      narrativeCoherenceScore: 78,
+      visualConsistencyScore: 76,
+      compositionScore: 74,
+      summary: '页面整体结构清晰，但事实表达仍缺少教材中的准确限定。',
+      slides: [{
+        findings: [{
+          category: 'FACTUAL_RISK', severity: 'CRITICAL',
+          summary: '页面中的数量关系需要与教材原文保持一致。', repairDomain: 'KNOWLEDGE',
+          sourceEvidence: '三个苹果表示数量三',
+        }],
+      }],
+    }
+    let requestBody: Record<string, any> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra', artifacts,
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return streamedResponsesTextCompletion(JSON.stringify(manuscript))
+      },
+    })
+
+    const result = await model.evaluate({
+      tenantId: 'frameflow',
+      blueprint: {
+        renderMode: 'VISUAL_DECK_V4',
+        curriculum: { sourceChunkIds: ['chunk-1'] },
+        visualDeckV4Proposal: { compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION },
+      } as never,
+      sourceChunks: [{ id: 'chunk-1', text: '教材明确说明：三个苹果表示数量三。', sha256: 'a'.repeat(64) }],
+      slides: [{
+        pageNumber: 1, slideId: 'run-v4:slide:1', artifactId: stored.artifactId,
+        title: '认识数量三', body: ['观察三个苹果'], layout: 'HERO',
+        visualIntent: '用三个苹果建立数量三的直观认识', sourceChunkIds: ['chunk-1'],
+      }],
+      idempotencyKey: 'run-v4-deck-review',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })
+
+    const body = requestBody! as Record<string, any>
+    expect(body.text.format).toMatchObject({
+      type: 'json_schema', name: 'ppt_agent_v4_deck_review_manuscript_v1', strict: true,
+    })
+    const schema = JSON.stringify(body.text.format.schema)
+    expect(schema).not.toContain('issueId')
+    expect(schema).not.toContain('slideId')
+    expect(schema).not.toContain('sourceChunkId')
+    expect(result).toMatchObject({
+      reviewedSourceChunkIds: ['chunk-1'],
+      issues: [{
+        category: 'FACTUAL_RISK', severity: 'CRITICAL', slideIds: ['run-v4:slide:1'],
+        sourceChunkIds: ['chunk-1'], status: 'OPEN', repairDomain: 'KNOWLEDGE',
+      }],
+    })
+    if (!('issues' in result)) throw new Error('CHAIN4_DECK_REVIEW_NOT_COMPILED')
+    expect(result.issues[0]?.id).toMatch(/^issue-[a-f0-9]{32}$/)
   })
 
   test('reviews downloaded asset bytes against knowledge and style without sending source URLs', async () => {

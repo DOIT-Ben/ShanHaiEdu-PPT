@@ -586,18 +586,18 @@ describe('mock runtime', () => {
         schemaVersion: '1',
         host: { tenantId: 'frameflow', externalUserId: 'user-1' },
         source: { kind: 'HOST_ATTACHMENT', attachmentId: 'lesson-source-1', roleHint: 'CONTENT_SOURCE' },
-        slideCount: 2,
+        slideCount: 1,
         visualDirection: '温暖、清晰、有故事感的小学课堂绘本视觉',
         imageModel: 'local-mock-image',
         automationLevel: 'BOUNDED_AUTO',
-        budgetUnits: 2,
+        budgetUnits: 1,
         maxRevisionRounds: 2,
         presentationMode: 'VISUAL_DECK_V4',
         visualDeckV4: {
           instruction: '制作一套让三年级学生理解平均分和二分之一的完整视觉演示',
           sourceMode: 'SOURCE_GROUNDED',
           deckOptions: {
-            deckType: 'DETAILED_DECK', language: 'zh-CN', length: { slideCount: 2 }, aspectRatio: '16:9',
+            deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount: 1 }, aspectRatio: '16:9',
             audience: '小学三年级学生', focus: '平均分与二分之一', styleHint: '温暖的儿童绘本课堂视觉',
           },
         },
@@ -993,6 +993,14 @@ describe('mock runtime', () => {
     expect(validateLifecycle(events, completed.status, 0)).toMatchObject({ passed: true })
     const history = await runtime.handler(request(`/v1/runs/${runId}/events/history?after=0`))
     expect((await history.json() as { data: unknown[] }).data.length).toBe(events.length)
+    const reconnectAfter = events.find((event) => event.type === 'generation.started')!.sequence
+    const stream = await runtime.handler(request(`/v1/runs/${runId}/events?after=${reconnectAfter}`))
+    const streamed = (await stream.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as { sequence: number })
+    expect(streamed.map((event) => event.sequence)).toEqual(
+      events.filter((event) => event.sequence > reconnectAfter).map((event) => event.sequence),
+    )
     const content = await runtime.handler(request(
       `/v1/runs/${runId}/deliveries/${encodeURIComponent(delivery.id)}/content?format=pptx`,
     ))

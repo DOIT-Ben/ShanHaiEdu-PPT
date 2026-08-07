@@ -583,6 +583,33 @@ describe('HTTP v1 handler', () => {
     expect(text).not.toContain(createBody.source.text)
   })
 
+  test('disposes a delayed Run SSE subscription when abort crosses subscribe', async () => {
+    const { repository, handle } = fixture()
+    const created = await createRun(handle, 'http-sse-delayed-subscribe-0001')
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    const originalRead = repository.readEvents.bind(repository)
+    let release!: () => void
+    let started!: () => void
+    const startedPromise = new Promise<void>((resolve) => { started = resolve })
+    const blocker = new Promise<void>((resolve) => { release = resolve })
+    let reads = 0
+    repository.readEvents = async (id, options) => {
+      reads += 1
+      started()
+      await blocker
+      return originalRead(id, options)
+    }
+    const abort = new AbortController()
+    const responsePromise = handle(request(`/v1/runs/${runId}/events`, { signal: abort.signal }))
+    await startedPromise
+    abort.abort()
+    release()
+    const response = await responsePromise
+    await response.body?.cancel()
+    await Bun.sleep(20)
+    expect(reads).toBe(1)
+  })
+
   test('returns bounded persisted event history for reconnect recovery', async () => {
     const { repository, handle } = fixture()
     const created = await createRun(handle)

@@ -98,6 +98,20 @@ describe('fallback courseware model', () => {
     expect(fallbackCalls).toBe(0)
   })
 
+  test('does not route historical Responses Function requests to Chat-only MiniMax', async () => {
+    let fallbackCalls = 0
+    const original = new StructuredModelError('PROVIDER_TIMEOUT', true, 'primary', 'primary-request')
+    const port = new FallbackCoursewareModel({
+      primary: model('primary', async () => { throw original }),
+      fallback: model('MiniMax-M3', async () => { fallbackCalls += 1; return {} }),
+    })
+    await expect(port.execute({
+      operation: 'create_visual_deck_v4_slide_briefs', schemaName: 'schema', payload: {},
+      idempotencyKey: 'historical-function-key', structuredGenerationProtocol: 'RESPONSES_FUNCTION',
+    })).rejects.toBe(original)
+    expect(fallbackCalls).toBe(0)
+  })
+
   test('preserves the fallback model and request id when MiniMax fails', async () => {
     const fallbackError = new StructuredModelError('PROVIDER_TIMEOUT', true, 'MiniMax-M3', 'minimax-request-1')
     const port = new FallbackCoursewareModel({

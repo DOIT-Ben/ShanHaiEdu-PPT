@@ -179,13 +179,17 @@ describe('quick-deck evaluation service', () => {
     try {
       const created = await service.create('evaluation-tenant', {
         ...request(1),
-        source: { kind: 'TEXT', name: 'large.txt', text: '资料'.repeat(100_000) },
+        source: {
+          kind: 'TEXT', name: 'large.txt',
+          text: `${'x'.repeat(199_940)}受控测试材料的核心表达必须保留`,
+        },
       })
       await service.tick({ limit: 10 })
 
       expect(created.status).toBe('QUEUED')
       expect(JSON.stringify(model.calls[0]!.payload).length).toBeLessThanOrEqual(220_000)
       expect((model.calls[0]!.payload as Record<string, unknown>).document).toBeUndefined()
+      expect(JSON.stringify(model.calls[0]!.payload)).toContain('受控测试材料的核心表达必须保留')
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

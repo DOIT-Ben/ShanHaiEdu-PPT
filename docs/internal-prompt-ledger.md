@@ -41,7 +41,7 @@
 | 3 | 无模型提示词 | 必定 | ManuscriptCompiler、SourceEvidenceResolver、V4PlanCompiler 确定性生成最终 Proposal |
 | 4 | `IMG-04` -> `IMG-08` | 用户请求进入执行后 | 后端逐页编译，受控并发提交首次整页图片 |
 | 5 | `VIS-01` | 每张图片完成后 | 单页视觉审查 |
-| 6 | `VIS-04` | 页面审查阶段完成后 | 整套 PPT 终审 |
+| 6 | `VIS-05` | 页面审查阶段完成后 | Chain-4 整套 PPT 语义终审，程序编译控制字段 |
 | 7 | `REV-01` | 页审或套审产生可返修问题且尚有轮次 | 生成限定范围的修订计划 |
 | 8 | `REV-05` | 修订计划需要内容或布局裁决 | ReviewManuscript；RevisionCompiler 按槽位编译 |
 | 9 | `IMG-06` -> `IMG-08` | 仅在显式启用且完成真实验收的图片编辑模型存在时 | 对上一版受控页面做局部图片编辑 |
@@ -112,7 +112,8 @@ Quick-deck 不是 Run：它只调用一次 `V4-11` 取得 `CreativeManuscript`�
 | `IMG-04` | ACTIVE | V4 | 首次整页图片提示词 | 完整 V4 图片提示词 | `src/core/blueprint-assets.ts:117-210` |
 | `IMG-08` | SHARED | 全模式 | 图片网关最终包装 | Provider 最终 `prompt` | `src/adapters/gateway-image-generation.ts:133-140` |
 | `VIS-01` | ACTIVE | V4 | 单页视觉审查与像素比例门禁 | `slideVisualReviewSchema` + 本地尺寸检查 | `src/adapters/gateway-courseware-model.ts:787-816`, `src/core/page-review-coordinator.ts:74-215,386-436` |
-| `VIS-04` | SHARED | V2/V2.1/V3/V4 | 整套课件终审 | `deckReviewDraftSchema` | `src/adapters/gateway-courseware-model.ts:848-875` |
+| `VIS-05` | ACTIVE | V4 chain-4 | 整套课件语义终审 | `v4DeckReviewManuscriptSchema`，程序编译 Issue 控制字段 | `src/adapters/gateway-courseware-model.ts` |
+| `VIS-04` | COMPATIBILITY | V2/V2.1/V3/V4 chain-1/2/3 | 整套课件终审 | `deckReviewDraftSchema` | `src/adapters/gateway-courseware-model.ts` |
 | `REV-01` | SHARED | V2/V3/V4 | 修订计划 | `revisionPlanDraftSchema` | `src/adapters/gateway-courseware-model.ts:878-893` |
 | `REV-02` | ACTIVE | V4 chain-2/3 | 局部规划补丁 | `visualDeckV4RevisionApplicationResultSchema` | `src/adapters/gateway-courseware-model.ts:895-926` |
 | `REV-05` | ACTIVE | V4 chain-4 | 语义修订文稿 | `visualDeckV4ReviewManuscriptSchema` | `src/adapters/gateway-courseware-model.ts` |
@@ -407,7 +408,17 @@ approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLO
 
 - 用户消息：先发送候选元数据、`intent`、`knowledgePoint`、`role`、`visualDirection` 的 JSON，再附候选图片。
 
-### `VIS-04` 整套课件终审
+### `VIS-05` Chain-4 整套课件语义终审
+
+```text
+你是一位拥有 20 年经验的 Chain-4 学校课件语义终审专家。按输入的页面顺序逐槽审查最终组装预览，只返回质量分数、总结，以及每个页面槽位的语义 findings。
+finding 只能包含 category、severity、summary、repairDomain 和可选的来源原文摘录 sourceEvidence。严禁输出 issueId、slideId、pageNumber、sourceChunkId、字段路径、Patch、哈希、状态或其他运行控制字段。知识与事实 finding 必须提供能在受信来源中唯一匹配的原文摘录。slides 数组必须与输入页面数量及顺序一致，不得省略空 findings 的页面槽位。
+```
+
+- 用户消息顺序：整套 `blueprint`、受信 `sourceChunks`、去除私有 artifactId 的页面元数据 JSON；随后按页码依次发送“第 N 页最终组装预览”及对应受控图片。
+- `Issue ID`、`slideId`、`sourceChunkIds` 与状态由程序按页面槽位和唯一证据匹配确定性生成。
+
+### `VIS-04` 历史整套课件终审
 
 ```text
 你是一位拥有 20 年经验的学校课件终审专家。对照教材和全部最终组装页，检查知识覆盖、事实准确、教学叙事、封面冲击力、跨页一致性、重复素材、布局冲突和儿童可读性。

@@ -23,6 +23,7 @@ import type {
   ContractRepairIssue,
 } from './ports'
 import { StructuredModelError } from './ports'
+import { VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
 import { transitionRun } from './policy'
 import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
 import {
@@ -146,7 +147,7 @@ export class RevisionPlanningRunner {
     const steps = await this.dependencies.repository.listSteps(run.id)
 
     try {
-      const plan = await this.planWithContractRepair({
+      const planningInput = {
         run,
         blueprint,
         review,
@@ -154,7 +155,10 @@ export class RevisionPlanningRunner {
         targetRevisionRound,
         idempotencyKey,
         steps,
-      })
+      }
+      const plan = blueprint.visualDeckV4Proposal?.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+        ? this.compileVisualDeckV4Fallback(planningInput)
+        : await this.planWithContractRepair(planningInput)
       return this.complete(run, idempotencyKey, plan)
     } catch (error) {
       const fallbackEligible = error instanceof RevisionPlanningExecutionError

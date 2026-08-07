@@ -78,10 +78,20 @@ function contentConfig(request: QuickDeckEvaluationRequest) {
   const sourceId = 'quick-deck-source'
   const chunkId = 'quick-deck-source-chunk'
   const source = { kind: 'TEXT' as const, name, text: request.source.text, roleHint: 'CONTENT_SOURCE' as const }
+  const chunkSize = 12_000
+  const chunks = Array.from({ length: Math.ceil(request.source.text.length / chunkSize) }, (_, index) => {
+    const text = request.source.text.slice(index * chunkSize, (index + 1) * chunkSize)
+    return {
+      id: `${chunkId}-${String(index + 1).padStart(4, '0')}`,
+      sourceId,
+      text,
+      sha256: hashInput(text),
+    }
+  })
   const document = {
     name,
     sources: [{ id: sourceId, name, kind: 'TEXT' as const, status: 'READY' as const }],
-    chunks: [{ id: chunkId, sourceId, text: request.source.text, sha256: hashInput(request.source.text) }],
+    chunks,
     assets: [],
     isComplete: true,
     missingRanges: [],

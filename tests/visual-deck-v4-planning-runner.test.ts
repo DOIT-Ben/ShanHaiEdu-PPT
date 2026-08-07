@@ -381,6 +381,33 @@ describe('visual deck v4 planning runner', () => {
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' })
   })
 
+  test('fails a recovered chain-4 run closed when its persisted preflight protocol is legacy', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-persisted-protocol-0001')
+    const key = `${created.run.id}:v4:structured-generation-preflight:planning:0`
+    await repository.transact(created.run.id, (transaction) => transaction.putStep({
+      id: `step-${hashInput({ key }).slice(0, 28)}`, runId: created.run.id, idempotencyKey: key,
+      inputHash: hashInput({ tool: 'preflight_v4_structured_generation', model: null }),
+      tool: 'preflight_v4_structured_generation', status: 'COMPLETED', budgetUnits: 0,
+      budgetReservationId: null, externalOperationId: null, errorCode: null,
+      output: { protocol: 'RESPONSES_FUNCTION' },
+      createdAt: clock.now().toISOString(), updatedAt: clock.now().toISOString(),
+    }))
+    const staged = stagedModel(created, inputRequest, clock)
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+    expect(result).toMatchObject({ blueprint: null, step: { errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' } })
+    expect(staged.operations).toEqual([])
+  })
+
   test('allows exactly one semantic completion to disambiguate repeated source evidence', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
@@ -470,6 +497,50 @@ describe('visual deck v4 planning runner', () => {
     expect(result.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(VISUAL_DECK_V4_COMPILER_VERSION)
     expect(creativeCalls).toBe(2)
     expect(completionPayloads).toEqual([expect.objectContaining({ contentSlotCompletion: true })])
+  })
+
+  test('does not grant a second semantic completion after repaired review evidence remains ambiguous', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-combined-repair-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let reviewCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'review_visual_deck_v4_manuscript') {
+        reviewCalls += 1
+        if (reviewCalls === 1) {
+          throw new StructuredModelError('MODEL_JSON_INVALID', true, 'test-model', 'request-invalid', 200)
+        }
+      }
+      return execute(modelInput)
+    }
+    const common = '共同教材摘录用于制造歧义。'.repeat(8)
+    const runner = new PlanningRunner({
+      repository,
+      documents: { async resolve() { return {
+        name: '重复来源', isComplete: true, missingRanges: [], assets: [],
+        sources: [
+          { id: 'textbook', name: '教材.md', kind: 'TEXT' as const, status: 'READY' as const },
+          { id: 'design', name: '设计稿.md', kind: 'TEXT' as const, status: 'READY' as const },
+        ],
+        chunks: [
+          { id: 'chunk-a', sourceId: 'textbook', text: `${common}第一来源。`, sha256: 'a'.repeat(64) },
+          { id: 'chunk-b', sourceId: 'design', text: `${common}第二来源。`, sha256: 'b'.repeat(64) },
+        ],
+      } } },
+      model: staged.model, clock,
+    })
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+    expect(result).toMatchObject({ blueprint: null, step: { errorCode: 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS' } })
+    expect(reviewCalls).toBe(2)
   })
 
   test('persists a real ten-page plan as five recoverable structured stages', async () => {

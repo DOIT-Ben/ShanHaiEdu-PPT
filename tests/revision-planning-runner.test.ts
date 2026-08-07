@@ -9,6 +9,7 @@ import { StructuredModelError, type DocumentPort, type DocumentResult, type RunR
 import { RevisionPlanningRunner, revisionPlanStepKey } from '../src/core/revision-planning-runner'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import type { DeckReview, RevisionPlanDraft } from '../src/presentation-contracts'
+import { CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION } from '../src/release-identity'
 
 function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -337,7 +338,7 @@ describe('revision planning runner', () => {
     expect(events.at(-1)).toMatchObject({ type: 'delivery.started' })
   })
 
-  test('falls back to a complete deterministic v4 plan after model contract repair is exhausted', async () => {
+  test('compiles a complete deterministic chain-4 plan without calling the model', async () => {
     const invalidPlan = { summary: '模型未能生成任何有效的局部修订操作。', operations: [] }
     const { planner, runner } = await fixture(
       { presentationMode: 'VISUAL_DECK_V4' },
@@ -347,7 +348,7 @@ describe('revision planning runner', () => {
 
     const result = await runner.plan('run-1')
 
-    expect(planner.requests.size).toBe(2)
+    expect(planner.requests.size).toBe(0)
     expect(result).toMatchObject({
       status: 'AWAITING_REVISION_APPROVAL',
       plan: {
@@ -622,9 +623,7 @@ describe('revision planning runner', () => {
       status: 'AWAITING_REVISION_APPROVAL',
       plan: { operations: [{ instruction: '逐项修复审查问题：第二页中的产物描述缺少教材限定条件。' }] },
     })
-    expect([...planner.requests.values()][1]?.contractRepairIssues).toContainEqual({
-      path: '$', message: 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
-    })
+    expect(planner.requests.size).toBe(0)
   })
 
   test('validates prior visual correction memory before starting another deck revision', async () => {
@@ -654,9 +653,7 @@ describe('revision planning runner', () => {
     expect(await runner.plan('run-1')).toMatchObject({
       status: 'DELIVERING', plan: null,
     })
-    expect([...planner.requests.values()][1]?.contractRepairIssues).toContainEqual({
-      path: '$', message: 'V4_REVISION_INSTRUCTION_BUDGET_EXCEEDED',
-    })
+    expect(planner.requests.size).toBe(0)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'revision.started')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'approval.required')).toBe(false)
     expect((await repository.listEvents('run-1')).some((event) => event.type === 'run.failed')).toBe(false)
@@ -763,10 +760,12 @@ describe('revision planning runner', () => {
   })
 
   test('does not use the v4 fallback after transient provider retries are exhausted', async () => {
+    const historicalBlueprint = visualDeckV4Blueprint()
+    historicalBlueprint.visualDeckV4Proposal!.compilerVersion = CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION
     const { repository, planner, runner } = await fixture(
       { presentationMode: 'VISUAL_DECK_V4' },
       plan(),
-      visualDeckV4Blueprint(),
+      historicalBlueprint,
     )
     let attempts = 0
     planner.plan = async () => {

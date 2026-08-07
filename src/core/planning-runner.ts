@@ -630,9 +630,17 @@ export class PlanningRunner {
     } catch (error) {
       if (!(error instanceof V4ManuscriptCompilationError)
         || error.code !== 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS') throw error
+      const repairKey = visualDeckV4PlanningStageStepKey(
+        input.input.runId, 'review-manuscript', input.input.attempt ?? 0, 1,
+      )
+      const repairUsed = await this.dependencies.repository.transact(
+        input.input.runId,
+        (transaction) => Boolean(transaction.getStep(repairKey)),
+      )
+      if (repairUsed) throw error
       review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4PlanningStage(input.input, {
         ...reviewRequest,
-        repairAttempt: 2,
+        repairAttempt: 1,
         payload: {
           ...reviewRequest.payload,
           contentSlotCompletion: true,
@@ -841,7 +849,9 @@ export class PlanningRunner {
       return null
     })
     if (existing) {
-      const persisted = this.parseV4StructuredGenerationProtocol(existing)
+      const chain4 = (await this.dependencies.repository.getRun(input.runId))?.release?.compilerVersion
+        === VISUAL_DECK_V4_COMPILER_VERSION
+      const persisted = this.parseV4StructuredGenerationProtocol(existing, chain4)
       await this.dependencies.repository.transact(input.runId, (transaction) => {
         if (transaction.run.v4StructuredGenerationProtocol !== persisted.protocol) {
           transaction.putRun({ ...transaction.run, v4StructuredGenerationProtocol: persisted.protocol, updatedAt: this.dependencies.clock.now().toISOString() })

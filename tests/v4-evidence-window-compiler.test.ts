@@ -33,9 +33,24 @@ describe('V4 evidence window compiler', () => {
     expect(first).toEqual(second)
     expect(first.audit.version).toBe(V4_EVIDENCE_WINDOW_VERSION)
     expect(first.audit.characterCount).toBeLessThanOrEqual(V4_EVIDENCE_WINDOW_MAX_CHARACTERS)
+    expect(first.audit.serializedByteCount).toBeLessThanOrEqual(V4_EVIDENCE_WINDOW_MAX_CHARACTERS)
     expect(first.chunks.every((chunk) => chunk.text.length <= V4_EVIDENCE_CHUNK_MAX_CHARACTERS)).toBe(true)
     expect(new Set(first.chunks.map((chunk) => chunk.sourceId))).toEqual(new Set(['source-a', 'source-b']))
     expect(first.audit.omittedChunkCount).toBeGreaterThan(0)
     expect(first.audit.selectedContentHash).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  test('budgets escaped controls and multi-byte text by serialized UTF-8 bytes', () => {
+    const text = `${'\u0001'.repeat(40_000)}${'资料'.repeat(40_000)}`
+    const result = new V4EvidenceWindowCompiler().compile({
+      document: {
+        name: 'escaped.txt', isComplete: true, missingRanges: [],
+        chunks: [{ id: 'chunk-escaped', sourceId: 'source', text, sha256: 'a'.repeat(64) }],
+        sources: [{ id: 'source', name: 'escaped.txt', kind: 'TEXT', status: 'READY' }],
+      },
+      instruction: '提取资料',
+    })
+    expect(result.audit.serializedByteCount).toBeLessThanOrEqual(V4_EVIDENCE_WINDOW_MAX_CHARACTERS)
+    expect(Buffer.byteLength(JSON.stringify(result.chunks))).toBeLessThan(120_000)
   })
 })

@@ -4,6 +4,7 @@ import {
   blueprintDraftSchema,
   blueprintReflectionSchema,
   deckReviewDraftSchema,
+  deckReviewIssueCategorySchema,
   layeredBlueprintDraftSchema,
   revisionPlanDraftSchema,
   slideVisualReviewSchema,
@@ -38,6 +39,7 @@ import {
 import { usesPatchRevisionContract, VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
 import { hashInput } from '../core/hash'
 import { buildV4ReflectionGatewayRequest } from './gateway/v4-reflection'
+import { SourceEvidenceResolver } from '../core/v4-manuscript-compiler'
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 type ImageDetail = 'auto' | 'low' | 'high' | 'default'
@@ -67,6 +69,24 @@ export type GatewayCoursewareTransport = 'RESPONSES' | 'CHAT_COMPLETIONS'
 
 export const MAX_GATEWAY_TOOL_ARGUMENT_BYTES = 4 * 1024 * 1024
 const MAX_GATEWAY_STREAM_BUFFER_BYTES = MAX_GATEWAY_TOOL_ARGUMENT_BYTES + 256 * 1024
+
+const v4DeckReviewManuscriptSchema = z.object({
+  qualityScore: z.number().int().min(0).max(100),
+  curriculumCoverageScore: z.number().int().min(0).max(100),
+  narrativeCoherenceScore: z.number().int().min(0).max(100),
+  visualConsistencyScore: z.number().int().min(0).max(100),
+  compositionScore: z.number().int().min(0).max(100),
+  summary: z.string().trim().min(10).max(1_000),
+  slides: z.array(z.object({
+    findings: z.array(z.object({
+      category: deckReviewIssueCategorySchema,
+      severity: z.enum(['INFO', 'WARNING', 'CRITICAL']),
+      summary: z.string().trim().min(1).max(500),
+      repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']),
+      sourceEvidence: z.string().trim().min(6).max(1_500).optional(),
+    }).strict()).max(10),
+  }).strict()).min(1).max(50),
+}).strict()
 
 export function gatewayCoursewareModelProfile(input: Readonly<{
   textModel: string
@@ -451,7 +471,7 @@ function uniqueSourceChunkIds(sourceChunkIds: readonly string[]) {
 
 function boundedJson(value: unknown, maxLength = 240_000) {
   const text = JSON.stringify(value)
-  if (text.length > maxLength) throw new Error('MODEL_CONTEXT_TOO_LARGE')
+  if (Buffer.byteLength(text) > maxLength) throw new Error('MODEL_CONTEXT_TOO_LARGE')
   return text
 }
 
@@ -620,12 +640,13 @@ export class GatewayCoursewareModel implements
       await request('JSON_SCHEMA', 'responses-json-schema')
       return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
     } catch (error) {
-      if (input.requiredProtocol === 'RESPONSES_JSON_SCHEMA') {
-        throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
-      }
       const compatibleEncodingFallback = error instanceof StructuredModelError
         && (error.code === 'MODEL_JSON_INVALID'
           || (error.code === 'PROVIDER_UNAVAILABLE' && [400, 415, 422].includes(error.status ?? 0)))
+      if (input.requiredProtocol === 'RESPONSES_JSON_SCHEMA') {
+        if (compatibleEncodingFallback) throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+        throw error
+      }
       if (!compatibleEncodingFallback) {
         throw error
       }
@@ -929,6 +950,7 @@ approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLO
 
   async evaluate(input: Parameters<DeckReviewPort['evaluate']>[0]) {
     const visualDeckV4 = input.blueprint.renderMode === 'VISUAL_DECK_V4'
+    const chain4 = input.blueprint.visualDeckV4Proposal?.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
     const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: ImageDetail } }> = [{
       type: 'text',
       text: `请审查整套课件。页面数据、教材来源和蓝图如下：\n${boundedJson({
@@ -942,17 +964,57 @@ approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLO
       content.push({ type: 'text', text: `第 ${slide.pageNumber} 页最终组装预览：` })
       content.push(await this.imageContent(input.tenantId, slide.artifactId))
     }
-    return this.request({
+    const result = await this.request({
       model: this.dependencies.visionModel ?? this.dependencies.textModel,
-      system: `你是一位拥有 20 年经验的学校课件终审专家。对照教材和全部最终组装页，检查知识覆盖、事实准确、教学叙事、封面冲击力、跨页一致性、重复素材、布局冲突和儿童可读性。
+      system: chain4
+        ? `你是一位拥有 20 年经验的 Chain-4 学校课件语义终审专家。按输入的页面顺序逐槽审查最终组装预览，只返回质量分数、总结，以及每个页面槽位的语义 findings。
+finding 只能包含 category、severity、summary、repairDomain 和可选的来源原文摘录 sourceEvidence。严禁输出 issueId、slideId、pageNumber、sourceChunkId、字段路径、Patch、哈希、状态或其他运行控制字段。知识与事实 finding 必须提供能在受信来源中唯一匹配的原文摘录。slides 数组必须与输入页面数量及顺序一致，不得省略空 findings 的页面槽位。`
+        : `你是一位拥有 20 年经验的学校课件终审专家。对照教材和全部最终组装页，检查知识覆盖、事实准确、教学叙事、封面冲击力、跨页一致性、重复素材、布局冲突和儿童可读性。
 V4整页图片还必须检查视觉元素独立性：主要元素是否分别保持完整轮廓、清晰边界和可见间隔，是否存在绑定、粘合、嵌套、遮挡、共用轮廓或不可分割的组合主体；发现问题时按LAYOUT报告，不得扩大到无关页面。
 每个问题必须定位到真实 slideId；知识或事实问题必须引用真实 sourceChunkIds，并把 repairDomain 标为 KNOWLEDGE、ASSET 或 LAYOUT。不得虚构引用。若输入包含contractRepairIssues，保持课件、来源、评分范围不变，逐项修正输出合同。`,
       user: content,
-      toolName: 'submit_deck_review',
-      description: '提交整套课件质量评分和可执行问题清单。',
-      schema: deckReviewDraftSchema,
+      toolName: chain4 ? 'submit_v4_deck_review_manuscript' : 'submit_deck_review',
+      description: chain4 ? '提交不含运行控制字段的逐页终审语义文稿。' : '提交整套课件质量评分和可执行问题清单。',
+      schema: chain4 ? v4DeckReviewManuscriptSchema : deckReviewDraftSchema,
       idempotencyKey: input.idempotencyKey,
-      ...(visualDeckV4 ? this.v4StructuredOutputOptions(input.structuredGenerationProtocol, 'ppt_agent_v4_deck_review_v1') : {}),
+      ...(visualDeckV4 ? this.v4StructuredOutputOptions(
+        input.structuredGenerationProtocol,
+        chain4 ? 'ppt_agent_v4_deck_review_manuscript_v1' : 'ppt_agent_v4_deck_review_v1',
+      ) : {}),
+    })
+    if (!chain4) return result
+    const manuscript = v4DeckReviewManuscriptSchema.parse(result)
+    if (manuscript.slides.length !== input.slides.length) throw new Error('V4_DECK_REVIEW_SLOT_COUNT_MISMATCH')
+    const resolver = new SourceEvidenceResolver()
+    return deckReviewDraftSchema.parse({
+      qualityScore: manuscript.qualityScore,
+      curriculumCoverageScore: manuscript.curriculumCoverageScore,
+      narrativeCoherenceScore: manuscript.narrativeCoherenceScore,
+      visualConsistencyScore: manuscript.visualConsistencyScore,
+      compositionScore: manuscript.compositionScore,
+      summary: manuscript.summary,
+      reviewedSourceChunkIds: input.blueprint.curriculum.sourceChunkIds,
+      issues: manuscript.slides.flatMap((slot, slotIndex) => slot.findings.map((finding, findingIndex) => {
+        const requiresSource = finding.repairDomain === 'KNOWLEDGE'
+          || ['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(finding.category)
+        const sourceChunkIds = requiresSource
+          ? resolver.resolve({
+              sourceMode: 'SOURCE_GROUNDED',
+              evidence: finding.sourceEvidence ? [{ excerpt: finding.sourceEvidence }] : [],
+              chunks: input.sourceChunks,
+            })
+          : []
+        return {
+          id: `issue-${hashInput({ key: input.idempotencyKey, slotIndex, findingIndex, finding }).slice(0, 32)}`,
+          category: finding.category,
+          severity: finding.severity,
+          summary: finding.summary,
+          slideIds: [input.slides[slotIndex]!.slideId],
+          sourceChunkIds,
+          status: 'OPEN' as const,
+          repairDomain: finding.repairDomain,
+        }
+      })),
     })
   }
 

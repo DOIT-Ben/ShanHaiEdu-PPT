@@ -13,6 +13,7 @@ export type V4EvidenceWindow = Readonly<{
     selectedContentHash: string
     omittedChunkCount: number
     characterCount: number
+    serializedByteCount: number
   }>
 }>
 
@@ -58,7 +59,18 @@ export class V4EvidenceWindowCompiler {
     const groupOrder = [...order, ...(unbound.length > 0 ? [''] : [])]
     const selected: SourceChunk[] = []
     const selectedIds = new Set<string>()
-    let remaining = V4_EVIDENCE_WINDOW_MAX_CHARACTERS
+    let remainingBytes = V4_EVIDENCE_WINDOW_MAX_CHARACTERS
+    const serializedBytes = (value: string) => Buffer.byteLength(JSON.stringify(value)) - 2
+    const boundedText = (value: string, characterLimit: number, byteLimit: number) => {
+      let low = 0
+      let high = Math.min(value.length, characterLimit)
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2)
+        if (serializedBytes(value.slice(0, middle)) <= byteLimit) low = middle
+        else high = middle - 1
+      }
+      return value.slice(0, low)
+    }
 
     const nonEmptyGroups = groupOrder.filter((sourceId) => (grouped.get(sourceId)?.length ?? 0) > 0)
     const mandatoryLimit = Math.min(
@@ -66,12 +78,12 @@ export class V4EvidenceWindowCompiler {
       Math.floor(V4_EVIDENCE_WINDOW_MAX_CHARACTERS / Math.max(1, nonEmptyGroups.length)),
     )
     const append = (chunk: SourceChunk, limit: number) => {
-      if (selectedIds.has(chunk.id) || remaining <= 0 || limit <= 0) return
-      const text = chunk.text.slice(0, Math.min(limit, remaining))
+      if (selectedIds.has(chunk.id) || remainingBytes <= 0 || limit <= 0) return
+      const text = boundedText(chunk.text, limit, remainingBytes)
       if (!text) return
       selected.push({ ...chunk, text })
       selectedIds.add(chunk.id)
-      remaining -= text.length
+      remainingBytes -= serializedBytes(text)
     }
 
     for (const sourceId of nonEmptyGroups) append(grouped.get(sourceId)![0]!, mandatoryLimit)
@@ -80,11 +92,11 @@ export class V4EvidenceWindowCompiler {
       sourceId,
       stableChunks(grouped.get(sourceId)!.slice(1), terms),
     ]))
-    while (remaining > 0 && [...queues.values()].some((queue) => queue.length > 0)) {
+    while (remainingBytes > 0 && [...queues.values()].some((queue) => queue.length > 0)) {
       for (const sourceId of nonEmptyGroups) {
         const chunk = queues.get(sourceId)?.shift()
         if (chunk) append(chunk, V4_EVIDENCE_CHUNK_MAX_CHARACTERS)
-        if (remaining <= 0) break
+        if (remainingBytes <= 0) break
       }
     }
 
@@ -96,6 +108,7 @@ export class V4EvidenceWindowCompiler {
         selectedContentHash: hashInput(selected.map((chunk) => ({ id: chunk.id, text: chunk.text }))),
         omittedChunkCount: input.document.chunks.length - selected.length,
         characterCount: selected.reduce((total, chunk) => total + chunk.text.length, 0),
+        serializedByteCount: selected.reduce((total, chunk) => total + serializedBytes(chunk.text), 0),
       },
     }
   }
