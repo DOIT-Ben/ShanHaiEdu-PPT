@@ -88,6 +88,26 @@ describe('main PPT Agent server configuration', () => {
     }, {
       textModels: ['gpt-5.6-terra'], imageModels: ['gemini-3-pro-image-preview'],
     })).toThrow('PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_KEY_NOT_ISOLATED')
+    expect(() => resolveQuickDeckEvaluationConfig({
+      PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY: 'formal-image-key-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY: 'evaluation-image-key-0001',
+      MODEL_GATEWAY_TEXT_KEY: 'formal-text-key-0001',
+      MODEL_GATEWAY_IMAGE_KEY: 'formal-image-key-0001',
+    }, {
+      textModels: ['gpt-5.6-terra'], imageModels: ['gemini-3-pro-image-preview'],
+    })).toThrow('PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_KEY_NOT_ISOLATED')
+    expect(() => resolveQuickDeckEvaluationConfig({
+      PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT: '/opt/ppt-agent/shared/data/quick-deck-evaluations',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY: 'evaluation-text-key-0001',
+      PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY: 'formal-text-key-0001',
+      MODEL_GATEWAY_TEXT_KEY: 'formal-text-key-0001',
+      MODEL_GATEWAY_IMAGE_KEY: 'formal-image-key-0001',
+    }, {
+      textModels: ['gpt-5.6-terra'], imageModels: ['gemini-3-pro-image-preview'],
+    })).toThrow('PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_KEY_NOT_ISOLATED')
   })
 
   test('routes the optional MiniMax fallback through the unified model gateway', () => {

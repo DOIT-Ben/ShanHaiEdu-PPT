@@ -105,10 +105,14 @@ export function resolveQuickDeckEvaluationConfig(
   const dataRoot = required(env, 'PPT_AGENT_QUICK_DECK_EVALUATION_DATA_ROOT')
   const gatewayTextKey = required(env, 'PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_TEXT_KEY')
   const gatewayImageKey = required(env, 'PPT_AGENT_QUICK_DECK_EVALUATION_GATEWAY_IMAGE_KEY')
-  if (gatewayTextKey === env.MODEL_GATEWAY_TEXT_KEY?.trim()) {
+  const formalGatewayKeys = new Set([
+    env.MODEL_GATEWAY_TEXT_KEY?.trim(),
+    env.MODEL_GATEWAY_IMAGE_KEY?.trim(),
+  ].filter((value): value is string => Boolean(value)))
+  if (formalGatewayKeys.has(gatewayTextKey)) {
     throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_KEY_NOT_ISOLATED')
   }
-  if (gatewayImageKey === env.MODEL_GATEWAY_IMAGE_KEY?.trim()) {
+  if (formalGatewayKeys.has(gatewayImageKey)) {
     throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_IMAGE_KEY_NOT_ISOLATED')
   }
   const textModel = env.PPT_AGENT_QUICK_DECK_EVALUATION_TEXT_MODEL?.trim() || input.textModels[0]

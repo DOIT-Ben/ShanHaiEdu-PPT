@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { LocalArtifactPort } from './adapters/local-artifact-port'
 import { PublicAssetDiscoveryPort } from './adapters/public-asset-discovery'
 import { GatewayImageGenerationPort } from './adapters/gateway-image-generation'
+import { GatewayModelAvailabilityProbe } from './adapters/gateway-model-availability'
 import { SharpControlledRasterPort } from './adapters/v4-controlled-raster'
 import {
   GatewayCoursewareModel,
@@ -42,6 +43,7 @@ import {
   resolveV4ImageEditAsyncTaskEnabled,
   resolveV4RevisionImageModel,
 } from './runtime/main-server-config'
+import { assertQuickDeckEvaluatorModelsAvailable } from './runtime/quick-deck-evaluator-preflight'
 import { resolveUsageV2RuntimeConfig } from './runtime/usage-v2-runtime-config'
 
 const {
@@ -177,6 +179,21 @@ const quickDeckEvaluationConfig = quickDeckEvaluationApiToken
       imageModels: publicV4CapabilitiesConfig!.imageModels,
     })
   : null
+if (quickDeckEvaluationConfig) {
+  const baseUrl = process.env.MODEL_GATEWAY_BASE_URL?.trim() || ''
+  await assertQuickDeckEvaluatorModelsAvailable({
+    textModel: quickDeckEvaluationConfig.textModel,
+    allowedImageModels: quickDeckEvaluationConfig.allowedImageModels,
+    textProbe: new GatewayModelAvailabilityProbe({
+      baseUrl,
+      apiKey: quickDeckEvaluationConfig.gatewayTextKey,
+    }),
+    imageProbe: new GatewayModelAvailabilityProbe({
+      baseUrl,
+      apiKey: quickDeckEvaluationConfig.gatewayImageKey,
+    }),
+  })
+}
 const v4ModelPolicy = publicV4CapabilitiesConfig
   ? new V4ModelPolicy({ runtimeMode: 'GATEWAY', ...publicV4CapabilitiesConfig })
   : V4ModelPolicy.mock()
