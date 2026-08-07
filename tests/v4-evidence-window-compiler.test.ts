@@ -84,7 +84,7 @@ describe('V4 evidence window compiler', () => {
     expect(result.audit.serializedByteCount).toBeGreaterThan(result.audit.characterCount)
   })
 
-  test('accepts only ready sources when a source manifest is present', () => {
+  test('binds unbound chunks to the only ready source in a source manifest', () => {
     const result = new V4EvidenceWindowCompiler().compile({
       document: {
         name: 'source-status.txt', isComplete: false, missingRanges: ['failed-source'],
@@ -101,8 +101,29 @@ describe('V4 evidence window compiler', () => {
       instruction: '仅使用已经就绪的资料',
     })
 
-    expect(result.chunks.map((chunk) => chunk.id)).toEqual(['ready-chunk'])
-    expect(result.audit.omittedChunkCount).toBe(2)
+    expect(result.chunks.map((chunk) => chunk.id)).toEqual(['ready-chunk', 'unbound-chunk'])
+    expect(result.chunks.find((chunk) => chunk.id === 'unbound-chunk')?.sourceId).toBe('ready-source')
+    expect(result.audit.omittedChunkCount).toBe(1)
+  })
+
+  test('rejects unbound chunks when more than one source is ready', () => {
+    const result = new V4EvidenceWindowCompiler().compile({
+      document: {
+        name: 'ambiguous-source-status.txt', isComplete: true, missingRanges: [],
+        sources: [
+          { id: 'ready-source-a', name: 'a.txt', kind: 'TEXT', status: 'READY' },
+          { id: 'ready-source-b', name: 'b.txt', kind: 'TEXT', status: 'READY' },
+        ],
+        chunks: [
+          { id: 'bound-chunk', sourceId: 'ready-source-a', text: '具名来源正文。', sha256: 'a'.repeat(64) },
+          { id: 'unbound-chunk', text: '多来源时不能猜测归属。', sha256: 'b'.repeat(64) },
+        ],
+      },
+      instruction: '只能使用可证明归属的资料',
+    })
+
+    expect(result.chunks.map((chunk) => chunk.id)).toEqual(['bound-chunk'])
+    expect(result.audit.omittedChunkCount).toBe(1)
   })
 
   test('keeps legacy chunks compatible when no source manifest exists', () => {

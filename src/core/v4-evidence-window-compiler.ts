@@ -29,8 +29,15 @@ function keywords(values: readonly (string | undefined)[]) {
 
 function eligibleChunks(document: DocumentResult) {
   if (!document.sources) return document.chunks
-  const readySourceIds = new Set(document.sources.filter((source) => source.status === 'READY').map((source) => source.id))
-  return document.chunks.filter((chunk) => Boolean(chunk.sourceId) && readySourceIds.has(chunk.sourceId!))
+  const readySources = document.sources.filter((source) => source.status === 'READY')
+  const readySourceIds = new Set(readySources.map((source) => source.id))
+  const onlyReadySourceId = readySources.length === 1 ? readySources[0]!.id : undefined
+  return document.chunks.flatMap((chunk) => {
+    if (chunk.sourceId && readySourceIds.has(chunk.sourceId)) return [chunk]
+    // FrameFlow's single attachment may carry source metadata without repeating its ID on every chunk.
+    if (!chunk.sourceId && onlyReadySourceId) return [{ ...chunk, sourceId: onlyReadySourceId }]
+    return []
+  })
 }
 
 function sourceOrder(document: DocumentResult, chunks: readonly SourceChunk[]) {
