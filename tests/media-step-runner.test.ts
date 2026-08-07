@@ -918,6 +918,27 @@ describe('media step runner', () => {
     expect((await repository.listEvents('run-1')).map((event) => event.type).at(-1)).toBe('tool.completed')
   })
 
+  test('restores the exact V4 aspect-ratio contract when an older waiting step omitted the flag', async () => {
+    const { repository, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+    await runner.submitSlideImage({ ...request, exactAspectRatio: true })
+    await repository.transact('run-1', (transaction) => {
+      const step = transaction.getStep(request.idempotencyKey)!
+      const { exactAspectRatio: _omitted, ...legacyOutput } = step.output as Record<string, unknown>
+      transaction.putStep({ ...step, output: legacyOutput })
+    })
+    const inspections: Parameters<typeof images.inspect>[0][] = []
+    const inspect = images.inspect.bind(images)
+    images.inspect = async (input) => {
+      inspections.push(structuredClone(input))
+      return inspect(input)
+    }
+
+    await runner.refreshSlideImage('run-1', request.idempotencyKey)
+
+    expect(inspections).toHaveLength(1)
+    expect(inspections[0]).toMatchObject({ aspectRatio: '16:9', exactAspectRatio: true })
+  })
+
   test('retries an unknown host settlement before marking provider success complete', async () => {
     const { repository, budget, images, runner } = await fixture()
     await runner.submitSlideImage(request)

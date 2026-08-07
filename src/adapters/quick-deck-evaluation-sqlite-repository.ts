@@ -195,7 +195,15 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
     }
     return this.#database.query<JsonRow, [string, number]>(`
       SELECT data FROM quick_deck_evaluations
-      WHERE status <> 'EXPIRED' AND expires_at <= ?
+      WHERE expires_at <= ? AND (
+        status <> 'EXPIRED'
+        OR json_extract(data, '$.pptx') IS NOT NULL
+        OR json_extract(data, '$.preview') IS NOT NULL
+        OR EXISTS (
+          SELECT 1 FROM json_each(json_extract(data, '$.pages')) AS page
+          WHERE json_extract(page.value, '$.artifactId') IS NOT NULL
+        )
+      )
       ORDER BY expires_at ASC, id ASC
       LIMIT ?
     `).all(input.now, input.limit).map((row) => parseRecord(row)!)

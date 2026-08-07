@@ -320,11 +320,11 @@ export class MediaStepRunner {
       await this.dependencies.budget.release({
           host: run.host,
           reservationId: step.budgetReservationId,
-          idempotencyKey: `release:${budgetReservationKey(this.reconstructInput(step, run.imageModel))}`,
+          idempotencyKey: `release:${budgetReservationKey(this.reconstructInput(step, run))}`,
       })
       return {
         step: await this.markDefiniteFailure(
-          this.reconstructInput(step, run.imageModel),
+          this.reconstructInput(step, run),
           step.budgetReservationId,
           step.errorCode ?? 'MEDIA_NOT_SUBMITTED',
           technicalFailureFromStep(step) ?? undefined,
@@ -339,7 +339,7 @@ export class MediaStepRunner {
     if (!step.externalOperationId) throw new Error('MEDIA_OPERATION_ID_MISSING')
     if (this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) return { step, changed: false }
 
-    const mediaInput = this.reconstructInput(step, run.imageModel)
+    const mediaInput = this.reconstructInput(step, run)
     const usesUsageV2 = accountingProtocolFor(run) === 'FRAMEFLOW_USAGE_V2'
     if (usesUsageV2) {
       if (!this.dependencies.usageV2) throw new Error('USAGE_V2_COORDINATOR_REQUIRED')
@@ -396,7 +396,7 @@ export class MediaStepRunner {
       if (failed) return { step: failed, changed: true }
     }
     if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId && !isBatchReserved(mediaInput)) {
-      const input = this.reconstructInput(step, run.imageModel)
+      const input = this.reconstructInput(step, run)
       await this.markReleasing(input, step.budgetReservationId, status.errorCode, status.technicalFailure)
       await this.dependencies.budget.release({
         host: run.host,
@@ -612,6 +612,7 @@ export class MediaStepRunner {
           slideId: input.slideId,
           versionId: input.versionId,
           aspectRatio: input.aspectRatio ?? '16:9',
+          ...(input.exactAspectRatio ? { exactAspectRatio: true } : {}),
           backgroundMode: input.backgroundMode ?? 'OPAQUE',
           model: input.model,
           operationMode: input.operationMode ?? 'TEXT_TO_IMAGE',
@@ -646,7 +647,7 @@ export class MediaStepRunner {
     if (step.status === 'SUBMISSION_UNKNOWN' && this.nextInspectionAt(step) > this.dependencies.clock.now().getTime()) {
       return { step, changed: false }
     }
-    const input = this.reconstructInput(step, run.imageModel)
+    const input = this.reconstructInput(step, run)
     const lookup = await this.lookupSubmission(
       run.host.tenantId,
       step.idempotencyKey,
@@ -713,7 +714,7 @@ export class MediaStepRunner {
     }
   }
 
-  private reconstructInput(step: StepRecord, model: string): SubmitSlideImageInput {
+  private reconstructInput(step: StepRecord, run: RunRecord): SubmitSlideImageInput {
     const output = step.output as {
       slideId?: unknown
       versionId?: unknown
@@ -738,13 +739,15 @@ export class MediaStepRunner {
       slideId: output.slideId,
       versionId: output.versionId,
       prompt: '',
-      model: persistedMediaStepModel(step, model),
+      model: persistedMediaStepModel(step, run.imageModel),
       budgetUnits: step.budgetUnits,
       ...(output.aspectRatio === '16:9' || output.aspectRatio === '4:3'
         || output.aspectRatio === '1:1' || output.aspectRatio === '3:4'
         ? { aspectRatio: output.aspectRatio }
         : {}),
-      ...(output.exactAspectRatio === true ? { exactAspectRatio: true } : {}),
+      ...(output.exactAspectRatio === true || run.presentationMode === 'VISUAL_DECK_V4'
+        ? { exactAspectRatio: true }
+        : {}),
       ...(typeof output.budgetReservationKey === 'string' ? { budgetReservationKey: output.budgetReservationKey } : {}),
       ...(typeof output.batchId === 'string' && typeof step.budgetReservationId === 'string'
         ? { batchReservation: { batchId: output.batchId, reservationId: step.budgetReservationId } }

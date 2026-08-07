@@ -75,7 +75,11 @@ function event(
 
 function contentConfig(request: QuickDeckEvaluationRequest) {
   const name = request.source.name ?? 'quick-deck-evaluation.txt'
-  const topic = name.replace(/\.[^.]+$/, '').trim().slice(0, 300) || '受控测试材料'
+  const normalizedText = request.source.text.replace(/\s+/g, ' ').trim()
+  const contentCue = `开头：${normalizedText.slice(0, 100)}；结尾：${normalizedText.slice(-160)}`
+  const topic = request.source.name
+    ? request.source.name.replace(/\.[^.]+$/, '').trim().slice(0, 300) || '受控测试材料'
+    : contentCue
   const sourceId = 'quick-deck-source'
   const chunkId = 'quick-deck-source-chunk'
   const source = { kind: 'TEXT' as const, name, text: request.source.text, roleHint: 'CONTENT_SOURCE' as const }
@@ -613,12 +617,13 @@ export class QuickDeckEvaluationService {
   }
 
   private async expire(record: QuickDeckEvaluationRecord, now: string) {
+    const discoveredArtifacts = new Map<number, string>()
     const artifactIds = new Set([
       ...record.pages.flatMap((page) => page.artifactId ? [page.artifactId] : []),
       ...(record.pptx ? [record.pptx.artifactId] : []),
       ...(record.preview ? [record.preview.artifactId] : []),
     ])
-    if (this.dependencies.images.lookupByIdempotency) {
+    if (record.status !== 'EXPIRED' && this.dependencies.images.lookupByIdempotency) {
       for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED')) {
         try {
           const lookup = await this.dependencies.images.lookupByIdempotency({
@@ -635,19 +640,21 @@ export class QuickDeckEvaluationService {
             backgroundMode: 'OPAQUE',
             exactAspectRatio: true,
           })
-          if (inspected.state === 'COMPLETED') artifactIds.add(inspected.artifactId)
+          if (inspected.state === 'COMPLETED') {
+            artifactIds.add(inspected.artifactId)
+            discoveredArtifacts.set(page.pageNumber, inspected.artifactId)
+          }
         } catch {
           // Provider cleanup inspection is best-effort; known local artifacts must still expire.
         }
       }
     }
-    if (this.dependencies.artifactCleanup) {
-      for (const artifactId of artifactIds) {
-        await this.dependencies.artifactCleanup.remove({ tenantId: record.tenantId, artifactId })
-      }
-    }
     const expired: QuickDeckEvaluationRecord = {
       ...record,
+      pages: record.pages.map((page) => ({
+        ...page,
+        artifactId: page.artifactId ?? discoveredArtifacts.get(page.pageNumber) ?? null,
+      })),
       status: 'EXPIRED',
       phase: 'EXPIRED',
       errorCode: null,
@@ -656,7 +663,28 @@ export class QuickDeckEvaluationService {
     }
     await this.dependencies.repository.save({
       record: expired,
-      event: event(expired.id, 'evaluation.expired', {}, now),
+      ...(record.status === 'EXPIRED' ? {} : { event: event(expired.id, 'evaluation.expired', {}, now) }),
+    })
+    const failedArtifactIds = new Set<string>()
+    if (this.dependencies.artifactCleanup) {
+      for (const artifactId of artifactIds) {
+        try {
+          await this.dependencies.artifactCleanup.remove({ tenantId: record.tenantId, artifactId })
+        } catch {
+          failedArtifactIds.add(artifactId)
+        }
+      }
+    }
+    await this.dependencies.repository.save({
+      record: {
+        ...expired,
+        pages: expired.pages.map((page) => ({
+          ...page,
+          artifactId: page.artifactId && failedArtifactIds.has(page.artifactId) ? page.artifactId : null,
+        })),
+        pptx: expired.pptx && failedArtifactIds.has(expired.pptx.artifactId) ? expired.pptx : null,
+        preview: expired.preview && failedArtifactIds.has(expired.preview.artifactId) ? expired.preview : null,
+      },
     })
   }
 

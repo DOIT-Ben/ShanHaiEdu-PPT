@@ -52,7 +52,11 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
 
   async listExpired(input: Parameters<QuickDeckEvaluationRepository['listExpired']>[0]) {
     return [...this.#records.values()]
-      .filter((record) => record.status !== 'EXPIRED' && record.expiresAt <= input.now)
+      .filter((record) => record.expiresAt <= input.now)
+      .filter((record) => record.status !== 'EXPIRED'
+        || record.pages.some((page) => page.artifactId !== null)
+        || record.pptx !== null
+        || record.preview !== null)
       .sort((left, right) => left.expiresAt.localeCompare(right.expiresAt) || left.id.localeCompare(right.id))
       .slice(0, input.limit)
       .map(clone)

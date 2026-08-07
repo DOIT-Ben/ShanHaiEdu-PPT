@@ -97,9 +97,24 @@ class PartialImages extends AsyncImages {
   }
 }
 
+class FailOnceArtifactCleanup {
+  #failed = false
+
+  constructor(private readonly delegate: LocalQuickDeckEvaluationArtifactCleanupPort) {}
+
+  async remove(input: Parameters<LocalQuickDeckEvaluationArtifactCleanupPort['remove']>[0]) {
+    if (!this.#failed) {
+      this.#failed = true
+      throw new Error('TEST_ARTIFACT_CLEANUP_UNAVAILABLE')
+    }
+    await this.delegate.remove(input)
+  }
+}
+
 async function fixture(
   imageSize: Readonly<{ width: number; height: number }> = { width: 1600, height: 900 },
   removeExpiredArtifacts = false,
+  failFirstArtifactCleanup = false,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-service-'))
   const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
@@ -107,6 +122,7 @@ async function fixture(
   const clock = new ControlledClock()
   const model = new CreativeModel()
   const images = new AsyncImages(artifacts, imageSize.width, imageSize.height)
+  const localCleanup = new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts'))
   const service = new QuickDeckEvaluationService({
     repository,
     artifacts,
@@ -115,7 +131,7 @@ async function fixture(
     renderer: new SharpPptxPresentationRenderer(),
     clock,
     ...(removeExpiredArtifacts ? {
-      artifactCleanup: new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts')),
+      artifactCleanup: failFirstArtifactCleanup ? new FailOnceArtifactCleanup(localCleanup) : localCleanup,
     } : {}),
     textModel: 'gpt-5.6-terra',
     allowedImageModels: ['gemini-3-pro-image-preview'],
@@ -198,6 +214,26 @@ describe('quick-deck evaluation service', () => {
       expect(Buffer.byteLength(JSON.stringify(model.calls[0]!.payload), 'utf8')).toBeLessThanOrEqual(220_000)
       expect((model.calls[0]!.payload as Record<string, unknown>).document).toBeUndefined()
       expect(JSON.stringify(model.calls[0]!.payload)).toContain('重点目标位于材料末尾并且必须保留')
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('keeps tail evidence selectable for a valid unnamed 200,000-character input', async () => {
+    const { directory, model, service } = await fixture()
+    try {
+      const tailEvidence = '无名材料的关键结论位于末尾且必须保留'
+      await service.create('evaluation-tenant', {
+        ...request(1),
+        source: {
+          kind: 'TEXT',
+          text: `${'x'.repeat(200_000 - tailEvidence.length)}${tailEvidence}`,
+        },
+      })
+      await service.tick({ limit: 10 })
+
+      expect(Buffer.byteLength(JSON.stringify(model.calls[0]!.payload), 'utf8')).toBeLessThanOrEqual(220_000)
+      expect(JSON.stringify(model.calls[0]!.payload)).toContain(tailEvidence)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -303,6 +339,74 @@ describe('quick-deck evaluation service', () => {
       for (const artifactId of artifactIds) {
         expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
       }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('publishes expiry immediately and retries a failed artifact cleanup on the next tick', async () => {
+    const { directory, artifacts, repository, clock, service } = await fixture(undefined, true, true)
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+      const beforeExpiry = await repository.get(created.jobId)
+      const artifactIds = [
+        beforeExpiry!.pages[0]!.artifactId!, beforeExpiry!.pptx!.artifactId, beforeExpiry!.preview!.artifactId,
+      ]
+      clock.advance(60_001)
+
+      await expect(service.tick({ limit: 10 })).resolves.toMatchObject({ expiredJobs: 1 })
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'EXPIRED' })
+      expect((await repository.get(created.jobId))!.pages.some((page) => page.artifactId !== null)
+        || (await repository.get(created.jobId))!.pptx !== null
+        || (await repository.get(created.jobId))!.preview !== null).toBe(true)
+
+      await expect(service.tick({ limit: 10 })).resolves.toMatchObject({ expiredJobs: 1 })
+      const cleaned = await repository.get(created.jobId)
+      expect(cleaned).toMatchObject({ status: 'EXPIRED', pptx: null, preview: null })
+      expect(cleaned!.pages.every((page) => page.artifactId === null)).toBe(true)
+      for (const artifactId of artifactIds) {
+        expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('persists a newly discovered Provider artifact when its first expiry cleanup fails', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-discovered-cleanup-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const clock = new ControlledClock()
+      const images = new PartialImages(artifacts)
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images,
+        renderer: new SharpPptxPresentationRenderer(), clock,
+        artifactCleanup: new FailOnceArtifactCleanup(
+          new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts')),
+        ),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(2))
+      await service.tick({ limit: 10 })
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'FAILED' })
+      const providerArtifactId = images.operations.get(images.operations.get(
+        `quick-deck-evaluation:${created.jobId}:slide:1:image`,
+      )!)!
+      clock.advance(60_001)
+
+      await service.tick({ limit: 10 })
+      const pendingCleanup = await repository.get(created.jobId)
+      expect(pendingCleanup).toMatchObject({ status: 'EXPIRED' })
+      expect(pendingCleanup!.pages[0]).toMatchObject({ pageNumber: 1, artifactId: providerArtifactId })
+      expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId: providerArtifactId })).not.toBeNull()
+
+      await service.tick({ limit: 10 })
+      expect((await repository.get(created.jobId))!.pages.every((page) => page.artifactId === null)).toBe(true)
+      expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId: providerArtifactId })).toBeNull()
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
