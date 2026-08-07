@@ -575,8 +575,12 @@ export class GatewayCoursewareModel implements
   async preflightStructuredGeneration(input: Readonly<{
     tenantId?: string
     idempotencyKey: string
+    requiredProtocol?: 'RESPONSES_JSON_SCHEMA'
   }>) {
     if (this.visualDeckV4Transport === 'CHAT_COMPLETIONS') {
+      if (input.requiredProtocol === 'RESPONSES_JSON_SCHEMA') {
+        throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+      }
       return { protocol: 'CHAT_LEGACY' as const }
     }
     const probeSchema = z.object({
@@ -616,6 +620,9 @@ export class GatewayCoursewareModel implements
       await request('JSON_SCHEMA', 'responses-json-schema')
       return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
     } catch (error) {
+      if (input.requiredProtocol === 'RESPONSES_JSON_SCHEMA') {
+        throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+      }
       const compatibleEncodingFallback = error instanceof StructuredModelError
         && (error.code === 'MODEL_JSON_INVALID'
           || (error.code === 'PROVIDER_UNAVAILABLE' && [400, 415, 422].includes(error.status ?? 0)))

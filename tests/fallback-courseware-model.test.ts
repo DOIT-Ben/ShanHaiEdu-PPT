@@ -82,6 +82,22 @@ describe('fallback courseware model', () => {
     expect(fallbackCalls).toBe(0)
   })
 
+  test('does not fallback Responses JSON Schema requests to MiniMax', async () => {
+    let fallbackCalls = 0
+    const original = new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'primary', 'primary-request')
+    const port = new FallbackCoursewareModel({
+      primary: model('primary', async () => { throw original }),
+      fallback: model('MiniMax-M3', async () => { fallbackCalls += 1; return {} }),
+    })
+
+    await expect(port.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'schema', payload: {}, idempotencyKey: 'chain-4-key',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })).rejects.toBe(original)
+    expect(fallbackCalls).toBe(0)
+  })
+
   test('preserves the fallback model and request id when MiniMax fails', async () => {
     const fallbackError = new StructuredModelError('PROVIDER_TIMEOUT', true, 'MiniMax-M3', 'minimax-request-1')
     const port = new FallbackCoursewareModel({

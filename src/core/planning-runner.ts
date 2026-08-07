@@ -65,6 +65,7 @@ import {
 } from '../release-identity'
 import { V4ReflectionCoordinator } from './v4-reflection/coordinator'
 import { ManuscriptCompiler } from './v4-manuscript-compiler'
+import { V4EvidenceWindowCompiler, type V4EvidenceWindow } from './v4-evidence-window-compiler'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
 const MAX_PROVIDER_ATTEMPTS = 5
@@ -547,11 +548,21 @@ export class PlanningRunner {
     protocol: StructuredGenerationProtocol
     compilerVersion: string
   }>) {
+    const evidenceWindow = new V4EvidenceWindowCompiler().compile({
+      document: input.document,
+      instruction: input.compilerInput.config.instruction,
+      ...(input.compilerInput.config.deckOptions.focus
+        ? { focus: input.compilerInput.config.deckOptions.focus }
+        : {}),
+      ...(input.compilerInput.presentationGoal ? { goal: input.compilerInput.presentationGoal } : {}),
+    })
+    await this.persistV4EvidenceWindow(input.input, evidenceWindow.audit)
     const sourceMode = input.compilerInput.config.sourceMode === 'AUTO'
       ? 'SOURCE_GROUNDED' as const
       : input.compilerInput.config.sourceMode
+    const { document: _duplicateDocument, ...chain4BasePayload } = input.basePayload
     const manuscriptContext: Record<string, unknown> = {
-      ...input.basePayload,
+      ...chain4BasePayload,
       originalRequest: {
         instruction: input.compilerInput.config.instruction,
         targetAudience: input.compilerInput.targetAudience ?? null,
@@ -576,7 +587,7 @@ export class PlanningRunner {
           kind: source.kind,
           status: source.status,
         })),
-        sourceChunks: input.document.chunks.map((chunk) => ({
+        sourceChunks: evidenceWindow.chunks.map((chunk) => ({
           id: chunk.id,
           sourceId: chunk.sourceId ?? null,
           text: chunk.text,
@@ -602,13 +613,79 @@ export class PlanningRunner {
       tool: 'review_v4_manuscript',
       operation: 'review_visual_deck_v4_manuscript',
       schemaName: 'ppt_agent_v4_review_manuscript_v1',
-      payload: { ...manuscriptContext, creativeManuscript: creative },
+      payload: this.boundedV4ReviewPayload(manuscriptContext, creative),
       protocol: input.protocol,
       compilerVersion: input.compilerVersion,
       parse: visualDeckV4ReviewManuscriptSchema.parse,
     }))
-    const draft = new ManuscriptCompiler().compilePlan(input.compilerInput, creative, review)
+    const compilerInput = {
+      ...input.compilerInput,
+      document: { ...input.compilerInput.document, chunks: evidenceWindow.chunks },
+    }
+    const draft = new ManuscriptCompiler().compilePlan(compilerInput, creative, review)
     return createVisualDeckV4BlueprintFromProposal(input.compilerInput, draft)
+  }
+
+  private boundedV4ReviewPayload(
+    manuscriptContext: Record<string, unknown>,
+    creativeManuscript: unknown,
+  ): Record<string, unknown> {
+    const maximumManuscriptCharacters = 80_000
+    const maximumPayloadCharacters = 220_000
+    let projected = structuredClone(creativeManuscript)
+    const serializedLength = (value: unknown) => JSON.stringify(value).length
+    const truncateStrings = (value: unknown, maximum: number): unknown => {
+      if (typeof value === 'string') return value.slice(0, maximum)
+      if (Array.isArray(value)) return value.map((item) => truncateStrings(item, maximum))
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, truncateStrings(item, maximum)]))
+      }
+      return value
+    }
+    for (const maximum of [1_500, 1_000, 500, 250, 120, 60]) {
+      if (serializedLength(projected) <= maximumManuscriptCharacters) break
+      projected = truncateStrings(projected, maximum)
+    }
+    if (serializedLength(projected) > maximumManuscriptCharacters) {
+      throw new Error('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    }
+    const payload = { ...manuscriptContext, creativeManuscript: projected }
+    if (serializedLength(payload) > maximumPayloadCharacters) throw new Error('V4_MODEL_PAYLOAD_TOO_LARGE')
+    return payload
+  }
+
+  private async persistV4EvidenceWindow(
+    input: PlanPresentationInput,
+    audit: V4EvidenceWindow['audit'],
+  ) {
+    const idempotencyKey = `${input.runId}:v4:evidence-window`
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      const existing = transaction.getStep(idempotencyKey)
+      if (existing) {
+        if (hashInput(existing.output) !== hashInput(audit)) throw new Error('V4_EVIDENCE_WINDOW_REPLAY_MISMATCH')
+        return
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      transaction.putStep({
+        id: `step-${hashInput({ idempotencyKey }).slice(0, 28)}`,
+        runId: input.runId,
+        idempotencyKey,
+        inputHash: hashInput({
+          instruction: input.visualDeckV4?.instruction,
+          focus: input.visualDeckV4?.deckOptions.focus,
+          presentationGoal: input.presentationGoal,
+        }),
+        tool: 'compile_v4_evidence_window',
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: audit,
+        createdAt: now,
+        updatedAt: now,
+      })
+    })
   }
 
   private async legacyDeckReflection(
@@ -776,10 +853,13 @@ export class PlanningRunner {
     try {
       const candidate = this.dependencies.model as StructuredModelPort & Partial<StructuredGenerationPreflightPort>
       if (!candidate.preflightStructuredGeneration) throw new Error('STRUCTURED_GENERATION_PREFLIGHT_UNAVAILABLE')
+      const chain4 = (await this.dependencies.repository.getRun(input.runId))?.release?.compilerVersion
+        === VISUAL_DECK_V4_COMPILER_VERSION
       const result = this.parseV4StructuredGenerationProtocol(await candidate.preflightStructuredGeneration({
         tenantId,
         idempotencyKey: key,
-      }))
+        ...(chain4 ? { requiredProtocol: 'RESPONSES_JSON_SCHEMA' as const } : {}),
+      }), chain4)
       await this.dependencies.repository.transact(input.runId, (transaction) => {
         const step = transaction.getStep(key)
         if (!step) throw new Error('STEP_NOT_FOUND')
@@ -805,12 +885,13 @@ export class PlanningRunner {
     }
   }
 
-  private parseV4StructuredGenerationProtocol(value: unknown): Readonly<{ protocol: StructuredGenerationProtocol }> {
+  private parseV4StructuredGenerationProtocol(value: unknown, chain4 = false): Readonly<{ protocol: StructuredGenerationProtocol }> {
     if (!value || typeof value !== 'object' || !('protocol' in value)) throw new Error('STRUCTURED_GENERATION_PROTOCOL_INVALID')
     const protocol = value.protocol
     if (protocol !== 'RESPONSES_JSON_SCHEMA' && protocol !== 'RESPONSES_FUNCTION' && protocol !== 'CHAT_LEGACY') {
       throw new Error('STRUCTURED_GENERATION_PROTOCOL_INVALID')
     }
+    if (chain4 && protocol !== 'RESPONSES_JSON_SCHEMA') throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
     return { protocol }
   }
 
@@ -1509,6 +1590,8 @@ export class PlanningRunner {
             ? 'VISUAL_ASSET_LIMIT_EXCEEDED'
             : message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID'
               ? 'V3_LAYER_CONTRACT_INVALID'
+              : message === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+                ? 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
               : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
                 ? 'MODEL_JSON_INVALID'
                 : 'BLUEPRINT_SCHEMA_INVALID'

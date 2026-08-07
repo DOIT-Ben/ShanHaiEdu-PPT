@@ -120,6 +120,7 @@ export interface StructuredGenerationPreflightPort {
   preflightStructuredGeneration(input: Readonly<{
     tenantId?: string
     idempotencyKey: string
+    requiredProtocol?: 'RESPONSES_JSON_SCHEMA'
   }>): Promise<Readonly<{ protocol: StructuredGenerationProtocol }>>
 }
 

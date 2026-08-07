@@ -104,11 +104,27 @@ function proposalFromSourceStage(
   clock: FixedClock,
   payload: any,
 ) {
+  const document = payload.document ?? {
+    name: 'evidence-window',
+    chunks: payload.trustedEvidence.sourceChunks.map((chunk: any) => ({
+      ...chunk,
+      sha256: chunk.sha256 ?? hashInput(chunk.text),
+      ...(chunk.sourceId ? { sourceId: chunk.sourceId } : {}),
+    })),
+    sources: payload.trustedEvidence.sources.map((source: any, index: number) => ({
+      id: payload.sourceReferences[index]?.sourceId ?? `source-${index + 1}`,
+      name: source.name,
+      kind: source.kind,
+      status: source.status,
+    })),
+    assets: [],
+    missingRanges: payload.trustedEvidence.missingRanges,
+  }
   return compileVisualDeckV4Proposal({
     runId: created.run.id,
     inputHash: 'model-v4-plan',
     source: created.run.source,
-    document: { ...payload.document, isComplete: true },
+    document: { ...document, isComplete: true },
     config: input.visualDeckV4,
     slideCount: input.slideCount,
     visualDirection: input.visualDirection,
@@ -338,6 +354,31 @@ describe('visual deck v4 planning runner', () => {
     expect((await repository.listEvents(created.run.id))
       .filter((event) => event.type === 'tool.progress')
       .map((event) => event.type === 'tool.progress' ? event.payload.completed : null)).toEqual([1, 2])
+  })
+
+  test('fails a new chain-4 run closed when preflight is not Responses JSON Schema', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-protocol-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    staged.model.preflightStructuredGeneration = async () => ({ protocol: 'CHAT_LEGACY' as never })
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.blueprint).toBeNull()
+    expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' })
   })
 
   test('permits exactly one chain-4 content-slot completion after a semantic schema failure', async () => {
