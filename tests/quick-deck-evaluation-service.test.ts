@@ -124,7 +124,9 @@ class AsyncImages implements ImageGenerationPort {
     return { state: 'COMPLETED' as const, artifactId }
   }
 
-  async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+  async lookupByIdempotency(
+    input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0],
+  ): ReturnType<NonNullable<ImageGenerationPort['lookupByIdempotency']>> {
     this.lookups.push(structuredClone(input))
     if (this.failCleanupLookup) throw new Error('TEST_GATEWAY_LOOKUP_UNAVAILABLE')
     const operationId = this.operations.get(input.idempotencyKey)
@@ -432,7 +434,25 @@ describe('quick-deck evaluation service', () => {
       await rm(directory, { recursive: true, force: true })
     }
   })
-  test('bounds a valid 200,000-character input before the Responses call', async () => {
+
+  test('atomically claims a queued evaluation before concurrent workers can plan or submit it twice', async () => {
+    const { directory, model, images, service } = await fixture()
+    try {
+      await service.create('evaluation-tenant', request(1))
+
+      await Promise.all([
+        service.tick({ limit: 10 }),
+        service.tick({ limit: 10 }),
+      ])
+
+      expect(model.calls).toHaveLength(1)
+      expect(images.submissions).toHaveLength(1)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('bounds a valid 200,000-character CJK input before the Responses call', async () => {
     const { directory, model, service } = await fixture()
     try {
       const tailEvidence = '重点目标位于材料末尾并且必须保留'
