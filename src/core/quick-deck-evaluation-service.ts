@@ -141,6 +141,10 @@ function contentConfig(request: QuickDeckEvaluationRequest) {
   return { source, document, config }
 }
 
+function isV4ResponsesProtocolError(error: unknown) {
+  return error instanceof Error && error.message === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+}
+
 function planningPayload(input: VisualDeckV4CompilerInput) {
   const evidenceWindow = new V4EvidenceWindowCompiler().compile({
     document: input.document,
@@ -623,9 +627,11 @@ export class QuickDeckEvaluationService {
     } catch (error) {
       return await this.fail(
         planning,
-        isV4ManuscriptContextTooLargeError(error)
-          ? 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE'
-          : 'EVALUATION_PLANNING_FAILED',
+        isV4ResponsesProtocolError(error)
+          ? 'EVALUATION_MODEL_PROTOCOL_INVALID'
+          : isV4ManuscriptContextTooLargeError(error)
+            ? 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE'
+            : 'EVALUATION_PLANNING_FAILED',
         claim,
       )
     }
@@ -1188,6 +1194,7 @@ export class QuickDeckEvaluationService {
 
   private async expire(record: QuickDeckEvaluationRecord, now: string, claim: QuickDeckClaim) {
     const discoveredArtifacts = new Map<number, string>()
+    const settledPages = new Map<number, QuickDeckEvaluationPageRecord>()
     let discoveredPreview: QuickDeckEvaluationArtifactRecord | null = null
     let discoveredPptx: QuickDeckEvaluationArtifactRecord | null = null
     const artifactIds = new Set([
@@ -1237,7 +1244,17 @@ export class QuickDeckEvaluationService {
           operationMode: 'TEXT_TO_IMAGE',
         })
         if (lookupResult.state !== 'SUBMITTED') {
-          if (lookupResult.state === 'UNKNOWN') cleanupPending = true
+          if (lookupResult.state === 'NOT_SUBMITTED') {
+            settledPages.set(page.pageNumber, {
+              ...page,
+              status: 'FAILED',
+              submissionState: 'NOT_SUBMITTED',
+              billingState: 'NOT_CHARGED',
+              errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+            })
+          } else {
+            cleanupPending = true
+          }
           continue
         }
         const inspected = await this.dependencies.images.inspect({
@@ -1264,6 +1281,7 @@ export class QuickDeckEvaluationService {
       ...record,
       pages: record.pages.map((page) => ({
         ...page,
+        ...settledPages.get(page.pageNumber),
         artifactId: page.artifactId ?? discoveredArtifacts.get(page.pageNumber) ?? null,
       })),
       pptx: record.pptx ?? discoveredPptx,

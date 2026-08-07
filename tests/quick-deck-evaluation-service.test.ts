@@ -74,6 +74,15 @@ class OversizedManuscriptModel extends CreativeModel {
   }
 }
 
+class ResponsesProtocolRejectedModel implements StructuredModelPort {
+  readonly calls: Parameters<StructuredModelPort['execute']>[0][] = []
+
+  async execute(input: Parameters<StructuredModelPort['execute']>[0]): Promise<never> {
+    this.calls.push(structuredClone(input))
+    throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+  }
+}
+
 class AsyncImages implements ImageGenerationPort {
   readonly submissions: Parameters<ImageGenerationPort['submit']>[0][] = []
   readonly inspections: Parameters<ImageGenerationPort['inspect']>[0][] = []
@@ -391,6 +400,33 @@ describe('quick-deck evaluation service', () => {
         status: 'FAILED',
         phase: 'FAILED',
         failure: { code: 'EVALUATION_MANUSCRIPT_CONTEXT_TOO_LARGE' },
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('publishes a Chain-4 Responses protocol rejection as a stable evaluator failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-protocol-rejection-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const model = new ResponsesProtocolRejectedModel()
+      const images = new AsyncImages(artifacts)
+      const service = new QuickDeckEvaluationService({
+        repository: new InMemoryQuickDeckEvaluationRepository(), artifacts, model, images,
+        renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(1))
+
+      await service.tick({ limit: 10 })
+
+      expect(model.calls).toHaveLength(1)
+      expect(images.submissions).toHaveLength(0)
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        failure: { code: 'EVALUATION_MODEL_PROTOCOL_INVALID' },
       })
     } finally {
       await rm(directory, { recursive: true, force: true })
@@ -971,6 +1007,44 @@ describe('quick-deck evaluation service', () => {
       await service.tick({ limit: 10 })
       expect((await repository.get(created.jobId))?.cleanupPending).toBe(false)
       expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('persists a definitive not-submitted lookup during expiry cleanup', async () => {
+    const { directory, repository, clock, images, service } = await fixture(undefined, false, false,
+      (artifacts) => new NotSubmittedLookupImages(artifacts))
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      const record = await repository.get(created.jobId)
+      if (!record) throw new Error('QUICK_DECK_TEST_RECORD_MISSING')
+      await repository.save({
+        record: {
+          ...record,
+          status: 'GENERATING',
+          phase: 'IMAGE_GENERATION',
+          pages: record.pages.map((page) => ({
+            ...page,
+            submissionState: 'UNKNOWN',
+            billingState: 'UNKNOWN',
+          })),
+        },
+      })
+      clock.advance(60_001)
+
+      await service.tick({ limit: 10 })
+
+      expect(images.lookups).toHaveLength(1)
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'EXPIRED',
+        cleanupPending: false,
+        pages: [expect.objectContaining({
+          status: 'FAILED',
+          submissionState: 'NOT_SUBMITTED',
+          billingState: 'NOT_CHARGED',
+        })],
+      })
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

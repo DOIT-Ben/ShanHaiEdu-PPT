@@ -413,9 +413,9 @@ describe('quick-deck evaluation HTTP facade', () => {
     const originalSetInterval = globalThis.setInterval
     const originalClearInterval = globalThis.clearInterval
     const timer = {} as ReturnType<typeof setInterval>
-    let heartbeat: (() => void) | null = null
+    const heartbeat = { callback: null as (() => void) | null }
     globalThis.setInterval = ((callback: () => void) => {
-      heartbeat = callback
+      heartbeat.callback = callback
       return timer
     }) as typeof setInterval
     globalThis.clearInterval = ((value: ReturnType<typeof setInterval>) => {
@@ -425,8 +425,8 @@ describe('quick-deck evaluation HTTP facade', () => {
       const response = await handle(request(`/v1/evaluations/quick-decks/${jobId}/events`))
       const reader = response.body!.getReader()
       await Bun.sleep(25)
-      if (!heartbeat) throw new Error('QUICK_DECK_SSE_HEARTBEAT_NOT_STARTED')
-      heartbeat()
+      if (!heartbeat.callback) throw new Error('QUICK_DECK_SSE_HEARTBEAT_NOT_STARTED')
+      heartbeat.callback()
 
       for (let index = 0; index < 100; index += 1) {
         expect((await reader.read()).done).toBe(false)
