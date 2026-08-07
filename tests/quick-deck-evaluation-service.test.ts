@@ -291,6 +291,31 @@ class NotSubmittedLookupImages extends AsyncImages {
   }
 }
 
+class LeaseExpiredCreativeModel extends CreativeModel {
+  constructor(private readonly clock: ControlledClock) {
+    super()
+  }
+
+  override async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
+    this.clock.advance(5 * 60_000 + 1)
+    return await super.execute(input)
+  }
+}
+
+class LeaseExpiredPackagingRenderer extends SharpPptxPresentationRenderer {
+  calls = 0
+
+  constructor(private readonly clock: ControlledClock) {
+    super()
+  }
+
+  override async renderSlidePreviews(input: Parameters<SharpPptxPresentationRenderer['renderSlidePreviews']>[0]) {
+    this.calls += 1
+    if (this.calls === 1) this.clock.advance(5 * 60_000 + 1)
+    return await super.renderSlidePreviews(input)
+  }
+}
+
 async function fixture(
   imageSize: Readonly<{ width: number; height: number }> = { width: 1600, height: 900 },
   removeExpiredArtifacts = false,
@@ -447,6 +472,61 @@ describe('quick-deck evaluation service', () => {
 
       expect(model.calls).toHaveLength(1)
       expect(images.submissions).toHaveLength(1)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('fails a reclaimed stale planning lease without rerunning the model or submitting images', async () => {
+    const { directory, artifacts, repository, clock, images } = await fixture()
+    try {
+      const model = new LeaseExpiredCreativeModel(clock)
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model, images, renderer: new SharpPptxPresentationRenderer(), clock,
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60 * 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(1))
+
+      await service.tick({ limit: 1 })
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'PLANNING', phase: 'CREATIVE_PLANNING', nextAttemptAt: '2026-08-07T00:00:00.000Z',
+      })
+
+      await service.tick({ limit: 1 })
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED', phase: 'FAILED', failure: { code: 'EVALUATION_INTERRUPTED' },
+      })
+      expect(model.calls).toHaveLength(1)
+      expect(images.submissions).toHaveLength(0)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('reclaims a stale packaging lease from deterministic artifacts without another image submission', async () => {
+    const { directory, artifacts, repository, clock, model, images } = await fixture()
+    try {
+      const renderer = new LeaseExpiredPackagingRenderer(clock)
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model, images, renderer, clock,
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60 * 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(1))
+
+      await service.tick({ limit: 1 })
+      await service.tick({ limit: 1 })
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'PACKAGING', phase: 'PPTX_PACKAGING', nextAttemptAt: '2026-08-07T00:00:00.000Z',
+      })
+
+      await service.tick({ limit: 1 })
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'COMPLETED', phase: 'COMPLETE',
+      })
+      expect(images.submissions).toHaveLength(1)
+      expect(renderer.calls).toBe(1)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

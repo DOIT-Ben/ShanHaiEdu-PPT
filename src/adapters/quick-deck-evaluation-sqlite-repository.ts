@@ -205,7 +205,7 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
     return this.#database.query<JsonRow, [string, string, string, number]>(`
       SELECT evaluation.data FROM quick_deck_evaluations AS evaluation
       LEFT JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
-      WHERE evaluation.status IN ('QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
+      WHERE evaluation.status IN ('QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
         AND evaluation.next_attempt_at IS NOT NULL
         AND evaluation.next_attempt_at <= ?
         AND evaluation.expires_at > ?
@@ -233,7 +233,7 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
       SELECT evaluation.id, ?, ?
       FROM quick_deck_evaluations AS evaluation
       LEFT JOIN quick_deck_evaluation_leases AS lease ON lease.job_id = evaluation.id
-      WHERE evaluation.status IN ('QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
+      WHERE evaluation.status IN ('QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
         AND evaluation.next_attempt_at IS NOT NULL
         AND evaluation.next_attempt_at <= ?
         AND evaluation.expires_at > ?

@@ -50,7 +50,7 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
 
   async listRunnable(input: Parameters<QuickDeckEvaluationRepository['listRunnable']>[0]) {
     return [...this.#records.values()]
-      .filter((record) => ['QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING'].includes(record.status))
+      .filter((record) => ['QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING'].includes(record.status))
       .filter((record) => record.nextAttemptAt !== null && record.nextAttemptAt <= input.now)
       .filter((record) => record.expiresAt > input.now)
       .filter((record) => {
@@ -70,7 +70,7 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
     const excluded = new Set(input.excludeJobIds ?? [])
     const claimed: QuickDeckEvaluationRecord[] = []
     for (const record of [...this.#records.values()]
-      .filter((candidate) => ['QUEUED', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING'].includes(candidate.status))
+      .filter((candidate) => ['QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING'].includes(candidate.status))
       .filter((candidate) => candidate.nextAttemptAt !== null && candidate.nextAttemptAt <= input.now)
       .filter((candidate) => candidate.expiresAt > input.now)
       .filter((candidate) => !excluded.has(candidate.id))

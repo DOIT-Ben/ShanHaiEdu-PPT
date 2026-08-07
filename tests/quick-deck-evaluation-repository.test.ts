@@ -287,6 +287,24 @@ describe('quick-deck evaluation repositories', () => {
       })
     })
 
+    test(`${kind} reclaims an expired planning lease for deterministic failure handling`, async () => {
+      await withRepository(kind, async (repository) => {
+        const job = record('quick-deck-eval-stale-planning', {
+          status: 'PLANNING', phase: 'CREATIVE_PLANNING', startedAt: now, nextAttemptAt: now,
+        })
+        await repository.create({
+          record: job, event: acceptedEvent(job.id), maxActiveJobs: 2, maxDailyJobs: 10, dayStart: now,
+        })
+
+        expect(await repository.claimRunnable({
+          now, leaseToken: 'planning-worker-first', leaseUntil: later, limit: 1,
+        })).toMatchObject([{ id: job.id, status: 'PLANNING' }])
+        expect(await repository.claimRunnable({
+          now: later, leaseToken: 'planning-worker-recovery', leaseUntil: '2026-08-07T00:02:00.000Z', limit: 1,
+        })).toMatchObject([{ id: job.id, status: 'PLANNING' }])
+      })
+    })
+
     test(`${kind} fences stale worker writes after a lease is reclaimed`, async () => {
       await withRepository(kind, async (repository) => {
         const afterLater = '2026-08-07T00:02:00.000Z'

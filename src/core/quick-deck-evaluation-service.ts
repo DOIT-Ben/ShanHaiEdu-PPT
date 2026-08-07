@@ -591,6 +591,7 @@ export class QuickDeckEvaluationService {
       const claim: QuickDeckClaim = { leaseToken }
       try {
         if (record.status === 'QUEUED') await this.planAndSubmit(record, claim)
+        else if (record.status === 'PLANNING') await this.fail(record, 'EVALUATION_INTERRUPTED', claim)
         else await this.inspectAndPackage(record, claim)
       } catch (error) {
         if (error instanceof QuickDeckClaimLostError) continue
@@ -614,7 +615,9 @@ export class QuickDeckEvaluationService {
       status: 'PLANNING',
       phase: 'CREATIVE_PLANNING',
       startedAt: record.startedAt ?? startedAt,
-      nextAttemptAt: null,
+      // A stale planning lease must be reclaimable and failed without replaying
+      // the model request or creating a second paid submission.
+      nextAttemptAt: startedAt,
       updatedAt: startedAt,
     }
     await this.saveClaimed({
@@ -818,7 +821,9 @@ export class QuickDeckEvaluationService {
       status: 'PACKAGING',
       phase: 'PPTX_PACKAGING',
       pages,
-      nextAttemptAt: null,
+      // Packaging is deterministic and artifact-idempotent, so a stale lease
+      // can safely resume from the existing preview/PPTX artifacts.
+      nextAttemptAt: packagingAt,
       updatedAt: packagingAt,
     }
     await this.saveClaimed({
