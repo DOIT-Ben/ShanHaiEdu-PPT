@@ -63,10 +63,14 @@ export class SourceEvidenceResolver {
       if (excerpt.length < 6) {
         throw new V4ManuscriptCompilationError('V4_MANUSCRIPT_SOURCE_EVIDENCE_TOO_SHORT')
       }
-      const match = input.chunks.find((chunk) => normalizedEvidence(chunk.text).includes(excerpt))
-      if (!match) {
+      const matches = input.chunks.filter((chunk) => normalizedEvidence(chunk.text).includes(excerpt))
+      if (matches.length === 0) {
         throw new V4ManuscriptCompilationError('V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED')
       }
+      if (matches.length > 1) {
+        throw new V4ManuscriptCompilationError('V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
+      }
+      const match = matches[0]!
       if (!resolved.includes(match.id)) resolved.push(match.id)
     }
     return resolved

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import sharp from 'sharp'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { SharpControlledRasterPort } from '../src/adapters/v4-controlled-raster'
+import { controlledRasterSvg, SharpControlledRasterPort } from '../src/adapters/v4-controlled-raster'
 import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
@@ -99,6 +99,21 @@ describe('V4 controlled raster', () => {
     expect(output).toMatchObject({ width: 1600, height: 900 })
     const artifact = await artifacts.get({ tenantId: 'frameflow', artifactId: output.artifactId })
     expect(await sharp(artifact!.bytes).metadata()).toMatchObject({ format: 'png', width: 1600, height: 900 })
+  })
+
+  test('renders no SVG text outside the approved title and locked copy whitelist', () => {
+    const input = {
+      tenantId: 'frameflow', runId: 'run-controlled-raster', pageNumber: 1,
+      title: '五个苹果', visibleCopy: ['桌上有5个苹果。'],
+      diagram: { kind: 'EXACT_COUNT' as const, itemLabel: '苹果', count: 5 },
+      idempotencyKey: 'controlled-raster-visible-copy',
+    }
+    const svg = controlledRasterSvg(input)
+    const textNodes = [...svg.matchAll(/<text[^>]*>(.*?)<\/text>/g)].map((match) => match[1])
+
+    expect(textNodes).toEqual(['五个苹果', '桌上有5个苹果。'])
+    expect(svg).not.toContain('精确关系图示')
+    expect(svg).not.toContain('5个苹果</text>')
   })
 
   test('keeps controlled pages in the V4 batch with zero Provider units', async () => {

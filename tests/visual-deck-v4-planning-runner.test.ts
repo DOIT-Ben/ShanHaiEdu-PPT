@@ -381,6 +381,60 @@ describe('visual deck v4 planning runner', () => {
     expect(result.step).toMatchObject({ status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' })
   })
 
+  test('allows exactly one semantic completion to disambiguate repeated source evidence', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = new RunService({ repository, clock })
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-evidence-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let reviewCalls = 0
+    staged.model.execute = async (modelInput) => {
+      const result = await execute(modelInput)
+      if (modelInput.operation !== 'review_visual_deck_v4_manuscript') return result
+      reviewCalls += 1
+      if (!(modelInput.payload as { sourceEvidenceDisambiguation?: string }).sourceEvidenceDisambiguation) return result
+      return {
+        ...(result as any),
+        slides: (result as any).slides.map((slide: any) => ({
+          ...slide,
+          sourceEvidence: [{ excerpt: '第一来源唯一证据段落说明百分数统一比较。' }],
+        })),
+      }
+    }
+    const common = '共同教材摘录用于制造歧义。'.repeat(8)
+    const document = {
+      name: '重复来源',
+      sources: [
+        { id: 'textbook', name: '教材.md', kind: 'TEXT' as const, status: 'READY' as const },
+        { id: 'design', name: '设计稿.md', kind: 'TEXT' as const, status: 'READY' as const },
+      ],
+      chunks: [
+        { id: 'chunk-a', sourceId: 'textbook', text: `${common}第一来源唯一证据段落说明百分数统一比较。`, sha256: 'a'.repeat(64) },
+        { id: 'chunk-b', sourceId: 'design', text: `${common}第二来源唯一证据段落说明课堂视觉。`, sha256: 'b'.repeat(64) },
+      ],
+      assets: [], isComplete: true, missingRanges: [],
+    }
+    const runner = new PlanningRunner({
+      repository,
+      documents: { async resolve() { return document } },
+      model: staged.model,
+      clock,
+    })
+
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.blueprint?.visualDeckV4Proposal?.slideBriefs.every((slide) =>
+      slide.sourceChunkIds.includes('chunk-a'))).toBe(true)
+    expect(reviewCalls).toBe(2)
+  })
+
   test('permits exactly one chain-4 content-slot completion after a semantic schema failure', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))

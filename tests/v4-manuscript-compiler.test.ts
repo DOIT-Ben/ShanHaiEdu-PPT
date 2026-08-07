@@ -79,6 +79,18 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
     })).toThrow(V4ManuscriptCompilationError)
   })
 
+  test('rejects an evidence excerpt that ambiguously matches multiple trusted chunks', () => {
+    const resolver = new SourceEvidenceResolver()
+    expect(() => resolver.resolve({
+      sourceMode: 'SOURCE_GROUNDED',
+      evidence: [{ excerpt: '太阳加热水面形成水汽' }],
+      chunks: [
+        { id: 'chunk-1', text: '太阳加热水面形成水汽，随后凝结。', sha256: 'a'.repeat(64) },
+        { id: 'chunk-2', text: '教材再次说明太阳加热水面形成水汽。', sha256: 'b'.repeat(64) },
+      ],
+    })).toThrow('V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
+  })
+
   test('schema rejects runtime control fields in model output', () => {
     expect(() => visualDeckV4CreativeManuscriptSchema.parse({
       ...manuscript(),

@@ -9,7 +9,6 @@ function compile(input: Readonly<{
   return new ConstraintCompiler().compile({
     title: input.title ?? '数量关系',
     lockedCopy: input.lockedCopy ?? [],
-    facts: input.facts ?? [],
   })
 }
 
@@ -46,7 +45,7 @@ describe('V4 constraint compiler', () => {
 
   test('falls back when the content has multiple unsupported count claims or exceeds the readable item limit', () => {
     expect(compile({ lockedCopy: ['这里有5个苹果和3个梨。'] })).toBeNull()
-    expect(compile({ facts: ['一共有21个苹果。'] })).toBeNull()
+    expect(compile({ facts: ['桌上有5个苹果。'] })).toBeNull()
     expect(compile({ lockedCopy: ['这里有许多苹果。'] })).toBeNull()
   })
 })

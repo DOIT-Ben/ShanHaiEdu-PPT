@@ -19,7 +19,6 @@ export function resolveV4RenderStrategy(
   const diagram = compiler.compile({
     title: brief.title,
     lockedCopy: brief.lockedCopy,
-    facts: brief.facts,
   })
   return diagram ? { kind: 'CONTROLLED_RASTER', diagram } : { kind: 'FULL_GENERATIVE' }
 }

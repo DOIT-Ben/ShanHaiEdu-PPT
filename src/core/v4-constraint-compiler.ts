@@ -31,7 +31,6 @@ export type ExactDiagramSpec = Readonly<
 export type ConstraintCompilerInput = Readonly<{
   title: string
   lockedCopy: readonly string[]
-  facts: readonly string[]
 }>
 
 const chineseDigitValues: Readonly<Record<string, number>> = {
@@ -174,7 +173,7 @@ function splitSentences(value: string) {
 }
 
 function inputSentences(input: ConstraintCompilerInput) {
-  return [...input.lockedCopy, ...input.facts, input.title]
+  return [...input.lockedCopy, input.title]
     .flatMap(splitSentences)
 }
 

@@ -11,9 +11,12 @@ function escapeXml(value: string) {
   })[character]!)
 }
 
-function visibleLine(value: string, limit = 34) {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 1)}...`
+function visibleLine(value: string) {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function fontSize(value: string, maximum: number, minimum: number) {
+  return Math.max(minimum, Math.min(maximum, Math.floor(1_120 / Math.max(1, value.length))))
 }
 
 function circleGrid(input: Readonly<{
@@ -41,10 +44,7 @@ function circleGrid(input: Readonly<{
 }
 
 function exactCountDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'EXACT_COUNT' }>) {
-  return [
-    `<text x="800" y="310" text-anchor="middle" font-size="42" font-family="sans-serif" fill="#334155">${diagram.count}个${escapeXml(diagram.itemLabel)}</text>`,
-    circleGrid({ count: diagram.count, startX: 310, startY: 420, availableWidth: 980, color: '#F97316' }),
-  ].join('')
+  return circleGrid({ count: diagram.count, startX: 310, startY: 360, availableWidth: 980, color: '#F97316' })
 }
 
 function partitionDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'PARTITION' }>) {
@@ -56,11 +56,10 @@ function partitionDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'PARTITION'
     const color = index % 2 === 0 ? '#0EA5E9' : '#8B5CF6'
     return [
       `<rect x="${left + 12}" y="335" width="${groupWidth - 24}" height="430" rx="30" fill="#ffffff" stroke="${color}" stroke-width="5"/>`,
-      `<text x="${left + groupWidth / 2}" y="395" text-anchor="middle" font-size="30" font-family="sans-serif" fill="#334155">第${index + 1}组</text>`,
       circleGrid({
         count: diagram.itemsPerGroup,
         startX: left + 54,
-        startY: 490,
+        startY: 430,
         availableWidth: groupWidth - 108,
         color,
         maximumPerRow: Math.min(4, diagram.itemsPerGroup),
@@ -68,26 +67,21 @@ function partitionDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'PARTITION'
       }),
     ].join('')
   }).join('')
-  return [
-    `<text x="800" y="290" text-anchor="middle" font-size="38" font-family="sans-serif" fill="#334155">${diagram.total}个${escapeXml(diagram.itemLabel)}平均分成${diagram.groupCount}组，每组${diagram.itemsPerGroup}个</text>`,
-    boxes,
-  ].join('')
+  return boxes
 }
 
 function comparisonDiagram(diagram: Extract<ExactDiagramSpec, { kind: 'COMPARE' }>) {
   const leftColor = diagram.direction === 'LEFT_GREATER' ? '#F97316' : '#38BDF8'
   const rightColor = diagram.direction === 'RIGHT_GREATER' ? '#F97316' : '#38BDF8'
-  const panel = (input: Readonly<{ left: number; label: string; count: number; color: string }>) => [
+  const panel = (input: Readonly<{ left: number; count: number; color: string }>) => [
     `<rect x="${input.left}" y="315" width="525" height="450" rx="34" fill="#ffffff" stroke="${input.color}" stroke-width="5"/>`,
-    `<text x="${input.left + 262}" y="385" text-anchor="middle" font-size="38" font-family="sans-serif" fill="#334155">${escapeXml(input.label)} ${input.count}个</text>`,
-    circleGrid({ count: input.count, startX: input.left + 75, startY: 485, availableWidth: 375, color: input.color, radius: 27 }),
+    circleGrid({ count: input.count, startX: input.left + 75, startY: 420, availableWidth: 375, color: input.color, radius: 27 }),
   ].join('')
   return [
-    panel({ left: 135, label: diagram.left.label, count: diagram.left.count, color: leftColor }),
-    panel({ left: 940, label: diagram.right.label, count: diagram.right.count, color: rightColor }),
+    panel({ left: 135, count: diagram.left.count, color: leftColor }),
+    panel({ left: 940, count: diagram.right.count, color: rightColor }),
     `<path d="M710 540 L890 540" stroke="#475569" stroke-width="9" stroke-linecap="round"/>`,
     `<path d="M890 540 L850 510 M890 540 L850 570" stroke="#475569" stroke-width="9" stroke-linecap="round" fill="none"/>`,
-    `<text x="800" y="605" text-anchor="middle" font-size="34" font-family="sans-serif" fill="#334155">相差${diagram.difference}个${escapeXml(diagram.itemLabel)}</text>`,
   ].join('')
 }
 
@@ -97,18 +91,20 @@ function diagramSvg(diagram: ExactDiagramSpec) {
   return comparisonDiagram(diagram)
 }
 
-function rasterSvg(input: Parameters<ControlledRasterPort['render']>[0]) {
-  const copy = input.visibleCopy.slice(0, 3).map((line, index) =>
-    `<text x="800" y="${172 + index * 42}" text-anchor="middle" font-size="29" font-family="sans-serif" fill="#475569">${escapeXml(visibleLine(line))}</text>`).join('')
+export function controlledRasterSvg(input: Parameters<ControlledRasterPort['render']>[0]) {
+  const allowedText = new Set([input.title, ...input.visibleCopy].map(visibleLine).filter(Boolean))
+  const visibleText = [visibleLine(input.title), ...input.visibleCopy.slice(0, 3).map(visibleLine)].filter(Boolean)
+  if (visibleText.some((text) => !allowedText.has(text))) throw new Error('CONTROLLED_RASTER_VISIBLE_TEXT_NOT_ALLOWED')
+  const copy = visibleText.slice(1).map((line, index) =>
+    `<text x="800" y="${172 + index * 42}" text-anchor="middle" font-size="${fontSize(line, 29, 18)}" font-family="sans-serif" fill="#475569">${escapeXml(line)}</text>`).join('')
   return `<svg width="${CONTROLLED_RASTER_WIDTH}" height="${CONTROLLED_RASTER_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <rect width="100%" height="100%" fill="#F8FAFC"/>
     <rect x="68" y="58" width="1464" height="784" rx="42" fill="#EAF3FF"/>
     <rect x="84" y="74" width="1432" height="752" rx="34" fill="#FDFEFF"/>
     <rect x="84" y="74" width="16" height="752" rx="8" fill="#2563EB"/>
-    <text x="800" y="122" text-anchor="middle" font-size="54" font-weight="700" font-family="sans-serif" fill="#172554">${escapeXml(visibleLine(input.title, 28))}</text>
+    <text x="800" y="122" text-anchor="middle" font-size="${fontSize(visibleText[0] ?? '', 54, 24)}" font-weight="700" font-family="sans-serif" fill="#172554">${escapeXml(visibleText[0] ?? '')}</text>
     ${copy}
     ${diagramSvg(input.diagram)}
-    <text x="800" y="805" text-anchor="middle" font-size="24" font-family="sans-serif" fill="#64748B">精确关系图示</text>
   </svg>`
 }
 
@@ -116,7 +112,7 @@ export class SharpControlledRasterPort implements ControlledRasterPort {
   constructor(private readonly dependencies: Readonly<{ artifacts: ArtifactPort }>) {}
 
   async render(input: Parameters<ControlledRasterPort['render']>[0]) {
-    const bytes = new Uint8Array(await sharp(Buffer.from(rasterSvg(input))).png({ compressionLevel: 8 }).toBuffer())
+    const bytes = new Uint8Array(await sharp(Buffer.from(controlledRasterSvg(input))).png({ compressionLevel: 8 }).toBuffer())
     const metadata = await sharp(bytes).metadata()
     if (metadata.width !== CONTROLLED_RASTER_WIDTH || metadata.height !== CONTROLLED_RASTER_HEIGHT) {
       throw new Error('CONTROLLED_RASTER_OUTPUT_DIMENSIONS_INVALID')

@@ -64,7 +64,7 @@ import {
   VISUAL_DECK_V4_COMPILER_VERSION,
 } from '../release-identity'
 import { V4ReflectionCoordinator } from './v4-reflection/coordinator'
-import { ManuscriptCompiler } from './v4-manuscript-compiler'
+import { ManuscriptCompiler, V4ManuscriptCompilationError } from './v4-manuscript-compiler'
 import { V4EvidenceWindowCompiler, type V4EvidenceWindow } from './v4-evidence-window-compiler'
 
 const MAX_BLUEPRINT_CONTRACT_ATTEMPTS = 5
@@ -608,7 +608,7 @@ export class PlanningRunner {
       compilerVersion: input.compilerVersion,
       parse: visualDeckV4CreativeManuscriptSchema.parse,
     }))
-    const review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4ManuscriptStage(input.input, {
+    const reviewRequest: V4ManuscriptStageRequest = {
       stage: 'review-manuscript',
       tool: 'review_v4_manuscript',
       operation: 'review_visual_deck_v4_manuscript',
@@ -617,12 +617,30 @@ export class PlanningRunner {
       protocol: input.protocol,
       compilerVersion: input.compilerVersion,
       parse: visualDeckV4ReviewManuscriptSchema.parse,
-    }))
+    }
+    let review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4ManuscriptStage(input.input, reviewRequest))
     const compilerInput = {
       ...input.compilerInput,
       document: { ...input.compilerInput.document, chunks: evidenceWindow.chunks },
     }
-    const draft = new ManuscriptCompiler().compilePlan(compilerInput, creative, review)
+    const compiler = new ManuscriptCompiler()
+    let draft
+    try {
+      draft = compiler.compilePlan(compilerInput, creative, review)
+    } catch (error) {
+      if (!(error instanceof V4ManuscriptCompilationError)
+        || error.code !== 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS') throw error
+      review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4PlanningStage(input.input, {
+        ...reviewRequest,
+        repairAttempt: 2,
+        payload: {
+          ...reviewRequest.payload,
+          contentSlotCompletion: true,
+          sourceEvidenceDisambiguation: '每条来源摘录必须足够长，并且只能在一个受信 chunk 中出现。',
+        },
+      }))
+      draft = compiler.compilePlan(compilerInput, creative, review)
+    }
     return createVisualDeckV4BlueprintFromProposal(input.compilerInput, draft)
   }
 
@@ -1592,6 +1610,10 @@ export class PlanningRunner {
               ? 'V3_LAYER_CONTRACT_INVALID'
               : message === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
                 ? 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+              : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+                ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+              : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
+                ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
               : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
                 ? 'MODEL_JSON_INVALID'
                 : 'BLUEPRINT_SCHEMA_INVALID'
