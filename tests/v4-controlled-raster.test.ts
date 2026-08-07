@@ -13,9 +13,9 @@ import { planningStepKey } from '../src/core/planning-runner'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 import { createVisualDeckV4Blueprint } from '../src/core/visual-deck-v4-planner'
 import { presentationBlueprintSchema } from '../src/presentation-contracts'
-import type { RunRecord } from '../src/core/ports'
+import type { ControlledRasterPort, RunRecord } from '../src/core/ports'
 
-function run(): RunRecord {
+function run(overrides: Partial<RunRecord> = {}): RunRecord {
   return {
     id: 'run-controlled-raster', creationKey: 'create-controlled-raster', requestHash: 'request-hash',
     host: { tenantId: 'frameflow', externalUserId: 'teacher-1' },
@@ -33,10 +33,11 @@ function run(): RunRecord {
     budgetUnits: 100, committedBudgetUnits: 0, qualityOverride: false, qualityOverrideReason: null,
     qualityOverrideBy: null, leaseToken: null, leaseUntil: null, leaseVersion: 0,
     createdAt: '2026-08-07T00:00:00.000Z', updatedAt: '2026-08-07T00:00:00.000Z',
+    ...overrides,
   }
 }
 
-function controlledBlueprint() {
+function controlledBlueprint(slideCount = 3) {
   const source = { kind: 'TEXT' as const, name: '课堂材料.txt', text: '桌上有5个苹果。水循环形成云和雨。'.repeat(8) }
   const base = createVisualDeckV4Blueprint({
     runId: 'run-controlled-raster', inputHash: 'request-hash', source,
@@ -47,13 +48,13 @@ function controlledBlueprint() {
       missingRanges: [],
     },
     config: {
-      instruction: '制作三页课堂视觉演示', sourceMode: 'SOURCE_GROUNDED',
+      instruction: `制作${slideCount}页课堂视觉演示`, sourceMode: 'SOURCE_GROUNDED',
       deckOptions: {
-        deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount: 3 }, aspectRatio: '16:9',
+        deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount }, aspectRatio: '16:9',
         audience: '小学学生', focus: '数量和水循环', styleHint: '清晰的课堂信息图',
       },
     },
-    slideCount: 3,
+    slideCount,
     visualDirection: '清晰的课堂信息图',
     compilerVersion: 'visual-deck-v4-chain-4',
     createdAt: '2026-08-07T00:00:00.000Z',
@@ -94,6 +95,26 @@ function controlledBlueprint() {
       body: ['水循环形成云和雨。'],
     }),
   })
+}
+
+async function seedBlueprint(repository: InMemoryAgentRepository, record: RunRecord, blueprint: ReturnType<typeof controlledBlueprint>) {
+  await repository.transact(record.id, (transaction) => {
+    transaction.putStep({
+      id: 'step-plan', runId: record.id, idempotencyKey: planningStepKey(record.id),
+      inputHash: hashInput({ blueprint }), tool: 'create_blueprint', status: 'COMPLETED',
+      budgetUnits: 0, budgetReservationId: null, externalOperationId: null, errorCode: null,
+      output: blueprint, createdAt: record.createdAt, updatedAt: record.updatedAt,
+    })
+  })
+}
+
+function failingControlledRaster(kind: 'ASPECT' | 'RENDER'): ControlledRasterPort {
+  return {
+    async render() {
+      if (kind === 'RENDER') throw new Error('controlled raster test renderer failed')
+      return { artifactId: 'controlled-raster-invalid-aspect', sha256: 'a'.repeat(64), width: 4, height: 3 }
+    },
+  }
 }
 
 describe('V4 controlled raster', () => {
@@ -143,14 +164,7 @@ describe('V4 controlled raster', () => {
     const record = run()
     await repository.createRun(record)
     const blueprint = controlledBlueprint()
-    await repository.transact(record.id, (transaction) => {
-      transaction.putStep({
-        id: 'step-plan', runId: record.id, idempotencyKey: planningStepKey(record.id),
-        inputHash: hashInput({ blueprint }), tool: 'create_blueprint', status: 'COMPLETED',
-        budgetUnits: 0, budgetReservationId: null, externalOperationId: null, errorCode: null,
-        output: blueprint, createdAt: record.createdAt, updatedAt: record.updatedAt,
-      })
-    })
+    await seedBlueprint(repository, record, blueprint)
     const media = new MediaStepRunner({ repository, budget, images, clock })
     const coordinator = new SlideGenerationCoordinator({
       repository, media, batchBudget: budget,
@@ -181,14 +195,7 @@ describe('V4 controlled raster', () => {
     const record = run()
     await repository.createRun(record)
     const blueprint = controlledBlueprint()
-    await repository.transact(record.id, (transaction) => {
-      transaction.putStep({
-        id: 'step-plan', runId: record.id, idempotencyKey: planningStepKey(record.id),
-        inputHash: hashInput({ blueprint }), tool: 'create_blueprint', status: 'COMPLETED',
-        budgetUnits: 0, budgetReservationId: null, externalOperationId: null, errorCode: null,
-        output: blueprint, createdAt: record.createdAt, updatedAt: record.updatedAt,
-      })
-    })
+    await seedBlueprint(repository, record, blueprint)
     const media = new MediaStepRunner({ repository, budget, images, clock })
     const coordinator = new SlideGenerationCoordinator({
       repository, media, batchBudget: budget,
@@ -199,5 +206,81 @@ describe('V4 controlled raster', () => {
     await expect(coordinator.submitBlueprintImages(record.id, 10)).rejects.toThrow('CONTROLLED_RASTER_PORT_REQUIRED')
     expect(images.operations.size).toBe(0)
     expect(budget.batchReservationRequests).toHaveLength(0)
+  })
+
+  for (const [kind, errorCode] of [
+    ['ASPECT', 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID'],
+    ['RENDER', 'CONTROLLED_RASTER_RENDER_FAILED'],
+  ] as const) {
+    test(`persists a ${kind.toLowerCase()} controlled initial raster failure before terminal batch accounting`, async () => {
+      const repository = new InMemoryAgentRepository()
+      const budget = new MockBudgetPort()
+      const images = new MockImageGenerationPort()
+      const artifacts = new MockArtifactPort()
+      const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+      const record = run({ slideCount: 1 })
+      await repository.createRun(record)
+      await seedBlueprint(repository, record, controlledBlueprint(1))
+      const media = new MediaStepRunner({ repository, budget, images, clock })
+      const coordinator = new SlideGenerationCoordinator({
+        repository, media, batchBudget: budget,
+        documents: { resolve: async () => ({ name: 'source', chunks: [], isComplete: true, missingRanges: [] }) },
+        artifacts, clock, controlledRaster: failingControlledRaster(kind),
+      })
+
+      await expect(coordinator.submitBlueprintImages(record.id, 10)).resolves.toMatchObject({ status: 'RECOVERING' })
+      expect(images.operations.size).toBe(0)
+      const failedStep = (await repository.listSteps(record.id)).find((step) =>
+        step.idempotencyKey.endsWith(':slide:1:image:r0:v1'))
+      expect(failedStep).toMatchObject({
+        status: 'FAILED', budgetUnits: 0, errorCode,
+        output: {
+          renderStrategy: 'CONTROLLED_RASTER',
+          technicalFailure: {
+            category: kind === 'ASPECT' ? 'CONTRACT' : 'INTERNAL',
+            disposition: 'NON_RETRYABLE',
+            diagnosticCode: errorCode,
+          },
+        },
+      })
+      if (kind === 'ASPECT') expect(failedStep).toMatchObject({ output: { imageWidth: 4, imageHeight: 3 } })
+
+      await expect(coordinator.reconcileTerminalGenerationBatch(record.id)).resolves.toBe(true)
+      expect(await repository.getRun(record.id)).toMatchObject({ status: 'FAILED' })
+      expect((await repository.listSteps(record.id)).find((step) => step.tool === 'generate_image_batch'))
+        .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'RELEASED' } } })
+    })
+  }
+
+  test('waits for a mixed batch provider result before settling its controlled raster failure', async () => {
+    const repository = new InMemoryAgentRepository()
+    const budget = new MockBudgetPort()
+    const images = new MockImageGenerationPort()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const record = run({ slideCount: 2 })
+    await repository.createRun(record)
+    await seedBlueprint(repository, record, controlledBlueprint(2))
+    const media = new MediaStepRunner({ repository, budget, images, clock })
+    const coordinator = new SlideGenerationCoordinator({
+      repository, media, batchBudget: budget,
+      documents: { resolve: async () => ({ name: 'source', chunks: [], isComplete: true, missingRanges: [] }) },
+      artifacts, clock, controlledRaster: failingControlledRaster('ASPECT'),
+    })
+
+    await expect(coordinator.submitBlueprintImages(record.id, 10)).resolves.toMatchObject({ status: 'RECOVERING' })
+    expect(images.operations.size).toBe(1)
+    await expect(coordinator.reconcileTerminalGenerationBatch(record.id)).resolves.toBe(false)
+
+    const providerKey = [...images.operations.keys()][0]!
+    images.complete(providerKey, 'artifact-provider-page-2')
+    await media.reconcilePendingRun(record.id)
+    await expect(coordinator.reconcileTerminalGenerationBatch(record.id)).resolves.toBe(true)
+
+    expect(images.operations.size).toBe(1)
+    expect(await repository.getRun(record.id)).toMatchObject({ status: 'FAILED' })
+    expect(budget.batchFinalizations).toEqual([
+      expect.objectContaining({ settledUnits: 10, releasedUnits: 0 }),
+    ])
   })
 })

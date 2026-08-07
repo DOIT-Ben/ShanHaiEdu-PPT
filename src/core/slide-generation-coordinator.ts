@@ -17,6 +17,7 @@ import {
   beginTechnicalRecovery,
   technicalFailureFromStep,
 } from './technical-recovery'
+import { persistControlledRasterFailure } from './controlled-raster-failure'
 import { hashInput } from './hash'
 import {
   isMediaFailureStepStatus,
@@ -597,17 +598,38 @@ export class SlideGenerationCoordinator {
       visibleCopy: brief.lockedCopy,
       diagram: strategy.diagram,
     })
-    const artifact = await renderer.render({
-      tenantId: run.host.tenantId,
-      runId: run.id,
-      pageNumber: requirement.pageNumber,
-      title: brief.title,
-      visibleCopy: brief.lockedCopy,
+    const failed = (errorCode: 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID' | 'CONTROLLED_RASTER_RENDER_FAILED',
+      observedDimensions?: Readonly<{ width: number; height: number }>) => persistControlledRasterFailure({
+      repository: this.dependencies.repository,
+      clock: this.dependencies.clock,
+      run,
+      step: {
+        id: `step-${run.id}-asset-${hashInput(requirement.assetKey).slice(0, 20)}-r${run.revisionRound}`,
+        idempotencyKey: requirement.idempotencyKey,
+        slideId: requirement.slideId,
+        versionId,
+      },
+      inputHash,
       diagram: strategy.diagram,
-      idempotencyKey: requirement.idempotencyKey,
+      errorCode,
+      ...(observedDimensions ? { observedDimensions } : {}),
     })
+    let artifact: Awaited<ReturnType<ControlledRasterPort['render']>>
+    try {
+      artifact = await renderer.render({
+        tenantId: run.host.tenantId,
+        runId: run.id,
+        pageNumber: requirement.pageNumber,
+        title: brief.title,
+        visibleCopy: brief.lockedCopy,
+        diagram: strategy.diagram,
+        idempotencyKey: requirement.idempotencyKey,
+      })
+    } catch {
+      return failed('CONTROLLED_RASTER_RENDER_FAILED')
+    }
     if (!hasVisualDeckV4AspectRatio(artifact.width, artifact.height)) {
-      throw new Error('CONTROLLED_RASTER_ASPECT_RATIO_INVALID')
+      return failed('CONTROLLED_RASTER_ASPECT_RATIO_INVALID', { width: artifact.width, height: artifact.height })
     }
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const existing = transaction.getStep(requirement.idempotencyKey)

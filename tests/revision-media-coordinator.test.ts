@@ -16,9 +16,16 @@ import { revisionBlueprintStepKey } from '../src/core/active-blueprint'
 import { V4_REVISION_PROMPT_MAX_LENGTH } from '../src/core/blueprint-assets'
 import { MediaStepRunner } from '../src/core/media-step-runner'
 import { PageReviewCoordinator } from '../src/core/page-review-coordinator'
-import { generationBatchStepKeyFor, getGenerationBatch } from '../src/core/generation-batch'
+import {
+  ensureGenerationBatch,
+  finalizeGenerationBatch,
+  generationBatchStepKeyFor,
+  getGenerationBatch,
+  refreshGenerationBatch,
+} from '../src/core/generation-batch'
+import { storedGenerationBatchSchema } from '../src/generation-batch-contracts'
 import { planningStepKey } from '../src/core/planning-runner'
-import { MediaSubmissionError, type RunRecord } from '../src/core/ports'
+import { MediaSubmissionError, type ControlledRasterPort, type RunRecord } from '../src/core/ports'
 import { RevisionMediaCoordinator } from '../src/core/revision-media-coordinator'
 import { SlideGenerationCoordinator } from '../src/core/slide-generation-coordinator'
 import { applyRunAction } from '../src/core/policy'
@@ -173,6 +180,80 @@ function exactCountVisualDeckV4Blueprint() {
       title: '五个苹果',
       body: ['桌上有5个苹果。'],
     } : slide),
+  })
+}
+
+function failingControlledRaster(kind: 'ASPECT' | 'RENDER'): ControlledRasterPort {
+  return {
+    async render() {
+      if (kind === 'RENDER') throw new Error('controlled raster test renderer failed')
+      return { artifactId: 'controlled-raster-invalid-aspect', sha256: 'a'.repeat(64), width: 4, height: 3 }
+    },
+  }
+}
+
+async function settleInitialV4Batch(input: Readonly<{
+  repository: InMemoryAgentRepository
+  budget: MockBudgetPort
+  clock: FixedClock
+}>) {
+  const activeRun = await input.repository.getRun('run-1')
+  if (!activeRun) throw new Error('RUN_NOT_FOUND')
+  const identity = { revisionRound: 0, scope: 'INITIAL' as const }
+  const requirements = [1, 2].map((pageNumber) => ({
+    pageNumber,
+    idempotencyKey: `run-1:slide:${pageNumber}:image:r0:v1`,
+    prompt: `initial-v4-page-${pageNumber}`,
+    budgetUnits: 10,
+    renderStrategy: 'FULL_GENERATIVE' as const,
+  }))
+  await ensureGenerationBatch({
+    repository: input.repository,
+    clock: input.clock,
+    run: activeRun,
+    blueprint: exactCountVisualDeckV4Blueprint(),
+    requirements,
+    unitBudgetUnits: 10,
+    accountingModel: 'gpt-image-2',
+    operationMode: 'TEXT_TO_IMAGE',
+    identity,
+  })
+  const key = generationBatchStepKeyFor('run-1', identity)
+  await input.repository.transact('run-1', (transaction) => {
+    const step = transaction.getStep(key)
+    if (!step) throw new Error('INITIAL_BATCH_NOT_FOUND')
+    const batch = storedGenerationBatchSchema.parse(step.output)
+    const now = input.clock.now().toISOString()
+    transaction.putStep({
+      ...step,
+      status: 'RUNNING',
+      budgetReservationId: 'initial-v4-batch-reservation',
+      output: storedGenerationBatchSchema.parse({
+        ...batch,
+        status: 'PROCESSING',
+        accounting: {
+          ...batch.accounting,
+          committedUnits: 20,
+          authorization: 'RESERVED',
+          settlement: 'PENDING',
+        },
+        updatedAt: now,
+      }),
+      updatedAt: now,
+    })
+  })
+  await refreshGenerationBatch({
+    repository: input.repository,
+    clock: input.clock,
+    runId: 'run-1',
+    revisionRound: 0,
+  })
+  await finalizeGenerationBatch({
+    repository: input.repository,
+    budget: input.budget,
+    clock: input.clock,
+    runId: 'run-1',
+    revisionRound: 0,
   })
 }
 
@@ -390,6 +471,51 @@ describe('revision media coordinator', () => {
     })
     expect(base.budget.batchFinalizations).toHaveLength(0)
   })
+
+  for (const [kind, errorCode] of [
+    ['ASPECT', 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID'],
+    ['RENDER', 'CONTROLLED_RASTER_RENDER_FAILED'],
+  ] as const) {
+    test(`persists a ${kind.toLowerCase()} controlled revision raster failure before terminal batch accounting`, async () => {
+      const base = await fixture({ presentationMode: 'VISUAL_DECK_V4' }, {
+        blueprint: exactCountVisualDeckV4Blueprint(),
+        revisionImageModel: null,
+      })
+      await settleInitialV4Batch(base)
+      const coordinator = new RevisionMediaCoordinator({
+        repository: base.repository,
+        media: base.media,
+        batchBudget: base.budget,
+        artifacts: base.artifacts,
+        controlledRaster: failingControlledRaster(kind),
+        clock: base.clock,
+        revisionImageModel: null,
+      })
+
+      await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({ status: 'RECOVERING' })
+      expect(base.images.submitCalls).toBe(0)
+      const failedStep = (await base.repository.listSteps('run-1')).find((step) =>
+        step.idempotencyKey === 'run-1:slide:2:image:r1:v1')
+      expect(failedStep).toMatchObject({
+        status: 'FAILED', budgetUnits: 0, errorCode,
+        output: {
+          renderStrategy: 'CONTROLLED_RASTER',
+          technicalFailure: {
+            category: kind === 'ASPECT' ? 'CONTRACT' : 'INTERNAL',
+            disposition: 'NON_RETRYABLE',
+            diagnosticCode: errorCode,
+          },
+        },
+      })
+      if (kind === 'ASPECT') expect(failedStep).toMatchObject({ output: { imageWidth: 4, imageHeight: 3 } })
+
+      await expect(base.generation.reconcileTerminalGenerationBatch('run-1')).resolves.toBe(true)
+      expect(await base.repository.getRun('run-1')).toMatchObject({ status: 'FAILED' })
+      expect((await base.repository.listSteps('run-1')).find((step) =>
+        step.idempotencyKey === generationBatchStepKeyFor('run-1', { revisionRound: 1, scope: 'REVISION' })))
+        .toMatchObject({ status: 'COMPLETED', output: { accounting: { settlement: 'RELEASED' } } })
+    })
+  }
 
   test('keeps a mixed V4 revision on its persisted controlled and Provider routes', async () => {
     const basePlan = revisionPlan()

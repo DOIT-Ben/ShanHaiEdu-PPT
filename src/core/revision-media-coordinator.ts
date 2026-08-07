@@ -46,6 +46,7 @@ import {
   beginTechnicalRecovery,
   technicalFailureFromStep,
 } from './technical-recovery'
+import { persistControlledRasterFailure } from './controlled-raster-failure'
 import { revisionPlanStepKey } from './revision-planning-runner'
 import {
   compileV4RepairContract,
@@ -856,17 +857,38 @@ export class RevisionMediaCoordinator {
       visibleCopy: brief.lockedCopy,
       diagram: strategy.diagram,
     })
-    const artifact = await renderer.render({
-      tenantId: run.host.tenantId,
-      runId: run.id,
-      pageNumber: target.pageNumber,
-      title: brief.title,
-      visibleCopy: brief.lockedCopy,
+    const failed = (errorCode: 'CONTROLLED_RASTER_ASPECT_RATIO_INVALID' | 'CONTROLLED_RASTER_RENDER_FAILED',
+      observedDimensions?: Readonly<{ width: number; height: number }>) => persistControlledRasterFailure({
+      repository: this.dependencies.repository,
+      clock: this.dependencies.clock,
+      run,
+      step: {
+        id: target.stepId,
+        idempotencyKey: target.idempotencyKey,
+        slideId: target.slideId,
+        versionId: target.versionId,
+      },
+      inputHash,
       diagram: strategy.diagram,
-      idempotencyKey: target.idempotencyKey,
+      errorCode,
+      ...(observedDimensions ? { observedDimensions } : {}),
     })
+    let artifact: Awaited<ReturnType<ControlledRasterPort['render']>>
+    try {
+      artifact = await renderer.render({
+        tenantId: run.host.tenantId,
+        runId: run.id,
+        pageNumber: target.pageNumber,
+        title: brief.title,
+        visibleCopy: brief.lockedCopy,
+        diagram: strategy.diagram,
+        idempotencyKey: target.idempotencyKey,
+      })
+    } catch {
+      return failed('CONTROLLED_RASTER_RENDER_FAILED')
+    }
     if (!hasVisualDeckV4AspectRatio(artifact.width, artifact.height)) {
-      throw new Error('CONTROLLED_RASTER_ASPECT_RATIO_INVALID')
+      return failed('CONTROLLED_RASTER_ASPECT_RATIO_INVALID', { width: artifact.width, height: artifact.height })
     }
     return this.dependencies.repository.transact(run.id, (transaction) => {
       const existing = transaction.getStep(target.idempotencyKey)
