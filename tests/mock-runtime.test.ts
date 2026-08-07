@@ -14,9 +14,11 @@ import {
   MockRevisionApplicationPort,
   MockRevisionPlanningPort,
   MockVisualReviewPort,
+  MockImageGenerationPort,
   FixedClock,
 } from '../src/adapters/mock-ports'
 import {
+  MediaSubmissionError,
   StructuredModelError,
   type DeckReviewPort,
   type ImageGenerationPort,
@@ -97,6 +99,33 @@ class CountingCompletedImageGeneration implements ImageGenerationPort {
           billingState: 'NOT_CHARGED' as const,
           technicalFailure: providerTechnicalFailure('COUNTING_IMAGE_NOT_FOUND'),
         }
+  }
+}
+
+class RecoveringAsyncImageGeneration extends MockImageGenerationPort {
+  readonly inspectedStates: string[] = []
+  private responseLost = true
+
+  override async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+    if (!this.responseLost) return super.submit(input)
+    this.responseLost = false
+    this.submitCalls += 1
+    const operationId = `recovering-image:${hashInput(input.idempotencyKey).slice(0, 24)}`
+    this.operations.set(input.idempotencyKey, operationId)
+    this.requests.set(input.idempotencyKey, structuredClone(input))
+    this.statuses.set(operationId, { state: 'QUEUED' })
+    throw new MediaSubmissionError(
+      'TEST_SUBMISSION_RESPONSE_LOST',
+      'UNKNOWN',
+      'test submission response lost after provider acceptance',
+      providerTechnicalFailure('TEST_SUBMISSION_RESPONSE_LOST', { disposition: 'RETRYABLE' }),
+    )
+  }
+
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]) {
+    const result = await super.inspect(input)
+    this.inspectedStates.push(result.state)
+    return result
   }
 }
 
@@ -1037,6 +1066,108 @@ describe('mock runtime', () => {
     expect(streamed.map((event) => event.sequence)).toEqual(
       events.filter((event) => event.sequence > reconnectAfter).map((event) => event.sequence),
     )
+    const content = await runtime.handler(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(delivery.id)}/content?format=pptx`,
+    ))
+    expect(content.status).toBe(200)
+    expect((await content.arrayBuffer()).byteLength).toBe(delivery.pptx.byteLength)
+  })
+
+  test('recovers one asynchronous SINGLE image with its original key before reviewing and delivering it', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const images = new RecoveringAsyncImageGeneration()
+    const runtime = createMockRuntime({ repository, artifacts, images, clock, apiToken: token })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-create-v4-single-async-0001' },
+      body: JSON.stringify({
+        schemaVersion: '1', host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: {
+          kind: 'TEXT', name: '水循环教材.txt', roleHint: 'CONTENT_SOURCE',
+          text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4),
+        },
+        slideCount: 1,
+        visualDirection: '清晰的自然科学课堂信息图',
+        imageModel: 'local-mock-image',
+        automationLevel: 'BOUNDED_AUTO', budgetUnits: 1, maxRevisionRounds: 0,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '用一页说明水循环的核心关系', sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount: 1 }, aspectRatio: '16:9',
+            audience: '小学高年级学生', focus: '水循环核心关系',
+          },
+        },
+      }),
+    }))
+    expect(created.status).toBe(201)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+
+    for (let index = 0; index < 6; index += 1) {
+      await runtime.tick()
+      if ((await repository.getRun(runId))?.status === 'RECOVERING') break
+    }
+    const recovering = (await repository.getRun(runId))!
+    expect(recovering).toMatchObject({
+      status: 'RECOVERING',
+      technicalRecovery: { resumeState: 'EXECUTING', reason: 'TEST_SUBMISSION_RESPONSE_LOST', active: true },
+    })
+    const imageStep = (await repository.listSteps(runId)).find((step) => step.tool === 'generate_slide_image')!
+    const imageKey = imageStep.idempotencyKey
+    expect(images.submitCalls).toBe(1)
+    expect(images.operations.get(imageKey)).toBeDefined()
+
+    const retryDeadline = recovering.technicalRecovery?.nextAttemptAt
+    if (!retryDeadline) throw new Error('TEST_RECOVERY_RETRY_DEADLINE_MISSING')
+    const retryAt = Date.parse(retryDeadline)
+    clock.advance(retryAt - clock.now().getTime())
+    await runtime.tick()
+    expect(images.lookupRequests).toEqual([expect.objectContaining({ idempotencyKey: imageKey })])
+    expect(images.inspectedStates).toContain('QUEUED')
+    expect(images.submitCalls).toBe(1)
+
+    const operationId = images.operations.get(imageKey)!
+    images.statuses.set(operationId, { state: 'PROCESSING' })
+    await runtime.tick()
+    expect(images.inspectedStates).toContain('PROCESSING')
+    expect(images.submitCalls).toBe(1)
+
+    const bytes = await sharp({
+      create: { width: 1600, height: 900, channels: 3, background: '#2F7D8C' },
+    }).png().toBuffer()
+    const artifact = await artifacts.put({
+      tenantId: 'frameflow', runId, name: 'single-async.png', mimeType: 'image/png', bytes,
+      idempotencyKey: `${imageKey}:accepted-artifact`,
+    })
+    images.complete(imageKey, artifact.artifactId)
+    for (let index = 0; index < 8; index += 1) {
+      await runtime.tick()
+      if ((await repository.getRun(runId))?.status === 'COMPLETED') break
+    }
+
+    const completed = (await repository.getRun(runId))!
+    expect(completed.status).toBe('COMPLETED')
+    expect((await getActiveBlueprint(repository, runId, 0)).visualDeckV4Proposal?.slideBriefs)
+      .toEqual([expect.objectContaining({ pageNumber: 1, role: 'SINGLE' })])
+    expect(images.submitCalls).toBe(1)
+    const events = await repository.listEvents(runId)
+    expect(events.filter((event) => event.type === 'technical.recovery.started')).toHaveLength(1)
+    expect(events.filter((event) => event.type === 'technical.recovery.completed')).toHaveLength(1)
+    expect(events.some((event) => event.type === 'page_review.completed')).toBe(true)
+    expect(events.some((event) => event.type === 'deck_review.completed')).toBe(true)
+
+    const reconnectAfter = events.find((event) => event.type === 'generation.started')!.sequence
+    const stream = await runtime.handler(request(`/v1/runs/${runId}/events?after=${reconnectAfter}`))
+    const streamed = (await stream.text()).split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as { sequence: number })
+    expect(streamed.map((event) => event.sequence)).toEqual(
+      events.filter((event) => event.sequence > reconnectAfter).map((event) => event.sequence),
+    )
+
+    const delivery = (await repository.listDeliveries(runId))[0]!
     const content = await runtime.handler(request(
       `/v1/runs/${runId}/deliveries/${encodeURIComponent(delivery.id)}/content?format=pptx`,
     ))
