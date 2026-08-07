@@ -7,6 +7,7 @@
     "test": "scripts/with-dev-umask.sh bun test",
     "typecheck": "scripts/with-dev-umask.sh tsc --noEmit",
     "build": "scripts/with-dev-umask.sh sh -c 'tsc -p tsconfig.build.json && mkdir -p dist/docs && cp docs/openapi-v1.json docs/openapi-v2.json dist/docs/'",
+    "prepare:release": "scripts/with-dev-umask.sh bun scripts/write-release-manifest.mjs",
     "dev:mock": "scripts/with-dev-umask.sh bun src/server.ts",
     "dev:v2": "scripts/with-dev-umask.sh bun src/presentation-job-v2-server.ts",
     "eval:v4": "scripts/with-dev-umask.sh bun scripts/run-v4-real-evaluation.ts",

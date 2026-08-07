@@ -1,10 +1,11 @@
 import { z } from 'zod'
+import { CONTRACT_VERSION } from './contract-version'
 import { visualDeckV4ConfigSchema, visualDeckV4SourceRoleSchema } from './visual-deck-v4-contracts'
 import { releaseIdentitySchema } from './release-identity'
 import { generationBatchSchema } from './generation-batch-contracts'
 import { terminalAccountingSchema } from './terminal-accounting-contracts'
 
-export const CONTRACT_VERSION = '1' as const
+export { CONTRACT_VERSION } from './contract-version'
 export const MAX_PLANNING_RETRIES = 2
 
 const identifierSchema = z.string().trim().min(1).max(160)

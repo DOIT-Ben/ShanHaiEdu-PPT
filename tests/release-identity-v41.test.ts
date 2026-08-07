@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import packageMetadata from '../package.json'
+import { CONTRACT_VERSION } from '../src/contract-version'
 import {
   PPT_AGENT_CONTRACT_VERSION,
   PPT_AGENT_SOFTWARE_VERSION,
@@ -19,7 +20,7 @@ describe('PPT Agent V4 release identity', () => {
       'visual-deck-v4-chain-3',
       'visual-deck-v4-chain-4',
     ])
-    expect(PPT_AGENT_CONTRACT_VERSION).toBe('1')
+    expect(PPT_AGENT_CONTRACT_VERSION).toBe(CONTRACT_VERSION)
   })
 
   test('keeps the deployment environment example on the same software version', () => {

@@ -33,7 +33,7 @@ import { RunService } from './core/run-service'
 import { createPresentationJobV2ProviderFromEnv } from './runtime/presentation-job-v2-provider-config'
 import { ServiceTokenAuthentication } from './http/service-token-authentication'
 import { safeWorkerErrorCode, WorkerTickError, workerLogRecord } from './observability/runtime-health'
-import { buildIdentity, PPT_AGENT_SOFTWARE_VERSION } from './release-identity'
+import { resolveRuntimeBuildIdentity } from './runtime/release-manifest'
 import { V4ModelPolicy } from './core/v4-model-policy'
 import {
   resolveGatewayCoursewareModelsConfig,
@@ -89,14 +89,11 @@ const revisionImageModel = resolveV4RevisionImageModel(process.env)
 const imageEditTaskEnabled = resolveV4ImageEditAsyncTaskEnabled(process.env)
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const visualDeckV4Transport = visualDeckV4TextTransport(process.env.PPT_AGENT_V4_TEXT_TRANSPORT)
-const appVersion = process.env.PPT_AGENT_SOFTWARE_VERSION?.trim()
-  || process.env.PPT_AGENT_APP_VERSION?.trim()
-  || PPT_AGENT_SOFTWARE_VERSION
-const releaseIdentity = buildIdentity({
-  softwareVersion: appVersion,
-  gitSha: process.env.PPT_AGENT_GIT_SHA?.trim() || 'unknown',
-  releaseId: process.env.PPT_AGENT_RELEASE_ID?.trim() || 'unversioned',
+const releaseIdentity = resolveRuntimeBuildIdentity({
+  env: process.env,
+  runtimeEntryUrl: import.meta.url,
 })
+const appVersion = releaseIdentity.softwareVersion
 const heartbeatStaleMs = boundedInteger('PPT_AGENT_HEARTBEAT_STALE_MS', 5_000, 1_000, 60_000)
 // A bounded provider retry window can legitimately keep one worker tick busy for ~19 minutes.
 const tickStaleMs = boundedInteger('PPT_AGENT_TICK_STALE_MS', 25 * 60_000, 10_000, 60 * 60_000)
