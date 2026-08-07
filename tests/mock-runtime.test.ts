@@ -950,6 +950,56 @@ describe('mock runtime', () => {
     })
   })
 
+  test('delivers a formal single-page V4 Run through planning, review, SSE and PPTX download', async () => {
+    const repository = new InMemoryAgentRepository()
+    const artifacts = new MockArtifactPort()
+    const runtime = createMockRuntime({ repository, artifacts, apiToken: token })
+    const created = await runtime.handler(request('/v1/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'mock-create-v4-single-0001' },
+      body: JSON.stringify({
+        schemaVersion: '1', host: { tenantId: 'frameflow', externalUserId: 'user-1' },
+        source: {
+          kind: 'TEXT', name: '水循环教材.txt', roleHint: 'CONTENT_SOURCE',
+          text: '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4),
+        },
+        slideCount: 1,
+        visualDirection: '清晰的自然科学课堂信息图',
+        imageModel: 'local-mock-image',
+        automationLevel: 'BOUNDED_AUTO', budgetUnits: 1, maxRevisionRounds: 0,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: {
+          instruction: '用一页说明水循环的核心关系', sourceMode: 'SOURCE_GROUNDED',
+          deckOptions: {
+            deckType: 'PRESENTER_SLIDES', language: 'zh-CN', length: { slideCount: 1 }, aspectRatio: '16:9',
+            audience: '小学高年级学生', focus: '水循环核心关系',
+          },
+        },
+      }),
+    }))
+    expect(created.status).toBe(201)
+    const runId = (await created.json() as { data: { id: string } }).data.id
+    for (let index = 0; index < 6; index += 1) await runtime.tick()
+
+    const completed = (await repository.getRun(runId))!
+    expect(completed.status).toBe('COMPLETED')
+    const blueprint = await getActiveBlueprint(repository, runId, 0)
+    expect(blueprint.visualDeckV4Proposal?.slideBriefs).toEqual([
+      expect.objectContaining({ pageNumber: 1, role: 'SINGLE' }),
+    ])
+    const delivery = (await repository.listDeliveries(runId))[0]!
+    expect(delivery.identity).toMatchObject({ status: 'VERIFIED', slideCount: 1, pageNumbers: [1] })
+    const events = await repository.listEvents(runId)
+    expect(validateLifecycle(events, completed.status, 0)).toMatchObject({ passed: true })
+    const history = await runtime.handler(request(`/v1/runs/${runId}/events/history?after=0`))
+    expect((await history.json() as { data: unknown[] }).data.length).toBe(events.length)
+    const content = await runtime.handler(request(
+      `/v1/runs/${runId}/deliveries/${encodeURIComponent(delivery.id)}/content?format=pptx`,
+    ))
+    expect(content.status).toBe(200)
+    expect((await content.arrayBuffer()).byteLength).toBe(delivery.pptx.byteLength)
+  })
+
   test('automatically completes a new v4 run after a non-blocking page-review rejection with revisions disabled', async () => {
     const scenario = await runQualityPolicyScenario({
       id: 'page-review-rejection',
