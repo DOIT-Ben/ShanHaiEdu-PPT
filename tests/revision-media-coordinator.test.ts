@@ -351,7 +351,7 @@ describe('revision media coordinator', () => {
       artifacts: base.artifacts,
       controlledRaster: new SharpControlledRasterPort({ artifacts: base.artifacts }),
       clock: base.clock,
-      revisionImageModel: 'gpt-image-2',
+      revisionImageModel: null,
     })
 
     await expect(coordinator.submit('run-1', 5)).resolves.toMatchObject({
