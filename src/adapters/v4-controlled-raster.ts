@@ -130,13 +130,27 @@ function diagramSvg(diagram: ExactDiagramSpec) {
   return comparisonDiagram(diagram)
 }
 
+function unescapeXml(value: string) {
+  return value.replace(/&(amp|lt|gt|quot|apos);/g, (_match, entity: string) => ({
+    amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  })[entity]!)
+}
+
+export function assertControlledRasterSvgTextWhitelist(svg: string, allowedText: ReadonlySet<string>) {
+  const textNodes = [...svg.matchAll(/<text\b[^>]*>([\s\S]*?)<\/text>/g)]
+  for (const node of textNodes) {
+    const text = visibleLine(unescapeXml(node[1]!))
+    if (!allowedText.has(text)) throw new Error('CONTROLLED_RASTER_VISIBLE_TEXT_NOT_ALLOWED')
+  }
+}
+
 export function controlledRasterSvg(input: Parameters<ControlledRasterPort['render']>[0]) {
   const allowedText = new Set([input.title, ...input.visibleCopy].map(visibleLine).filter(Boolean))
   const visibleText = [visibleLine(input.title), ...input.visibleCopy.slice(0, 3).map(visibleLine)].filter(Boolean)
   if (visibleText.some((text) => !allowedText.has(text))) throw new Error('CONTROLLED_RASTER_VISIBLE_TEXT_NOT_ALLOWED')
   const copy = visibleText.slice(1).map((line, index) =>
     `<text x="800" y="${172 + index * 42}" text-anchor="middle" font-size="${fontSize(line, 29, 18)}" font-family="sans-serif" fill="#475569">${escapeXml(line)}</text>`).join('')
-  return `<svg width="${CONTROLLED_RASTER_WIDTH}" height="${CONTROLLED_RASTER_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
+  const svg = `<svg width="${CONTROLLED_RASTER_WIDTH}" height="${CONTROLLED_RASTER_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
     <rect width="100%" height="100%" fill="#F8FAFC"/>
     <rect x="68" y="58" width="1464" height="784" rx="42" fill="#EAF3FF"/>
     <rect x="84" y="74" width="1432" height="752" rx="34" fill="#FDFEFF"/>
@@ -145,6 +159,8 @@ export function controlledRasterSvg(input: Parameters<ControlledRasterPort['rend
     ${copy}
     ${diagramSvg(input.diagram)}
   </svg>`
+  assertControlledRasterSvgTextWhitelist(svg, allowedText)
+  return svg
 }
 
 export class SharpControlledRasterPort implements ControlledRasterPort {

@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import sharp from 'sharp'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
-import { controlledRasterSvg, SharpControlledRasterPort } from '../src/adapters/v4-controlled-raster'
+import {
+  assertControlledRasterSvgTextWhitelist,
+  controlledRasterSvg,
+  SharpControlledRasterPort,
+} from '../src/adapters/v4-controlled-raster'
 import { FixedClock, MockArtifactPort, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { hashInput } from '../src/core/hash'
 import { MediaStepRunner } from '../src/core/media-step-runner'
@@ -17,6 +21,13 @@ function run(): RunRecord {
     host: { tenantId: 'frameflow', externalUserId: 'teacher-1' },
     source: { kind: 'TEXT', text: '桌上有5个苹果。水循环形成云和雨。'.repeat(5) },
     slideCount: 3, visualDirection: '清晰的课堂信息图', imageModel: 'gemini-3-pro-image-preview',
+    v4ModelSnapshot: {
+      schemaVersion: '1',
+      textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra',
+      imageModel: 'gemini-3-pro-image-preview',
+      imageEditModel: 'gpt-image-2',
+    },
     presentationMode: 'VISUAL_DECK_V4', automationLevel: 'BOUNDED_AUTO', maxRevisionRounds: 2,
     revisionRound: 0, qualityScore: null, status: 'EXECUTING', resumeState: null, version: 1,
     budgetUnits: 100, committedBudgetUnits: 0, qualityOverride: false, qualityOverrideReason: null,
@@ -114,6 +125,13 @@ describe('V4 controlled raster', () => {
     expect(textNodes).toEqual(['五个苹果', '桌上有5个苹果。'])
     expect(svg).not.toContain('精确关系图示')
     expect(svg).not.toContain('5个苹果</text>')
+  })
+
+  test('rejects unapproved text found in the final SVG before rasterization', () => {
+    expect(() => assertControlledRasterSvgTextWhitelist(
+      '<svg><text>已批准标题</text><text>未批准文本</text></svg>',
+      new Set(['已批准标题']),
+    )).toThrow('CONTROLLED_RASTER_VISIBLE_TEXT_NOT_ALLOWED')
   })
 
   test('keeps controlled pages in the V4 batch with zero Provider units', async () => {
