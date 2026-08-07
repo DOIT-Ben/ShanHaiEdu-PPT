@@ -1373,6 +1373,10 @@ export class QuickDeckEvaluationService {
       }
     }
 
+    // Known artifacts must become durably reclaimable before physical deletion.
+    // A process can stop between the two writes, so this is distinct from the
+    // remaining pending state calculated after cleanup completes.
+    const cleanupRequiredBeforeDeletion = cleanupPending || (artifactIds.size > 0 && cleanupWindowOpen)
     const expired: QuickDeckEvaluationRecord = {
       ...record,
       pages: record.pages.map((page) => ({
@@ -1386,8 +1390,8 @@ export class QuickDeckEvaluationService {
       phase: 'EXPIRED',
       errorCode: null,
       nextAttemptAt: null,
-      cleanupPending,
-      cleanupDeadline: cleanupPending ? cleanupDeadline : null,
+      cleanupPending: cleanupRequiredBeforeDeletion,
+      cleanupDeadline: cleanupRequiredBeforeDeletion ? cleanupDeadline : null,
       cleanupAuditRequired,
       updatedAt: now,
     }
