@@ -33,10 +33,13 @@ function record(id: string, overrides: Partial<QuickDeckEvaluationRecord> = {}):
     pptx: null,
     preview: null,
     errorCode: null,
+    pendingFailure: null,
     createdAt: now,
     startedAt: null,
     completedAt: null,
     expiresAt: '2026-08-08T00:00:00.000Z',
+    drainStartedAt: null,
+    drainDeadline: null,
     nextAttemptAt: now,
     updatedAt: now,
     ...overrides,
@@ -93,7 +96,7 @@ describe('quick-deck evaluation repositories', () => {
       })
     })
 
-    test(`${kind} persists ordered SSE events and never resumes an interrupted evaluation`, async () => {
+    test(`${kind} turns an interrupted image submission into a drain without resubmitting it`, async () => {
       await withRepository(kind, async (repository) => {
         const job = record('quick-deck-eval-events')
         await repository.create({
@@ -101,8 +104,11 @@ describe('quick-deck evaluation repositories', () => {
           dayStart: '2026-08-07T00:00:00.000Z',
         })
         const generating = record(job.id, {
-          status: 'GENERATING', phase: 'IMAGE_GENERATION', startedAt: later, nextAttemptAt: later, updatedAt: later,
-          pages: [{ ...job.pages[0]!, status: 'SUBMITTED', operationId: 'imgop_1234567890abcdef1234567890abcdef' }],
+          status: 'SUBMITTING_IMAGES', phase: 'IMAGE_GENERATION', startedAt: later, nextAttemptAt: null, updatedAt: later,
+          pages: [{ ...job.pages[0]!, status: 'PENDING', submissionState: 'UNKNOWN', operationId: null }],
+          pendingFailure: null,
+          drainStartedAt: null,
+          drainDeadline: null,
         })
         await repository.save({
           record: generating,
@@ -113,15 +119,19 @@ describe('quick-deck evaluation repositories', () => {
         })
         expect((await repository.readEvents({ jobId: job.id, afterSequence: 0, limit: 10 })).events.map((event) => event.sequence))
           .toEqual([1, 2])
-        expect(await repository.failInterrupted({ now: '2026-08-07T00:02:00.000Z' })).toBe(1)
+        expect(await repository.recoverInterrupted({
+          now: '2026-08-07T00:02:00.000Z', defaultDrainDeadline: '2026-08-07T00:17:00.000Z',
+        })).toBe(1)
         expect(await repository.get(job.id)).toMatchObject({
-          status: 'FAILED', phase: 'FAILED', errorCode: 'EVALUATION_INTERRUPTED', nextAttemptAt: null,
+          status: 'GENERATING', phase: 'IMAGE_GENERATION', errorCode: null,
+          pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+          drainDeadline: '2026-08-07T00:17:00.000Z', nextAttemptAt: '2026-08-07T00:02:00.000Z',
         })
         const events = await repository.readEvents({ jobId: job.id, afterSequence: 0, limit: 10 })
         expect(events.events.map((event) => event.type)).toEqual([
-          'evaluation.accepted', 'images.submitted', 'evaluation.failed',
+          'evaluation.accepted', 'images.submitted', 'images.draining',
         ])
-        expect(events.terminalSequence).toBe(3)
+        expect(events.terminalSequence).toBeNull()
       })
     })
 

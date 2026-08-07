@@ -52,10 +52,14 @@ export type QuickDeckEvaluationRecord = Readonly<{
   pptx: QuickDeckEvaluationArtifactRecord | null
   preview: QuickDeckEvaluationArtifactRecord | null
   errorCode: QuickDeckEvaluationFailureCode | null
+  /** The first terminal media fault while accepted operations are drained. */
+  pendingFailure: QuickDeckEvaluationFailureCode | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null
   expiresAt: string
+  drainStartedAt: string | null
+  drainDeadline: string | null
   nextAttemptAt: string | null
   updatedAt: string
 }>
@@ -84,5 +88,8 @@ export interface QuickDeckEvaluationRepository {
     hasMore: boolean
     terminalSequence: number | null
   }>>
-  failInterrupted(input: Readonly<{ now: string }>): Promise<number>
+  recoverInterrupted(input: Readonly<{
+    now: string
+    defaultDrainDeadline: string
+  }>): Promise<number>
 }

@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { presentationBlueprintSchema } from '../presentation-contracts'
 import {
@@ -10,6 +11,7 @@ import {
   type QuickDeckEvaluationEvent,
 } from '../quick-deck-evaluation-contracts'
 import type { QuickDeckEvaluationRepository, QuickDeckEvaluationRecord } from '../core/quick-deck-evaluation-ports'
+import { recoverInterruptedQuickDeckEvaluation } from '../core/quick-deck-evaluation-recovery'
 
 type JsonRow = Readonly<{ data: string }>
 type CountRow = Readonly<{ count: number }>
@@ -62,6 +64,9 @@ const recordSchema = z.object({
   startedAt: dateTimeSchema.nullable(),
   completedAt: dateTimeSchema.nullable(),
   expiresAt: dateTimeSchema,
+  pendingFailure: quickDeckEvaluationFailureCodeSchema.nullable().default(null),
+  drainStartedAt: dateTimeSchema.nullable().default(null),
+  drainDeadline: dateTimeSchema.nullable().default(null),
   nextAttemptAt: dateTimeSchema.nullable(),
   updatedAt: dateTimeSchema,
 }).strict()
@@ -226,37 +231,47 @@ export class SqliteQuickDeckEvaluationRepository implements QuickDeckEvaluationR
     return { events, hasMore: rows.length > input.limit, terminalSequence: terminal }
   }
 
-  async failInterrupted(input: Parameters<QuickDeckEvaluationRepository['failInterrupted']>[0]) {
+  async recoverInterrupted(input: Parameters<QuickDeckEvaluationRepository['recoverInterrupted']>[0]) {
     const transaction = this.#database.transaction(() => {
       const rows = this.#database.query<JsonRow, []>(`
         SELECT data FROM quick_deck_evaluations
         WHERE status IN ('QUEUED', 'PLANNING', 'SUBMITTING_IMAGES', 'GENERATING', 'PACKAGING')
       `).all()
+      let changed = 0
       for (const row of rows) {
         const record = parseRecord(row)!
-        const failed: QuickDeckEvaluationRecord = {
-          ...record,
-          status: 'FAILED', phase: 'FAILED', errorCode: 'EVALUATION_INTERRUPTED',
-          completedAt: input.now, nextAttemptAt: null, updatedAt: input.now,
-        }
+        const recovered = recoverInterruptedQuickDeckEvaluation(record, input)
+        if (!recovered) continue
         const sequence = (this.#database.query<SequenceRow, [string]>(`
           SELECT MAX(sequence) AS sequence FROM quick_deck_evaluation_events WHERE job_id = ?
-        `).get(failed.id)?.sequence ?? 0) + 1
+        `).get(recovered.record.id)?.sequence ?? 0) + 1
         const event = quickDeckEvaluationEventSchema.parse({
-          schemaVersion: '1', jobId: failed.id, sequence, eventId: `event-${failed.id}-interrupted`,
-          type: 'evaluation.failed', payload: { code: 'EVALUATION_INTERRUPTED' }, occurredAt: input.now,
+          schemaVersion: '1', jobId: recovered.record.id, sequence, eventId: `event-${randomUUID()}`,
+          ...(recovered.action === 'FAILED'
+            ? { type: 'evaluation.failed' as const, payload: { code: recovered.record.errorCode! } }
+            : {
+                type: 'images.draining' as const,
+                payload: {
+                  pendingPages: recovered.record.pages.filter((page) => !['COMPLETED', 'FAILED'].includes(page.status)).length,
+                  failedPages: recovered.record.pages.filter((page) => page.status === 'FAILED').length,
+                  totalPages: recovered.record.request.slideCount,
+                  drainDeadline: recovered.record.drainDeadline!,
+                },
+              }),
+          occurredAt: input.now,
         })
         this.#database.query<unknown, [string, string, string, string | null, string, string, string]>(`
           UPDATE quick_deck_evaluations
           SET data = ?, tenant_id = ?, status = ?, next_attempt_at = ?, expires_at = ?, updated_at = ?
           WHERE id = ?
-        `).run(JSON.stringify(failed), failed.tenantId, failed.status, failed.nextAttemptAt,
-          failed.expiresAt, failed.updatedAt, failed.id)
+        `).run(JSON.stringify(recovered.record), recovered.record.tenantId, recovered.record.status, recovered.record.nextAttemptAt,
+          recovered.record.expiresAt, recovered.record.updatedAt, recovered.record.id)
         this.#database.query<unknown, [string, number, string]>(`
           INSERT INTO quick_deck_evaluation_events (job_id, sequence, data) VALUES (?, ?, ?)
-        `).run(failed.id, sequence, JSON.stringify(event))
+        `).run(recovered.record.id, sequence, JSON.stringify(event))
+        changed += 1
       }
-      return rows.length
+      return changed
     })
     return transaction()
   }

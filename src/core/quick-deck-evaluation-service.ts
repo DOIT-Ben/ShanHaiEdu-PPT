@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import sharp from 'sharp'
-import type { ArtifactPort, ClockPort, ImageGenerationPort, PresentationRendererPort, StructuredModelPort } from './ports'
+import { MediaSubmissionError, type ArtifactPort, type ClockPort, type ImageGenerationPort, type PresentationRendererPort, type StructuredModelPort } from './ports'
 import { blueprintImageRequirements, hasVisualDeckV4AspectRatio } from './blueprint-assets'
 import { hashInput } from './hash'
 import { assertReadablePptxArtifact } from './pptx-artifact-validation'
@@ -25,12 +25,14 @@ import type {
   QuickDeckEvaluationArtifactRecord,
   QuickDeckEvaluationArtifactCleanupPort,
   QuickDeckEvaluationRecord,
+  QuickDeckEvaluationPageRecord,
   QuickDeckEvaluationRepository,
 } from './quick-deck-evaluation-ports'
 import { V4EvidenceWindowCompiler } from './v4-evidence-window-compiler'
 
 const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation' as const
 const PREVIEW_MIME = 'image/png' as const
+const QUICK_DECK_DRAIN_TIMEOUT_MS = 15 * 60_000
 
 export class QuickDeckEvaluationError extends Error {
   constructor(readonly status: number, readonly code: string) {
@@ -174,7 +176,7 @@ function artifactPublic(record: QuickDeckEvaluationArtifactRecord | null) {
 
 function publicJob(record: QuickDeckEvaluationRecord): QuickDeckEvaluationPublicJob {
   const completed = record.status === 'COMPLETED'
-  const submittedPages = record.pages.filter((page) => ['SUBMITTED', 'PROCESSING', 'COMPLETED', 'FAILED'].includes(page.status)).length
+  const submittedPages = record.pages.filter((page) => page.submissionState !== 'NOT_SUBMITTED').length
   const completedPages = record.pages.filter((page) => page.status === 'COMPLETED').length
   return quickDeckEvaluationPublicJobSchema.parse({
     schemaVersion: '1',
@@ -240,7 +242,11 @@ export class QuickDeckEvaluationService {
   }
 
   async initialize() {
-    return this.dependencies.repository.failInterrupted({ now: this.dependencies.clock.now().toISOString() })
+    const now = this.dependencies.clock.now()
+    return this.dependencies.repository.recoverInterrupted({
+      now: now.toISOString(),
+      defaultDrainDeadline: new Date(now.getTime() + QUICK_DECK_DRAIN_TIMEOUT_MS).toISOString(),
+    })
   }
 
   async create(tenantId: string, request: unknown) {
@@ -278,10 +284,13 @@ export class QuickDeckEvaluationService {
       pptx: null,
       preview: null,
       errorCode: null,
+      pendingFailure: null,
       createdAt: timestamp,
       startedAt: null,
       completedAt: null,
       expiresAt: new Date(now.getTime() + this.dependencies.ttlMs).toISOString(),
+      drainStartedAt: null,
+      drainDeadline: null,
       nextAttemptAt: timestamp,
       updatedAt: timestamp,
     }
@@ -377,56 +386,91 @@ export class QuickDeckEvaluationService {
       event: event(submitting.id, 'planning.completed', { slideCount: submitting.request.slideCount }, submittedAt),
     })
     const requirements = blueprintImageRequirements({ id: submitting.id, revisionRound: 0 }, blueprint)
-    const results = await Promise.allSettled(requirements.map((requirement) => this.dependencies.images.submit({
-      tenantId: submitting.tenantId,
-      prompt: requirement.prompt,
-      ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
-      model: submitting.imageModel,
-      aspectRatio: '16:9',
-      exactAspectRatio: true,
-      backgroundMode: 'OPAQUE',
-      operationMode: 'TEXT_TO_IMAGE',
-      idempotencyKey: submitting.pages.find((page) => page.pageNumber === requirement.pageNumber)!.idempotencyKey,
-    })))
-    const nextPages = submitting.pages.map((page) => {
-      const result = results[page.pageNumber - 1]!
-      if (result.status !== 'fulfilled') return {
+    let persisted = submitting
+    let submissionFailure: QuickDeckEvaluationFailureCode | null = null
+    for (const requirement of requirements) {
+      const page = this.pageForRequirement(persisted, requirement.pageNumber)
+      const beforeSubmit = this.replacePage(persisted, {
         ...page,
-        status: 'FAILED' as const,
-        submissionState: 'UNKNOWN' as const,
-        errorCode: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+        status: 'PENDING',
+        submissionState: 'UNKNOWN',
+        operationId: null,
+        errorCode: null,
+      })
+      await this.dependencies.repository.save({ record: beforeSubmit })
+      persisted = beforeSubmit
+      try {
+        const result = await this.dependencies.images.submit({
+          tenantId: persisted.tenantId,
+          prompt: requirement.prompt,
+          ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
+          model: persisted.imageModel,
+          aspectRatio: '16:9',
+          exactAspectRatio: true,
+          backgroundMode: 'OPAQUE',
+          operationMode: 'TEXT_TO_IMAGE',
+          idempotencyKey: page.idempotencyKey,
+        })
+        persisted = this.replacePage(persisted, {
+          ...page,
+          status: result.state === 'PROCESSING' ? 'PROCESSING' : 'SUBMITTED',
+          submissionState: 'SUBMITTED',
+          operationId: result.operationId,
+          errorCode: null,
+        })
+        await this.dependencies.repository.save({ record: persisted })
+      } catch (error) {
+        const mediaError = error instanceof MediaSubmissionError ? error : null
+        const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
+        const errorCode = mediaError?.code ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+        persisted = this.replacePage(persisted, submissionState === 'NOT_SUBMITTED'
+          ? { ...page, status: 'FAILED', submissionState, operationId: null, errorCode }
+          : {
+              ...page,
+              status: 'PENDING',
+              submissionState,
+              operationId: mediaError?.operationId ?? null,
+              errorCode,
+            })
+        await this.dependencies.repository.save({ record: persisted })
+        submissionFailure = this.submissionFailureCode(persisted.pages, submissionState)
+        break
       }
-      return {
-        ...page,
-        status: result.value.state === 'PROCESSING' ? 'PROCESSING' as const : 'SUBMITTED' as const,
-        submissionState: 'SUBMITTED' as const,
-        operationId: result.value.operationId,
+    }
+    if (submissionFailure) {
+      const stopped = {
+        ...persisted,
+        pages: persisted.pages.map((page) => page.status === 'PENDING' && page.submissionState === 'NOT_SUBMITTED'
+          ? { ...page, status: 'FAILED' as const, errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }
+          : page),
+        updatedAt: this.dependencies.clock.now().toISOString(),
       }
-    })
-    const rejected = results.filter((result) => result.status === 'rejected').length
-    if (rejected > 0) {
-      const persisted = { ...submitting, pages: nextPages, updatedAt: this.dependencies.clock.now().toISOString() }
-      await this.dependencies.repository.save({ record: persisted })
-      return await this.fail(
-        persisted,
-        rejected === results.length
-          ? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
-          : 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
-      )
+      if (!this.hasUnresolvedPages(stopped.pages)) return await this.fail(stopped, submissionFailure)
+      const draining = this.startDraining(stopped, submissionFailure)
+      await this.dependencies.repository.save({
+        record: draining,
+        event: event(draining.id, 'images.submitted', {
+          submittedPages: draining.pages.filter((page) => page.submissionState !== 'NOT_SUBMITTED').length,
+          totalPages: draining.request.slideCount,
+        }, draining.updatedAt),
+      })
+      return await this.dependencies.repository.save({
+        record: draining,
+        event: event(draining.id, 'images.draining', this.drainEventPayload(draining), draining.updatedAt),
+      })
     }
     const generatingAt = this.dependencies.clock.now().toISOString()
     const generating: QuickDeckEvaluationRecord = {
-      ...submitting,
+      ...persisted,
       status: 'GENERATING',
       phase: 'IMAGE_GENERATION',
-      pages: nextPages,
       nextAttemptAt: generatingAt,
       updatedAt: generatingAt,
     }
     await this.dependencies.repository.save({
       record: generating,
       event: event(generating.id, 'images.submitted', {
-        submittedPages: nextPages.length,
+        submittedPages: generating.pages.length,
         totalPages: generating.request.slideCount,
       }, generatingAt),
     })
@@ -434,55 +478,37 @@ export class QuickDeckEvaluationService {
 
   private async inspectAndPackage(record: QuickDeckEvaluationRecord) {
     if (!record.blueprint) return await this.fail(record, 'EVALUATION_PLANNING_FAILED')
-    const pending = record.pages.filter((page) => ['SUBMITTED', 'PROCESSING'].includes(page.status))
+    const recoveredPages = await this.recoverOperationIds(record)
+    const pending = recoveredPages.filter((page) => page.operationId !== null && !this.isTerminalPage(page))
     const inspected = await Promise.all(pending.map(async (page) => {
-      if (!page.operationId) throw new Error('QUICK_DECK_IMAGE_OPERATION_MISSING')
-      const result = await this.dependencies.images.inspect({
-        tenantId: record.tenantId,
-        operationId: page.operationId,
-        idempotencyKey: page.idempotencyKey,
-        aspectRatio: '16:9',
-        exactAspectRatio: true,
-        backgroundMode: 'OPAQUE',
-      })
-      if (result.state === 'QUEUED' || result.state === 'PROCESSING') {
-        return { page, result, next: null as null | QuickDeckEvaluationRecord['pages'][number] }
-      }
-      if (result.state === 'FAILED') {
-        return { page, result, next: { ...page, status: 'FAILED' as const, errorCode: result.errorCode } }
-      }
-      if (result.state !== 'COMPLETED') throw new Error('QUICK_DECK_IMAGE_INSPECTION_RESULT_INVALID')
-      const artifact = await this.dependencies.artifacts.get({ tenantId: record.tenantId, artifactId: result.artifactId })
-      if (!artifact) throw new Error('QUICK_DECK_IMAGE_ARTIFACT_MISSING')
-      const metadata = await sharp(artifact.bytes).metadata()
-      if (!metadata.width || !metadata.height) throw new Error('QUICK_DECK_IMAGE_METADATA_INVALID')
-      return {
-        page,
-        result,
-        next: {
-          ...page,
-          status: 'COMPLETED' as const,
-          artifactId: result.artifactId,
-          width: metadata.width,
-          height: metadata.height,
-          aspectRatioValidated: hasVisualDeckV4AspectRatio(metadata.width, metadata.height),
-          sha256: artifact.sha256,
-          errorCode: null,
-        },
-      }
+      return this.inspectPage(record, page)
     }))
     const pagesByNumber = new Map(inspected.flatMap((item) => item.next ? [[item.page.pageNumber, item.next] as const] : []))
-    const pages = record.pages.map((page) => pagesByNumber.get(page.pageNumber) ?? page)
-    if (pages.some((page) => page.status === 'FAILED')) {
-      return await this.fail({ ...record, pages, updatedAt: this.dependencies.clock.now().toISOString() }, 'EVALUATION_IMAGE_TASK_FAILED')
-    }
-    if (pages.some((page) => page.status === 'COMPLETED' && !page.aspectRatioValidated)) {
-      return await this.fail({ ...record, pages, updatedAt: this.dependencies.clock.now().toISOString() }, 'EVALUATION_IMAGE_RATIO_INVALID')
-    }
-    if (pages.some((page) => page.status !== 'COMPLETED')) {
-      const delays = inspected.flatMap((item) => item.result.state === 'QUEUED' || item.result.state === 'PROCESSING'
-        ? [boundedDelay(item.result.retryAfterMs)] : [])
+    const pages = recoveredPages.map((page) => pagesByNumber.get(page.pageNumber) ?? page)
+    const now = this.dependencies.clock.now()
+    if (this.hasUnresolvedPages(pages)) {
+      if (record.drainDeadline && Date.parse(record.drainDeadline) <= now.getTime()) {
+        const timedOut = pages.map((page) => this.isTerminalPage(page)
+          ? page
+          : { ...page, status: 'FAILED' as const, errorCode: 'EVALUATION_IMAGE_DRAIN_TIMEOUT' })
+        return await this.fail({ ...record, pages: timedOut, updatedAt: now.toISOString() }, 'EVALUATION_IMAGE_DRAIN_TIMEOUT')
+      }
+      const failure = record.pendingFailure ?? this.failureFromPages(pages)
       const progressAt = this.dependencies.clock.now()
+      if (failure) {
+        const draining = this.startDraining({ ...record, pages, updatedAt: progressAt.toISOString() }, failure, progressAt)
+        const pagesChanged = pages.some((page, index) => page !== record.pages[index])
+        const publishDrain = record.pendingFailure !== draining.pendingFailure
+          || record.drainDeadline !== draining.drainDeadline
+          || pagesChanged
+        return await this.dependencies.repository.save({
+          record: draining,
+          ...(publishDrain ? {
+            event: event(draining.id, 'images.draining', this.drainEventPayload(draining), draining.updatedAt),
+          } : {}),
+        })
+      }
+      const delays = inspected.flatMap((item) => item.retryAfterMs === null ? [] : [boundedDelay(item.retryAfterMs)])
       const generating: QuickDeckEvaluationRecord = {
         ...record,
         pages,
@@ -497,6 +523,8 @@ export class QuickDeckEvaluationService {
         }, generating.updatedAt),
       })
     }
+    const failure = record.pendingFailure ?? this.failureFromPages(pages)
+    if (failure) return await this.fail({ ...record, pages, updatedAt: now.toISOString() }, failure)
     const packagingAt = this.dependencies.clock.now().toISOString()
     const packaging: QuickDeckEvaluationRecord = {
       ...record,
@@ -514,6 +542,176 @@ export class QuickDeckEvaluationService {
       await this.package(packaging)
     } catch {
       await this.fail(packaging, 'EVALUATION_PACKAGING_FAILED')
+    }
+  }
+
+  private pageForRequirement(record: QuickDeckEvaluationRecord, pageNumber: number) {
+    const page = record.pages.find((candidate) => candidate.pageNumber === pageNumber)
+    if (!page) throw new Error('QUICK_DECK_IMAGE_PAGE_MISSING')
+    return page
+  }
+
+  private replacePage(record: QuickDeckEvaluationRecord, replacement: QuickDeckEvaluationPageRecord): QuickDeckEvaluationRecord {
+    return {
+      ...record,
+      pages: record.pages.map((page) => page.pageNumber === replacement.pageNumber ? replacement : page),
+      updatedAt: this.dependencies.clock.now().toISOString(),
+    }
+  }
+
+  private isTerminalPage(page: QuickDeckEvaluationPageRecord) {
+    return page.status === 'COMPLETED' || page.status === 'FAILED'
+  }
+
+  private hasUnresolvedPages(pages: readonly QuickDeckEvaluationPageRecord[]) {
+    return pages.some((page) => !this.isTerminalPage(page))
+  }
+
+  private submissionFailureCode(
+    pages: readonly QuickDeckEvaluationPageRecord[],
+    failureState: QuickDeckEvaluationPageRecord['submissionState'],
+  ): QuickDeckEvaluationFailureCode {
+    if (pages.some((page) => page.submissionState === 'SUBMITTED')) {
+      return 'EVALUATION_IMAGE_SUBMISSION_PARTIAL'
+    }
+    return failureState === 'NOT_SUBMITTED'
+      ? 'EVALUATION_IMAGE_SUBMISSION_FAILED'
+      : 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+  }
+
+  private failureFromPages(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode | null {
+    const failed = pages.filter((page) => page.status === 'FAILED')
+    if (failed.length === 0) return null
+    if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_DRAIN_TIMEOUT')) {
+      return 'EVALUATION_IMAGE_DRAIN_TIMEOUT'
+    }
+    if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_RATIO_INVALID')) {
+      return 'EVALUATION_IMAGE_RATIO_INVALID'
+    }
+    if (failed.some((page) => page.errorCode === 'EVALUATION_IMAGE_ARTIFACT_INVALID')) {
+      return 'EVALUATION_IMAGE_ARTIFACT_INVALID'
+    }
+    return 'EVALUATION_IMAGE_TASK_FAILED'
+  }
+
+  private startDraining(
+    record: QuickDeckEvaluationRecord,
+    pendingFailure: QuickDeckEvaluationFailureCode,
+    now = this.dependencies.clock.now(),
+  ): QuickDeckEvaluationRecord {
+    return {
+      ...record,
+      status: 'GENERATING',
+      phase: 'IMAGE_GENERATION',
+      errorCode: null,
+      pendingFailure: record.pendingFailure ?? pendingFailure,
+      drainStartedAt: record.drainStartedAt ?? now.toISOString(),
+      drainDeadline: record.drainDeadline ?? new Date(now.getTime() + QUICK_DECK_DRAIN_TIMEOUT_MS).toISOString(),
+      nextAttemptAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    }
+  }
+
+  private drainEventPayload(record: QuickDeckEvaluationRecord) {
+    if (!record.drainDeadline) throw new Error('QUICK_DECK_DRAIN_DEADLINE_MISSING')
+    return {
+      pendingPages: record.pages.filter((page) => !this.isTerminalPage(page)).length,
+      failedPages: record.pages.filter((page) => page.status === 'FAILED').length,
+      totalPages: record.request.slideCount,
+      drainDeadline: record.drainDeadline,
+    }
+  }
+
+  private async recoverOperationIds(record: QuickDeckEvaluationRecord): Promise<readonly QuickDeckEvaluationPageRecord[]> {
+    const lookup = this.dependencies.images.lookupByIdempotency
+    if (!lookup) return record.pages
+    return await Promise.all(record.pages.map(async (page) => {
+      if (this.isTerminalPage(page) || page.operationId !== null
+        || !['SUBMITTED', 'UNKNOWN'].includes(page.submissionState)) return page
+      try {
+        const result = await lookup({
+          tenantId: record.tenantId,
+          idempotencyKey: page.idempotencyKey,
+          operationMode: 'TEXT_TO_IMAGE',
+        })
+        if (result.state === 'SUBMITTED') {
+          return { ...page, status: 'SUBMITTED' as const, submissionState: 'SUBMITTED' as const, operationId: result.operationId }
+        }
+        if (result.state === 'NOT_SUBMITTED') {
+          return {
+            ...page,
+            status: 'FAILED' as const,
+            submissionState: 'NOT_SUBMITTED' as const,
+            errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+          }
+        }
+      } catch {
+        // A lookup outage is not evidence that the provider did not accept the original key.
+      }
+      return page
+    }))
+  }
+
+  private async inspectPage(record: QuickDeckEvaluationRecord, page: QuickDeckEvaluationPageRecord): Promise<Readonly<{
+    page: QuickDeckEvaluationPageRecord
+    next: QuickDeckEvaluationPageRecord | null
+    retryAfterMs: number | null
+  }>> {
+    if (!page.operationId) throw new Error('QUICK_DECK_IMAGE_OPERATION_MISSING')
+    let result: Awaited<ReturnType<ImageGenerationPort['inspect']>>
+    try {
+      result = await this.dependencies.images.inspect({
+        tenantId: record.tenantId,
+        operationId: page.operationId,
+        idempotencyKey: page.idempotencyKey,
+        aspectRatio: '16:9',
+        exactAspectRatio: true,
+        backgroundMode: 'OPAQUE',
+      })
+    } catch {
+      return { page, next: null, retryAfterMs: 1_000 }
+    }
+    if (result.state !== 'COMPLETED') {
+      if (result.state === 'FAILED') {
+        return {
+          page,
+          next: { ...page, status: 'FAILED', submissionState: 'SUBMITTED', errorCode: result.errorCode },
+          retryAfterMs: null,
+        }
+      }
+      return { page, next: null, retryAfterMs: result.retryAfterMs ?? 1_000 }
+    }
+    const artifact = await this.dependencies.artifacts.get({ tenantId: record.tenantId, artifactId: result.artifactId })
+    if (!artifact) {
+      return {
+        page,
+        next: { ...page, status: 'FAILED', submissionState: 'SUBMITTED', errorCode: 'EVALUATION_IMAGE_ARTIFACT_INVALID' },
+        retryAfterMs: null,
+      }
+    }
+    const metadata = await sharp(artifact.bytes).metadata().catch(() => null)
+    if (!metadata?.width || !metadata.height) {
+      return {
+        page,
+        next: { ...page, status: 'FAILED', submissionState: 'SUBMITTED', errorCode: 'EVALUATION_IMAGE_ARTIFACT_INVALID' },
+        retryAfterMs: null,
+      }
+    }
+    const aspectRatioValidated = hasVisualDeckV4AspectRatio(metadata.width, metadata.height)
+    return {
+      page,
+      next: {
+        ...page,
+        status: aspectRatioValidated ? 'COMPLETED' : 'FAILED',
+        submissionState: 'SUBMITTED',
+        artifactId: result.artifactId,
+        width: metadata.width,
+        height: metadata.height,
+        aspectRatioValidated,
+        sha256: artifact.sha256,
+        errorCode: aspectRatioValidated ? null : 'EVALUATION_IMAGE_RATIO_INVALID',
+      },
+      retryAfterMs: null,
     }
   }
 

@@ -7,7 +7,7 @@ import { LocalArtifactPort } from '../src/adapters/local-artifact-port'
 import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-renderer'
 import { LocalQuickDeckEvaluationArtifactCleanupPort } from '../src/adapters/quick-deck-evaluation-local-artifact-cleanup'
 import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-deck-evaluation-in-memory-repository'
-import type { ImageGenerationPort, StructuredModelPort } from '../src/core/ports'
+import { MediaSubmissionError, type ImageGenerationPort, type StructuredModelPort } from '../src/core/ports'
 import { QuickDeckEvaluationError, QuickDeckEvaluationService } from '../src/core/quick-deck-evaluation-service'
 
 const sourceText = '太阳加热水面形成水汽，水汽凝结成云，降水回到地表，构成持续循环。'.repeat(4)
@@ -92,7 +92,26 @@ class AsyncImages implements ImageGenerationPort {
 
 class PartialImages extends AsyncImages {
   override async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
-    if (input.idempotencyKey.includes(':slide:2:')) throw new Error('TEST_SUBMISSION_UNKNOWN')
+    if (input.idempotencyKey.includes(':slide:2:')) {
+      this.submissions.push(structuredClone(input))
+      throw new Error('TEST_SUBMISSION_UNKNOWN')
+    }
+    return super.submit(input)
+  }
+}
+
+class RejectedSecondPageImages extends AsyncImages {
+  override async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+    if (input.idempotencyKey.includes(':slide:2:')) {
+      this.submissions.push(structuredClone(input))
+      throw new MediaSubmissionError(
+        'TEST_SUBMISSION_REJECTED',
+        'NOT_SUBMITTED',
+        'the gateway rejected this page before accepting it',
+        { category: 'PROVIDER', disposition: 'NON_RETRYABLE', diagnosticCode: 'TEST_SUBMISSION_REJECTED' },
+        { billingState: 'NOT_CHARGED' },
+      )
+    }
     return super.submit(input)
   }
 }
@@ -154,7 +173,7 @@ function request(slideCount = 2) {
 }
 
 describe('quick-deck evaluation service', () => {
-  test('runs one Responses manuscript call, submits images in parallel, validates pixels, and packages a PPTX', async () => {
+  test('runs one Responses manuscript call, submits asynchronous images, validates pixels, and packages a PPTX', async () => {
     const { directory, artifacts, model, images, service } = await fixture()
     try {
       const first = await service.create('evaluation-tenant', request())
@@ -256,26 +275,90 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
-  test('persists successful and unknown page submissions before failing a partial batch', async () => {
+  test('stops new submissions after a definite rejection and drains already accepted pages', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-partial-'))
     try {
       const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
       const repository = new InMemoryQuickDeckEvaluationRepository()
+      const images = new RejectedSecondPageImages(artifacts)
       const service = new QuickDeckEvaluationService({
-        repository, artifacts, model: new CreativeModel(), images: new PartialImages(artifacts),
+        repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
-      const created = await service.create('evaluation-tenant', request(2))
+      const created = await service.create('evaluation-tenant', request(3))
       await service.tick({ limit: 10 })
       const stored = await repository.get(created.jobId)
 
-      expect(stored).toMatchObject({ status: 'FAILED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL' })
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual([
+        expect.stringContaining(':slide:1:'),
+        expect.stringContaining(':slide:2:'),
+      ])
+      expect(stored).toMatchObject({
+        status: 'GENERATING',
+        pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+        drainStartedAt: expect.any(String),
+        drainDeadline: expect.any(String),
+      })
       expect(stored?.pages).toEqual([
         expect.objectContaining({ submissionState: 'SUBMITTED', operationId: expect.any(String) }),
-        expect.objectContaining({ submissionState: 'UNKNOWN', errorCode: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN' }),
+        expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'TEST_SUBMISSION_REJECTED' }),
+        expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
       ])
+
+      await service.tick({ limit: 10 })
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'FAILED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+        pages: [
+          expect.objectContaining({ status: 'COMPLETED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED' }),
+        ],
+      })
+      expect(images.submissions).toHaveLength(2)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('resumes an interrupted partial drain by lookup and never creates another image submission', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-restart-drain-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const clock = new ControlledClock()
+      const images = new PartialImages(artifacts)
+      const firstService = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images,
+        renderer: new SharpPptxPresentationRenderer(), clock,
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 30 * 60_000,
+      })
+      const created = await firstService.create('evaluation-tenant', request(2))
+      await firstService.tick({ limit: 10 })
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'GENERATING', pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+      })
+
+      const resumedService = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images,
+        renderer: new SharpPptxPresentationRenderer(), clock,
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 30 * 60_000,
+      })
+      await resumedService.initialize()
+      clock.advance(20 * 60_000)
+      await resumedService.tick({ limit: 10 })
+
+      expect(images.submissions).toHaveLength(2)
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'FAILED', errorCode: 'EVALUATION_IMAGE_DRAIN_TIMEOUT',
+        pages: [
+          expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'UNKNOWN' }),
+        ],
+      })
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -393,7 +476,7 @@ describe('quick-deck evaluation service', () => {
       })
       const created = await service.create('evaluation-tenant', request(2))
       await service.tick({ limit: 10 })
-      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'FAILED' })
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({ status: 'GENERATING' })
       const providerArtifactId = images.operations.get(images.operations.get(
         `quick-deck-evaluation:${created.jobId}:slide:1:image`,
       )!)!

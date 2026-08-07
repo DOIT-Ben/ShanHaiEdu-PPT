@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto'
 import type { QuickDeckEvaluationRepository, QuickDeckEvaluationRecord } from '../core/quick-deck-evaluation-ports'
+import { recoverInterruptedQuickDeckEvaluation } from '../core/quick-deck-evaluation-recovery'
 import { quickDeckEvaluationEventSchema, type QuickDeckEvaluationEvent } from '../quick-deck-evaluation-contracts'
 
 function clone<T>(value: T): T {
@@ -74,24 +76,27 @@ export class InMemoryQuickDeckEvaluationRepository implements QuickDeckEvaluatio
     }
   }
 
-  async failInterrupted(input: Parameters<QuickDeckEvaluationRepository['failInterrupted']>[0]) {
+  async recoverInterrupted(input: Parameters<QuickDeckEvaluationRepository['recoverInterrupted']>[0]) {
     let changed = 0
     for (const record of [...this.#records.values()]) {
-      if (!active(record.status)) continue
-      const failed: QuickDeckEvaluationRecord = {
-        ...record,
-        status: 'FAILED',
-        phase: 'FAILED',
-        errorCode: 'EVALUATION_INTERRUPTED',
-        completedAt: input.now,
-        nextAttemptAt: null,
-        updatedAt: input.now,
-      }
+      const recovered = recoverInterruptedQuickDeckEvaluation(record, input)
+      if (!recovered) continue
       await this.save({
-        record: failed,
+        record: recovered.record,
         event: {
-          schemaVersion: '1', jobId: failed.id, eventId: `event-${failed.id}-interrupted`,
-          type: 'evaluation.failed', payload: { code: 'EVALUATION_INTERRUPTED' }, occurredAt: input.now,
+          schemaVersion: '1', jobId: recovered.record.id, eventId: `event-${randomUUID()}`,
+          ...(recovered.action === 'FAILED'
+            ? { type: 'evaluation.failed' as const, payload: { code: recovered.record.errorCode! } }
+            : {
+                type: 'images.draining' as const,
+                payload: {
+                  pendingPages: recovered.record.pages.filter((page) => !['COMPLETED', 'FAILED'].includes(page.status)).length,
+                  failedPages: recovered.record.pages.filter((page) => page.status === 'FAILED').length,
+                  totalPages: recovered.record.request.slideCount,
+                  drainDeadline: recovered.record.drainDeadline!,
+                },
+              }),
+          occurredAt: input.now,
         },
       })
       changed += 1
