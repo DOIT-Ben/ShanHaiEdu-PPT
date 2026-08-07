@@ -159,14 +159,26 @@ function sseResponse(input: Readonly<{
   let unsubscribe: (() => void) | null = null
   let closed = false
   let abortHandler: (() => void) | null = null
+  const dispose = () => {
+    if (closed) return
+    closed = true
+    if (heartbeat) {
+      clearInterval(heartbeat)
+      heartbeat = null
+    }
+    if (abortHandler) {
+      input.signal.removeEventListener('abort', abortHandler)
+      abortHandler = null
+    }
+    const currentUnsubscribe = unsubscribe
+    unsubscribe = null
+    currentUnsubscribe?.()
+  }
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const close = () => {
         if (closed) return
-        closed = true
-        if (heartbeat) clearInterval(heartbeat)
-        if (abortHandler) input.signal.removeEventListener('abort', abortHandler)
-        unsubscribe?.()
+        dispose()
         try { controller.close() } catch {}
       }
       abortHandler = close
@@ -176,32 +188,32 @@ function sseResponse(input: Readonly<{
         return
       }
       heartbeat = setInterval(() => {
-        if (!closed) controller.enqueue(encoder.encode(': heartbeat\n\n'))
+        if (closed || (controller.desiredSize ?? 1) <= 0) return
+        controller.enqueue(encoder.encode(': heartbeat\n\n'))
       }, 15_000)
-      unsubscribe = await input.broker.subscribe({
-        jobId: input.jobId,
-        after: cursor,
-        onEvent(event) {
-          if (closed || (controller.desiredSize ?? 1) <= 0) return false
-          cursor = event.sequence
-          controller.enqueue(encoder.encode(
-            `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-          ))
-          return true
-        },
-        onClose: close,
-      })
-      if (closed) {
-        unsubscribe()
-        unsubscribe = null
-        if (abortHandler) input.signal.removeEventListener('abort', abortHandler)
+      try {
+        unsubscribe = await input.broker.subscribe({
+          jobId: input.jobId,
+          after: cursor,
+          onEvent(event) {
+            if (closed || (controller.desiredSize ?? 1) <= 0) return false
+            cursor = event.sequence
+            controller.enqueue(encoder.encode(
+              `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+            ))
+            return true
+          },
+          onClose: close,
+        })
+        if (closed) dispose()
+      } catch (error) {
+        const shouldError = !closed
+        dispose()
+        if (shouldError) controller.error(error)
       }
     },
     cancel() {
-      closed = true
-      if (heartbeat) clearInterval(heartbeat)
-      if (abortHandler) input.signal.removeEventListener('abort', abortHandler)
-      unsubscribe?.()
+      dispose()
     },
   }, { highWaterMark: DEFAULT_QUICK_DECK_EVENT_BATCH_LIMIT })
   return new Response(stream, {

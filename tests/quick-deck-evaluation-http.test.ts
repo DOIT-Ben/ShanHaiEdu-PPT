@@ -354,4 +354,96 @@ describe('quick-deck evaluation HTTP facade', () => {
 
     expect(reads).toBe(1)
   })
+
+  test('releases the SSE heartbeat and abort listener when initial subscription fails', async () => {
+    const { handle, repository } = fixture()
+    const created = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()),
+    }))
+    const jobId = (await created.json() as { data: { jobId: string } }).data.jobId
+    const originalRead = repository.readEvents.bind(repository)
+    repository.readEvents = async () => {
+      throw new Error('QUICK_DECK_EVENT_SUBSCRIPTION_FAILED')
+    }
+    const originalSetInterval = globalThis.setInterval
+    const originalClearInterval = globalThis.clearInterval
+    const timer = {} as ReturnType<typeof setInterval>
+    let clearCalls = 0
+    globalThis.setInterval = ((callback: () => void) => {
+      void callback
+      return timer
+    }) as typeof setInterval
+    globalThis.clearInterval = ((value: ReturnType<typeof setInterval>) => {
+      if (value === timer) clearCalls += 1
+    }) as typeof clearInterval
+    try {
+      const abort = new AbortController()
+      const response = await handle(request(`/v1/evaluations/quick-decks/${jobId}/events`, { signal: abort.signal }))
+      const reader = response.body!.getReader()
+
+      await reader.read().catch(() => undefined)
+      expect(clearCalls).toBe(1)
+
+      abort.abort()
+      expect(clearCalls).toBe(1)
+    } finally {
+      repository.readEvents = originalRead
+      globalThis.setInterval = originalSetInterval
+      globalThis.clearInterval = originalClearInterval
+    }
+  })
+
+  test('does not enqueue a heartbeat while the Quick-deck SSE queue is full', async () => {
+    const { handle, repository } = fixture()
+    const created = await handle(request('/v1/evaluations/quick-decks', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()),
+    }))
+    const jobId = (await created.json() as { data: { jobId: string } }).data.jobId
+    const record = await repository.get(jobId)
+    if (!record) throw new Error('QUICK_DECK_TEST_RECORD_MISSING')
+    for (let index = 2; index <= 100; index += 1) {
+      await repository.save({
+        record,
+        event: {
+          schemaVersion: '1', jobId, eventId: `quick-deck-sse-buffer-${index}`,
+          type: 'planning.started', payload: {}, occurredAt: '2026-08-07T00:00:00.000Z',
+        },
+      })
+    }
+    const originalSetInterval = globalThis.setInterval
+    const originalClearInterval = globalThis.clearInterval
+    const timer = {} as ReturnType<typeof setInterval>
+    let heartbeat: (() => void) | null = null
+    globalThis.setInterval = ((callback: () => void) => {
+      heartbeat = callback
+      return timer
+    }) as typeof setInterval
+    globalThis.clearInterval = ((value: ReturnType<typeof setInterval>) => {
+      void value
+    }) as typeof clearInterval
+    try {
+      const response = await handle(request(`/v1/evaluations/quick-decks/${jobId}/events`))
+      const reader = response.body!.getReader()
+      await Bun.sleep(25)
+      if (!heartbeat) throw new Error('QUICK_DECK_SSE_HEARTBEAT_NOT_STARTED')
+      heartbeat()
+
+      for (let index = 0; index < 100; index += 1) {
+        expect((await reader.read()).done).toBe(false)
+      }
+      const next = reader.read()
+      try {
+        expect(await Promise.race([
+          next.then(() => 'chunk' as const, () => 'error' as const),
+          Bun.sleep(25).then(() => 'timeout' as const),
+        ])).toBe('timeout')
+      } finally {
+        await reader.cancel()
+        await next.catch(() => undefined)
+      }
+    } finally {
+      globalThis.setInterval = originalSetInterval
+      globalThis.clearInterval = originalClearInterval
+    }
+  })
 })
