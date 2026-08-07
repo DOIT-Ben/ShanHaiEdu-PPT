@@ -257,7 +257,12 @@ async function downloadArtifact(config: EvaluationConfig, jobId: string, format:
   return { byteLength: bytes.byteLength, sha256: expected.sha256, mimeType: expected.mimeType }
 }
 
-function validateCompletedJob(job: QuickDeckEvaluationPublicJob, config: EvaluationConfig, slideCount: number) {
+export function validateCompletedQuickDeckJob(job: QuickDeckEvaluationPublicJob, config: Pick<EvaluationConfig, 'textModel' | 'imageModel'>, slideCount: number) {
+  if (job.status === 'FAILED') {
+    assert(job.failure !== null, 'QUICK_DECK_EVALUATION_FAILURE_CODE_MISSING')
+    throw new Error(job.failure.code)
+  }
+  if (job.status === 'EXPIRED') throw new Error('QUICK_DECK_EVALUATION_EXPIRED')
   assert(job.status === 'COMPLETED' && job.phase === 'COMPLETE', 'QUICK_DECK_NOT_COMPLETED')
   assert(job.models.text === config.textModel && job.models.image === config.imageModel, 'QUICK_DECK_MODEL_IDENTITY_INVALID')
   assert(job.slideCount === slideCount && job.pages.length === slideCount, 'QUICK_DECK_PAGE_COUNT_INVALID')
@@ -278,7 +283,7 @@ async function runCase(config: EvaluationConfig, slideCount: number) {
   const created = await createEvaluation(config, slideCount)
   const sse = await collectSseEvents(config, created.job.jobId, `quick-deck-real-events-${slideCount}-${randomUUID()}`)
   const job = await waitForTerminal(config, created.job.jobId)
-  validateCompletedJob(job, config, slideCount)
+  validateCompletedQuickDeckJob(job, config, slideCount)
   const [pptx, preview] = await Promise.all([
     downloadArtifact(config, job.jobId, 'pptx', job),
     downloadArtifact(config, job.jobId, 'preview', job),

@@ -4,13 +4,55 @@ import {
   readQuickDeckEvaluationReadyRelease,
   resolveQuickDeckEvaluationCanaryPageCounts,
   runQuickDeckEvaluationCanary,
+  validateCompletedQuickDeckJob,
   type QuickDeckEvaluationRelease,
 } from '../scripts/run-quick-deck-real-evaluation'
+import { quickDeckEvaluationPublicJobSchema } from '../src/quick-deck-evaluation-contracts'
 
 const release: QuickDeckEvaluationRelease = {
   softwareVersion: '4.4.0',
   gitSha: 'a'.repeat(40),
   releaseId: 'v4.4.0-aaaaaaaaaaaa',
+}
+
+function failedEvaluationJob() {
+  return quickDeckEvaluationPublicJobSchema.parse({
+    schemaVersion: '1',
+    jobId: 'quick-deck-evaluation-failed-case',
+    status: 'FAILED',
+    phase: 'FAILED',
+    slideCount: 1,
+    aspectRatio: '16:9',
+    models: { text: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
+    progress: { planned: true, submittedPages: 1, completedPages: 0, totalPages: 1 },
+    pages: [{
+      pageNumber: 1,
+      status: 'FAILED',
+      submissionState: 'SUBMITTED',
+      billingState: 'UNKNOWN',
+      errorCode: 'EVALUATION_IMAGE_RATIO_INVALID',
+      width: 1376,
+      height: 768,
+      aspectRatioValidated: false,
+      aspect: {
+        observedWidth: 1376,
+        observedHeight: 768,
+        relativeError: 0.0078125,
+        normalization: 'REJECTED',
+        normalizedWidth: null,
+        normalizedHeight: null,
+      },
+      sha256: null,
+    }],
+    artifacts: { pptx: null, preview: null },
+    quality: { state: 'NOT_ASSESSED', score: null, rubric: null },
+    failure: { code: 'EVALUATION_IMAGE_RATIO_INVALID' },
+    createdAt: '2026-08-08T00:00:00.000Z',
+    startedAt: '2026-08-08T00:00:01.000Z',
+    completedAt: '2026-08-08T00:00:02.000Z',
+    expiresAt: '2026-08-09T00:00:00.000Z',
+    durationMs: 1_000,
+  })
 }
 
 describe('Quick-deck real evaluation harness', () => {
@@ -89,6 +131,13 @@ describe('Quick-deck real evaluation harness', () => {
     expect(result.results).toEqual([
       { passed: false, slideCount: 1, errorCode: 'EVALUATION_IMAGE_ASPECT_RATIO_INVALID' },
     ])
+  })
+
+  test('preserves the service failure code when a real quick-deck job reaches a failed terminal state', () => {
+    expect(() => validateCompletedQuickDeckJob(failedEvaluationJob(), {
+      textModel: 'gpt-5.6-terra',
+      imageModel: 'gemini-3-pro-image-preview',
+    }, 1)).toThrow('EVALUATION_IMAGE_RATIO_INVALID')
   })
 
   test('runs all three cases only after the release preflight succeeds', async () => {
