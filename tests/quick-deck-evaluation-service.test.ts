@@ -47,6 +47,10 @@ class ToggleModelEligibility implements QuickDeckEvaluationModelEligibilityPort 
   }
 }
 
+const readyModelEligibility: QuickDeckEvaluationModelEligibilityPort = {
+  async check() { return 'READY' },
+}
+
 class CreativeModel implements StructuredModelPort {
   readonly calls: Parameters<StructuredModelPort['execute']>[0][] = []
 
@@ -423,7 +427,7 @@ async function fixture(
     } : {}),
     textModel: 'gpt-5.6-terra',
     allowedImageModels: ['gemini-3-pro-image-preview'],
-    ...(modelEligibility ? { modelEligibility } : {}),
+    modelEligibility: modelEligibility ?? readyModelEligibility,
     maxActiveJobs: 2,
     maxDailyJobs: 3,
     ttlMs,
@@ -443,6 +447,27 @@ function request(slideCount = 2) {
 }
 
 describe('quick-deck evaluation service', () => {
+  test('requires an explicit model eligibility dependency at startup', () => {
+    const artifacts = new LocalArtifactPort(join(tmpdir(), 'ppt-agent-quick-deck-missing-eligibility'))
+    const dependencies = {
+      repository: new InMemoryQuickDeckEvaluationRepository(),
+      artifacts,
+      model: new CreativeModel(),
+      images: new AsyncImages(artifacts),
+      renderer: new SharpPptxPresentationRenderer(),
+      clock: new ControlledClock(),
+      textModel: 'gpt-5.6-terra',
+      allowedImageModels: ['gemini-3-pro-image-preview'],
+      maxActiveJobs: 2,
+      maxDailyJobs: 3,
+      ttlMs: 60_000,
+    }
+
+    expect(() => new QuickDeckEvaluationService(
+      dependencies as unknown as ConstructorParameters<typeof QuickDeckEvaluationService>[0],
+    )).toThrow('QUICK_DECK_MODEL_ELIGIBILITY_REQUIRED')
+  })
+
   test('rejects stale evaluator models before either model or image provider work begins', async () => {
     const eligibility = new ToggleModelEligibility()
     const { directory, images, model, service } = await fixture(undefined, false, false, undefined, eligibility)
@@ -525,6 +550,7 @@ describe('quick-deck evaluation service', () => {
         repository: new InMemoryQuickDeckEvaluationRepository(), artifacts, model, images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -553,6 +579,7 @@ describe('quick-deck evaluation service', () => {
         repository: new InMemoryQuickDeckEvaluationRepository(), artifacts, model, images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -594,6 +621,7 @@ describe('quick-deck evaluation service', () => {
       const service = new QuickDeckEvaluationService({
         repository, artifacts, model, images, renderer: new SharpPptxPresentationRenderer(), clock,
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60 * 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -621,6 +649,7 @@ describe('quick-deck evaluation service', () => {
       const service = new QuickDeckEvaluationService({
         repository, artifacts, model, images, renderer, clock,
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60 * 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -813,6 +842,7 @@ describe('quick-deck evaluation service', () => {
         clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra',
         allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2,
         maxDailyJobs: 3,
         ttlMs: 60_000,
@@ -871,6 +901,7 @@ describe('quick-deck evaluation service', () => {
         clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra',
         allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2,
         maxDailyJobs: 3,
         ttlMs: 60_000,
@@ -903,6 +934,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(3))
@@ -951,6 +983,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(2))
@@ -1097,6 +1130,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(2))
@@ -1138,6 +1172,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -1168,6 +1203,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock,
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 30 * 60_000,
       })
       const created = await firstService.create('evaluation-tenant', request(2))
@@ -1180,6 +1216,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock,
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 30 * 60_000,
       })
       await resumedService.initialize()
@@ -1313,6 +1350,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock, artifactCleanup: cleanup,
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -1341,6 +1379,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock, artifactCleanup: cleanup,
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       expect(await resumedService.initialize()).toBe(0)
@@ -1500,6 +1539,7 @@ describe('quick-deck evaluation service', () => {
         renderer: new SharpPptxPresentationRenderer(), clock,
         artifactCleanup: new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts')),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -1556,6 +1596,7 @@ describe('quick-deck evaluation service', () => {
         repository, artifacts, model: new CreativeModel(), images: new AsyncImages(artifacts),
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(1))
@@ -1590,6 +1631,7 @@ describe('quick-deck evaluation service', () => {
           new LocalQuickDeckEvaluationArtifactCleanupPort(join(directory, 'artifacts')),
         ),
         textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
       })
       const created = await service.create('evaluation-tenant', request(2))

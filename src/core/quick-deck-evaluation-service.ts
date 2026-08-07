@@ -387,7 +387,7 @@ export class QuickDeckEvaluationService {
     artifactCleanup?: QuickDeckEvaluationArtifactCleanupPort
     textModel: string
     allowedImageModels: readonly string[]
-    modelEligibility?: QuickDeckEvaluationModelEligibilityPort
+    modelEligibility: QuickDeckEvaluationModelEligibilityPort
     maxActiveJobs: number
     maxDailyJobs: number
     ttlMs: number
@@ -399,6 +399,9 @@ export class QuickDeckEvaluationService {
     if (dependencies.allowedImageModels.length < 1 || dependencies.allowedImageModels.length > 20
       || dependencies.allowedImageModels.some((model) => model.trim().length < 1 || model.trim().length > 120)) {
       throw new Error('QUICK_DECK_IMAGE_MODELS_INVALID')
+    }
+    if (typeof dependencies.modelEligibility?.check !== 'function') {
+      throw new Error('QUICK_DECK_MODEL_ELIGIBILITY_REQUIRED')
     }
     if (!Number.isSafeInteger(dependencies.maxActiveJobs) || dependencies.maxActiveJobs < 1 || dependencies.maxActiveJobs > 50
       || !Number.isSafeInteger(dependencies.maxDailyJobs) || dependencies.maxDailyJobs < 1 || dependencies.maxDailyJobs > 10_000
@@ -1254,8 +1257,8 @@ export class QuickDeckEvaluationService {
     textModel: string
     imageModels: readonly string[]
   }>) {
-    const eligibility = await this.dependencies.modelEligibility?.check(input)
-    if (eligibility === undefined || eligibility === 'READY') return
+    const eligibility = await this.dependencies.modelEligibility.check(input)
+    if (eligibility === 'READY') return
     if (eligibility === 'NOT_READY') {
       throw new QuickDeckEvaluationError(422, 'EVALUATION_MODEL_NOT_ALLOWED')
     }

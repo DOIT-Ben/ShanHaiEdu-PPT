@@ -10,6 +10,9 @@ import { ServiceTokenAuthentication } from '../src/http/service-token-authentica
 
 const evaluationToken = 'quick-deck-runtime-evaluation-token-0001'
 const userToken = 'quick-deck-runtime-v1-token-0001'
+const readyModelEligibility: QuickDeckEvaluationModelEligibilityPort = {
+  async check() { return 'READY' },
+}
 
 class FixedClock {
   now() { return new Date('2026-08-07T00:00:00.000Z') }
@@ -76,6 +79,7 @@ describe('quick-deck evaluation runtime integration', () => {
         authentication,
         textModel: 'gpt-5.6-terra',
         allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
         maxActiveJobs: 2,
         maxDailyJobs: 5,
         ttlMs: 60_000,

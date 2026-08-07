@@ -613,7 +613,7 @@ type RuntimeInput = Readonly<{
     model?: StructuredModelPort
     textModel: string
     allowedImageModels: readonly string[]
-    modelEligibility?: QuickDeckEvaluationModelEligibilityPort
+    modelEligibility: QuickDeckEvaluationModelEligibilityPort
     maxActiveJobs: number
     maxDailyJobs: number
     ttlMs: number
@@ -710,7 +710,7 @@ export function createAgentRuntime(input: RuntimeInput) {
         ...(input.quickDeckEvaluation.artifactCleanup ? { artifactCleanup: input.quickDeckEvaluation.artifactCleanup } : {}),
         textModel: input.quickDeckEvaluation.textModel,
         allowedImageModels: input.quickDeckEvaluation.allowedImageModels,
-        ...(input.quickDeckEvaluation.modelEligibility ? { modelEligibility: input.quickDeckEvaluation.modelEligibility } : {}),
+        modelEligibility: input.quickDeckEvaluation.modelEligibility,
         maxActiveJobs: input.quickDeckEvaluation.maxActiveJobs,
         maxDailyJobs: input.quickDeckEvaluation.maxDailyJobs,
         ttlMs: input.quickDeckEvaluation.ttlMs,

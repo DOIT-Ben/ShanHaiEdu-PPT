@@ -5,7 +5,10 @@ import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-dec
 import { MockArtifactPort } from '../src/adapters/mock-ports'
 import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-renderer'
 import type { ImageGenerationPort, StructuredModelPort } from '../src/core/ports'
-import { QuickDeckEvaluationService } from '../src/core/quick-deck-evaluation-service'
+import {
+  QuickDeckEvaluationService,
+  type QuickDeckEvaluationModelEligibilityPort,
+} from '../src/core/quick-deck-evaluation-service'
 import { RunService } from '../src/core/run-service'
 import { createHttpHandler, type HostAuthenticationPort } from '../src/http/handler'
 import {
@@ -20,6 +23,9 @@ const secondEvaluationToken = 'quick-deck-evaluation-token-0002'
 const userToken = 'ordinary-v1-token-must-not-access-0001'
 const v2Token = 'presentation-job-v2-token-must-not-access-0001'
 const sourceText = '水汽凝结形成云，降水回到地表，水循环因此持续发生。'.repeat(4)
+const readyModelEligibility: QuickDeckEvaluationModelEligibilityPort = {
+  async check() { return 'READY' },
+}
 
 class FixedClock {
   now() { return new Date('2026-08-07T00:00:00.000Z') }
@@ -91,6 +97,7 @@ function fixture(input: Readonly<{ eventBroker?: QuickDeckEvaluationEventBrokerP
     clock: new FixedClock(),
     textModel: 'gpt-5.6-terra',
     allowedImageModels: ['gemini-3-pro-image-preview'],
+    modelEligibility: readyModelEligibility,
     maxActiveJobs: 5,
     maxDailyJobs: 10,
     ttlMs: 60_000,
