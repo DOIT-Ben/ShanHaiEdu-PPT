@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import {
+  assertQuickDeckEvaluationTokenIsolation,
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
   resolveQuickDeckEvaluationConfig,
@@ -29,6 +30,18 @@ describe('main PPT Agent server configuration', () => {
       PPT_AGENT_API_TOKEN: 'v1-server-token-0001',
       PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN: 'quick-deck-evaluation-token-0001',
     }).quickDeckEvaluationApiToken).toBe('quick-deck-evaluation-token-0001')
+  })
+
+  test('rejects an evaluator ingress token reused as the FrameFlow internal credential', () => {
+    const evaluatorToken = 'quick-deck-evaluation-token-0001'
+    expect(() => assertQuickDeckEvaluationTokenIsolation(
+      evaluatorToken,
+      evaluatorToken,
+    )).toThrow('PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN_NOT_ISOLATED')
+    expect(() => assertQuickDeckEvaluationTokenIsolation(
+      evaluatorToken,
+      'frameflow-internal-token-0001',
+    )).not.toThrow()
   })
 
   test('requires an isolated evaluator root and limits quick decks to evaluation-enabled V4 models', () => {

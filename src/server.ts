@@ -39,6 +39,7 @@ import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
   resolveQuickDeckEvaluationConfig,
+  assertQuickDeckEvaluationTokenIsolation,
   resolveV4ImageEditAsyncTaskEnabled,
   resolveV4ModelPolicyConfig,
   resolveV4RevisionImageModel,
@@ -267,6 +268,7 @@ const runtime = runtimeMode === 'gateway'
         ? process.env.FRAMEFLOW_INTERNAL_TOKEN?.trim()
         : undefined
       if (budgetMode === 'frameflow' && !frameFlowInternalToken) throw new Error('FRAMEFLOW_INTERNAL_TOKEN_REQUIRED')
+      assertQuickDeckEvaluationTokenIsolation(quickDeckEvaluationApiToken, frameFlowInternalToken)
       const frameFlowBackend = budgetMode === 'frameflow'
         ? new HttpFrameFlowBackend({
             baseUrl: process.env.FRAMEFLOW_INTERNAL_BASE_URL?.trim() || 'http://127.0.0.1:3010',

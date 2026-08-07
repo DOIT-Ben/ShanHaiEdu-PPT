@@ -9,6 +9,16 @@ function required(env: Environment, name: string) {
   return value
 }
 
+/** Keeps the evaluator's narrow ingress credential out of the host trust boundary. */
+export function assertQuickDeckEvaluationTokenIsolation(
+  evaluationApiToken: string | undefined,
+  frameFlowInternalToken: string | undefined,
+) {
+  if (evaluationApiToken && frameFlowInternalToken && evaluationApiToken === frameFlowInternalToken) {
+    throw new Error('PPT_AGENT_QUICK_DECK_EVALUATION_API_TOKEN_NOT_ISOLATED')
+  }
+}
+
 export function resolveMainServerConfig(env: Environment = process.env) {
   const hostname = env.PPT_AGENT_HOST?.trim() || '127.0.0.1'
   if (!['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
