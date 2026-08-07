@@ -78,6 +78,6 @@ Quick-deck 只在主进程 `gateway` 模式配置以下变量后启用：
 
 ## 真实验收
 
-`scripts/run-quick-deck-real-evaluation.ts` 只调用回环地址的 quick-deck 资源，默认依次执行 `1`、`3`、`10` 页受控测试。它通过 SSE 等到终态，验证模型身份、每页实际像素与 `16:9` 比例，并重新计算 PPTX/预览 SHA-256；结果只写入显式配置的测试输出根，不写入正式 Run 或 Usage 数据。
+`scripts/run-quick-deck-real-evaluation.ts` 只调用回环地址的 quick-deck 资源，固定按 `1 -> 3 -> 10` 页执行受控测试；任一案例失败即停止，绝不提交后续案例。每次提交前脚本必须读取 `GET /health/ready` 并取得 `READY` 的服务端 `softwareVersion`、`gitSha` 与 `releaseId`，将其写入评测报告，而不接受调用方自报代码版本。它通过 SSE 等到终态，验证模型身份、每页实际像素与 `16:9` 比例，并重新计算 PPTX/预览 SHA-256；结果只写入显式配置的测试输出根，不写入正式 Run 或 Usage 数据。
 
-运行时必须通过环境提供 `QUICK_DECK_EVAL_API_TOKEN`、`QUICK_DECK_EVAL_OUTPUT_ROOT`、`QUICK_DECK_EVAL_TEXT_MODEL` 和 `QUICK_DECK_EVAL_IMAGE_MODEL`。可选 `QUICK_DECK_EVAL_SERVICE_URL`（默认 `http://127.0.0.1:4311`）、`QUICK_DECK_EVAL_PAGE_COUNTS`、`QUICK_DECK_EVAL_POLL_MS`、`QUICK_DECK_EVAL_TIMEOUT_MS` 与 `QUICK_DECK_EVAL_CODE_VERSION` 仅影响本次验收。脚本不会输出 Token、来源正文、内部 Prompt、Provider URL 或 artifact ID。
+运行时必须通过环境提供 `QUICK_DECK_EVAL_API_TOKEN`、`QUICK_DECK_EVAL_OUTPUT_ROOT`、`QUICK_DECK_EVAL_TEXT_MODEL` 和 `QUICK_DECK_EVAL_IMAGE_MODEL`。可选 `QUICK_DECK_EVAL_SERVICE_URL`（默认 `http://127.0.0.1:4311`）、`QUICK_DECK_EVAL_POLL_MS` 与 `QUICK_DECK_EVAL_TIMEOUT_MS` 仅影响本次验收。为兼容旧脚本保留的 `QUICK_DECK_EVAL_PAGE_COUNTS` 只能为精确序列 `1,3,10`；`QUICK_DECK_EVAL_CODE_VERSION` 已被拒绝，防止伪造报告身份。脚本不会输出 Token、来源正文、内部 Prompt、Provider URL 或 artifact ID。

@@ -9,7 +9,7 @@ import {
 import { hasVisualDeckV4AspectRatio } from '../src/core/blueprint-assets'
 
 const DEFAULT_SERVICE_URL = 'http://127.0.0.1:4311'
-const DEFAULT_PAGE_COUNTS = [1, 3, 10]
+export const QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS = [1, 3, 10] as const
 const CONTROLLED_SOURCE_TEXT = [
   '水循环由蒸发、凝结、降水和汇集组成。',
   '太阳提供能量，使地表水蒸发形成水汽。',
@@ -22,16 +22,28 @@ type EvaluationConfig = Readonly<{
   outputRoot: string
   textModel: string
   imageModel: string
-  pageCounts: readonly number[]
   pollMs: number
   timeoutMs: number
-  codeVersion: string | null
 }>
 
 type SseResult = Readonly<{
   events: readonly ReturnType<typeof quickDeckEvaluationEventSchema.parse>[]
   chunkCount: number
 }>
+
+export type QuickDeckEvaluationRelease = Readonly<{
+  softwareVersion: string
+  gitSha: string
+  releaseId: string
+}>
+
+type QuickDeckCanaryCaseResult = Readonly<{
+  passed: boolean
+  slideCount: number
+  errorCode?: string
+}>
+
+type FetchPort = (input: string, init?: RequestInit) => Promise<Response>
 
 function requiredEnvironment(name: string) {
   const value = process.env[name]?.trim()
@@ -47,16 +59,15 @@ function boundedInteger(name: string, fallback: number, minimum: number, maximum
   return value
 }
 
-function pageCounts(value: string | undefined) {
-  const values = (value?.trim() || DEFAULT_PAGE_COUNTS.join(','))
+export function resolveQuickDeckEvaluationCanaryPageCounts(value: string | undefined) {
+  const values = (value?.trim() || QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS.join(','))
     .split(',')
     .map((item) => Number(item.trim()))
-  if (values.length < 1 || values.length > 10
-    || values.some((count) => !Number.isSafeInteger(count) || count < 1 || count > 10)
-    || new Set(values).size !== values.length) {
+  if (values.length !== QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS.length
+    || !values.every((count, index) => count === QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS[index])) {
     throw new Error('QUICK_DECK_EVAL_PAGE_COUNTS_INVALID')
   }
-  return values
+  return QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS
 }
 
 function evaluationConfig(): EvaluationConfig {
@@ -64,16 +75,18 @@ function evaluationConfig(): EvaluationConfig {
   if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) {
     throw new Error('QUICK_DECK_EVAL_SERVICE_URL_MUST_BE_LOOPBACK')
   }
+  resolveQuickDeckEvaluationCanaryPageCounts(process.env.QUICK_DECK_EVAL_PAGE_COUNTS)
+  if (process.env.QUICK_DECK_EVAL_CODE_VERSION?.trim()) {
+    throw new Error('QUICK_DECK_EVAL_CODE_VERSION_UNSUPPORTED')
+  }
   return {
     serviceUrl: url.origin,
     apiToken: requiredEnvironment('QUICK_DECK_EVAL_API_TOKEN'),
     outputRoot: path.resolve(requiredEnvironment('QUICK_DECK_EVAL_OUTPUT_ROOT')),
     textModel: requiredEnvironment('QUICK_DECK_EVAL_TEXT_MODEL'),
     imageModel: requiredEnvironment('QUICK_DECK_EVAL_IMAGE_MODEL'),
-    pageCounts: pageCounts(process.env.QUICK_DECK_EVAL_PAGE_COUNTS),
     pollMs: boundedInteger('QUICK_DECK_EVAL_POLL_MS', 1_000, 250, 30_000),
     timeoutMs: boundedInteger('QUICK_DECK_EVAL_TIMEOUT_MS', 30 * 60_000, 10_000, 4 * 60 * 60_000),
-    codeVersion: process.env.QUICK_DECK_EVAL_CODE_VERSION?.trim() || null,
   }
 }
 
@@ -91,6 +104,45 @@ function headers(config: EvaluationConfig, requestId: string, json = false) {
     'X-Request-ID': requestId,
     ...(json ? { 'Content-Type': 'application/json' } : {}),
   }
+}
+
+function validReleaseField(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
+}
+
+export async function readQuickDeckEvaluationReadyRelease(input: Readonly<{
+  serviceUrl: string
+  timeoutMs: number
+  fetch: FetchPort
+}>) {
+  const response = await input.fetch(`${input.serviceUrl}/health/ready`, {
+    headers: { 'X-Request-ID': `quick-deck-real-ready-${randomUUID()}` },
+    signal: AbortSignal.timeout(input.timeoutMs),
+  })
+  const body = await response.json().catch(() => null)
+  assert(response.status === 200, `QUICK_DECK_EVAL_READY_HTTP_${response.status}`)
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error('QUICK_DECK_EVAL_READY_CONTRACT_INVALID')
+  }
+  const record = body as Readonly<Record<string, unknown>>
+  const release = record.release
+  if (record.status !== 'READY' || !release || typeof release !== 'object' || Array.isArray(release)) {
+    throw new Error('QUICK_DECK_EVAL_READY_CONTRACT_INVALID')
+  }
+  const identity = release as Readonly<Record<string, unknown>>
+  const { softwareVersion, gitSha, releaseId } = identity
+  if (!validReleaseField(softwareVersion)
+    || !validReleaseField(gitSha)
+    || !validReleaseField(releaseId)
+    || ['development', 'unknown', 'unversioned'].includes(gitSha)
+    || ['development', 'unknown', 'unversioned'].includes(releaseId)) {
+    throw new Error('QUICK_DECK_EVAL_READY_RELEASE_INVALID')
+  }
+  return {
+    softwareVersion,
+    gitSha,
+    releaseId,
+  } satisfies QuickDeckEvaluationRelease
 }
 
 function safeFailureCode(error: unknown) {
@@ -251,29 +303,52 @@ async function runCase(config: EvaluationConfig, slideCount: number) {
   }
 }
 
-async function main() {
-  const config = evaluationConfig()
-  const reportDirectory = path.join(config.outputRoot, `quick-deck-real-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`)
-  await mkdir(reportDirectory, { recursive: true, mode: 0o700 })
-  const results: Array<Record<string, unknown>> = []
-  for (const slideCount of config.pageCounts) {
+export async function runQuickDeckEvaluationCanary(input: Readonly<{
+  preflight: () => Promise<QuickDeckEvaluationRelease>
+  runCase: (slideCount: typeof QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS[number]) => Promise<QuickDeckCanaryCaseResult>
+}>) {
+  const release = await input.preflight()
+  const results: QuickDeckCanaryCaseResult[] = []
+  for (const slideCount of QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS) {
     try {
-      results.push(await runCase(config, slideCount))
+      const result = await input.runCase(slideCount)
+      results.push(result)
+      if (!result.passed) break
     } catch (error) {
       results.push({ passed: false, slideCount, errorCode: safeFailureCode(error) })
+      break
     }
   }
-  const passed = results.every((result) => result.passed === true)
+  return {
+    release,
+    results,
+    passed: results.length === QUICK_DECK_EVALUATION_CANARY_PAGE_COUNTS.length
+      && results.every((result) => result.passed),
+  }
+}
+
+async function main() {
+  const config = evaluationConfig()
+  const canary = await runQuickDeckEvaluationCanary({
+    preflight: () => readQuickDeckEvaluationReadyRelease({
+      serviceUrl: config.serviceUrl,
+      timeoutMs: config.timeoutMs,
+      fetch,
+    }),
+    runCase: (slideCount) => runCase(config, slideCount),
+  })
+  const reportDirectory = path.join(config.outputRoot, `quick-deck-real-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`)
+  await mkdir(reportDirectory, { recursive: true, mode: 0o700 })
   await writeJson(path.join(reportDirectory, 'summary.json'), {
     schemaVersion: '1',
     generatedAt: new Date().toISOString(),
-    codeVersion: config.codeVersion,
     serviceUrl: config.serviceUrl,
+    release: canary.release,
     protocol: { text: 'RESPONSES_JSON_SCHEMA', image: 'IMAGE_TASK', imageRatio: '16:9' },
-    results,
+    results: canary.results,
   })
-  console.log(JSON.stringify({ event: 'quick_deck_real_evaluation_completed', passed, reportDirectory, results }))
-  if (!passed) process.exitCode = 1
+  console.log(JSON.stringify({ event: 'quick_deck_real_evaluation_completed', passed: canary.passed, reportDirectory, results: canary.results }))
+  if (!canary.passed) process.exitCode = 1
 }
 
 if (import.meta.main) await main()
