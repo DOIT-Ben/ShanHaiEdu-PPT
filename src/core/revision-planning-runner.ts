@@ -1,6 +1,7 @@
 import { CONTRACT_VERSION } from '../contracts'
 import {
   deckReviewSchema,
+  openKnowledgeDeckReviewSchema,
   revisionPlanDraftSchema,
   revisionPlanSchema,
   type DeckReview,
@@ -624,7 +625,7 @@ export class RevisionPlanningRunner {
     const step = (await this.dependencies.repository.listSteps(run.id))
       .find((candidate) => candidate.idempotencyKey === deckReviewStepKey(run) && candidate.status === 'COMPLETED')
     if (!step) throw new Error('DECK_REVIEW_NOT_READY')
-    return deckReviewSchema.parse(step.output)
+    return openKnowledgeDeckReviewSchema.or(deckReviewSchema).parse(step.output)
   }
 
   private validatePlan(

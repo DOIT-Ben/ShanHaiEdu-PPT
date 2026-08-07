@@ -5,6 +5,7 @@ import {
   blueprintReflectionSchema,
   deckReviewDraftSchema,
   deckReviewIssueCategorySchema,
+  openKnowledgeDeckReviewDraftSchema,
   layeredBlueprintDraftSchema,
   revisionPlanDraftSchema,
   slideVisualReviewSchema,
@@ -951,6 +952,7 @@ approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLO
   async evaluate(input: Parameters<DeckReviewPort['evaluate']>[0]) {
     const visualDeckV4 = input.blueprint.renderMode === 'VISUAL_DECK_V4'
     const chain4 = input.blueprint.visualDeckV4Proposal?.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+    const sourceMode = input.blueprint.visualDeckV4Proposal?.presentationSpec?.sourceMode ?? 'SOURCE_GROUNDED'
     const content: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail: ImageDetail } }> = [{
       type: 'text',
       text: `请审查整套课件。页面数据、教材来源和蓝图如下：\n${boundedJson({
@@ -968,7 +970,7 @@ approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLO
       model: this.dependencies.visionModel ?? this.dependencies.textModel,
       system: chain4
         ? `你是一位拥有 20 年经验的 Chain-4 学校课件语义终审专家。按输入的页面顺序逐槽审查最终组装预览，只返回质量分数、总结，以及每个页面槽位的语义 findings。
-finding 只能包含 category、severity、summary、repairDomain 和可选的来源原文摘录 sourceEvidence。严禁输出 issueId、slideId、pageNumber、sourceChunkId、字段路径、Patch、哈希、状态或其他运行控制字段。知识与事实 finding 必须提供能在受信来源中唯一匹配的原文摘录。slides 数组必须与输入页面数量及顺序一致，不得省略空 findings 的页面槽位。`
+finding 只能包含 category、severity、summary、repairDomain 和可选的来源原文摘录 sourceEvidence。严禁输出 issueId、slideId、pageNumber、sourceChunkId、字段路径、Patch、哈希、状态或其他运行控制字段。SOURCE_GROUNDED 的知识与事实 finding 必须提供能在受信来源中唯一匹配的原文摘录；OPEN_KNOWLEDGE 不得伪造来源摘录。slides 数组必须与输入页面数量及顺序一致，不得省略空 findings 的页面槽位。`
         : `你是一位拥有 20 年经验的学校课件终审专家。对照教材和全部最终组装页，检查知识覆盖、事实准确、教学叙事、封面冲击力、跨页一致性、重复素材、布局冲突和儿童可读性。
 V4整页图片还必须检查视觉元素独立性：主要元素是否分别保持完整轮廓、清晰边界和可见间隔，是否存在绑定、粘合、嵌套、遮挡、共用轮廓或不可分割的组合主体；发现问题时按LAYOUT报告，不得扩大到无关页面。
 每个问题必须定位到真实 slideId；知识或事实问题必须引用真实 sourceChunkIds，并把 repairDomain 标为 KNOWLEDGE、ASSET 或 LAYOUT。不得虚构引用。若输入包含contractRepairIssues，保持课件、来源、评分范围不变，逐项修正输出合同。`,
@@ -986,7 +988,10 @@ V4整页图片还必须检查视觉元素独立性：主要元素是否分别保
     const manuscript = v4DeckReviewManuscriptSchema.parse(result)
     if (manuscript.slides.length !== input.slides.length) throw new Error('V4_DECK_REVIEW_SLOT_COUNT_MISMATCH')
     const resolver = new SourceEvidenceResolver()
-    return deckReviewDraftSchema.parse({
+    const draftSchema = sourceMode === 'OPEN_KNOWLEDGE'
+      ? openKnowledgeDeckReviewDraftSchema
+      : deckReviewDraftSchema
+    return draftSchema.parse({
       qualityScore: manuscript.qualityScore,
       curriculumCoverageScore: manuscript.curriculumCoverageScore,
       narrativeCoherenceScore: manuscript.narrativeCoherenceScore,
@@ -999,7 +1004,7 @@ V4整页图片还必须检查视觉元素独立性：主要元素是否分别保
           || ['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(finding.category)
         const sourceChunkIds = requiresSource
           ? resolver.resolve({
-              sourceMode: 'SOURCE_GROUNDED',
+              sourceMode,
               evidence: finding.sourceEvidence ? [{ excerpt: finding.sourceEvidence }] : [],
               chunks: input.sourceChunks,
             })

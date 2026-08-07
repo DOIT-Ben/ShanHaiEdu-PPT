@@ -392,7 +392,7 @@ export const deckReviewIssueCategorySchema = z.enum([
   'CHILD_READABILITY',
 ])
 
-export const deckReviewIssueSchema = z.object({
+const deckReviewIssueObjectSchema = z.object({
   id: identifierSchema,
   category: deckReviewIssueCategorySchema,
   severity: z.enum(['INFO', 'WARNING', 'CRITICAL']),
@@ -401,7 +401,9 @@ export const deckReviewIssueSchema = z.object({
   sourceChunkIds: z.array(identifierSchema).max(200),
   status: z.literal('OPEN'),
   repairDomain: z.enum(['KNOWLEDGE', 'ASSET', 'LAYOUT']).optional(),
-}).strict().superRefine((value, context) => {
+}).strict()
+
+function requireDeckReviewIssueSource(value: z.infer<typeof deckReviewIssueObjectSchema>, context: z.RefinementCtx) {
   if ((['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(value.category) || value.repairDomain === 'KNOWLEDGE')
     && value.sourceChunkIds.length === 0) {
     context.addIssue({
@@ -410,7 +412,9 @@ export const deckReviewIssueSchema = z.object({
       message: 'curriculum and factual issues require source references',
     })
   }
-})
+}
+
+export const deckReviewIssueSchema = deckReviewIssueObjectSchema.superRefine(requireDeckReviewIssueSource)
 
 const deckReviewDraftObjectSchema = z.object({
   qualityScore: z.number().int().min(0).max(100),
@@ -420,8 +424,24 @@ const deckReviewDraftObjectSchema = z.object({
   compositionScore: z.number().int().min(0).max(100),
   summary: z.string().trim().min(10).max(1_000),
   reviewedSourceChunkIds: z.array(identifierSchema).min(1).max(200),
-  issues: z.array(deckReviewIssueSchema).max(100),
+  issues: z.array(deckReviewIssueObjectSchema).max(100),
 }).strict()
+
+function requireDeckReviewIssueSources(
+  value: z.infer<typeof deckReviewDraftObjectSchema>,
+  context: z.RefinementCtx,
+) {
+  value.issues.forEach((issue, index) => {
+    if ((['CURRICULUM_GAP', 'FACTUAL_RISK'].includes(issue.category) || issue.repairDomain === 'KNOWLEDGE')
+      && issue.sourceChunkIds.length === 0) {
+      context.addIssue({
+        code: 'custom',
+        path: ['issues', index, 'sourceChunkIds'],
+        message: 'curriculum and factual issues require source references',
+      })
+    }
+  })
+}
 
 function requireUniqueDeckReviewIssueIds(
   value: z.infer<typeof deckReviewDraftObjectSchema>,
@@ -440,13 +460,25 @@ function requireUniqueDeckReviewIssueIds(
   })
 }
 
-export const deckReviewDraftSchema = deckReviewDraftObjectSchema.superRefine(requireUniqueDeckReviewIssueIds)
+export const deckReviewDraftSchema = deckReviewDraftObjectSchema
+  .superRefine(requireDeckReviewIssueSources)
+  .superRefine(requireUniqueDeckReviewIssueIds)
 
-export const deckReviewSchema = deckReviewDraftObjectSchema.extend({
+export const openKnowledgeDeckReviewDraftSchema = deckReviewDraftObjectSchema
+  .superRefine(requireUniqueDeckReviewIssueIds)
+
+const deckReviewObjectSchema = deckReviewDraftObjectSchema.extend({
   id: identifierSchema,
   revisionRound: z.number().int().min(0).max(4),
   createdAt: z.string().datetime(),
-}).strict().superRefine(requireUniqueDeckReviewIssueIds)
+}).strict()
+
+export const deckReviewSchema = deckReviewObjectSchema
+  .superRefine(requireDeckReviewIssueSources)
+  .superRefine(requireUniqueDeckReviewIssueIds)
+
+export const openKnowledgeDeckReviewSchema = deckReviewObjectSchema
+  .superRefine(requireUniqueDeckReviewIssueIds)
 
 export const revisionOperationSchema = z.object({
   id: identifierSchema,

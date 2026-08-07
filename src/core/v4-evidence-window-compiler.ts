@@ -4,6 +4,7 @@ import type { DocumentResult, SourceChunk } from './ports'
 export const V4_EVIDENCE_WINDOW_VERSION = 'v4-evidence-window-v1'
 export const V4_EVIDENCE_WINDOW_MAX_CHARACTERS = 96_000
 export const V4_EVIDENCE_CHUNK_MAX_CHARACTERS = 12_000
+export const V4_EVIDENCE_WINDOW_MAX_CHUNKS = 200
 
 export type V4EvidenceWindow = Readonly<{
   chunks: readonly SourceChunk[]
@@ -78,7 +79,8 @@ export class V4EvidenceWindowCompiler {
       Math.floor(V4_EVIDENCE_WINDOW_MAX_CHARACTERS / Math.max(1, nonEmptyGroups.length)),
     )
     const append = (chunk: SourceChunk, limit: number) => {
-      if (selectedIds.has(chunk.id) || remainingBytes <= 0 || limit <= 0) return
+      if (selected.length >= V4_EVIDENCE_WINDOW_MAX_CHUNKS
+        || selectedIds.has(chunk.id) || remainingBytes <= 0 || limit <= 0) return
       const text = boundedText(chunk.text, limit, remainingBytes)
       if (!text) return
       selected.push({ ...chunk, text })
@@ -92,11 +94,13 @@ export class V4EvidenceWindowCompiler {
       sourceId,
       stableChunks(grouped.get(sourceId)!.slice(1), terms),
     ]))
-    while (remainingBytes > 0 && [...queues.values()].some((queue) => queue.length > 0)) {
+    while (selected.length < V4_EVIDENCE_WINDOW_MAX_CHUNKS
+      && remainingBytes > 0
+      && [...queues.values()].some((queue) => queue.length > 0)) {
       for (const sourceId of nonEmptyGroups) {
         const chunk = queues.get(sourceId)?.shift()
         if (chunk) append(chunk, V4_EVIDENCE_CHUNK_MAX_CHARACTERS)
-        if (remainingBytes <= 0) break
+        if (selected.length >= V4_EVIDENCE_WINDOW_MAX_CHUNKS || remainingBytes <= 0) break
       }
     }
 

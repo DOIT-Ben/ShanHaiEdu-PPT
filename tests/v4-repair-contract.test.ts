@@ -60,9 +60,9 @@ function contract() {
 }
 
 describe('V4 repair contract', () => {
-  test('uses a relative three-percent tolerance for a 16:9 repair source', () => {
-    expect(hasVisualDeckV4AspectRatio(1600, 927)).toBe(true)
-    expect(hasVisualDeckV4AspectRatio(1600, 929)).toBe(false)
+  test('requires exact 16:9 pixels for a V4 repair source', () => {
+    expect(hasVisualDeckV4AspectRatio(1600, 900)).toBe(true)
+    expect(hasVisualDeckV4AspectRatio(1600, 927)).toBe(false)
   })
 
   test('freezes the exact edit scope, teaching constraints, source identity and edit model', () => {
@@ -116,11 +116,11 @@ describe('V4 repair contract', () => {
     expect(prompt).toContain('不得将两个或多个主要元素绑定、粘合、嵌套或合成为不可分割的组合主体')
   })
 
-  test('targets a 16:9 landscape output without demanding pixel-perfect dimensions', () => {
+  test('requires an exact 16:9 landscape output', () => {
     const prompt = compileV4RepairPrompt(contract())
 
-    expect(prompt).toContain('输出一张完成的满版横向幻灯片，目标比例约为 16:9。')
-    expect(prompt).toContain('允许轻微的像素尺寸偏差，但不得有意输出 3:2、4:3 或方形图片。')
+    expect(prompt).toContain('实际像素宽高必须满足 width * 9 = height * 16')
+    expect(prompt).toContain('实际像素宽高必须满足 width * 9 = height * 16')
     expect(prompt).not.toContain('像素级精确')
   })
 

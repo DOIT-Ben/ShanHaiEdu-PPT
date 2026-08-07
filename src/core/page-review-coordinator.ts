@@ -37,7 +37,7 @@ type V4AspectRatioViolation = Readonly<{
   issueId: string
 }>
 
-const V4_ASPECT_RATIO_REPAIR_INSTRUCTION = '重新生成当前整页幻灯片，严格使用横向 16:9 输出；实际像素宽高与 16:9 的相对误差不得超过 3%。保留已批准的页面施工单、可见文字、数字、公式和教学事实，不得裁切源图。'
+const V4_ASPECT_RATIO_REPAIR_INSTRUCTION = '重新生成当前整页幻灯片，严格使用横向 16:9 输出；实际像素宽高必须满足 width * 9 = height * 16。保留已批准的页面施工单、可见文字、数字、公式和教学事实，不得裁切源图。'
 
 function compositeReviewVersion(deckTitle: string, pageNumber: number) {
   return deckTitle.includes('5以内数的分与合') && pageNumber === 2
@@ -424,7 +424,7 @@ export class PageReviewCoordinator {
             id: violation.issueId,
             category: 'IMAGE_QUALITY',
             severity: 'CRITICAL',
-            summary: `第 ${violation.pageNumber} 页实际像素 ${violation.width}×${violation.height} 与 16:9 的相对误差超过 3%。`,
+            summary: `第 ${violation.pageNumber} 页实际像素 ${violation.width}×${violation.height} 不满足精确 16:9。`,
             slideIds: [`${transaction.run.id}:slide:${violation.pageNumber}`],
             sourceChunkIds: [],
             status: 'OPEN',

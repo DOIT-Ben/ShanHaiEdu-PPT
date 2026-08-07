@@ -65,8 +65,8 @@ describe('gateway image generation adapter', () => {
 
   test('rejects a completed gateway image whose actual pixels violate the requested ratio', async () => {
     const artifacts = new MockArtifactPort()
-    const square = await sharp({
-      create: { width: 1024, height: 1024, channels: 3, background: '#DDE7F7' },
+    const nearSixteenNine = await sharp({
+      create: { width: 1360, height: 768, channels: 3, background: '#DDE7F7' },
     }).png().toBuffer()
     const operationId = 'imgop_11111111111111111111111111111111'
     const adapter = new GatewayImageGenerationPort({
@@ -78,7 +78,7 @@ describe('gateway image generation adapter', () => {
             id: operationId,
             status: 'COMPLETED',
             submission_state: 'SUBMITTED',
-            result: { data: [{ b64_json: square.toString('base64') }] },
+            result: { data: [{ b64_json: nearSixteenNine.toString('base64') }] },
           }),
     })
     const submitted = await adapter.submit({

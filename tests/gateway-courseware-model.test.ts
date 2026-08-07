@@ -1483,6 +1483,67 @@ describe('gateway courseware model', () => {
     expect(result.issues[0]?.id).toMatch(/^issue-[a-f0-9]{32}$/)
   })
 
+  test('keeps open-knowledge chain-4 findings source-free without contract repair', async () => {
+    const artifacts = new MockArtifactPort()
+    const bytes = await sharp({
+      create: { width: 160, height: 90, channels: 3, background: '#F5F8FF' },
+    }).png().toBuffer()
+    const stored = await artifacts.put({
+      tenantId: 'frameflow', runId: 'run-open', name: 'slide-1.png', mimeType: 'image/png', bytes,
+      idempotencyKey: 'run-open-slide-1',
+    })
+    const manuscript = {
+      qualityScore: 72,
+      curriculumCoverageScore: 70,
+      narrativeCoherenceScore: 78,
+      visualConsistencyScore: 76,
+      compositionScore: 74,
+      summary: '页面整体结构清晰，但开放知识中的事实表达仍需要进一步核验。',
+      slides: [{ findings: [{
+        category: 'FACTUAL_RISK', severity: 'CRITICAL',
+        summary: '页面中的开放知识事实需要由下游进一步核验。', repairDomain: 'KNOWLEDGE',
+      }] }],
+    }
+    let calls = 0
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      visionModel: 'gpt-5.6-terra', artifacts,
+      fetchImpl: async () => {
+        calls += 1
+        return streamedResponsesTextCompletion(JSON.stringify(manuscript))
+      },
+    })
+
+    const result = await model.evaluate({
+      tenantId: 'frameflow',
+      blueprint: {
+        renderMode: 'VISUAL_DECK_V4',
+        curriculum: { sourceChunkIds: ['chunk-request'] },
+        visualDeckV4Proposal: {
+          compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+          presentationSpec: { sourceMode: 'OPEN_KNOWLEDGE' },
+        },
+      } as never,
+      sourceChunks: [{ id: 'chunk-request', text: '用户请求制作一页开放知识演示。', sha256: 'b'.repeat(64) }],
+      slides: [{
+        pageNumber: 1, slideId: 'run-open:slide:1', artifactId: stored.artifactId,
+        title: '开放知识主题', body: ['待核验事实'], layout: 'HERO',
+        visualIntent: '清晰展示开放知识主题', sourceChunkIds: ['chunk-request'],
+      }],
+      idempotencyKey: 'run-open-deck-review',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+    })
+
+    expect(calls).toBe(1)
+    expect(result).toMatchObject({
+      reviewedSourceChunkIds: ['chunk-request'],
+      issues: [{
+        category: 'FACTUAL_RISK', repairDomain: 'KNOWLEDGE', sourceChunkIds: [],
+        slideIds: ['run-open:slide:1'], status: 'OPEN',
+      }],
+    })
+  })
+
   test('reviews downloaded asset bytes against knowledge and style without sending source URLs', async () => {
     const artifacts = new MockArtifactPort()
     const png = await sharp({

@@ -3,6 +3,8 @@ import { ZodError } from 'zod'
 import {
   deckReviewDraftSchema,
   deckReviewSchema,
+  openKnowledgeDeckReviewDraftSchema,
+  openKnowledgeDeckReviewSchema,
   revisionPlanSchema,
   type DeckReview,
   type DeckReviewDraft,
@@ -179,7 +181,8 @@ export class DeckReviewRunner {
             ...(contractRepairIssues ? { contractRepairIssues } : {}),
             ...(run.v4StructuredGenerationProtocol ? { structuredGenerationProtocol: run.v4StructuredGenerationProtocol } : {}),
           })
-          const draft = deckReviewDraftSchema.parse(raw)
+          const openKnowledge = blueprint.visualDeckV4Proposal?.presentationSpec.sourceMode === 'OPEN_KNOWLEDGE'
+          const draft = (openKnowledge ? openKnowledgeDeckReviewDraftSchema : deckReviewDraftSchema).parse(raw)
           this.validateReferences(draft, run.id, blueprint, sourceChunks)
           if (blueprint.renderMode === 'VISUAL_DECK_V4') {
             const repairableIssues = draft.issues.filter((issue) => issue.severity !== 'INFO'
@@ -187,7 +190,7 @@ export class DeckReviewRunner {
                 || isHardQualityIssue(issue)))
             compileVisualDeckV4RevisionIssueGroups(repairableIssues)
           }
-          return deckReviewSchema.parse({
+          return (openKnowledge ? openKnowledgeDeckReviewSchema : deckReviewSchema).parse({
             ...draft,
             id: `${run.id}:deck-review:r${run.revisionRound}`,
             revisionRound: run.revisionRound,
@@ -233,7 +236,7 @@ export class DeckReviewRunner {
           throw new Error('STEP_IDEMPOTENCY_CONFLICT')
         }
         if (existing.status === 'COMPLETED') {
-          const review = deckReviewSchema.parse(existing.output)
+          const review = openKnowledgeDeckReviewSchema.parse(existing.output)
           const remediationExhausted = isVisualDeckV4(transaction.run)
             && transaction.run.automationLevel === 'BOUNDED_AUTO'
             && transaction.run.revisionRound >= transaction.run.maxRevisionRounds
@@ -339,7 +342,7 @@ export class DeckReviewRunner {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'COMPLETED') {
-        const persisted = deckReviewSchema.parse(step.output)
+        const persisted = openKnowledgeDeckReviewSchema.parse(step.output)
         return {
           step,
           review: persisted,
@@ -497,7 +500,7 @@ export class DeckReviewRunner {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'COMPLETED') {
-        const persisted = deckReviewSchema.parse(step.output)
+        const persisted = openKnowledgeDeckReviewSchema.parse(step.output)
         return {
           step,
           review: persisted,

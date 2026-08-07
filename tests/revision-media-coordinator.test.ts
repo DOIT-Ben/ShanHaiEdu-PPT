@@ -603,7 +603,7 @@ describe('revision media coordinator', () => {
     expect(budget.batchReservationRequests[0]?.model).toBe('gpt-image-2')
   })
 
-  test('accepts a controlled V4 repair source within the three-percent 16:9 tolerance', async () => {
+  test('accepts an exact 16:9 controlled V4 repair source', async () => {
     const { repository, images, artifacts, coordinator } = await fixture({
       presentationMode: 'VISUAL_DECK_V4', imageModel: 'gemini-3-pro-image-preview',
     }, {
@@ -612,7 +612,7 @@ describe('revision media coordinator', () => {
       revisionImageModel: 'gpt-image-2',
     })
     const bytes = new Uint8Array(await sharp({
-      create: { width: 1360, height: 768, channels: 3, background: '#FFFFFF' },
+      create: { width: 1280, height: 720, channels: 3, background: '#FFFFFF' },
     }).png().toBuffer())
     artifacts.artifacts.set('artifact-r0-2', {
       mimeType: 'image/png', bytes, sha256: createHash('sha256').update(bytes).digest('hex'),
@@ -628,7 +628,7 @@ describe('revision media coordinator', () => {
     expect(await revisionImageKey(repository, 2)).toContain(':edit:')
   })
 
-  test('rebuilds every planned V4 page as 16:9 when one edit source exceeds the tolerance', async () => {
+  test('rebuilds every planned V4 page when one edit source is not exact 16:9', async () => {
     const basePlan = revisionPlan()
     const plan = {
       ...basePlan,

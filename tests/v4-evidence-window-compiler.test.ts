@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   V4_EVIDENCE_CHUNK_MAX_CHARACTERS,
   V4_EVIDENCE_WINDOW_MAX_CHARACTERS,
+  V4_EVIDENCE_WINDOW_MAX_CHUNKS,
   V4_EVIDENCE_WINDOW_VERSION,
   V4EvidenceWindowCompiler,
 } from '../src/core/v4-evidence-window-compiler'
@@ -52,5 +53,25 @@ describe('V4 evidence window compiler', () => {
     })
     expect(result.audit.serializedByteCount).toBeLessThanOrEqual(V4_EVIDENCE_WINDOW_MAX_CHARACTERS)
     expect(Buffer.byteLength(JSON.stringify(result.chunks))).toBeLessThan(120_000)
+  })
+
+  test('keeps a legal short-chunk document within the gateway schema limit', () => {
+    const chunks = Array.from({ length: 201 }, (_, index) => ({
+      id: `chunk-${String(index).padStart(3, '0')}`,
+      sourceId: 'source-a',
+      text: index === 200 ? '重点目标位于最后一个短分块。' : `普通短分块 ${index}`,
+      sha256: String(index).padStart(64, '0'),
+    }))
+    const result = new V4EvidenceWindowCompiler().compile({
+      document: {
+        name: 'many-short-chunks.txt', chunks, isComplete: true, missingRanges: [],
+        sources: [{ id: 'source-a', name: 'many-short-chunks.txt', kind: 'TEXT', status: 'READY' }],
+      },
+      instruction: '重点目标',
+    })
+
+    expect(result.chunks).toHaveLength(V4_EVIDENCE_WINDOW_MAX_CHUNKS)
+    expect(result.chunks.some((chunk) => chunk.id === 'chunk-200')).toBe(true)
+    expect(result.audit.omittedChunkCount).toBe(1)
   })
 })

@@ -412,7 +412,7 @@ approved=true只能与PASS同时出现；approved=false必须明确区分NON_BLO
 
 ```text
 你是一位拥有 20 年经验的 Chain-4 学校课件语义终审专家。按输入的页面顺序逐槽审查最终组装预览，只返回质量分数、总结，以及每个页面槽位的语义 findings。
-finding 只能包含 category、severity、summary、repairDomain 和可选的来源原文摘录 sourceEvidence。严禁输出 issueId、slideId、pageNumber、sourceChunkId、字段路径、Patch、哈希、状态或其他运行控制字段。知识与事实 finding 必须提供能在受信来源中唯一匹配的原文摘录。slides 数组必须与输入页面数量及顺序一致，不得省略空 findings 的页面槽位。
+finding 只能包含 category、severity、summary、repairDomain 和可选的来源原文摘录 sourceEvidence。严禁输出 issueId、slideId、pageNumber、sourceChunkId、字段路径、Patch、哈希、状态或其他运行控制字段。SOURCE_GROUNDED 的知识与事实 finding 必须提供能在受信来源中唯一匹配的原文摘录；OPEN_KNOWLEDGE 不得伪造来源摘录。slides 数组必须与输入页面数量及顺序一致，不得省略空 findings 的页面槽位。
 ```
 
 - 用户消息顺序：整套 `blueprint`、受信 `sourceChunks`、去除私有 artifactId 的页面元数据 JSON；随后按页码依次发送“第 N 页最终组装预览”及对应受控图片。
@@ -506,7 +506,7 @@ V2 不追加统一编译规则，直接把蓝图中的 `slide.visualPrompt` 交�
 {{IMG-04 的关键文字、事实、视觉方向和全部安全规则}}
 ```
 
-- 用于已经持久化 `TEXT_TO_IMAGE` 返修路由的历史 Run；显式启用图片编辑的新 Run 使用 `IMG-06`，但编辑来源超过 `3%` 比例阈值时也会切换到本路径。
+- 用于已经持久化 `TEXT_TO_IMAGE` 返修路由的历史 Run；显式启用图片编辑的新 Run 使用 `IMG-06`，但编辑来源不满足精确 `16:9` 时也会切换到本路径。
 - 与 `IMG-04` 使用同一份必保留段、可选艺术段和安全尾注预算策略。
 
 ### `IMG-06` V4 受控局部图片编辑提示词（条件启用）
@@ -524,13 +524,13 @@ V2 不追加统一编译规则，直接把蓝图中的 `slide.visualPrompt` 交�
 受控业务数据｜视觉连续性规则：{{continuityRules}}
 受控业务数据｜禁止的修改：{{forbiddenChanges}}
 {{IMG-04 的全部视觉元素独立性、可计数对象、文字白名单和禁止拼贴安全尾注}}
-输出一张完成的满版横向幻灯片，目标比例约为 16:9。允许轻微的像素尺寸偏差，但不得有意输出 3:2、4:3 或方形图片。不得输出解释、边框、水印或其他幻灯片的内容。
+输出一张完成的满版横向幻灯片，实际像素宽高必须满足 width * 9 = height * 16。不得输出 3:2、4:3、方形或其他近似比例图片。不得输出解释、边框、水印或其他幻灯片的内容。
 ```
 
 - 本段固定指令统一使用中文；动态占位符按合同原样保留，支持非中文语言，不得翻译或改写。
 - 空数组对应的分段在运行时省略；`{{preserve.unaffectedAreas}}` 是后端冻结并持久化的原样保护指令。
 - 仅当 `PPT_AGENT_V4_IMAGE_EDIT_ENABLED=true` 且模型已通过真实验收时，此提示词才与上一版受控页面图片一起提交到图片编辑接口，随后仍经过 `IMG-08` 包装；否则需要 Provider 图片编辑的新 V4 Run 在任何预算或 Provider 提交前以 `IMAGE_EDIT_UNAVAILABLE` 结束。
-- `VIS-01` 在视觉模型审查后读取本地受控图片的实际像素尺寸。任一页相对 `16:9` 误差超过 `3%` 时，记录硬质量问题并将下一轮计划扩展到整套全部页面；不裁切原图。随后 `IMG-06` 路由改为 `TEXT_TO_IMAGE`，使用原始出图模型和 `16:9` 请求参数整页重绘全部页面。
+- `VIS-01` 在视觉模型审查后读取本地受控图片的实际像素尺寸。任一页不满足 `width * 9 = height * 16` 时，记录硬质量问题并将下一轮计划扩展到整套全部页面；不裁切原图。随后 `IMG-06` 路由改为 `TEXT_TO_IMAGE`，使用原始出图模型和 `16:9` 请求参数整页重绘全部页面。
 
 ### `IMG-07` V3 独立素材图片提示词
 

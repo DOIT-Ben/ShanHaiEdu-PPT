@@ -316,7 +316,7 @@ describe('page review coordinator', () => {
     })
   })
 
-  test('redraws the complete V4 deck when page review finds one source outside the three-percent 16:9 tolerance', async () => {
+  test('redraws the complete V4 deck when page review finds one source that is not exact 16:9', async () => {
     const planned = visualDeckV4Blueprint()
     const { repository, coordinator } = await fixture({
       plannedBlueprint: planned,
@@ -350,7 +350,7 @@ describe('page review coordinator', () => {
       'run-1:slide:1', 'run-1:slide:2', 'run-1:slide:3',
     ])
     expect(operations.every((operation) => operation.kind === 'REGENERATE_IMAGE')).toBe(true)
-    expect(operations.every((operation) => operation.instruction.includes('相对误差不得超过 3%'))).toBe(true)
+    expect(operations.every((operation) => operation.instruction.includes('width * 9 = height * 16'))).toBe(true)
     expect(operations.every((operation) => operation.issueIds.includes('step-image-2:aspect-ratio'))).toBe(true)
     expect((await repository.listEvents('run-1')).find((event) =>
       event.type === 'issue.detected' && event.payload.id === 'step-image-2:aspect-ratio')).toMatchObject({

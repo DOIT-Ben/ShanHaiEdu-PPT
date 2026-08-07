@@ -3,6 +3,7 @@ import sharp from 'sharp'
 import type { ArtifactPort, ImageGenerationPort } from '../core/ports'
 import { MediaSubmissionError } from '../core/ports'
 import { providerTechnicalFailure } from '../core/technical-recovery'
+import { hasVisualDeckV4AspectRatio } from '../core/blueprint-assets'
 
 const gatewayResponseSchema = z.object({
   data: z.array(z.object({ b64_json: z.string().min(1) }).passthrough()).min(1),
@@ -78,6 +79,10 @@ function expectedAspectRatio(value: Parameters<ImageGenerationPort['submit']>[0]
 async function assertImageAspectRatio(image: Uint8Array, aspectRatio: Parameters<ImageGenerationPort['submit']>[0]['aspectRatio']) {
   const metadata = await sharp(image).metadata()
   if (!metadata.width || !metadata.height) throw new Error('GATEWAY_IMAGE_OUTPUT_INVALID')
+  if (aspectRatio === '16:9') {
+    if (!hasVisualDeckV4AspectRatio(metadata.width, metadata.height)) throw new GatewayImageAspectRatioError()
+    return
+  }
   const ratio = metadata.width / metadata.height
   if (Math.abs(ratio / expectedAspectRatio(aspectRatio) - 1) > GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE) {
     throw new GatewayImageAspectRatioError()

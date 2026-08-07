@@ -50,7 +50,7 @@ function v4RepairPromptText(value: Readonly<{
     controlledDataSection('视觉连续性规则', value.preserve.continuityRules),
     controlledDataSection('禁止的修改', value.forbiddenChanges),
     ...VISUAL_DECK_V4_SAFETY_RULES,
-    '输出一张完成的满版横向幻灯片，目标比例约为 16:9。允许轻微的像素尺寸偏差，但不得有意输出 3:2、4:3 或方形图片。不得输出解释、边框、水印或其他幻灯片的内容。',
+    '输出一张完成的满版横向幻灯片，实际像素宽高必须满足 width * 9 = height * 16。不得输出 3:2、4:3、方形或其他近似比例图片。不得输出解释、边框、水印或其他幻灯片的内容。',
   ].filter(Boolean).join(' ')
 }
 

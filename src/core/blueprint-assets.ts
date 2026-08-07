@@ -24,12 +24,9 @@ export type BlueprintImageRequirement = Readonly<{
 export const V4_REVISION_PROMPT_MAX_LENGTH = 12_000
 // Four page-review rounds can each contribute a 1,000-character retry instruction.
 export const V4_REVISION_INSTRUCTION_MAX_LENGTH = 4_100
-export const VISUAL_DECK_V4_ASPECT_RATIO_TOLERANCE = 0.03
-
 export function hasVisualDeckV4AspectRatio(width: number, height: number) {
   if (!Number.isSafeInteger(width) || width <= 0 || !Number.isSafeInteger(height) || height <= 0) return false
-  const target = 16 / 9
-  return Math.abs(width / height / target - 1) <= VISUAL_DECK_V4_ASPECT_RATIO_TOLERANCE
+  return width * 9 === height * 16
 }
 
 export const VISUAL_DECK_V4_SAFETY_RULES = [
