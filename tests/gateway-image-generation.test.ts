@@ -298,7 +298,7 @@ describe('gateway image generation adapter', () => {
       errorCode: undefined, expectedCode: 'IDEMPOTENCY_RESPONSE_EXPIRED', operationId: null,
     },
     {
-      label: 'unknown', status: 'SUBMITTING', submissionState: 'UNKNOWN',
+      label: 'terminal unknown submission', status: 'SUBMISSION_UNKNOWN', submissionState: 'UNKNOWN',
       errorCode: undefined, expectedCode: 'GATEWAY_SUBMISSION_UNKNOWN', operationId: 'imgop_0123456789abcdef0123456789abcdef',
     },
     {
@@ -344,6 +344,98 @@ describe('gateway image generation adapter', () => {
     ])
   })
 
+  test('recovers a pollable task despite a transient unknown submission state', async () => {
+    const artifacts = new MockArtifactPort()
+    const operationId = 'imgop_0123456789abcdef0123456789abcdef'
+    const requests: string[] = []
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (url) => {
+        requests.push(String(url))
+        if (String(url).endsWith('/image-tasks')) throw new Error('connection dropped after gateway accepted request')
+        return Response.json({ id: operationId, status: 'SUBMITTING', submission_state: 'UNKNOWN' })
+      },
+    })
+
+    await expect(adapter.submit({
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
+    })).resolves.toEqual({ operationId, state: 'QUEUED' })
+    expect(requests).toEqual([
+      'https://newapi.doitbenai.cloud/v1/image-tasks',
+      'https://newapi.doitbenai.cloud/v1/image-tasks/by-idempotency',
+    ])
+  })
+
+  test.each([
+    ['CREATED', 'QUEUED'],
+    ['SUBMITTING', 'QUEUED'],
+    ['QUEUED', 'QUEUED'],
+    ['PROCESSING', 'PROCESSING'],
+  ] as const)('accepts a directly acknowledged active %s task despite a transient unknown submission state', async (status, state) => {
+    const operationId = 'imgop_0123456789abcdef0123456789abcdef'
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({ id: operationId, status, submission_state: 'UNKNOWN' }, { status: 202 }),
+    })
+
+    await expect(adapter.submit({
+      tenantId: 'frameflow', prompt: 'A valid educational illustration prompt', model: 'gpt-image-2',
+      aspectRatio: '16:9', idempotencyKey: 'run-1:asset:base:r0:v1',
+    })).resolves.toEqual({ operationId, state })
+  })
+
+  test.each([
+    {
+      label: 'active created task',
+      status: 'CREATED',
+      submissionState: 'UNKNOWN',
+      expected: { state: 'SUBMITTED', operationId: 'imgop_0123456789abcdef0123456789abcdef' },
+    },
+    {
+      label: 'active submitting task',
+      status: 'SUBMITTING',
+      submissionState: 'UNKNOWN',
+      expected: { state: 'SUBMITTED', operationId: 'imgop_0123456789abcdef0123456789abcdef' },
+    },
+    {
+      label: 'active queued task',
+      status: 'QUEUED',
+      submissionState: 'UNKNOWN',
+      expected: { state: 'SUBMITTED', operationId: 'imgop_0123456789abcdef0123456789abcdef' },
+    },
+    {
+      label: 'active processing task',
+      status: 'PROCESSING',
+      submissionState: 'UNKNOWN',
+      expected: { state: 'SUBMITTED', operationId: 'imgop_0123456789abcdef0123456789abcdef' },
+    },
+    {
+      label: 'terminal unknown submission',
+      status: 'SUBMISSION_UNKNOWN',
+      submissionState: 'UNKNOWN',
+      expected: { state: 'UNKNOWN' },
+    },
+  ] as const)('classifies idempotency lookup for a $label by operation status', async (case_) => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        id: 'imgop_0123456789abcdef0123456789abcdef',
+        status: case_.status,
+        submission_state: case_.submissionState,
+      }),
+    })
+
+    await expect(adapter.lookupByIdempotency!({
+      tenantId: 'frameflow',
+      idempotencyKey: 'run-1:asset:base:r0:v1',
+      operationMode: 'TEXT_TO_IMAGE',
+    })).resolves.toEqual(case_.expected)
+  })
+
   test.each([408, 429, 500])('keeps a known image task pollable after transient gateway status %i', async (status) => {
     const adapter = new GatewayImageGenerationPort({
       ...config,
@@ -356,6 +448,30 @@ describe('gateway image generation adapter', () => {
       operationId: 'imgop_0123456789abcdef0123456789abcdef',
       idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
     })).resolves.toMatchObject({ state: 'PROCESSING', retryAfterMs: 2_000 })
+  })
+
+  test.each([
+    ['CREATED', 'UNKNOWN', 'QUEUED'],
+    ['SUBMITTING', 'UNKNOWN', 'QUEUED'],
+    ['QUEUED', 'UNKNOWN', 'QUEUED'],
+    ['PROCESSING', 'UNKNOWN', 'PROCESSING'],
+    ['QUEUED', 'NOT_SUBMITTED', 'QUEUED'],
+  ] as const)('keeps an active %s task pollable with submission state %s', async (status, submissionState, state) => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        id: 'imgop_0123456789abcdef0123456789abcdef',
+        status,
+        submission_state: submissionState,
+      }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      aspectRatio: '16:9',
+    })).resolves.toEqual({ state })
   })
 
   test('honors Retry-After for a transient image task lookup', async () => {
@@ -375,30 +491,15 @@ describe('gateway image generation adapter', () => {
     })).resolves.toEqual({ state: 'PROCESSING', retryAfterMs: 7_000 })
   })
 
-  test.each([
-    {
-      label: 'unknown submission while processing', status: 'PROCESSING', submissionState: 'UNKNOWN',
-      error: undefined, expected: { errorCode: 'GATEWAY_SUBMISSION_UNKNOWN', billingState: 'UNKNOWN' },
-    },
-    {
-      label: 'explicitly unsubmitted task while queued', status: 'QUEUED', submissionState: 'NOT_SUBMITTED',
-      error: 'MODEL_FORBIDDEN', expected: { errorCode: 'MODEL_FORBIDDEN', billingState: 'NOT_CHARGED' },
-    },
-    {
-      label: 'unknown submission despite a completed payload', status: 'COMPLETED', submissionState: 'UNKNOWN',
-      error: undefined, expected: { errorCode: 'GATEWAY_SUBMISSION_UNKNOWN', billingState: 'UNKNOWN' },
-    },
-  ] as const)('stops inspection for $label', async (case_) => {
+  test('stops inspection only for a terminal unknown submission', async () => {
     const artifacts = new MockArtifactPort()
     const adapter = new GatewayImageGenerationPort({
       ...config,
       artifacts,
       fetchImpl: async () => Response.json({
         id: 'imgop_0123456789abcdef0123456789abcdef',
-        status: case_.status,
-        submission_state: case_.submissionState,
-        ...(case_.error ? { error: { code: case_.error } } : {}),
-        ...(case_.status === 'COMPLETED' ? { result: { data: [{ b64_json: 'not-an-image' }] } } : {}),
+        status: 'SUBMISSION_UNKNOWN',
+        submission_state: 'UNKNOWN',
       }),
     })
 
@@ -407,9 +508,32 @@ describe('gateway image generation adapter', () => {
       idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
     })).resolves.toMatchObject({
       state: 'FAILED',
-      ...case_.expected,
+      errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
+      billingState: 'UNKNOWN',
     })
     expect(artifacts.artifacts.size).toBe(0)
+  })
+
+  test('uses a completed task result despite an unknown submission state', async () => {
+    const artifacts = new MockArtifactPort()
+    const output = await sharp({ create: { width: 1600, height: 900, channels: 3, background: '#2F7D8C' } }).png().toBuffer()
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async () => Response.json({
+        id: 'imgop_0123456789abcdef0123456789abcdef',
+        status: 'COMPLETED',
+        submission_state: 'UNKNOWN',
+        result: { data: [{ b64_json: output.toString('base64') }] },
+      }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow',
+      operationId: 'imgop_0123456789abcdef0123456789abcdef',
+      aspectRatio: '16:9',
+      exactAspectRatio: true,
+    })).resolves.toMatchObject({ state: 'COMPLETED' })
   })
 
   test('keeps authorization failures as an explicit unknown-billing result', async () => {

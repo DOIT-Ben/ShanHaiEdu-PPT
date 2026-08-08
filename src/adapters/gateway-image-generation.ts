@@ -21,6 +21,9 @@ const imageOperationSchema = z.object({
   error: z.object({ code: z.string().min(1) }).passthrough().optional(),
 }).passthrough()
 
+type ImageOperation = z.infer<typeof imageOperationSchema>
+type PollableImageOperationStatus = Extract<ImageOperation['status'], 'CREATED' | 'SUBMITTING' | 'QUEUED' | 'PROCESSING'>
+
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
 const GATEWAY_IMAGE_ASPECT_RATIO_TOLERANCE = 0.03
@@ -150,19 +153,30 @@ async function normalizedVisualDeckV4Image(
     .toBuffer())
 }
 
-function operationErrorCode(operation: z.infer<typeof imageOperationSchema>) {
+function operationErrorCode(operation: ImageOperation) {
   return operation.error?.code
     ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED')
 }
 
-function gatewayAcceptedBeforeProviderSubmission(operation: z.infer<typeof imageOperationSchema>) {
-  return operation.submission_state === 'NOT_SUBMITTED'
-    && (operation.status === 'CREATED' || operation.status === 'SUBMITTING')
+function isPollableImageOperationStatus(
+  status: ImageOperation['status'],
+): status is PollableImageOperationStatus {
+  return status === 'CREATED' || status === 'SUBMITTING' || status === 'QUEUED' || status === 'PROCESSING'
 }
 
-function acceptedOperationState(operation: z.infer<typeof imageOperationSchema>) {
+function acceptedOperationState(operation: ImageOperation) {
   const errorCode = operationErrorCode(operation)
-  if (gatewayAcceptedBeforeProviderSubmission(operation)) return 'QUEUED' as const
+  if (isPollableImageOperationStatus(operation.status)) return pendingOperationState(operation.status)
+  if (operation.status === 'SUBMISSION_UNKNOWN') {
+    const unknownCode = errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode
+    throw new MediaSubmissionError(
+      unknownCode,
+      'UNKNOWN',
+      'gateway image task submission state is unknown',
+      providerTechnicalFailure(unknownCode, { disposition: 'RETRYABLE' }),
+      { operationId: operation.id },
+    )
+  }
   if (operation.submission_state === 'NOT_SUBMITTED') {
     throw new MediaSubmissionError(
       errorCode,
@@ -170,17 +184,6 @@ function acceptedOperationState(operation: z.infer<typeof imageOperationSchema>)
       'gateway did not accept the image task',
       providerTechnicalFailure(errorCode),
       { billingState: 'NOT_CHARGED' },
-    )
-  }
-  if (operation.submission_state === 'UNKNOWN' || operation.status === 'SUBMISSION_UNKNOWN') {
-    throw new MediaSubmissionError(
-      errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode,
-      'UNKNOWN',
-      'gateway image task submission state is unknown',
-      providerTechnicalFailure(errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode, {
-        disposition: 'RETRYABLE',
-      }),
-      { operationId: operation.id },
     )
   }
   if (operation.status === 'FAILED' || operation.status === 'EXPIRED') {
@@ -192,12 +195,10 @@ function acceptedOperationState(operation: z.infer<typeof imageOperationSchema>)
       { operationId: operation.id },
     )
   }
-  return operation.status === 'PROCESSING' ? 'PROCESSING' as const
-    : operation.status === 'COMPLETED' ? 'COMPLETED' as const
-      : 'QUEUED' as const
+  return 'COMPLETED' as const
 }
 
-function pendingOperationState(status: 'CREATED' | 'SUBMITTING' | 'QUEUED' | 'PROCESSING') {
+function pendingOperationState(status: PollableImageOperationStatus) {
   return status === 'PROCESSING' ? 'PROCESSING' as const : 'QUEUED' as const
 }
 
@@ -207,24 +208,24 @@ function billingState() {
   return 'UNKNOWN' as const
 }
 
-function inspectedSubmissionFailure(operation: z.infer<typeof imageOperationSchema>) {
+function inspectedSubmissionFailure(operation: ImageOperation) {
   const errorCode = operationErrorCode(operation)
-  if (gatewayAcceptedBeforeProviderSubmission(operation)) return null
-  if (operation.submission_state === 'NOT_SUBMITTED') {
-    return {
-      state: 'FAILED' as const,
-      errorCode,
-      billingState: 'NOT_CHARGED' as const,
-      technicalFailure: providerTechnicalFailure(errorCode),
-    }
-  }
-  if (operation.submission_state === 'UNKNOWN' || operation.status === 'SUBMISSION_UNKNOWN') {
+  if (isPollableImageOperationStatus(operation.status)) return null
+  if (operation.status === 'SUBMISSION_UNKNOWN') {
     const unknownCode = errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode
     return {
       state: 'FAILED' as const,
       errorCode: unknownCode,
       billingState: billingState(),
       technicalFailure: providerTechnicalFailure(unknownCode, { disposition: 'RETRYABLE' }),
+    }
+  }
+  if (operation.submission_state === 'NOT_SUBMITTED') {
+    return {
+      state: 'FAILED' as const,
+      errorCode,
+      billingState: 'NOT_CHARGED' as const,
+      technicalFailure: providerTechnicalFailure(errorCode),
     }
   }
   return null
@@ -405,8 +406,8 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
 
   async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
     const operation = await this.lookupImageTask(input.idempotencyKey, input.operationMode ?? 'TEXT_TO_IMAGE')
-    if (!operation || operation.submission_state === 'UNKNOWN') return { state: 'UNKNOWN' as const }
-    if (gatewayAcceptedBeforeProviderSubmission(operation)) {
+    if (!operation || operation.status === 'SUBMISSION_UNKNOWN') return { state: 'UNKNOWN' as const }
+    if (isPollableImageOperationStatus(operation.status)) {
       return { state: 'SUBMITTED' as const, operationId: operation.id }
     }
     if (operation.submission_state === 'NOT_SUBMITTED') return { state: 'NOT_SUBMITTED' as const }
@@ -462,8 +463,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     const operation = parsed.data
     const submissionFailure = inspectedSubmissionFailure(operation)
     if (submissionFailure) return submissionFailure
-    if (operation.status === 'CREATED' || operation.status === 'SUBMITTING'
-      || operation.status === 'QUEUED' || operation.status === 'PROCESSING') {
+    if (isPollableImageOperationStatus(operation.status)) {
       return { state: pendingOperationState(operation.status) }
     }
     if (operation.status === 'COMPLETED') {
