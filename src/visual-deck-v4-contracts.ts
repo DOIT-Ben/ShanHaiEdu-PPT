@@ -38,6 +38,11 @@ export const VISUAL_DECK_V4_CRITICAL_CONTENT_MAX_LENGTH = 4_000
 export const VISUAL_DECK_V4_REPAIR_CONSTRAINT_MAX_LENGTH = 2_300
 export const VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS = 80_000
 export const V4_MANUSCRIPT_CONTEXT_TOO_LARGE = 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE'
+const V4_MANUSCRIPT_CONTEXT_TOO_LARGE_CODES = new Set([
+  V4_MANUSCRIPT_CONTEXT_TOO_LARGE,
+  'MODEL_CONTEXT_TOO_LARGE',
+  'V4_MODEL_PAYLOAD_TOO_LARGE',
+])
 
 export function visualDeckV4ManuscriptCharacterCount(value: unknown) {
   return JSON.stringify(value)?.length ?? 0
@@ -50,7 +55,7 @@ export function assertVisualDeckV4ManuscriptCharacterLimit(value: unknown) {
 }
 
 export function isV4ManuscriptContextTooLargeError(error: unknown) {
-  return (error instanceof Error && error.message === V4_MANUSCRIPT_CONTEXT_TOO_LARGE)
+  return (error instanceof Error && V4_MANUSCRIPT_CONTEXT_TOO_LARGE_CODES.has(error.message))
     || (error instanceof z.ZodError && error.issues.some((issue) => issue.message === V4_MANUSCRIPT_CONTEXT_TOO_LARGE))
 }
 
@@ -176,9 +181,11 @@ const visualDeckV4ManuscriptSlideShape = {
   sourceEvidence: z.array(z.object({ excerpt: boundedText(1_200) }).strict()).max(8),
 } as const
 
-function isSemanticManuscriptPlaceholder(value: string) {
+export function isSemanticManuscriptPlaceholder(value: string) {
   const normalized = value.normalize('NFKC').replace(/\s+/gu, '').toLocaleLowerCase()
-  return /^(?:\.{3,}|…+|tbd|todo|n\/?a|placeholder|待补充|待完善|待定)$/u.test(normalized)
+  const content = normalized.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '')
+  if (content.length === 0) return true
+  return /^(?:tbd|todo|n\/?a|placeholder|待补充|待完善|待定|待补全|暂无|未定|待填)(?:[\p{P}\p{S}].*)?$/u.test(content)
 }
 
 const visualDeckV4ManuscriptSlideSchema = z.object(visualDeckV4ManuscriptSlideShape).strict()

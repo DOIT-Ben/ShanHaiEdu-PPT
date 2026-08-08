@@ -129,6 +129,8 @@ const v4PlanningStageAuditSchema = z.object({
   stageKeyHash: z.string().regex(/^[a-f0-9]{64}$/),
   totalDurationMs: z.number().int().nonnegative(),
   attempts: z.array(v4PlanningStageAttemptSchema).max(MAX_PROVIDER_ATTEMPTS),
+  semanticCompletionUsed: z.boolean().default(false),
+  semanticCompletionExhausted: z.boolean().default(false),
 }).strict()
 
 type V4PlanningStageAttempt = z.infer<typeof v4PlanningStageAttemptSchema>
@@ -709,24 +711,22 @@ export class PlanningRunner {
     } catch (error) {
       if (!(error instanceof V4ManuscriptCompilationError)
         || error.code !== 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS') throw error
-      const repairKey = visualDeckV4PlanningStageStepKey(
-        input.input.runId, 'review-manuscript', input.input.attempt ?? 0, 1,
-      )
-      const repairUsed = await this.dependencies.repository.transact(
-        input.input.runId,
-        (transaction) => Boolean(transaction.getStep(repairKey)),
-      )
-      if (repairUsed) throw error
-      review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4PlanningStage(input.input, {
-        ...reviewRequest,
-        repairAttempt: 1,
-        payload: {
-          ...reviewRequest.payload,
-          contentSlotCompletion: true,
-          sourceEvidenceDisambiguation: '每条来源摘录必须足够长，并且只能在一个受信 chunk 中出现。',
-        },
-      }))
-      draft = compiler.compilePlan(compilerInput, creative, review)
+      review = visualDeckV4ReviewManuscriptSchema.parse(await this.runV4SemanticCompletion(
+        input.input,
+        reviewRequest,
+        error,
+        { sourceEvidenceDisambiguation: '每条来源摘录必须足够长，并且只能在一个受信 chunk 中出现。' },
+      ))
+      try {
+        draft = compiler.compilePlan(compilerInput, creative, review)
+      } catch (repairError) {
+        if (!(repairError instanceof V4ManuscriptCompilationError)
+          || !['V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS', 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'].includes(repairError.code)) {
+          throw repairError
+        }
+        await this.markV4SemanticCompletion(input.input.runId, 'review-manuscript', input.input.attempt ?? 0, true)
+        throw new PlanningFailureError(this.terminalV4SemanticFailure(input.input, repairError))
+      }
     }
     return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
   }
@@ -1026,26 +1026,99 @@ export class PlanningRunner {
       // must never be sent back to the model for repeated repair.
       if (!(error instanceof PlanningFailureError)
         || error.failure.errorCode !== 'MODEL_JSON_INVALID') throw error
-      try {
-        return await this.runV4PlanningStage(input, {
-          ...request,
-          repairAttempt: 1,
-          payload: { ...request.payload, contentSlotCompletion: true },
-        })
-      } catch (repairError) {
-        if (!(repairError instanceof PlanningFailureError)
-          || repairError.failure.errorCode !== 'MODEL_JSON_INVALID') throw repairError
-        throw new PlanningFailureError({
-          ...repairError.failure,
-          terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
-          retryable: false,
-          attempt: 2,
-          maxAttempts: 2,
-          suggestedAction: 'CONTACT_ADMIN',
-          diagnosticCode: V4_MANUSCRIPT_SEMANTIC_INVALID,
-        })
-      }
+      return this.runV4SemanticCompletion(input, request, error)
     }
+  }
+
+  private async runV4SemanticCompletion(
+    input: PlanPresentationInput,
+    request: V4ManuscriptStageRequest,
+    initialError: unknown,
+    extraPayload: Readonly<Record<string, unknown>> = {},
+  ) {
+    const claimed = await this.claimV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0)
+    if (!claimed) {
+      await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true)
+      throw new PlanningFailureError(this.terminalV4SemanticFailure(input, initialError))
+    }
+    try {
+      return await this.runV4PlanningStage(input, {
+        ...request,
+        repairAttempt: 1,
+        payload: {
+          ...request.payload,
+          contentSlotCompletion: true,
+          ...extraPayload,
+        },
+      })
+    } catch (repairError) {
+      if (!this.isV4SemanticFailure(repairError)) throw repairError
+      await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true)
+      throw new PlanningFailureError(this.terminalV4SemanticFailure(input, repairError))
+    }
+  }
+
+  private isV4SemanticFailure(error: unknown) {
+    return error instanceof PlanningFailureError
+      && (error.failure.errorCode === 'MODEL_JSON_INVALID'
+        || error.failure.errorCode === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+        || error.failure.errorCode === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
+  }
+
+  private terminalV4SemanticFailure(input: PlanPresentationInput, error: unknown): PlanningFailure {
+    const failure = error instanceof PlanningFailureError
+      ? error.failure
+      : this.contractFailure(input, error, 2, 2, true, true)
+    return {
+      ...failure,
+      terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
+      retryable: false,
+      attempt: 2,
+      maxAttempts: 2,
+      suggestedAction: 'CONTACT_ADMIN',
+      diagnosticCode: V4_MANUSCRIPT_SEMANTIC_INVALID,
+    }
+  }
+
+  private async claimV4SemanticCompletion(runId: string, stage: V4ManuscriptStageRequest['stage'], attempt: number) {
+    return this.dependencies.repository.transact(runId, (transaction) => {
+      const auditKey = `${visualDeckV4PlanningStageStepKey(runId, stage, attempt)}:attempt-audit`
+      const audit = transaction.getStep(auditKey)
+      if (!audit || audit.tool !== 'audit_v4_planning_stage') throw new Error('V4_PLANNING_STAGE_AUDIT_MISSING')
+      const output = v4PlanningStageAuditSchema.parse(audit.output)
+      if (output.semanticCompletionUsed || output.semanticCompletionExhausted) return false
+      transaction.putStep({
+        ...audit,
+        output: { ...output, semanticCompletionUsed: true },
+        updatedAt: this.dependencies.clock.now().toISOString(),
+      })
+      return true
+    })
+  }
+
+  private async markV4SemanticCompletion(
+    runId: string,
+    stage: V4ManuscriptStageRequest['stage'],
+    attempt: number,
+    exhausted: boolean,
+  ) {
+    await this.dependencies.repository.transact(runId, (transaction) => {
+      const auditKey = `${visualDeckV4PlanningStageStepKey(runId, stage, attempt)}:attempt-audit`
+      const audit = transaction.getStep(auditKey)
+      if (!audit || audit.tool !== 'audit_v4_planning_stage') return
+      const output = v4PlanningStageAuditSchema.parse(audit.output)
+      transaction.putStep({
+        ...audit,
+        status: exhausted ? 'FAILED' : audit.status,
+        errorCode: exhausted ? 'MODEL_JSON_INVALID' : audit.errorCode,
+        output: {
+          ...output,
+          semanticCompletionUsed: true,
+          semanticCompletionExhausted: exhausted || output.semanticCompletionExhausted,
+        },
+        updatedAt: this.dependencies.clock.now().toISOString(),
+      })
+    })
   }
 
   private async runV4PlanningStage(input: PlanPresentationInput, request: Readonly<{
@@ -1853,7 +1926,9 @@ export class PlanningRunner {
     exhausted: boolean,
     semanticManuscript = false,
   ): PlanningFailure {
-    const semanticContractFailure = semanticManuscript && !isV4ManuscriptContextTooLargeError(error)
+    const semanticContractFailure = semanticManuscript
+      && !isV4ManuscriptContextTooLargeError(error)
+      && this.isV4SemanticContractError(error)
     const fieldPaths = semanticContractFailure && error instanceof ZodError
       ? [...new Set(error.issues.map((issue) => issue.path.join('.') || 'manuscript'))].slice(0, 20)
       : semanticContractFailure
@@ -1864,41 +1939,49 @@ export class PlanningRunner {
         ? ['blueprint']
         : []
     const message = error instanceof Error ? error.message : ''
+    const technicalMessage = /^[A-Z][A-Z0-9_]{2,99}$/.test(message) && isTechnicalFailureCode(message)
+    const semanticErrorCode: PlanningFailure['errorCode'] = error instanceof V4ManuscriptCompilationError
+      && (error.code === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+        || error.code === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
+      ? error.code
+      : 'MODEL_JSON_INVALID'
     const errorCode: PlanningFailure['errorCode'] = isV4ManuscriptContextTooLargeError(error)
       ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
       : semanticContractFailure
-        ? 'MODEL_JSON_INVALID'
-      : error instanceof ZodError
-      ? input.presentationMode === 'LAYERED_COURSEWARE_V3' && error.issues.some((issue) =>
-        issue.path.includes('layeredDesign') || issue.path.includes('elements'))
-        ? 'V3_LAYER_CONTRACT_INVALID'
-        : 'BLUEPRINT_SCHEMA_INVALID'
-      : message === 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
-        ? 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
-        : message === 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
-          ? 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
-          : message === 'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID'
-            ? 'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID'
-            : message === 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE'
-              ? 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE'
-          : message === 'BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED'
-            ? 'VISUAL_ASSET_LIMIT_EXCEEDED'
-            : message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID'
-              ? 'V3_LAYER_CONTRACT_INVALID'
-              : message === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
-                ? 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
-                : message === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
-                  ? 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
-                  : message === V4_PLANNING_REQUEST_REPLAY_MISMATCH
-                    ? V4_PLANNING_REQUEST_REPLAY_MISMATCH
-                    : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
-                      ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
-                      : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
-                        ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
-                        : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
-                          ? 'MODEL_JSON_INVALID'
-                          : 'BLUEPRINT_SCHEMA_INVALID'
-    const retryable = semanticContractFailure || [
+        ? semanticErrorCode
+        : error instanceof ZodError
+          ? input.presentationMode === 'LAYERED_COURSEWARE_V3' && error.issues.some((issue) =>
+            issue.path.includes('layeredDesign') || issue.path.includes('elements'))
+            ? 'V3_LAYER_CONTRACT_INVALID'
+            : 'BLUEPRINT_SCHEMA_INVALID'
+          : message === 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
+            ? 'BLUEPRINT_SLIDE_COUNT_MISMATCH'
+            : message === 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
+              ? 'BLUEPRINT_SOURCE_REFERENCE_INVALID'
+              : message === 'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID'
+                ? 'BLUEPRINT_SOURCE_ASSET_REFERENCE_INVALID'
+                : message === 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE'
+                  ? 'BLUEPRINT_SOURCE_ASSET_MAPPING_INCOMPLETE'
+                  : message === 'BLUEPRINT_VISUAL_ASSET_LIMIT_EXCEEDED'
+                    ? 'VISUAL_ASSET_LIMIT_EXCEEDED'
+                    : message === 'LAYERED_BLUEPRINT_SCHEMA_INVALID'
+                      ? 'V3_LAYER_CONTRACT_INVALID'
+                      : message === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+                        ? 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+                        : message === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
+                          ? 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
+                          : message === V4_PLANNING_REQUEST_REPLAY_MISMATCH
+                            ? V4_PLANNING_REQUEST_REPLAY_MISMATCH
+                            : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+                              ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+                              : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
+                                ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
+                                : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
+                                  ? 'MODEL_JSON_INVALID'
+                                  : technicalMessage
+                                    ? 'PROVIDER_UNAVAILABLE'
+                                    : 'BLUEPRINT_SCHEMA_INVALID'
+    const retryable = semanticContractFailure || technicalMessage || [
       'MODEL_JSON_INVALID',
       'BLUEPRINT_SLIDE_COUNT_MISMATCH',
       'BLUEPRINT_SOURCE_REFERENCE_INVALID',
@@ -1914,7 +1997,9 @@ export class PlanningRunner {
       attempt,
       maxAttempts,
       suggestedAction: effectiveRetryable ? 'RETRY' : 'CONTACT_ADMIN',
-      diagnosticCode: semanticContractFailure ? V4_MANUSCRIPT_SEMANTIC_INVALID : errorCode,
+      diagnosticCode: semanticContractFailure
+        ? V4_MANUSCRIPT_SEMANTIC_INVALID
+        : technicalMessage ? message : errorCode,
       fieldPaths,
       correlationId: this.correlationId(input),
       requestId: error instanceof StructuredModelError
@@ -1925,6 +2010,12 @@ export class PlanningRunner {
         : this.dependencies.model.modelName ?? null,
       contractVersion: CONTRACT_VERSION,
     }
+  }
+
+  private isV4SemanticContractError(error: unknown) {
+    return error instanceof ZodError
+      || (error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID')
+      || error instanceof V4ManuscriptCompilationError
   }
 
   private correlationId(input: PlanPresentationInput) {
@@ -2223,8 +2314,7 @@ export class PlanningRunner {
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'FAILED') return step
       const now = this.dependencies.clock.now().toISOString()
-      const terminalSemanticManuscriptFailure = failure.errorCode === 'MODEL_JSON_INVALID'
-        && failure.terminalCode === 'CONTRACT_REPAIR_EXHAUSTED'
+      const terminalSemanticManuscriptFailure = failure.terminalCode === 'CONTRACT_REPAIR_EXHAUSTED'
         && failure.diagnosticCode === V4_MANUSCRIPT_SEMANTIC_INVALID
       const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
         && issueCategory === 'PLANNING_FAILED'

@@ -91,14 +91,20 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
     expect(JSON.stringify(proposal)).not.toContain('pageIndex')
   })
 
-  test('rejects a placeholder semantic visual description before compilation', () => {
-    const invalid = {
-      ...manuscript(),
-      slides: [{ ...manuscript().slides[0]!, visualDescription: '...' }],
+  test('rejects every known placeholder form while keeping short meaningful descriptions valid', () => {
+    for (const visualDescription of ['...', '…', '待补全', '待补全。', 'TBD: ...', '暂无', 'N/A。', '???']) {
+      const invalid = {
+        ...manuscript(),
+        slides: [{ ...manuscript().slides[0]!, visualDescription }],
+      }
+      expect(() => visualDeckV4CreativeManuscriptSchema.parse(invalid)).toThrow(
+        'semantic manuscript content cannot be a placeholder',
+      )
     }
-
-    expect(() => visualDeckV4CreativeManuscriptSchema.parse(invalid))
-      .toThrow('semantic manuscript content cannot be a placeholder')
+    expect(() => visualDeckV4CreativeManuscriptSchema.parse({
+      ...manuscript(),
+      slides: [{ ...manuscript().slides[0]!, visualDescription: '水面、云和降水' }],
+    })).not.toThrow()
   })
 
   test('derives a valid blueprint visual intent from a short meaningful semantic description', () => {

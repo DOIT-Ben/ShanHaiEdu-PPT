@@ -1,6 +1,7 @@
 import type { RevisionPlan } from '../presentation-contracts'
 import {
   assertVisualDeckV4ManuscriptCharacterLimit,
+  isSemanticManuscriptPlaceholder,
   visualDeckV4ProposalDraftSchema,
   type VisualDeckV4CreativeManuscript,
   type VisualDeckV4ProposalDraft,
@@ -26,6 +27,9 @@ function compact(value: string, maximum: number) {
 
 function compileVisualIntent(value: string) {
   const description = compact(value, 1_000)
+  if (!description || isSemanticManuscriptPlaceholder(description)) {
+    throw new V4ManuscriptCompilationError('V4_MANUSCRIPT_SEMANTIC_INVALID')
+  }
   return description.length >= 10
     ? description
     : compact(`以${description}建立清晰的主视觉关系`, 1_000)

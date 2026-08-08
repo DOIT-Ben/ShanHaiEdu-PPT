@@ -22,7 +22,7 @@ import {
 import { hashInput } from './hash'
 import { planningStepKey } from './planning-runner'
 import { getPresentationModeStrategy } from './presentation-mode-strategy'
-import { V4_PLANNING_STAGE_COUNT } from './visual-deck-v4-planner'
+import { V4_PLANNING_STAGE_COUNT, visualDeckV4PlanningStageStepKey } from './visual-deck-v4-planner'
 import type {
   AgentRepository,
   AgentTransaction,
@@ -69,6 +69,21 @@ const ADMIN_ONLY_CRITICAL_CATEGORIES = new Set([
   'SOURCE_INCOMPLETE',
   'PLANNING_FAILED',
 ])
+
+function hasExhaustedV4SemanticCompletion(
+  run: Pick<RunRecord, 'id' | 'planningAttempt'>,
+  steps: readonly StepRecord[],
+) {
+  const attempt = run.planningAttempt ?? 0
+  return (['creative-manuscript', 'review-manuscript'] as const).some((stage) => {
+    const key = `${visualDeckV4PlanningStageStepKey(run.id, stage, attempt)}:attempt-audit`
+    const step = steps.find((candidate) => candidate.idempotencyKey === key)
+    const output = step?.output && typeof step.output === 'object'
+      ? step.output as Record<string, unknown>
+      : null
+    return output?.semanticCompletionExhausted === true
+  })
+}
 
 type QualityRecoveryArtifactProof = Readonly<{
   runId: string
@@ -274,6 +289,8 @@ export class RunService {
       && presentationBlueprintSchema.safeParse(activeBlueprintStep.output).success
     const planningStep = steps.find((step) => step.idempotencyKey === planningStepKey(run.id, run.planningAttempt ?? 0))
     const hasFailedPlanning = planningStep?.status === 'FAILED'
+    const semanticCompletionExhausted = isVisualDeckV4(run)
+      && hasExhaustedV4SemanticCompletion(run, steps)
     const deliveryStep = steps.find((step) => step.idempotencyKey === deliveryStepKey(run))
     const targetRevisionRound = run.revisionRound + 1
     const revisionPlan = revisionPlanSchema.safeParse(
@@ -299,7 +316,8 @@ export class RunService {
     }
 
     if (run.status === 'NEEDS_HUMAN' && hasFailedPlanning) {
-      if (isVisualDeckV4(run) || (run.planningAttempt ?? 0) < MAX_PLANNING_RETRIES) add('RETRY_PLANNING')
+      if ((isVisualDeckV4(run) && !semanticCompletionExhausted)
+        || (!isVisualDeckV4(run) && (run.planningAttempt ?? 0) < MAX_PLANNING_RETRIES)) add('RETRY_PLANNING')
       if ((run.planningAttempt ?? 0) < MAX_PLANNING_RETRIES) add('REPLAN')
     }
 
@@ -635,6 +653,13 @@ export class RunService {
     if (action.type !== 'RETRY_PLANNING' && action.type !== 'REPLAN') return null
     const currentAttempt = transaction.run.planningAttempt ?? 0
     if (action.type === 'RETRY_PLANNING' && isVisualDeckV4(transaction.run)) {
+      if (hasExhaustedV4SemanticCompletion(transaction.run, transaction.listSteps())) {
+        throw new RunServiceError(
+          409,
+          'V4_SEMANTIC_COMPLETION_EXHAUSTED',
+          'chain-4 semantic completion has already been consumed for this planning attempt; use REPLAN',
+        )
+      }
       const failed = transaction.getStep(planningStepKey(transaction.run.id, currentAttempt))
       if (!failed || failed.status !== 'FAILED') {
         throw new RunServiceError(409, 'PLANNING_FAILURE_NOT_READY', 'failed planning attempt is not available')

@@ -1105,6 +1105,78 @@ describe('visual deck v4 planning runner', () => {
     const run = await repository.getRun(created.run.id)
     expect(run?.status).toBe('NEEDS_HUMAN')
     expect(run?.technicalRecovery).toBeUndefined()
+    const reviewAudit = (await repository.listSteps(created.run.id)).find((step) =>
+      step.idempotencyKey === `${visualDeckV4PlanningStageStepKey(created.run.id, 'review-manuscript')}:attempt-audit`)
+    expect(reviewAudit).toMatchObject({ status: 'FAILED', output: {
+      semanticCompletionUsed: true, semanticCompletionExhausted: true,
+    } })
+    const allowed = await service.getAllowedActions(created.run.id, created.run.host)
+    expect(allowed.map((action) => action.type)).not.toContain('RETRY_PLANNING')
+    expect(allowed.map((action) => action.type)).toContain('REPLAN')
+    await expect(service.act(created.run.id, created.run.host, {
+      schemaVersion: CONTRACT_VERSION, type: 'RETRY_PLANNING', expectedVersion: run!.version,
+    }, 'v4-semantic-completion-retry-blocked-0001')).rejects.toMatchObject({
+      status: 409, code: 'V4_SEMANTIC_COMPLETION_EXHAUSTED',
+    })
+  })
+
+  test('does not turn a technical network error into semantic completion', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-network-error-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let calls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript') {
+        calls += 1
+        throw new Error('NETWORK_TIMEOUT')
+      }
+      return execute(modelInput)
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.step.errorCode).toBe('PROVIDER_UNAVAILABLE')
+    expect(calls).toBe(1)
+    expect((await repository.getRun(created.run.id))?.status).toBe('RECOVERING')
+  })
+
+  test('normalizes gateway context overflow aliases without semantic completion', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-context-alias-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let reviewCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'review_visual_deck_v4_manuscript') {
+        reviewCalls += 1
+        throw new Error('V4_MODEL_PAYLOAD_TOO_LARGE')
+      }
+      return execute(modelInput)
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.step.errorCode).toBe('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    expect(reviewCalls).toBe(1)
   })
 
   test('does not grant a second semantic completion after repaired review evidence remains ambiguous', async () => {
