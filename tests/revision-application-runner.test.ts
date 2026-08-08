@@ -504,6 +504,29 @@ describe('revision application runner', () => {
     expect(application.requests.size).toBe(1)
   })
 
+  test('normalizes a gateway revision payload overflow alias before any semantic repair', async () => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
+    const input = visualDeckV4Input()
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const { application, runner } = await fixture({}, revisionPlan, base, {
+      runOverrides: { source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config },
+      documents: new StaticDocumentPort(input.document),
+    })
+    let calls = 0
+    application.apply = async () => {
+      calls += 1
+      throw new Error('MODEL_CONTEXT_TOO_LARGE')
+    }
+
+    const result = await runner.apply('run-1')
+
+    expect(result.step.errorCode).toBe('V4_MANUSCRIPT_CONTEXT_TOO_LARGE')
+    expect(calls).toBe(1)
+  })
+
   test('uses one semantic slot-completion retry for a chain-4 revision manuscript', async () => {
     const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
     const input = visualDeckV4Input()
@@ -540,6 +563,54 @@ describe('revision application runner', () => {
     expect(requests[0]?.contentSlotCompletion).toBeUndefined()
     expect(requests[1]).toMatchObject({ contentSlotCompletion: true })
     expect(requests[1]?.contractRepairIssues).toBeUndefined()
+  })
+
+  test('fails a second chain-4 placeholder as a terminal semantic contract failure', async () => {
+    const base = visualDeckV4Blueprint(2, VISUAL_DECK_V4_COMPILER_VERSION)
+    const input = visualDeckV4Input()
+    const response = {
+      title: '光合作用', narrative: ['明确绿色植物的作用', '说明光合作用的产物'],
+      slides: [{
+        title: '光合作用会产生什么？', narrative: '绿色植物制造有机物并释放氧气。',
+        userVisibleCopy: ['制造有机物', '释放氧气'], factualStatements: ['绿色植物制造有机物并释放氧气。'],
+        visualDescription: '以一片完整叶子和两条清晰方向箭头表现两种产物',
+        sourceEvidence: [{ excerpt: '制造有机物并释放氧气。' }],
+      }],
+      revisionSuggestions: ['用单一叶片场景清晰区分两种产物。'],
+    }
+    const revisionPlan = {
+      ...plan('UPDATE_CONTENT'),
+      operations: [{ ...plan('UPDATE_CONTENT').operations[0]!, sourceChunkIds: ['chunk-2'] }],
+    }
+    const { application, repository, runner } = await fixture(response, revisionPlan, base, {
+      runOverrides: { source: input.source, presentationMode: 'VISUAL_DECK_V4', visualDeckV4: input.config },
+      documents: new StaticDocumentPort(input.document),
+    })
+    const requests: Array<{ contentSlotCompletion?: boolean }> = []
+    application.apply = async (modelInput) => {
+      requests.push(modelInput)
+      return {
+        ...response,
+        slides: response.slides.map((slide) => ({ ...slide, visualDescription: '待补全。' })),
+      }
+    }
+
+    const result = await runner.apply('run-1')
+
+    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', step: {
+      status: 'FAILED', errorCode: 'MODEL_JSON_INVALID', output: {
+        diagnostic: {
+          terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
+          diagnosticCode: 'V4_MANUSCRIPT_SEMANTIC_INVALID',
+        },
+      },
+    } })
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.contentSlotCompletion).toBeUndefined()
+    expect(requests[1]?.contentSlotCompletion).toBe(true)
+    const run = await repository.getRun('run-1')
+    expect(run?.status).toBe('NEEDS_HUMAN')
+    expect(run?.technicalRecovery).toBeUndefined()
   })
 
   test('requests one longer unique source excerpt after an ambiguous chain-4 revision manuscript', async () => {

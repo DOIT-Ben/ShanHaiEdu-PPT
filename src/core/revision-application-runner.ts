@@ -1,4 +1,5 @@
 import { CONTRACT_VERSION } from '../contracts'
+import { ZodError } from 'zod'
 import {
   blueprintDraftSchema,
   presentationBlueprintSchema,
@@ -30,7 +31,7 @@ import type {
 } from './ports'
 import { StructuredModelError } from './ports'
 import { transitionRun } from './policy'
-import { beginTechnicalRecovery, isTechnicalFailureCode } from './technical-recovery'
+import { beginTechnicalRecovery, isTechnicalFailureCode, technicalFailureDisposition } from './technical-recovery'
 import {
   MAX_REVISION_CONTRACT_ATTEMPTS,
   revisionContractAttemptKey,
@@ -40,7 +41,7 @@ import { revisionPlanStepKey } from './revision-planning-runner'
 import {
   createVisualDeckV4BlueprintFromProposal,
 } from './visual-deck-v4-planner'
-import { ManuscriptCompiler } from './v4-manuscript-compiler'
+import { ManuscriptCompiler, V4ManuscriptCompilationError } from './v4-manuscript-compiler'
 import {
   isSupportedVisualDeckV4CompilerVersion,
   VISUAL_DECK_V4_COMPILER_VERSION,
@@ -65,9 +66,11 @@ export type RevisionApplicationResult = Readonly<{
 
 const MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS = 5
 const REVISION_APPLICATION_RETRY_DELAYS_MS = [2_000, 10_000, 30_000, 60_000] as const
+const V4_MANUSCRIPT_SEMANTIC_INVALID = 'V4_MANUSCRIPT_SEMANTIC_INVALID'
 
 type RevisionApplicationFailure = Readonly<{
   errorCode: string
+  terminalCode?: 'CONTRACT_REPAIR_EXHAUSTED'
   diagnosticCode: string
   providerAttempt: number
   maxProviderAttempts: number
@@ -296,10 +299,18 @@ export class RevisionApplicationRunner {
           const sourceEvidenceAmbiguous = chain4
             && error instanceof Error
             && error.message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
-          const issues = revisionContractRepairIssues(error)
+          const semanticManuscriptFailure = chain4 && isV4SemanticManuscriptFailure(error)
+          const issues = chain4 && !semanticManuscriptFailure
+            ? null
+            : revisionContractRepairIssues(error)
           if (!issues || contractAttempt + 1 >= MAX_REVISION_CONTRACT_ATTEMPTS) {
             throw new RevisionApplicationExecutionError(
-              revisionApplicationFailure(error, providerAttempt, contractAttempt + 1),
+              revisionApplicationFailure(
+                error,
+                providerAttempt,
+                contractAttempt + 1,
+                semanticManuscriptFailure && contractAttempt + 1 >= MAX_REVISION_CONTRACT_ATTEMPTS,
+              ),
             )
           }
           if (chain4) {
@@ -481,8 +492,14 @@ export class RevisionApplicationRunner {
       }
       if (step.status !== 'RUNNING') throw new Error('REVISION_APPLICATION_STEP_STATE_INVALID')
       const now = this.dependencies.clock.now().toISOString()
-      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && isTechnicalFailureCode(diagnostic.errorCode)
-      const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4' && !v4TechnicalFailure
+      const terminalSemanticManuscriptFailure = diagnostic.terminalCode === 'CONTRACT_REPAIR_EXHAUSTED'
+        && diagnostic.diagnosticCode === V4_MANUSCRIPT_SEMANTIC_INVALID
+      const v4TechnicalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && !terminalSemanticManuscriptFailure
+        && isTechnicalFailureCode(diagnostic.errorCode)
+      const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && !terminalSemanticManuscriptFailure
+        && !v4TechnicalFailure
       const policy = v4TechnicalFailure || v4InternalFailure
         ? transaction.run
         : transitionRun(transaction.run, 'NEEDS_HUMAN')
@@ -750,22 +767,36 @@ function revisionApplicationFailure(
   error: unknown,
   providerAttempt: number,
   contractAttempt: number,
+  terminalSemanticManuscriptFailure = false,
 ): RevisionApplicationFailure {
   const structured = error instanceof StructuredModelError ? error : null
   const manuscriptContextTooLarge = isV4ManuscriptContextTooLargeError(error)
-  const diagnosticCode = structured?.code
-    ?? (manuscriptContextTooLarge
-      ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
-      : error instanceof Error && /^[A-Z][A-Z0-9_]{2,99}$/.test(error.message)
-      ? error.message
-      : 'REVISION_APPLICATION_FAILED')
-  return {
-    errorCode: structured?.code
+  const semanticFailure = terminalSemanticManuscriptFailure && isV4SemanticManuscriptFailure(error)
+  const message = error instanceof Error ? error.message : ''
+  const technicalMessage = /^[A-Z][A-Z0-9_]{2,99}$/.test(message)
+    && technicalFailureDisposition(message) === 'RETRYABLE'
+  const diagnosticCode = semanticFailure
+    ? V4_MANUSCRIPT_SEMANTIC_INVALID
+    : structured?.code
       ?? (manuscriptContextTooLarge
         ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
-        : error instanceof Error && ['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'].includes(error.message)
-        ? error.message
-        : 'REVISION_APPLICATION_FAILED'),
+        : technicalMessage
+          ? message
+          : /^[A-Z][A-Z0-9_]{2,99}$/.test(message)
+            ? message
+            : 'REVISION_APPLICATION_FAILED')
+  return {
+    errorCode: semanticFailure
+      ? 'MODEL_JSON_INVALID'
+      : structured?.code
+        ?? (manuscriptContextTooLarge
+          ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
+          : error instanceof Error && ['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'].includes(error.message)
+            ? error.message
+            : technicalMessage
+              ? 'PROVIDER_UNAVAILABLE'
+              : 'REVISION_APPLICATION_FAILED'),
+    ...(semanticFailure ? { terminalCode: 'CONTRACT_REPAIR_EXHAUSTED' as const } : {}),
     diagnosticCode,
     providerAttempt,
     maxProviderAttempts: MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS,
@@ -774,6 +805,12 @@ function revisionApplicationFailure(
     model: structured?.model ?? null,
     requestId: structured?.requestId ?? null,
   }
+}
+
+function isV4SemanticManuscriptFailure(error: unknown) {
+  return error instanceof ZodError
+    || (error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID')
+    || error instanceof V4ManuscriptCompilationError
 }
 
 function inheritSourceLineage(base: PresentationBlueprint, draft: BlueprintDraft): BlueprintDraft {
