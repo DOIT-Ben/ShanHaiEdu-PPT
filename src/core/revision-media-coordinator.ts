@@ -1016,7 +1016,9 @@ export class RevisionMediaCoordinator {
           completed,
           total,
           ...details,
-          reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+          reason: technicalFailure?.category === 'PROVIDER' && technicalFailure.disposition === 'RETRYABLE'
+            ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
+            : 'REVISION_FAILED',
           retryable: technicalFailure?.disposition === 'RETRYABLE'
             && !transaction.run.pendingTerminalFailure
             && (transaction.run.technicalRecovery?.retryable ?? false),

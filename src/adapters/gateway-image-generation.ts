@@ -288,7 +288,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     artifacts: ArtifactPort
     fetchImpl?: Fetch
     timeoutMs?: number
-    /** Explicitly enables the gateway's IMAGE_TASK + IMAGE_EDIT contract. */
+    /** Explicitly enables the gateway's asynchronous IMAGE_EDIT contract. */
     imageEditTaskEnabled?: boolean
   }>) {
     this.baseUrl = normalizedBaseUrl(dependencies.baseUrl)
@@ -527,7 +527,12 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     body: string | FormData,
   ) {
     try {
-      const response = await this.fetchImpl(`${this.baseUrl}/image-tasks`, {
+      // Multipart edits are accepted only by the dedicated asynchronous edit
+      // endpoint. JSON text-to-image requests remain on the task endpoint.
+      const endpoint = input.operationMode === 'IMAGE_EDIT'
+        ? `${this.baseUrl}/images/edits?response_mode=async`
+        : `${this.baseUrl}/image-tasks`
+      const response = await this.fetchImpl(endpoint, {
         method: 'POST',
         headers: {
           Accept: 'application/json',

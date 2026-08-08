@@ -1527,7 +1527,7 @@ describe('revision media coordinator', () => {
     expect(lifecycle.filter((event) => event.type === 'revision.completed')).toHaveLength(1)
     expect(lifecycle.at(-1)).toMatchObject({
       type: 'revision.completed',
-      payload: { reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE', retryable: false },
+      payload: { reason: 'REVISION_FAILED', retryable: false },
     })
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
   })

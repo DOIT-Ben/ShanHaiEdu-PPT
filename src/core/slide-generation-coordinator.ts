@@ -973,7 +973,9 @@ export class SlideGenerationCoordinator {
             completed: Math.min(completed, transaction.run.slideCount),
             total: transaction.run.slideCount,
             pageNumbers: allPageNumbers(transaction.run),
-            reason: 'PROVIDER_TEMPORARILY_UNAVAILABLE',
+            reason: technicalFailure.category === 'PROVIDER' && technicalFailure.disposition === 'RETRYABLE'
+              ? 'PROVIDER_TEMPORARILY_UNAVAILABLE'
+              : 'INTERNAL_FAILURE',
             retryable: technicalFailure.disposition === 'RETRYABLE'
               && !transaction.run.pendingTerminalFailure
               && (technical?.technicalRecovery?.retryable
