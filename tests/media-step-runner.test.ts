@@ -3,7 +3,7 @@ import { CONTRACT_VERSION } from '../src/contracts'
 import { InMemoryAgentRepository } from '../src/adapters/in-memory-repository'
 import { FixedClock, MockBudgetPort, MockImageGenerationPort } from '../src/adapters/mock-ports'
 import { MediaStepRunner } from '../src/core/media-step-runner'
-import { MediaSubmissionError, type RunRecord } from '../src/core/ports'
+import { MediaSubmissionError, type ImageAspectDiagnostics, type RunRecord } from '../src/core/ports'
 import { hashInput } from '../src/core/hash'
 import { applyRunAction, reserveBudget } from '../src/core/policy'
 import { providerTechnicalFailure, resumeTechnicalRecovery } from '../src/core/technical-recovery'
@@ -54,6 +54,24 @@ const request = {
   model: 'gpt-image-2',
   budgetUnits: 10,
 } as const
+
+const normalizedAspectDiagnostics = {
+  observedWidth: 1376,
+  observedHeight: 768,
+  relativeError: 0.0078125,
+  normalization: 'NORMALIZED',
+  normalizedWidth: 1600,
+  normalizedHeight: 900,
+} as const satisfies ImageAspectDiagnostics
+
+const rejectedAspectDiagnostics = {
+  observedWidth: 1024,
+  observedHeight: 1024,
+  relativeError: 0.4375,
+  normalization: 'REJECTED',
+  normalizedWidth: null,
+  normalizedHeight: null,
+} as const satisfies ImageAspectDiagnostics
 
 async function fixture(overrides: Partial<RunRecord> = {}) {
   const repository = new InMemoryAgentRepository()
@@ -525,7 +543,9 @@ describe('media step runner', () => {
         createdAt: '2026-07-21T00:00:00.000Z', updatedAt: '2026-07-21T00:00:00.000Z',
       })
     })
-    images.complete(usageRequest.idempotencyKey, 'artifact-slide-1-v1')
+    images.statuses.set(providerOperationId, {
+      state: 'COMPLETED', artifactId: 'artifact-slide-1-v1', aspectDiagnostics: normalizedAspectDiagnostics,
+    })
 
     const result = await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
 
@@ -545,6 +565,7 @@ describe('media step runner', () => {
             providerStatus: 'COMPLETED', billingState: 'CHARGED',
             diagnosticCode: 'USAGE_V2_EVENT_IDENTITY_CONFLICT',
           },
+          aspectDiagnostics: normalizedAspectDiagnostics,
         },
       },
     })
@@ -560,6 +581,46 @@ describe('media step runner', () => {
     expect(events.some((event) => event.type === 'approval.required')).toBe(false)
     expect(events.some((event) => event.type === 'run.failed'
       && event.payload.errorCode === 'WORKER_FATAL')).toBe(false)
+  })
+
+  test('persists rejected image diagnostics when Usage V2 result accounting fails', async () => {
+    const { repository, images, runner } = await usageFixture()
+    const submitted = await runner.submitSlideImage(usageRequest)
+    const providerOperationId = submitted.step.externalOperationId!
+    images.statuses.set(providerOperationId, {
+      state: 'FAILED',
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      billingState: 'UNKNOWN',
+      technicalFailure: providerTechnicalFailure('GATEWAY_IMAGE_ASPECT_RATIO_INVALID'),
+      aspectDiagnostics: rejectedAspectDiagnostics,
+    })
+    const inspect = images.inspect.bind(images)
+    images.inspect = async (input) => {
+      const result = await inspect(input)
+      await tamperPersistedUsageIdentity(repository, 'model')
+      return result
+    }
+
+    const failed = await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
+
+    expect(failed).toMatchObject({
+      changed: true,
+      step: {
+        status: 'WAITING',
+        externalOperationId: providerOperationId,
+        errorCode: 'USAGE_V2_MEDIA_IDENTITY_CONFLICT',
+        output: {
+          aspectDiagnostics: rejectedAspectDiagnostics,
+          usageV2Recovery: {
+            stage: 'PROVIDER_RESULT',
+            providerOperationId,
+            providerStatus: 'FAILED',
+            billingState: 'UNKNOWN',
+          },
+        },
+      },
+    })
+    expect(images.submitCalls).toBe(1)
   })
 
   test.each(usageIdentityFields)(
@@ -963,7 +1024,10 @@ describe('media step runner', () => {
     const { repository, budget, images, runner } = await fixture()
     await runner.submitSlideImage(request)
     expect((await runner.refreshSlideImage('run-1', request.idempotencyKey)).changed).toBe(false)
-    images.complete(request.idempotencyKey, 'artifact-slide-1-v1')
+    const operationId = images.operations.get(request.idempotencyKey)!
+    images.statuses.set(operationId, {
+      state: 'COMPLETED', artifactId: 'artifact-slide-1-v1', aspectDiagnostics: normalizedAspectDiagnostics,
+    })
     const completed = await runner.refreshSlideImage('run-1', request.idempotencyKey)
     const replay = await runner.refreshSlideImage('run-1', request.idempotencyKey)
 
@@ -976,10 +1040,80 @@ describe('media step runner', () => {
       operationMode: 'TEXT_TO_IMAGE',
       aspectRatio: '16:9',
       artifactId: 'artifact-slide-1-v1',
+      aspectDiagnostics: normalizedAspectDiagnostics,
     })
     expect(replay).toMatchObject({ changed: false, step: { status: 'COMPLETED' } })
     expect(budget.settled.size).toBe(1)
     expect((await repository.listEvents('run-1')).map((event) => event.type).at(-1)).toBe('tool.completed')
+  })
+
+  test('retains a synchronous image result diagnostic when a later inspection has no duplicate diagnostic', async () => {
+    const { images, runner } = await fixture()
+    const submit = images.submit.bind(images)
+    images.submit = async (input) => ({
+      ...(await submit(input)),
+      state: 'COMPLETED' as const,
+      aspectDiagnostics: normalizedAspectDiagnostics,
+    })
+
+    const submitted = await runner.submitSlideImage(request)
+    expect(submitted.step.output).toMatchObject({ aspectDiagnostics: normalizedAspectDiagnostics })
+
+    images.complete(request.idempotencyKey, 'artifact-synchronous-result')
+    const completed = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+    expect(completed.step.output).toMatchObject({
+      artifactId: 'artifact-synchronous-result',
+      aspectDiagnostics: normalizedAspectDiagnostics,
+    })
+    expect(images.submitCalls).toBe(1)
+  })
+
+  test.each([
+    { billingState: 'NOT_CHARGED' as const, expectedStatus: 'FAILED' },
+    { billingState: 'CHARGED' as const, expectedStatus: 'FAILED_CHARGED' },
+    { billingState: 'UNKNOWN' as const, expectedStatus: 'BILLING_UNKNOWN' },
+  ])('persists rejected diagnostics for an inspected $billingState result', async ({ billingState, expectedStatus }) => {
+    const { images, runner } = await fixture()
+    await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+    images.statuses.set(operationId, {
+      state: 'FAILED',
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      billingState,
+      technicalFailure: providerTechnicalFailure('GATEWAY_IMAGE_ASPECT_RATIO_INVALID'),
+      aspectDiagnostics: rejectedAspectDiagnostics,
+    })
+
+    const failed = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+    expect(failed.step).toMatchObject({
+      status: expectedStatus,
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      output: { aspectDiagnostics: rejectedAspectDiagnostics },
+    })
+    expect(images.submitCalls).toBe(1)
+  })
+
+  test.each([
+    { submissionState: 'NOT_SUBMITTED' as const, billingState: 'NOT_CHARGED' as const, expectedStatus: 'FAILED' },
+    { submissionState: 'SUBMITTED' as const, billingState: 'UNKNOWN' as const, expectedStatus: 'BILLING_UNKNOWN' },
+    { submissionState: 'UNKNOWN' as const, billingState: 'UNKNOWN' as const, expectedStatus: 'SUBMISSION_UNKNOWN' },
+  ])('persists rejected diagnostics for a $submissionState submission error', async ({ submissionState, billingState, expectedStatus }) => {
+    const { images, runner } = await fixture()
+    images.nextFailure = new MediaSubmissionError(
+      'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      submissionState,
+      'gateway rejected the observed aspect ratio',
+      providerTechnicalFailure('GATEWAY_IMAGE_ASPECT_RATIO_INVALID'),
+      { billingState, aspectDiagnostics: rejectedAspectDiagnostics },
+    )
+
+    const failed = await runner.submitSlideImage(request)
+    expect(failed.step).toMatchObject({
+      status: expectedStatus,
+      errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      output: { aspectDiagnostics: rejectedAspectDiagnostics },
+    })
+    expect(images.submitCalls).toBe(1)
   })
 
   test('restores the exact V4 aspect-ratio contract when an older waiting step omitted the flag', async () => {

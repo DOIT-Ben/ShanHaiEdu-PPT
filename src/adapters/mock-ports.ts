@@ -132,7 +132,9 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   submitCalls = 0
   readonly lookupRequests: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0][] = []
 
-  async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
+  async submit(
+    input: Parameters<ImageGenerationPort['submit']>[0],
+  ): ReturnType<ImageGenerationPort['submit']> {
     this.submitCalls += 1
     this.activeSubmissions += 1
     this.maxConcurrentSubmissions = Math.max(this.maxConcurrentSubmissions, this.activeSubmissions)

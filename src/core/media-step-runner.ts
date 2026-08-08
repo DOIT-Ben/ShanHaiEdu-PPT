@@ -5,6 +5,7 @@ import {
   BudgetReservationError,
   type BudgetPort,
   type ClockPort,
+  type ImageAspectDiagnostics,
   type ImageGenerationPort,
   type MediaBillingState,
   MediaSubmissionError,
@@ -154,6 +155,15 @@ function outputWithMediaFailure(output: unknown, mediaFailure: MediaFailureState
   if (!mediaFailure) return output
   const persisted = output && typeof output === 'object' ? output as Record<string, unknown> : {}
   return { ...persisted, mediaFailure }
+}
+
+function outputWithAspectDiagnostics(
+  output: unknown,
+  aspectDiagnostics: ImageAspectDiagnostics | null | undefined,
+) {
+  if (!aspectDiagnostics) return output
+  const persisted = output && typeof output === 'object' ? output as Record<string, unknown> : {}
+  return { ...persisted, aspectDiagnostics }
 }
 
 function persistedMediaSubmissionState(step: StepRecord) {
@@ -306,18 +316,22 @@ export class MediaStepRunner {
         : providerTechnicalFailure(errorCode, { disposition: 'RETRYABLE' })
       const mediaFailure = { submissionState, billingState } as const
       if (submissionState === 'NOT_SUBMITTED' && reservationId && !isBatchReserved(input)) {
-        await this.markReleasing(input, reservationId, errorCode, technicalFailure, mediaFailure)
+        await this.markReleasing(input, reservationId, errorCode, technicalFailure, mediaFailure, mediaError?.aspectDiagnostics)
         await this.dependencies.budget.release({
           host: prepared.run.host,
           reservationId,
           idempotencyKey: `release:${budgetReservationKey(input)}`,
         })
-        const step = await this.markDefiniteFailure(input, reservationId, errorCode, technicalFailure, mediaFailure)
+        const step = await this.markDefiniteFailure(
+          input, reservationId, errorCode, technicalFailure, mediaFailure, mediaError?.aspectDiagnostics,
+        )
         return { step, replayed: false }
       }
 
       if (submissionState === 'NOT_SUBMITTED' && reservationId) {
-        const step = await this.markDefiniteFailure(input, reservationId, errorCode, technicalFailure, mediaFailure)
+        const step = await this.markDefiniteFailure(
+          input, reservationId, errorCode, technicalFailure, mediaFailure, mediaError?.aspectDiagnostics,
+        )
         return { step, replayed: false }
       }
 
@@ -330,6 +344,7 @@ export class MediaStepRunner {
           technicalFailure,
           mediaFailure,
           mediaError?.operationId ?? null,
+          mediaError?.aspectDiagnostics,
         )
         return { step, replayed: false }
       }
@@ -342,10 +357,11 @@ export class MediaStepRunner {
         technicalFailure,
         mediaFailure,
         mediaError?.operationId ?? null,
+        mediaError?.aspectDiagnostics,
       )
       return { step, replayed: false }
     }
-    const step = await this.markWaiting(input, reservationId, submitted.operationId)
+    const step = await this.markWaiting(input, reservationId, submitted.operationId, submitted.aspectDiagnostics)
     if (usesUsageV2) {
       const failed = await this.recordUsageV2ProviderSubmission(
         input.runId,
@@ -421,6 +437,7 @@ export class MediaStepRunner {
           step.externalOperationId,
           'COMPLETED',
           'CHARGED',
+          status.aspectDiagnostics,
         )
         if (failed) return { step: failed, changed: true }
       }
@@ -431,7 +448,10 @@ export class MediaStepRunner {
           idempotencyKey: `settle:${budgetReservationKey(mediaInput)}`,
         })
       }
-      return { step: await this.markCompleted(runId, idempotencyKey, status.artifactId), changed: true }
+      return {
+        step: await this.markCompleted(runId, idempotencyKey, status.artifactId, status.aspectDiagnostics),
+        changed: true,
+      }
     }
     if (status.state !== 'FAILED') return { step, changed: false }
     if (usesUsageV2) {
@@ -441,25 +461,32 @@ export class MediaStepRunner {
         step.externalOperationId,
         'FAILED',
         status.billingState,
+        status.aspectDiagnostics,
       )
       if (failed) return { step: failed, changed: true }
     }
     if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId && !isBatchReserved(mediaInput)) {
       const input = this.reconstructInput(step, run)
-      await this.markReleasing(input, step.budgetReservationId, status.errorCode, status.technicalFailure)
+      await this.markReleasing(
+        input, step.budgetReservationId, status.errorCode, status.technicalFailure, undefined, status.aspectDiagnostics,
+      )
       await this.dependencies.budget.release({
         host: run.host,
         reservationId: step.budgetReservationId,
         idempotencyKey: `release:${budgetReservationKey(input)}`,
       })
       return {
-        step: await this.markDefiniteFailure(input, step.budgetReservationId, status.errorCode, status.technicalFailure),
+        step: await this.markDefiniteFailure(
+          input, step.budgetReservationId, status.errorCode, status.technicalFailure, undefined, status.aspectDiagnostics,
+        ),
         changed: true,
       }
     }
     if (status.billingState === 'NOT_CHARGED') {
       return {
-        step: await this.markDefiniteFailure(mediaInput, step.budgetReservationId, status.errorCode, status.technicalFailure),
+        step: await this.markDefiniteFailure(
+          mediaInput, step.budgetReservationId, status.errorCode, status.technicalFailure, undefined, status.aspectDiagnostics,
+        ),
         changed: true,
       }
     }
@@ -481,6 +508,8 @@ export class MediaStepRunner {
         status.billingState,
         status.technicalFailure,
         { submissionState: 'SUBMITTED', billingState: status.billingState },
+        null,
+        status.aspectDiagnostics,
       ),
       changed: true,
     }
@@ -644,7 +673,12 @@ export class MediaStepRunner {
     })
   }
 
-  private async markWaiting(input: SubmitSlideImageInput, reservationId: string, operationId: string) {
+  private async markWaiting(
+    input: SubmitSlideImageInput,
+    reservationId: string,
+    operationId: string,
+    aspectDiagnostics?: ImageAspectDiagnostics | null,
+  ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
@@ -658,7 +692,7 @@ export class MediaStepRunner {
         budgetReservationId: reservationId,
         externalOperationId: operationId,
         errorCode: null,
-        output: {
+        output: outputWithAspectDiagnostics({
           ...persistedOutput,
           slideId: input.slideId,
           versionId: input.versionId,
@@ -676,7 +710,7 @@ export class MediaStepRunner {
           ...(input.revisionRound === undefined ? {} : { revisionRound: input.revisionRound }),
           ...(input.elementId ? { elementId: input.elementId } : {}),
           ...(input.assetReuseKey ? { assetReuseKey: input.assetReuseKey } : {}),
-        },
+        }, aspectDiagnostics),
         updatedAt: this.dependencies.clock.now().toISOString(),
       }
       transaction.putStep(updated)
@@ -842,7 +876,12 @@ export class MediaStepRunner {
     })
   }
 
-  private async markCompleted(runId: string, idempotencyKey: string, artifactId: string) {
+  private async markCompleted(
+    runId: string,
+    idempotencyKey: string,
+    artifactId: string,
+    aspectDiagnostics?: ImageAspectDiagnostics | null,
+  ) {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
       if (!step) throw new Error('STEP_NOT_FOUND')
@@ -853,7 +892,7 @@ export class MediaStepRunner {
       const updated: StepRecord = {
         ...step,
         status: completedAfterCancel ? 'COMPLETED_AFTER_CANCEL' : 'COMPLETED',
-        output: { ...output, artifactId },
+        output: outputWithAspectDiagnostics({ ...output, artifactId }, aspectDiagnostics),
         errorCode: null,
         updatedAt: this.dependencies.clock.now().toISOString(),
       }
@@ -908,6 +947,7 @@ export class MediaStepRunner {
     providerOperationId: string,
     providerStatus: 'COMPLETED' | 'FAILED' | 'CANCELLED',
     billingState: 'CHARGED' | 'NOT_CHARGED' | 'UNKNOWN',
+    aspectDiagnostics?: ImageAspectDiagnostics,
   ) {
     try {
       await this.dependencies.usageV2!.recordProviderResult({
@@ -925,7 +965,7 @@ export class MediaStepRunner {
         providerOperationId,
         providerStatus,
         billingState,
-      })
+      }, aspectDiagnostics)
     }
   }
 
@@ -985,6 +1025,7 @@ export class MediaStepRunner {
     idempotencyKey: string,
     technicalFailure: TechnicalFailure,
     checkpoint: UsageV2RecoveryCheckpoint,
+    aspectDiagnostics?: ImageAspectDiagnostics,
   ) {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
@@ -1002,14 +1043,17 @@ export class MediaStepRunner {
         ...step,
         externalOperationId: checkpoint.providerOperationId,
         errorCode: technicalFailure.diagnosticCode,
-        output: outputWithTechnicalFailure({
-          ...output,
-          usageV2Recovery: {
-            ...checkpoint,
-            operationIdempotencyKey: idempotencyKey,
-            diagnosticCode: technicalFailure.diagnosticCode,
-          },
-        }, technicalFailure),
+        output: outputWithAspectDiagnostics(
+          outputWithTechnicalFailure({
+            ...output,
+            usageV2Recovery: {
+              ...checkpoint,
+              operationIdempotencyKey: idempotencyKey,
+              diagnosticCode: technicalFailure.diagnosticCode,
+            },
+          }, technicalFailure),
+          aspectDiagnostics,
+        ),
         updatedAt: this.dependencies.clock.now().toISOString(),
       }
       transaction.putStep(updated)
@@ -1037,6 +1081,7 @@ export class MediaStepRunner {
     technicalFailure: TechnicalFailure,
     mediaFailure?: MediaFailureState,
     operationId: string | null = null,
+    aspectDiagnostics?: ImageAspectDiagnostics | null,
   ) {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const step = transaction.getStep(idempotencyKey)
@@ -1057,7 +1102,10 @@ export class MediaStepRunner {
           ? 'FAILED_CHARGED'
           : billingState === 'NOT_CHARGED' ? 'FAILED_NOT_CHARGED' : 'BILLING_UNKNOWN',
         errorCode,
-        output: outputWithMediaFailure(outputWithTechnicalFailure(step.output, technicalFailure), mediaFailure),
+        output: outputWithAspectDiagnostics(
+          outputWithMediaFailure(outputWithTechnicalFailure(step.output, technicalFailure), mediaFailure),
+          aspectDiagnostics,
+        ),
         updatedAt: now,
       }
       transaction.putRun(run)
@@ -1113,6 +1161,7 @@ export class MediaStepRunner {
     errorCode: string,
     technicalFailure?: TechnicalFailure,
     mediaFailure?: MediaFailureState,
+    aspectDiagnostics?: ImageAspectDiagnostics | null,
   ) {
     await this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1122,10 +1171,13 @@ export class MediaStepRunner {
         status: 'RELEASING',
         budgetReservationId: reservationId,
         errorCode,
-        ...(technicalFailure || mediaFailure ? {
-          output: outputWithMediaFailure(
-            technicalFailure ? outputWithTechnicalFailure(step.output, technicalFailure) : step.output,
-            mediaFailure,
+        ...(technicalFailure || mediaFailure || aspectDiagnostics ? {
+          output: outputWithAspectDiagnostics(
+            outputWithMediaFailure(
+              technicalFailure ? outputWithTechnicalFailure(step.output, technicalFailure) : step.output,
+              mediaFailure,
+            ),
+            aspectDiagnostics,
           ),
         } : {}),
         updatedAt: this.dependencies.clock.now().toISOString(),
@@ -1139,6 +1191,7 @@ export class MediaStepRunner {
     errorCode: string,
     technicalFailure?: TechnicalFailure,
     mediaFailure?: MediaFailureState,
+    aspectDiagnostics?: ImageAspectDiagnostics | null,
   ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1153,10 +1206,13 @@ export class MediaStepRunner {
         status: transaction.run.status === 'CANCELLED' ? 'FAILED_NOT_CHARGED' : 'FAILED',
         budgetReservationId: input.batchReservation?.reservationId ?? null,
         errorCode,
-        ...(resolvedTechnicalFailure || mediaFailure ? {
-          output: outputWithMediaFailure(
-            resolvedTechnicalFailure ? outputWithTechnicalFailure(step.output, resolvedTechnicalFailure) : step.output,
-            mediaFailure,
+        ...(resolvedTechnicalFailure || mediaFailure || aspectDiagnostics ? {
+          output: outputWithAspectDiagnostics(
+            outputWithMediaFailure(
+              resolvedTechnicalFailure ? outputWithTechnicalFailure(step.output, resolvedTechnicalFailure) : step.output,
+              mediaFailure,
+            ),
+            aspectDiagnostics,
           ),
         } : {}),
         updatedAt: now,
@@ -1196,6 +1252,7 @@ export class MediaStepRunner {
     technicalFailure?: TechnicalFailure,
     mediaFailure?: MediaFailureState,
     operationId?: string | null,
+    aspectDiagnostics?: ImageAspectDiagnostics | null,
   ) {
     return this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(input.idempotencyKey)
@@ -1240,7 +1297,10 @@ export class MediaStepRunner {
       const outputWithFailure = resolvedTechnicalFailure
         ? outputWithTechnicalFailure(output, resolvedTechnicalFailure)
         : output
-      const persistedOutput = outputWithMediaFailure(outputWithFailure, mediaFailure)
+      const persistedOutput = outputWithAspectDiagnostics(
+        outputWithMediaFailure(outputWithFailure, mediaFailure),
+        aspectDiagnostics,
+      )
       const updated: StepRecord = {
         ...step,
         status: kind === 'BUDGET' ? 'RESERVATION_UNKNOWN' : 'SUBMISSION_UNKNOWN',
