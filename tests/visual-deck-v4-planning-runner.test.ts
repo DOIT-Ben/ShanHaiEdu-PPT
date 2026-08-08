@@ -1026,6 +1026,87 @@ describe('visual deck v4 planning runner', () => {
     expect(completionPayloads).toEqual([expect.objectContaining({ contentSlotCompletion: true })])
   })
 
+  test('repairs a placeholder chain-4 visual description with one semantic completion', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-placeholder-repair-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let reviewCalls = 0
+    const completionPayloads: unknown[] = []
+    staged.model.execute = async (modelInput) => {
+      const result = await execute(modelInput)
+      if (modelInput.operation !== 'review_visual_deck_v4_manuscript') return result
+      reviewCalls += 1
+      if (reviewCalls === 1) {
+        const manuscript = result as { slides: readonly Record<string, unknown>[] }
+        return {
+          ...(result as Record<string, unknown>),
+          slides: manuscript.slides.map((slide) => ({ ...slide, visualDescription: '...' })),
+        }
+      }
+      completionPayloads.push(modelInput.payload)
+      return result
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(VISUAL_DECK_V4_COMPILER_VERSION)
+    expect(reviewCalls).toBe(2)
+    expect(completionPayloads).toEqual([expect.objectContaining({ contentSlotCompletion: true })])
+  })
+
+  test('does not restart chain-4 planning after its semantic completion remains invalid', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-placeholder-terminal-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let reviewCalls = 0
+    staged.model.execute = async (modelInput) => {
+      const result = await execute(modelInput)
+      if (modelInput.operation !== 'review_visual_deck_v4_manuscript') return result
+      reviewCalls += 1
+      const manuscript = result as { slides: readonly Record<string, unknown>[] }
+      return {
+        ...(result as Record<string, unknown>),
+        slides: manuscript.slides.map((slide) => ({ ...slide, visualDescription: '...' })),
+      }
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+
+    const result = await runner.plan({
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result).toMatchObject({ blueprint: null, step: { errorCode: 'MODEL_JSON_INVALID' } })
+    expect(reviewCalls).toBe(2)
+    const run = await repository.getRun(created.run.id)
+    expect(run?.status).toBe('NEEDS_HUMAN')
+    expect(run?.technicalRecovery).toBeUndefined()
+  })
+
   test('does not grant a second semantic completion after repaired review evidence remains ambiguous', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))

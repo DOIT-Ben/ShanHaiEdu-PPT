@@ -176,10 +176,26 @@ const visualDeckV4ManuscriptSlideShape = {
   sourceEvidence: z.array(z.object({ excerpt: boundedText(1_200) }).strict()).max(8),
 } as const
 
+function isSemanticManuscriptPlaceholder(value: string) {
+  const normalized = value.normalize('NFKC').replace(/\s+/gu, '').toLocaleLowerCase()
+  return /^(?:\.{3,}|…+|tbd|todo|n\/?a|placeholder|待补充|待完善|待定)$/u.test(normalized)
+}
+
+const visualDeckV4ManuscriptSlideSchema = z.object(visualDeckV4ManuscriptSlideShape).strict()
+  .superRefine((value, context) => {
+    if (isSemanticManuscriptPlaceholder(value.visualDescription)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['visualDescription'],
+        message: 'semantic manuscript content cannot be a placeholder',
+      })
+    }
+  })
+
 export const visualDeckV4CreativeManuscriptSchema = z.object({
   title: boundedText(160),
   narrative: z.array(boundedText(500)).min(1).max(20),
-  slides: z.array(z.object(visualDeckV4ManuscriptSlideShape).strict()).min(1).max(50),
+  slides: z.array(visualDeckV4ManuscriptSlideSchema).min(1).max(50),
 }).strict().superRefine((value, context) => {
   if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {
     context.addIssue({ code: 'custom', message: V4_MANUSCRIPT_CONTEXT_TOO_LARGE })
@@ -189,7 +205,7 @@ export const visualDeckV4CreativeManuscriptSchema = z.object({
 export const visualDeckV4ReviewManuscriptSchema = z.object({
   title: boundedText(160),
   narrative: z.array(boundedText(500)).min(1).max(20),
-  slides: z.array(z.object(visualDeckV4ManuscriptSlideShape).strict()).min(1).max(50),
+  slides: z.array(visualDeckV4ManuscriptSlideSchema).min(1).max(50),
   revisionSuggestions: z.array(boundedText(1_000)).max(50),
 }).strict().superRefine((value, context) => {
   if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {

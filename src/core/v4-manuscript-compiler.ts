@@ -24,6 +24,13 @@ function compact(value: string, maximum: number) {
   return value.replace(/\s+/g, ' ').trim().slice(0, maximum)
 }
 
+function compileVisualIntent(value: string) {
+  const description = compact(value, 1_000)
+  return description.length >= 10
+    ? description
+    : compact(`以${description}建立清晰的主视觉关系`, 1_000)
+}
+
 function unique(values: readonly string[]) {
   return [...new Set(values.map((value) => compact(value, 1_500)).filter(Boolean))]
 }
@@ -129,7 +136,7 @@ export class V4PlanCompiler {
     const role = input.template.role
     const previousTitle = input.allTitles[input.pageNumber - 2]
     const nextTitle = input.allTitles[input.pageNumber]
-    const visualDescription = compact(input.manuscript.visualDescription, 1_000)
+    const visualDescription = compileVisualIntent(input.manuscript.visualDescription)
     const narrative = compact(input.manuscript.narrative, 1_000)
     const title = compact(input.manuscript.title, 120)
     return {

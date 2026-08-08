@@ -135,6 +135,7 @@ type V4PlanningStageAttempt = z.infer<typeof v4PlanningStageAttemptSchema>
 
 const V4_PLANNING_REQUEST_EVIDENCE_TOOL = 'audit_v4_planning_request'
 const V4_PLANNING_REQUEST_REPLAY_MISMATCH = 'V4_PLANNING_REQUEST_REPLAY_MISMATCH'
+const V4_MANUSCRIPT_SEMANTIC_INVALID = 'V4_MANUSCRIPT_SEMANTIC_INVALID'
 
 const structuredGenerationRequestContractSchema = z.object({
   protocol: z.literal('RESPONSES_JSON_SCHEMA'),
@@ -1025,11 +1026,25 @@ export class PlanningRunner {
       // must never be sent back to the model for repeated repair.
       if (!(error instanceof PlanningFailureError)
         || error.failure.errorCode !== 'MODEL_JSON_INVALID') throw error
-      return this.runV4PlanningStage(input, {
-        ...request,
-        repairAttempt: 1,
-        payload: { ...request.payload, contentSlotCompletion: true },
-      })
+      try {
+        return await this.runV4PlanningStage(input, {
+          ...request,
+          repairAttempt: 1,
+          payload: { ...request.payload, contentSlotCompletion: true },
+        })
+      } catch (repairError) {
+        if (!(repairError instanceof PlanningFailureError)
+          || repairError.failure.errorCode !== 'MODEL_JSON_INVALID') throw repairError
+        throw new PlanningFailureError({
+          ...repairError.failure,
+          terminalCode: 'CONTRACT_REPAIR_EXHAUSTED',
+          retryable: false,
+          attempt: 2,
+          maxAttempts: 2,
+          suggestedAction: 'CONTACT_ADMIN',
+          diagnosticCode: V4_MANUSCRIPT_SEMANTIC_INVALID,
+        })
+      }
     }
   }
 
@@ -1211,6 +1226,7 @@ export class PlanningRunner {
             providerAttempt,
             MAX_PROVIDER_ATTEMPTS,
             exhausted,
+            request.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION && isV4ManuscriptStage(request.stage),
           ))
       const attemptRecord = this.v4PlanningStageAttemptRecord({
         attempt: providerAttempt,
@@ -1835,8 +1851,14 @@ export class PlanningRunner {
     attempt: number,
     maxAttempts: number,
     exhausted: boolean,
+    semanticManuscript = false,
   ): PlanningFailure {
-    const fieldPaths = error instanceof ZodError
+    const semanticContractFailure = semanticManuscript && !isV4ManuscriptContextTooLargeError(error)
+    const fieldPaths = semanticContractFailure && error instanceof ZodError
+      ? [...new Set(error.issues.map((issue) => issue.path.join('.') || 'manuscript'))].slice(0, 20)
+      : semanticContractFailure
+        ? ['manuscript']
+        : error instanceof ZodError
       ? [...new Set(error.issues.map((issue) => issue.path.join('.') || 'blueprint'))].slice(0, 20)
       : error instanceof StructuredModelError && error.code === 'MODEL_JSON_INVALID'
         ? ['blueprint']
@@ -1844,6 +1866,8 @@ export class PlanningRunner {
     const message = error instanceof Error ? error.message : ''
     const errorCode: PlanningFailure['errorCode'] = isV4ManuscriptContextTooLargeError(error)
       ? V4_MANUSCRIPT_CONTEXT_TOO_LARGE
+      : semanticContractFailure
+        ? 'MODEL_JSON_INVALID'
       : error instanceof ZodError
       ? input.presentationMode === 'LAYERED_COURSEWARE_V3' && error.issues.some((issue) =>
         issue.path.includes('layeredDesign') || issue.path.includes('elements'))
@@ -1874,7 +1898,7 @@ export class PlanningRunner {
                         : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
                           ? 'MODEL_JSON_INVALID'
                           : 'BLUEPRINT_SCHEMA_INVALID'
-    const retryable = [
+    const retryable = semanticContractFailure || [
       'MODEL_JSON_INVALID',
       'BLUEPRINT_SLIDE_COUNT_MISMATCH',
       'BLUEPRINT_SOURCE_REFERENCE_INVALID',
@@ -1890,7 +1914,7 @@ export class PlanningRunner {
       attempt,
       maxAttempts,
       suggestedAction: effectiveRetryable ? 'RETRY' : 'CONTACT_ADMIN',
-      diagnosticCode: errorCode,
+      diagnosticCode: semanticContractFailure ? V4_MANUSCRIPT_SEMANTIC_INVALID : errorCode,
       fieldPaths,
       correlationId: this.correlationId(input),
       requestId: error instanceof StructuredModelError
@@ -2199,11 +2223,16 @@ export class PlanningRunner {
       if (!step) throw new Error('STEP_NOT_FOUND')
       if (step.status === 'FAILED') return step
       const now = this.dependencies.clock.now().toISOString()
+      const terminalSemanticManuscriptFailure = failure.errorCode === 'MODEL_JSON_INVALID'
+        && failure.terminalCode === 'CONTRACT_REPAIR_EXHAUSTED'
+        && failure.diagnosticCode === V4_MANUSCRIPT_SEMANTIC_INVALID
       const v4InternalFailure = transaction.run.presentationMode === 'VISUAL_DECK_V4'
         && issueCategory === 'PLANNING_FAILED'
+        && !terminalSemanticManuscriptFailure
         && !isTechnicalFailureCode(failure.errorCode)
       const recoveryReason = v4InternalFailure ? 'V4_PLANNING_STAGE_FAILED' : failure.errorCode
       const technicalRecovery = transaction.run.presentationMode === 'VISUAL_DECK_V4'
+        && !terminalSemanticManuscriptFailure
         && isTechnicalFailureCode(recoveryReason)
         ? beginTechnicalRecovery(transaction, this.dependencies.clock, recoveryReason)
         : null

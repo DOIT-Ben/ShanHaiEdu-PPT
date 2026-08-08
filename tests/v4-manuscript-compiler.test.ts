@@ -5,6 +5,7 @@ import {
   V4ManuscriptCompilationError,
   V4PlanCompiler,
 } from '../src/core/v4-manuscript-compiler'
+import { createVisualDeckV4BlueprintFromProposal } from '../src/core/visual-deck-v4-planner'
 import {
   assertVisualDeckV4ManuscriptCharacterLimit,
   VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS,
@@ -88,6 +89,30 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
     })
     expect(JSON.stringify(proposal)).not.toContain('sourceEvidence')
     expect(JSON.stringify(proposal)).not.toContain('pageIndex')
+  })
+
+  test('rejects a placeholder semantic visual description before compilation', () => {
+    const invalid = {
+      ...manuscript(),
+      slides: [{ ...manuscript().slides[0]!, visualDescription: '...' }],
+    }
+
+    expect(() => visualDeckV4CreativeManuscriptSchema.parse(invalid))
+      .toThrow('semantic manuscript content cannot be a placeholder')
+  })
+
+  test('derives a valid blueprint visual intent from a short meaningful semantic description', () => {
+    const base = input()
+    const creative = visualDeckV4CreativeManuscriptSchema.parse(manuscript())
+    const review = visualDeckV4ReviewManuscriptSchema.parse({
+      ...creative,
+      slides: [{ ...creative.slides[0]!, visualDescription: '水面、云和降水' }],
+      revisionSuggestions: [],
+    })
+    const proposal = new ManuscriptCompiler().compilePlan(base, creative, review)
+    const blueprint = createVisualDeckV4BlueprintFromProposal(base, proposal)
+
+    expect(blueprint.slides[0]?.visualIntent.length).toBeGreaterThanOrEqual(10)
   })
 
   test('rejects an evidence excerpt that is not present in trusted chunks', () => {
