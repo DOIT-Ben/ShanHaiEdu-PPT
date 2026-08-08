@@ -1352,6 +1352,9 @@ describe('visual deck v4 planning runner', () => {
     })
     expect(creativeCalls).toBe(1)
     expect(reviewCalls).toBe(0)
+    expect((await repository.listSteps(created.run.id)).find((step) =>
+      step.idempotencyKey === visualDeckV4PlanningStageStepKey(created.run.id, 'creative-manuscript'),
+    )).toMatchObject({ status: 'COMPLETED' })
   })
 
   test('fails closed when a claimed semantic repair replays with a different request contract', async () => {

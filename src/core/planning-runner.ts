@@ -1286,16 +1286,18 @@ export class PlanningRunner {
         })
       } catch (error) {
         const failure = this.contractFailure(input, error, 1, 1, false)
-        await this.dependencies.repository.transact(input.runId, (transaction) => {
-          const step = transaction.getStep(key)
-          if (!step || step.status === 'FAILED') return
-          transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
-          transaction.appendEvent({
-            schemaVersion: CONTRACT_VERSION,
-            type: 'tool.failed',
-            payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
+        if (existing === null) {
+          await this.dependencies.repository.transact(input.runId, (transaction) => {
+            const step = transaction.getStep(key)
+            if (!step || step.status === 'FAILED') return
+            transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
+            transaction.appendEvent({
+              schemaVersion: CONTRACT_VERSION,
+              type: 'tool.failed',
+              payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
+            })
           })
-        })
+        }
         throw new PlanningFailureError(failure)
       }
     }
