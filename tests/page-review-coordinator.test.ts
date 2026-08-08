@@ -381,7 +381,15 @@ describe('page review coordinator', () => {
     })
 
     expect(await coordinator.reviewAll('run-1')).toMatchObject({ status: 'FAILED', rejected: 1 })
-    expect((await repository.listEvents('run-1')).some((event) => event.type === 'deck_review.started')).toBe(false)
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'deck_review.started')).toBe(false)
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
+    })
   })
 
   test('keeps a rejected supervised v4 page behind internal review when automatic revision is disabled', async () => {

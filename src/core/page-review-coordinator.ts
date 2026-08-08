@@ -197,6 +197,7 @@ export class PageReviewCoordinator {
         if (fullPageRaster && !executionFailed && rejected > 0 && automaticRevision === 'EXHAUSTED') {
           await this.moveToDeckReview(runId, total, {
             reason: 'PAGE_REVIEW_REJECTED',
+            revisionLimitReached: run.revisionRound >= run.maxRevisionRounds,
             pageNumbers: problemPageNumbers,
             acceptedIssueIds: [
               ...reviews
@@ -457,6 +458,7 @@ export class PageReviewCoordinator {
     total: number,
     accepted?: Readonly<{
       reason: 'PAGE_REVIEW_REJECTED'
+      revisionLimitReached: boolean
       pageNumbers: readonly number[]
       acceptedIssueIds: readonly string[]
     }>,
@@ -481,8 +483,12 @@ export class PageReviewCoordinator {
         failVisualDeckV4Transaction({
           transaction,
           clock: this.dependencies.clock,
-          errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
-          reason: 'PAGE_REVIEW_REJECTED',
+          errorCode: accepted?.revisionLimitReached
+            ? 'QUALITY_REMEDIATION_EXHAUSTED'
+            : 'QUALITY_ISSUE_STATE_INCONSISTENT',
+          reason: accepted?.revisionLimitReached
+            ? 'REVISION_LIMIT_REACHED'
+            : 'PAGE_REVIEW_REJECTED',
         })
         return
       }

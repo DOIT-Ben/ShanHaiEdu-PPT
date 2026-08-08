@@ -524,7 +524,7 @@ describe('FrameFlow public V4 contract', () => {
       .toHaveLength(2)
   })
 
-  test('reports an exhausted hard quality blocker as a stable technical result without human approval', async () => {
+  test('reports an exhausted hard quality blocker as a recoverable quality result without human approval', async () => {
     const repository = new InMemoryAgentRepository()
     const runtime = createFrameFlowRuntime({
       repository,
@@ -551,7 +551,7 @@ describe('FrameFlow public V4 contract', () => {
         deliveries: [],
         deliveryAvailability: { state: 'UNAVAILABLE', reason: 'RUN_FAILED' },
         error: {
-          code: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+          code: 'QUALITY_REMEDIATION_EXHAUSTED',
           category: 'QUALITY',
           retryable: false,
           action: 'CONTACT_SUPPORT',
@@ -575,9 +575,10 @@ describe('FrameFlow public V4 contract', () => {
     expect(history.data.at(-1)).toMatchObject({
       type: 'run.failed',
       payload: {
-        errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
         error: {
-          code: 'QUALITY_ISSUE_STATE_INCONSISTENT',
+          code: 'QUALITY_REMEDIATION_EXHAUSTED',
           category: 'QUALITY',
           retryable: false,
           action: 'CONTACT_SUPPORT',
