@@ -185,7 +185,7 @@ export function isSemanticManuscriptPlaceholder(value: string) {
   const normalized = value.normalize('NFKC').replace(/\s+/gu, '').toLocaleLowerCase()
   const content = normalized.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '')
   if (content.length === 0) return true
-  return /^(?:tbd|todo|n\/?a|placeholder|待补充|待完善|待定|待补全|暂无|未定|待填)(?:[\p{P}\p{S}].*)?$/u.test(content)
+  return /^(?:tbd|todo|n(?:[\/\-–—])?a|placeholder|待补充|待完善|待定|待补全|暂无|未定|待填)(?:[\p{P}\p{S}].*)?$/u.test(content)
 }
 
 const visualDeckV4ManuscriptSlideSchema = z.object(visualDeckV4ManuscriptSlideShape).strict()

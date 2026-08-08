@@ -92,7 +92,9 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
   })
 
   test('rejects every known placeholder form while keeping short meaningful descriptions valid', () => {
-    for (const visualDescription of ['...', '…', '待补全', '待补全。', 'TBD: ...', '暂无', 'N/A。', '???']) {
+    for (const visualDescription of [
+      '...', '…', '待补全', '待补全。', 'TBD: ...', '暂无', 'N/A。', 'N-A', 'N–A', 'N—A', '???',
+    ]) {
       const invalid = {
         ...manuscript(),
         slides: [{ ...manuscript().slides[0]!, visualDescription }],
