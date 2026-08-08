@@ -269,6 +269,57 @@ class FailedRatioImages extends AsyncImages {
   }
 }
 
+class UnknownInspectionImages extends AsyncImages {
+  #inspectAttempts = 0
+  #lookupAttempts = 0
+
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
+    this.inspections.push(structuredClone(input))
+    if (this.#inspectAttempts++ === 0) {
+      return {
+        state: 'FAILED' as const,
+        errorCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN',
+        billingState: 'UNKNOWN' as const,
+        technicalFailure: {
+          category: 'PROVIDER' as const,
+          disposition: 'RETRYABLE' as const,
+          diagnosticCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN',
+        },
+        requiresIdempotencyDrain: true as const,
+      }
+    }
+    const artifactId = this.operations.get(input.operationId)
+    if (!artifactId) throw new Error('TEST_IMAGE_OPERATION_NOT_FOUND')
+    return { state: 'COMPLETED' as const, artifactId }
+  }
+
+  override async lookupByIdempotency(
+    input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0],
+  ): ReturnType<NonNullable<ImageGenerationPort['lookupByIdempotency']>> {
+    this.lookups.push(structuredClone(input))
+    if (this.#lookupAttempts++ === 0) return { state: 'UNKNOWN' as const }
+    const operationId = this.operations.get(input.idempotencyKey)
+    return operationId ? { state: 'SUBMITTED' as const, operationId } : { state: 'UNKNOWN' as const }
+  }
+}
+
+class PersistentUnknownInspectionImages extends AsyncImages {
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
+    this.inspections.push(structuredClone(input))
+    return {
+      state: 'FAILED' as const,
+      errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
+      billingState: 'UNKNOWN' as const,
+      technicalFailure: {
+        category: 'PROVIDER' as const,
+        disposition: 'RETRYABLE' as const,
+        diagnosticCode: 'GATEWAY_SUBMISSION_UNKNOWN',
+      },
+      requiresIdempotencyDrain: true as const,
+    }
+  }
+}
+
 class FailOnceArtifactCleanup {
   #failed = false
 
@@ -882,11 +933,12 @@ describe('quick-deck evaluation service', () => {
     try {
       const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
       const repository = new InMemoryQuickDeckEvaluationRepository()
+      const images = new FailedRatioImages(artifacts)
       const service = new QuickDeckEvaluationService({
         repository,
         artifacts,
         model: new CreativeModel(),
-        images: new FailedRatioImages(artifacts),
+        images,
         renderer: new SharpPptxPresentationRenderer(),
         clock: new ControlledClock(),
         textModel: 'gpt-5.6-terra',
@@ -924,6 +976,102 @@ describe('quick-deck evaluation service', () => {
         evidenceCompleteness: 'COMPLETE',
       })
       expect(evidence.pages[0]?.providerRequestId).toMatch(/^[a-f0-9]{64}$/)
+      expect(images.lookups).toHaveLength(0)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('drains an inspected unknown submission through its original idempotency key without resubmitting', async () => {
+    const { directory, images: imagePort, repository, service } = await fixture(undefined, false, false,
+      (artifacts) => new UnknownInspectionImages(artifacts))
+    const images = imagePort as UnknownInspectionImages
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      const originalKeys = images.submissions.map((submission) => submission.idempotencyKey)
+      const originalOperationId = submitted!.pages[0]!.operationId
+
+      await service.tick({ limit: 10 })
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'GENERATING',
+        phase: 'IMAGE_GENERATION',
+        pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+        drainDeadline: expect.any(String),
+        pages: [expect.objectContaining({
+          status: 'PENDING',
+          submissionState: 'UNKNOWN',
+          operationId: originalOperationId,
+          billingState: 'UNKNOWN',
+          errorCode: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+        })],
+      })
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual(originalKeys)
+      expect(images.inspections).toHaveLength(1)
+
+      await service.tick({ limit: 10 })
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([submitted!.pages[0]!.idempotencyKey])
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual(originalKeys)
+      expect(images.inspections).toHaveLength(1)
+
+      await service.tick({ limit: 10 })
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        phase: 'FAILED',
+        failure: { code: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN' },
+        artifacts: { pptx: null, preview: null },
+        pages: [expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' })],
+      })
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual(originalKeys)
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([submitted!.pages[0]!.idempotencyKey, submitted!.pages[0]!.idempotencyKey])
+      expect(images.inspections).toHaveLength(2)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('fails a persistently unknown inspection after its bounded drain without resubmitting', async () => {
+    const { directory, images: imagePort, repository, clock, service } = await fixture(undefined, false, false,
+      (artifacts) => new PersistentUnknownInspectionImages(artifacts), undefined, 30 * 60_000)
+    const images = imagePort as PersistentUnknownInspectionImages
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      const originalKeys = images.submissions.map((submission) => submission.idempotencyKey)
+
+      await service.tick({ limit: 10 })
+      expect((await repository.get(created.jobId))?.pendingFailure).toBe('EVALUATION_IMAGE_SUBMISSION_UNKNOWN')
+
+      clock.advance(15 * 60_000 + 1)
+      await service.tick({ limit: 10 })
+
+      expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
+        status: 'FAILED',
+        phase: 'FAILED',
+        failure: { code: 'EVALUATION_IMAGE_DRAIN_TIMEOUT' },
+      })
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual(originalKeys)
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([submitted!.pages[0]!.idempotencyKey])
+
+      clock.advance(15 * 60_000)
+      await service.tick({ limit: 10 })
+
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'EXPIRED',
+        cleanupPending: true,
+        pages: [expect.objectContaining({
+          status: 'FAILED',
+          submissionState: 'UNKNOWN',
+          errorCode: 'EVALUATION_IMAGE_DRAIN_TIMEOUT',
+        })],
+      })
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual(originalKeys)
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([
+        submitted!.pages[0]!.idempotencyKey,
+        submitted!.pages[0]!.idempotencyKey,
+      ])
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -1463,6 +1611,35 @@ describe('quick-deck evaluation service', () => {
       await service.tick({ limit: 10 })
       expect((await repository.get(created.jobId))?.cleanupPending).toBe(false)
       expect(await artifacts.get({ tenantId: 'evaluation-tenant', artifactId })).toBeNull()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('keeps a terminal unknown image inspection in the expiry cleanup queue', async () => {
+    const { directory, repository, clock, images: imagePort, service } = await fixture(undefined, false, false,
+      (artifacts) => new PersistentUnknownInspectionImages(artifacts))
+    const images = imagePort as PersistentUnknownInspectionImages
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      const operationId = submitted!.pages[0]!.operationId
+      clock.advance(60_001)
+
+      await service.tick({ limit: 10 })
+
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([submitted!.pages[0]!.idempotencyKey])
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'EXPIRED',
+        cleanupPending: true,
+        pages: [expect.objectContaining({
+          status: 'SUBMITTED',
+          submissionState: 'SUBMITTED',
+          operationId,
+          errorCode: null,
+        })],
+      })
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

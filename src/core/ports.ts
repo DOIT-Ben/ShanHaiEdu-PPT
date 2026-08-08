@@ -266,6 +266,12 @@ export interface ImageGenerationPort {
         technicalFailure: TechnicalFailure
         providerRequestId?: string
         aspectDiagnostics?: ImageAspectDiagnostics
+        /**
+         * The gateway explicitly reported `SUBMISSION_UNKNOWN`. Callers must
+         * reconcile only through the original idempotency key and must not
+         * treat this as an ordinary terminal provider failure.
+         */
+        requiresIdempotencyDrain?: true
       }>
   >
 }

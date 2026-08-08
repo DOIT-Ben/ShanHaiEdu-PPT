@@ -835,7 +835,12 @@ export class QuickDeckEvaluationService {
   private async inspectAndPackage(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
     if (!record.blueprint) return await this.fail(record, 'EVALUATION_PLANNING_FAILED', claim)
     const recoveredPages = await this.recoverOperationIds(record)
-    const pending = recoveredPages.filter((page) => page.operationId !== null && !this.isTerminalPage(page))
+    // An explicit unknown submission can only be reconciled by its original
+    // idempotency key. Do not poll its remembered operation id again before
+    // that lookup confirms it is submitted.
+    const pending = recoveredPages.filter((page) => page.operationId !== null
+      && page.submissionState !== 'UNKNOWN'
+      && !this.isTerminalPage(page))
     const inspected = await Promise.all(pending.map(async (page) => {
       return this.inspectPage(record, page)
     }))
@@ -979,7 +984,6 @@ export class QuickDeckEvaluationService {
 
   private failureFromPages(pages: readonly QuickDeckEvaluationPageRecord[]): QuickDeckEvaluationFailureCode | null {
     const failed = pages.filter((page) => page.status === 'FAILED')
-    if (failed.length === 0) return null
     if (failed.some((page) => page.errorCode === 'EVALUATION_MODEL_NOT_READY')) {
       return 'EVALUATION_MODEL_NOT_READY'
     }
@@ -995,6 +999,10 @@ export class QuickDeckEvaluationService {
     if (failed.some((page) => ['EVALUATION_IMAGE_ARTIFACT_INVALID', 'GATEWAY_IMAGE_DIMENSIONS_INVALID'].includes(page.errorCode ?? ''))) {
       return 'EVALUATION_IMAGE_ARTIFACT_INVALID'
     }
+    if (pages.some((page) => page.submissionState === 'UNKNOWN')) {
+      return quickDeckSubmissionFailureCode(pages)
+    }
+    if (failed.length === 0) return null
     return 'EVALUATION_IMAGE_TASK_FAILED'
   }
 
@@ -1030,8 +1038,8 @@ export class QuickDeckEvaluationService {
     const lookup = this.dependencies.images.lookupByIdempotency?.bind(this.dependencies.images)
     if (!lookup) return record.pages
     return await Promise.all(record.pages.map(async (page) => {
-      if (this.isTerminalPage(page) || page.operationId !== null
-        || !['SUBMITTED', 'UNKNOWN'].includes(page.submissionState)) return page
+      if (this.isTerminalPage(page) || !['SUBMITTED', 'UNKNOWN'].includes(page.submissionState)) return page
+      if (page.submissionState === 'SUBMITTED' && page.operationId !== null) return page
       try {
         const result = await lookup({
           tenantId: record.tenantId,
@@ -1039,7 +1047,13 @@ export class QuickDeckEvaluationService {
           operationMode: 'TEXT_TO_IMAGE',
         })
         if (result.state === 'SUBMITTED') {
-          return { ...page, status: 'SUBMITTED' as const, submissionState: 'SUBMITTED' as const, operationId: result.operationId }
+          return {
+            ...page,
+            status: 'SUBMITTED' as const,
+            submissionState: 'SUBMITTED' as const,
+            operationId: result.operationId,
+            errorCode: page.submissionState === 'UNKNOWN' ? null : page.errorCode,
+          }
         }
         if (result.state === 'NOT_SUBMITTED') {
           return {
@@ -1078,6 +1092,27 @@ export class QuickDeckEvaluationService {
     }
     if (result.state !== 'COMPLETED') {
       if (result.state === 'FAILED') {
+        if (result.requiresIdempotencyDrain) {
+          return {
+            page,
+            next: {
+              ...page,
+              status: 'PENDING',
+              submissionState: 'UNKNOWN',
+              billingState: result.billingState,
+              // Keep the observed id for audit, but never poll it again until
+              // the gateway confirms the original idempotency key.
+              operationId: page.operationId,
+              providerRequestId: result.providerRequestId ?? page.providerRequestId,
+              width: null,
+              height: null,
+              aspectRatioValidated: false,
+              aspectDiagnostics: null,
+              errorCode: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+            },
+            retryAfterMs: 1_000,
+          }
+        }
         const receivedAspectDiagnostics = result.aspectDiagnostics ?? null
         const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
         const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null
@@ -1327,7 +1362,9 @@ export class QuickDeckEvaluationService {
     const lookup = this.dependencies.images.lookupByIdempotency?.bind(this.dependencies.images)
     for (const page of record.pages.filter((candidate) => candidate.submissionState !== 'NOT_SUBMITTED'
       && candidate.artifactId === null
-      && !(candidate.status === 'FAILED' && candidate.operationId !== null))) {
+      && !(candidate.status === 'FAILED'
+        && candidate.submissionState === 'SUBMITTED'
+        && candidate.operationId !== null))) {
       if (!lookup) {
         cleanupAuditRequired = true
         continue
@@ -1368,6 +1405,10 @@ export class QuickDeckEvaluationService {
           artifactIds.add(inspected.artifactId)
           discoveredArtifacts.set(page.pageNumber, inspected.artifactId)
         } else if (inspected.state === 'FAILED') {
+          if (inspected.requiresIdempotencyDrain) {
+            cleanupPending = true
+            continue
+          }
           const receivedAspectDiagnostics = inspected.aspectDiagnostics ?? null
           const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
           const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null

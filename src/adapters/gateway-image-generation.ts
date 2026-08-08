@@ -218,6 +218,7 @@ function inspectedSubmissionFailure(operation: ImageOperation) {
       errorCode: unknownCode,
       billingState: billingState(),
       technicalFailure: providerTechnicalFailure(unknownCode, { disposition: 'RETRYABLE' }),
+      requiresIdempotencyDrain: true as const,
     }
   }
   if (operation.submission_state === 'NOT_SUBMITTED') {

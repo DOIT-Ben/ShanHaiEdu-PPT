@@ -510,6 +510,7 @@ describe('gateway image generation adapter', () => {
       state: 'FAILED',
       errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
       billingState: 'UNKNOWN',
+      requiresIdempotencyDrain: true,
     })
     expect(artifacts.artifacts.size).toBe(0)
   })
