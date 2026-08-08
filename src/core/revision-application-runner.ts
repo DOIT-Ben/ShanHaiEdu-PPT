@@ -187,7 +187,7 @@ export class RevisionApplicationRunner {
     } catch (error) {
       const diagnostic = error instanceof RevisionApplicationExecutionError
         ? error.diagnostic
-        : revisionApplicationFailure(error, 1, 1)
+        : revisionApplicationFailure(error, 1, 1, false, chain4Manuscript)
       return this.fail(run, idempotencyKey, diagnostic, plan)
     }
   }
@@ -287,7 +287,7 @@ export class RevisionApplicationRunner {
           if (providerRetryable) {
             if (providerAttempt === MAX_REVISION_APPLICATION_PROVIDER_ATTEMPTS) {
               throw new RevisionApplicationExecutionError(
-                revisionApplicationFailure(error, providerAttempt, contractAttempt + 1),
+                revisionApplicationFailure(error, providerAttempt, contractAttempt + 1, false, chain4),
               )
             }
             await (this.dependencies.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
@@ -310,6 +310,7 @@ export class RevisionApplicationRunner {
                 providerAttempt,
                 contractAttempt + 1,
                 semanticManuscriptFailure && contractAttempt + 1 >= MAX_REVISION_CONTRACT_ATTEMPTS,
+                chain4,
               ),
             )
           }
@@ -322,7 +323,7 @@ export class RevisionApplicationRunner {
       }
     }
     throw new RevisionApplicationExecutionError(
-      revisionApplicationFailure(lastError, 1, MAX_REVISION_CONTRACT_ATTEMPTS),
+      revisionApplicationFailure(lastError, 1, MAX_REVISION_CONTRACT_ATTEMPTS, false, chain4),
     )
   }
 
@@ -768,12 +769,13 @@ function revisionApplicationFailure(
   providerAttempt: number,
   contractAttempt: number,
   terminalSemanticManuscriptFailure = false,
+  chain4 = false,
 ): RevisionApplicationFailure {
   const structured = error instanceof StructuredModelError ? error : null
-  const manuscriptContextTooLarge = isV4ManuscriptContextTooLargeError(error)
-  const semanticFailure = terminalSemanticManuscriptFailure && isV4SemanticManuscriptFailure(error)
+  const manuscriptContextTooLarge = chain4 && isV4ManuscriptContextTooLargeError(error)
+  const semanticFailure = chain4 && terminalSemanticManuscriptFailure && isV4SemanticManuscriptFailure(error)
   const message = error instanceof Error ? error.message : ''
-  const technicalMessage = /^[A-Z][A-Z0-9_]{2,99}$/.test(message)
+  const technicalMessage = chain4 && /^[A-Z][A-Z0-9_]{2,99}$/.test(message)
     && technicalFailureDisposition(message) === 'RETRYABLE'
   const diagnosticCode = semanticFailure
     ? V4_MANUSCRIPT_SEMANTIC_INVALID

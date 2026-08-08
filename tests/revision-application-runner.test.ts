@@ -389,6 +389,27 @@ describe('revision application runner', () => {
     expect(failed?.payload).toMatchObject({ errorCode: 'PROVIDER_UNAVAILABLE', retryable: false })
   })
 
+  test('keeps a historical V4 raw network error outside the Chain-4 technical recovery contract', async () => {
+    const base = visualDeckV4Blueprint(2, CHAIN_3_VISUAL_DECK_V4_COMPILER_VERSION)
+    const input = visualDeckV4Input()
+    const { repository, application, runner } = await fixture({}, plan('UPDATE_CONTENT'), base, {
+      runOverrides: {
+        source: input.source,
+        presentationMode: 'VISUAL_DECK_V4',
+        visualDeckV4: input.config,
+      },
+      documents: new StaticDocumentPort(input.document),
+    })
+    application.apply = async () => { throw new Error('NETWORK_TIMEOUT') }
+
+    const result = await runner.apply('run-1')
+
+    expect(result.step).toMatchObject({
+      errorCode: 'REVISION_APPLICATION_FAILED',
+      output: { diagnostic: { diagnosticCode: 'NETWORK_TIMEOUT' } },
+    })
+  })
+
   test('preserves the approved v4 plan for a page-only redraw without another model rewrite', async () => {
     const base = visualDeckV4Blueprint()
     const { application, runner } = await fixture({}, plan('REGENERATE_IMAGE'), base)
