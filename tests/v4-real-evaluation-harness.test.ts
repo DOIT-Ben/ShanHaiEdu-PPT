@@ -26,7 +26,11 @@ import {
   validateRasterPages,
   validateCreatedV4RunIdentity,
   assertV4RunStatusMatchesSseTerminal,
+  exerciseV4PauseResume,
+  validateV4PauseResumeSseEvidence,
+  v4EvaluationActionIdempotencyKey,
   v4EvaluationIdempotencyKey,
+  type V4EvaluationPauseResumeEvidence,
   type V4EvaluationRelease,
 } from '../scripts/run-v4-real-evaluation'
 import { createPublicCapabilities } from '../src/run-query-contracts'
@@ -206,6 +210,150 @@ function streamedSseResponse(frames: readonly string[], requestId: string) {
   })
 }
 
+const actionRelease = {
+  softwareVersion: '4.4.0',
+  presentationMode: 'VISUAL_DECK_V4' as const,
+  compilerVersion: 'visual-deck-v4-chain-4',
+  contractVersion: '1',
+  gitSha: 'a'.repeat(40),
+  releaseId: 'v4.4.0-aaaaaaaaaaaa',
+}
+
+function actionRunDetail(input: Readonly<{
+  id: string
+  status: 'EXECUTING' | 'PAUSED'
+  version: number
+  resumeState: 'EXECUTING' | null
+  allowedActions: readonly { type: 'PAUSE' | 'RESUME'; expectedVersion: number }[]
+}>) {
+  return {
+    schemaVersion: '1' as const,
+    id: input.id,
+    host: { tenantId: 'phase5', externalUserId: 'evaluation-user' },
+    status: input.status,
+    resumeState: input.resumeState,
+    visualDirection: '适合课堂投影的清晰视觉风格',
+    targetAudience: null,
+    presentationGoal: null,
+    imageModel: 'gemini-3-pro-image-preview',
+    automationLevel: 'BOUNDED_AUTO' as const,
+    version: input.version,
+    slideCount: 1,
+    revisionRound: 0,
+    maxRevisionRounds: 2,
+    planningAttempt: 0,
+    maxPlanningRetries: 2 as const,
+    budgetUnits: 30,
+    committedBudgetUnits: 0,
+    qualityScore: null,
+    qualityOverride: false,
+    qualityDisposition: 'PENDING' as const,
+    qualityPolicyAudit: null,
+    qualityOverrideAudit: null,
+    presentationMode: 'VISUAL_DECK_V4' as const,
+    release: actionRelease,
+    error: null,
+    blueprint: null,
+    generationPlan: null,
+    deliveries: [],
+    deliveryAvailability: { state: 'UNAVAILABLE' as const, reason: 'RUN_NOT_COMPLETED' as const },
+    issues: [],
+    progress: [],
+    createdAt: '2026-08-08T00:00:00.000Z',
+    updatedAt: '2026-08-08T00:00:01.000Z',
+    allowedActions: input.allowedActions,
+  }
+}
+
+function actionRunSnapshot(detail: ReturnType<typeof actionRunDetail>) {
+  const {
+    allowedActions: _allowedActions,
+    blueprint: _blueprint,
+    generationPlan: _generationPlan,
+    deliveries: _deliveries,
+    deliveryAvailability: _deliveryAvailability,
+    issues: _issues,
+    progress: _progress,
+    ...snapshot
+  } = detail
+  return snapshot
+}
+
+function actionDetailResponse(detail: ReturnType<typeof actionRunDetail>, requestId: string) {
+  return new Response(JSON.stringify({ schemaVersion: '1', requestId, data: detail }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+  })
+}
+
+function actionSnapshotResponse(detail: ReturnType<typeof actionRunDetail>, requestId: string) {
+  return new Response(JSON.stringify({ schemaVersion: '1', requestId, data: actionRunSnapshot(detail) }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+  })
+}
+
+function actionHistoryResponse(runId: string, requestId: string, cursorSequence = 0, events: readonly unknown[] = []) {
+  const data = events.length > 0
+    ? events
+    : cursorSequence === 0
+      ? []
+      : [{
+          schemaVersion: '1',
+          id: `cursor-event-${cursorSequence}`,
+          eventId: `cursor-event-${cursorSequence}`,
+          runId,
+          sequence: cursorSequence,
+          createdAt: '2026-08-08T00:00:00.000Z',
+          type: 'action.cursor',
+          payload: {},
+        }]
+  return new Response(JSON.stringify({
+    schemaVersion: '1', requestId, data,
+    pagination: { nextAfter: cursorSequence, hasMore: false },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+  })
+}
+
+function actionErrorResponse(code: string, requestId: string, runId: string) {
+  return new Response(JSON.stringify({
+    schemaVersion: '1',
+    error: {
+      code, category: 'CONTRACT', retryable: true, action: 'RETRY',
+      message: 'action rejected', requestId, runId,
+    },
+  }), {
+    status: 409,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+  })
+}
+
+function pauseResumeEvidence(runId = 'run-action-1'): V4EvaluationPauseResumeEvidence {
+  return {
+    runId,
+    pause: {
+      type: 'PAUSE', expectedVersion: 4, allowedActionVersion: 4, detailVersion: 4,
+      idempotencyKey: 'pause-key', detailRequestId: 'detail-request-1', detailResponseRequestId: 'detail-request-1',
+      beforeEvent: { sequence: 4, requestId: 'cursor-request-1', responseRequestId: 'cursor-request-1' },
+      afterEvent: { sequence: 5, requestId: 'cursor-request-2', responseRequestId: 'cursor-request-2' },
+      conflicts: [],
+      requestId: 'action-request-1', responseRequestId: 'action-request-1',
+      beforeStatus: 'EXECUTING', status: 'PAUSED', responseVersion: 5, resumeState: 'EXECUTING',
+    },
+    resume: {
+      type: 'RESUME', expectedVersion: 5, allowedActionVersion: 5, detailVersion: 5,
+      idempotencyKey: 'resume-key', detailRequestId: 'detail-request-2', detailResponseRequestId: 'detail-request-2',
+      beforeEvent: { sequence: 5, requestId: 'cursor-request-3', responseRequestId: 'cursor-request-3' },
+      afterEvent: { sequence: 6, requestId: 'cursor-request-4', responseRequestId: 'cursor-request-4' },
+      conflicts: [],
+      requestId: 'action-request-2', responseRequestId: 'action-request-2',
+      beforeStatus: 'PAUSED', status: 'EXECUTING', responseVersion: 6, resumeState: null,
+    },
+  }
+}
+
 describe('V4 real evaluation harness', () => {
   test('uses the main V4 service and only the fixed 1 -> 3 -> 10 canary sequence', () => {
     expect(V4_EVALUATION_DEFAULT_SERVICE_URL).toBe('http://127.0.0.1:4310')
@@ -320,6 +468,432 @@ describe('V4 real evaluation harness', () => {
     expect(reconcileV4SseEventStream(observed.events, observed.events).terminalEventType).toBe('run.failed')
   })
 
+  test('pauses and resumes only with server-provided versions and proves both actions on the same SSE stream', async () => {
+    const calls: Array<{ path: string; method: string; idempotencyKey: string | null; requestId: string | null }> = []
+    const details = [
+      actionRunDetail({ id: 'run-action-1', status: 'EXECUTING', version: 4, resumeState: null, allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }] }),
+      actionRunDetail({ id: 'run-action-1', status: 'PAUSED', version: 5, resumeState: 'EXECUTING', allowedActions: [{ type: 'RESUME', expectedVersion: 5 }] }),
+    ]
+    let detailIndex = 0
+    let historyIndex = 0
+    const evidence = await exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-1',
+      batchKey: 'batch-action-1',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        calls.push({
+          path: parsed.pathname,
+          method: init?.method ?? 'GET',
+          idempotencyKey: new Headers(init?.headers).get('Idempotency-Key'),
+          requestId: new Headers(init?.headers).get('X-Request-ID'),
+        })
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          const cursor = [0, 5, 5, 6][Math.min(historyIndex++, 3)]!
+          return actionHistoryResponse('run-action-1', requestId, cursor)
+        }
+        if (parsed.pathname.endsWith('/actions')) {
+          const body = JSON.parse(String(init?.body)) as { type: string; expectedVersion: number }
+          const status = body.type === 'PAUSE' ? 'PAUSED' : 'EXECUTING'
+          const version = body.type === 'PAUSE' ? 5 : 6
+          return actionSnapshotResponse(actionRunDetail({
+            id: 'run-action-1', status, version,
+            resumeState: body.type === 'PAUSE' ? 'EXECUTING' : null,
+            allowedActions: [],
+          }), requestId)
+        }
+        const detail = details[Math.min(detailIndex++, details.length - 1)]!
+        return actionDetailResponse(detail, requestId)
+      },
+    })
+
+    expect(evidence.pause).toMatchObject({
+      type: 'PAUSE', expectedVersion: 4, status: 'PAUSED', responseVersion: 5,
+      allowedActionVersion: 4, detailVersion: 4,
+      beforeEvent: { sequence: 0 }, afterEvent: { sequence: 5 }, conflicts: [],
+      idempotencyKey: v4EvaluationActionIdempotencyKey('run-action-1', 'PAUSE', 4, 'batch-action-1'),
+    })
+    expect(evidence.resume).toMatchObject({
+      type: 'RESUME', expectedVersion: 5, status: 'EXECUTING', responseVersion: 6,
+      allowedActionVersion: 5, detailVersion: 5,
+      idempotencyKey: v4EvaluationActionIdempotencyKey('run-action-1', 'RESUME', 5, 'batch-action-1'),
+    })
+    expect(calls.filter((call) => call.method === 'POST').map((call) => call.idempotencyKey)).toEqual([
+      evidence.pause.idempotencyKey,
+      evidence.resume.idempotencyKey,
+    ])
+
+    const events = [
+      { eventId: 'event-1', runId: 'run-action-1', sequence: 5, type: 'run.paused', payload: { reason: 'PAUSED_BY_USER', resumeState: 'EXECUTING' } },
+      { eventId: 'event-2', runId: 'run-action-1', sequence: 6, type: 'run.resumed', payload: { status: 'EXECUTING' } },
+    ]
+    expect(validateV4PauseResumeSseEvidence(events, evidence)).toEqual({
+      pauseEvent: { eventId: 'event-1', sequence: 5, type: 'run.paused' },
+      resumeEvent: { eventId: 'event-2', sequence: 6, type: 'run.resumed' },
+    })
+  })
+
+  test('retries a pause only after an explicit version conflict and binds the retry to the newer server version', async () => {
+    const pauseKeys: string[] = []
+    const details = [
+      actionRunDetail({ id: 'run-action-conflict', status: 'EXECUTING', version: 4, resumeState: null, allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }] }),
+      actionRunDetail({ id: 'run-action-conflict', status: 'EXECUTING', version: 5, resumeState: null, allowedActions: [{ type: 'PAUSE', expectedVersion: 5 }] }),
+      actionRunDetail({ id: 'run-action-conflict', status: 'PAUSED', version: 6, resumeState: 'EXECUTING', allowedActions: [{ type: 'RESUME', expectedVersion: 6 }] }),
+    ]
+    let detailIndex = 0
+    let historyIndex = 0
+    const persistedConflicts: unknown[] = []
+    const evidence = await exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-conflict',
+      batchKey: 'batch-action-conflict',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      onConflict: (conflict) => { persistedConflicts.push(conflict) },
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          const cursor = [0, 4, 6, 6, 7][Math.min(historyIndex++, 4)]!
+          return actionHistoryResponse('run-action-conflict', requestId, cursor)
+        }
+        if (!parsed.pathname.endsWith('/actions')) {
+          const detail = details[Math.min(detailIndex++, details.length - 1)]!
+          return actionDetailResponse(detail, requestId)
+        }
+        const body = JSON.parse(String(init?.body)) as { type: string; expectedVersion: number }
+        const key = new Headers(init?.headers).get('Idempotency-Key')
+        if (body.type === 'PAUSE') pauseKeys.push(key ?? '')
+        if (body.type === 'PAUSE' && body.expectedVersion === 4) {
+          return new Response(JSON.stringify({
+            schemaVersion: '1',
+            error: {
+              code: 'RUN_VERSION_CONFLICT', category: 'CONTRACT', retryable: true, action: 'RETRY',
+              message: 'version changed', requestId, runId: 'run-action-conflict',
+            },
+          }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+          })
+        }
+        const status = body.type === 'PAUSE' ? 'PAUSED' : 'EXECUTING'
+        const version = body.type === 'PAUSE' ? 6 : 7
+        return actionSnapshotResponse(actionRunDetail({
+          id: 'run-action-conflict', status, version,
+          resumeState: body.type === 'PAUSE' ? 'EXECUTING' : null,
+          allowedActions: [],
+        }), requestId)
+      },
+    })
+
+    expect(pauseKeys).toEqual([
+      v4EvaluationActionIdempotencyKey('run-action-conflict', 'PAUSE', 4, 'batch-action-conflict'),
+      v4EvaluationActionIdempotencyKey('run-action-conflict', 'PAUSE', 5, 'batch-action-conflict'),
+    ])
+    expect(evidence.pause.expectedVersion).toBe(5)
+    expect(evidence.resume.expectedVersion).toBe(6)
+    expect(evidence.pause.conflicts).toHaveLength(1)
+    expect(persistedConflicts).toHaveLength(1)
+    expect(evidence.pause.conflicts[0]).toMatchObject({
+      status: 409,
+      expectedVersion: 4,
+      errorCode: 'RUN_VERSION_CONFLICT',
+      errorRunId: 'run-action-conflict',
+      beforeEvent: { sequence: 0 },
+    })
+  })
+
+  test('retains the conflict journal callback when a later action fails', async () => {
+    const details = [
+      actionRunDetail({ id: 'run-action-journal', status: 'EXECUTING', version: 4, resumeState: null, allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }] }),
+      actionRunDetail({ id: 'run-action-journal', status: 'EXECUTING', version: 5, resumeState: null, allowedActions: [{ type: 'PAUSE', expectedVersion: 5 }] }),
+      actionRunDetail({ id: 'run-action-journal', status: 'PAUSED', version: 6, resumeState: 'EXECUTING', allowedActions: [{ type: 'RESUME', expectedVersion: 6 }] }),
+    ]
+    const persistedConflicts: unknown[] = []
+    let detailIndex = 0
+    let historyIndex = 0
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-journal',
+      batchKey: 'batch-action-journal',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      onConflict: (conflict) => { persistedConflicts.push(conflict) },
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          const cursor = [0, 4, 6, 6][Math.min(historyIndex++, 3)]!
+          return actionHistoryResponse('run-action-journal', requestId, cursor)
+        }
+        if (!parsed.pathname.endsWith('/actions')) {
+          return actionDetailResponse(details[Math.min(detailIndex++, details.length - 1)]!, requestId)
+        }
+        const body = JSON.parse(String(init?.body)) as { type: string; expectedVersion: number }
+        if (body.type === 'PAUSE' && body.expectedVersion === 4) {
+          return actionErrorResponse('RUN_VERSION_CONFLICT', requestId, 'run-action-journal')
+        }
+        if (body.type === 'RESUME') {
+          return actionErrorResponse('IDEMPOTENCY_CONFLICT', requestId, 'run-action-journal')
+        }
+        return actionSnapshotResponse(details[2]!, requestId)
+      },
+    })).rejects.toThrow('V4_EVAL_ACTION_HTTP_409_IDEMPOTENCY_CONFLICT')
+    expect(persistedConflicts).toHaveLength(1)
+    expect(persistedConflicts[0]).toMatchObject({ type: 'PAUSE', errorCode: 'RUN_VERSION_CONFLICT' })
+  })
+
+  test('binds detail and action envelopes to the exact request id sent by the harness', async () => {
+    const detail = actionRunDetail({
+      id: 'run-action-request-id', status: 'EXECUTING', version: 4, resumeState: null,
+      allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }],
+    })
+    let detailCalls = 0
+    let actionCalls = 0
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-request-id',
+      batchKey: 'batch-request-id',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) return actionHistoryResponse('run-action-request-id', requestId)
+        if (parsed.pathname.endsWith('/actions')) {
+          actionCalls += 1
+          return actionSnapshotResponse(actionRunDetail({
+            id: 'run-action-request-id', status: 'PAUSED', version: 5, resumeState: 'EXECUTING', allowedActions: [],
+          }), 'response-belongs-to-another-request')
+        }
+        detailCalls += 1
+        return actionDetailResponse(detail, 'detail-belongs-to-another-request')
+      },
+    })).rejects.toThrow('V4_EVAL_RUN_ACTIONS_REQUEST_ID_MISMATCH')
+    expect(detailCalls).toBe(1)
+    expect(actionCalls).toBe(0)
+  })
+
+  test('rejects a successful action response whose request id is not the action request id', async () => {
+    const detail = actionRunDetail({
+      id: 'run-action-response-id', status: 'EXECUTING', version: 4, resumeState: null,
+      allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }],
+    })
+    let actionCalls = 0
+    let historyIndex = 0
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-response-id',
+      batchKey: 'batch-response-id',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          const cursor = [0, 5][Math.min(historyIndex++, 1)]!
+          return actionHistoryResponse('run-action-response-id', requestId, cursor)
+        }
+        if (parsed.pathname.endsWith('/actions')) {
+          actionCalls += 1
+          return actionSnapshotResponse(actionRunDetail({
+            id: 'run-action-response-id', status: 'PAUSED', version: 5, resumeState: 'EXECUTING', allowedActions: [],
+          }), 'another-action-request')
+        }
+        return actionDetailResponse(detail, requestId)
+      },
+    })).rejects.toThrow('V4_EVAL_ACTION_REQUEST_ID_MISMATCH')
+    expect(actionCalls).toBe(1)
+  })
+
+  test('does not refresh or retry a non-version 409 action failure', async () => {
+    const detail = actionRunDetail({
+      id: 'run-action-non-version-conflict', status: 'EXECUTING', version: 4, resumeState: null,
+      allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }],
+    })
+    let detailCalls = 0
+    let actionCalls = 0
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-non-version-conflict',
+      batchKey: 'batch-non-version-conflict',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) return actionHistoryResponse('run-action-non-version-conflict', requestId)
+        if (parsed.pathname.endsWith('/actions')) {
+          actionCalls += 1
+          return actionErrorResponse('IDEMPOTENCY_CONFLICT', requestId, 'run-action-non-version-conflict')
+        }
+        detailCalls += 1
+        return actionDetailResponse(detail, requestId)
+      },
+    })).rejects.toThrow('V4_EVAL_ACTION_HTTP_409_IDEMPOTENCY_CONFLICT')
+    expect(detailCalls).toBe(1)
+    expect(actionCalls).toBe(1)
+  })
+
+  test('fails closed when a detail or cursor error is not correlated to the request and Run', async () => {
+    const detail = actionRunDetail({
+      id: 'run-action-error-correlation', status: 'EXECUTING', version: 4, resumeState: null,
+      allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }],
+    })
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-error-correlation',
+      batchKey: 'batch-detail-error-correlation',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          return actionErrorResponse('HISTORY_UNAVAILABLE', 'wrong-history-request', 'run-action-error-correlation')
+        }
+        return actionDetailResponse(detail, requestId)
+      },
+    })).rejects.toThrow('V4_EVAL_ACTION_CURSOR_REQUEST_ID_MISMATCH')
+
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-error-correlation',
+      batchKey: 'batch-cursor-jump',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          return new Response(JSON.stringify({
+            schemaVersion: '1', requestId, data: [], pagination: { nextAfter: 7, hasMore: false },
+          }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+          })
+        }
+        return actionDetailResponse(detail, requestId)
+      },
+    })).rejects.toThrow('V4_EVAL_ACTION_CURSOR_SEQUENCE_INVALID')
+
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-error-correlation',
+      batchKey: 'batch-detail-error-correlation-2',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) return actionHistoryResponse('run-action-error-correlation', requestId)
+        return new Response(JSON.stringify({
+          schemaVersion: '1',
+          error: {
+            code: 'RUN_NOT_FOUND', category: 'CONTRACT', retryable: false, action: 'NONE',
+            message: 'run missing', requestId, runId: 'run-other',
+          },
+        }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json', 'X-Request-ID': requestId },
+        })
+      },
+    })).rejects.toThrow('V4_EVAL_RUN_ACTIONS_RUN_ID_INVALID')
+  })
+
+  test('rejects a version conflict whose error belongs to another Run', async () => {
+    const detail = actionRunDetail({
+      id: 'run-action-conflict-run-id', status: 'EXECUTING', version: 4, resumeState: null,
+      allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }],
+    })
+    await expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-conflict-run-id',
+      batchKey: 'batch-conflict-run-id',
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) return actionHistoryResponse('run-action-conflict-run-id', requestId)
+        if (parsed.pathname.endsWith('/actions')) {
+          return actionErrorResponse('RUN_VERSION_CONFLICT', requestId, 'run-other')
+        }
+        return actionDetailResponse(detail, requestId)
+      },
+    })).rejects.toThrow('V4_EVAL_ACTION_ERROR_RUN_ID_MISMATCH')
+  })
+
+  test('rejects an action response that does not advance the version or preserve the pause invariant', async () => {
+    const runCase = (responseDetail: ReturnType<typeof actionRunDetail>, expectedError: string) => {
+      let historyIndex = 0
+      return expect(exerciseV4PauseResume({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-action-transition',
+      batchKey: `batch-${expectedError}`,
+      timeoutMs: 1_000,
+      pollMs: 1,
+      fetch: async (url, init) => {
+        const parsed = new URL(url)
+        const requestId = new Headers(init?.headers).get('X-Request-ID') ?? 'missing-request-id'
+        if (parsed.pathname.endsWith('/events/history')) {
+          const cursor = [0, 5][Math.min(historyIndex++, 1)]!
+          return actionHistoryResponse('run-action-transition', requestId, cursor)
+        }
+        if (parsed.pathname.endsWith('/actions')) return actionSnapshotResponse(responseDetail, requestId)
+        return actionDetailResponse(actionRunDetail({
+          id: 'run-action-transition', status: 'EXECUTING', version: 4, resumeState: null,
+          allowedActions: [{ type: 'PAUSE', expectedVersion: 4 }],
+        }), requestId)
+      },
+      })).rejects.toThrow(expectedError)
+    }
+
+    await runCase(actionRunDetail({
+      id: 'run-action-transition', status: 'PAUSED', version: 4, resumeState: 'EXECUTING', allowedActions: [],
+    }), 'V4_EVAL_ACTION_VERSION_TRANSITION_INVALID')
+    await runCase(actionRunDetail({
+      id: 'run-action-transition', status: 'EXECUTING', version: 5, resumeState: null, allowedActions: [],
+    }), 'V4_EVAL_PAUSE_ACTION_RESULT_INVALID')
+  })
+
+  test('rejects foreign-run and stale pause/resume SSE evidence', () => {
+    const evidence = pauseResumeEvidence()
+    expect(() => validateV4PauseResumeSseEvidence([
+      { eventId: 'foreign-1', runId: 'run-other', sequence: 5, type: 'run.paused', payload: { reason: 'PAUSED_BY_USER', resumeState: 'EXECUTING' } },
+      { eventId: 'foreign-2', runId: 'run-other', sequence: 6, type: 'run.resumed', payload: { status: 'EXECUTING' } },
+    ], evidence)).toThrow('V4_EVAL_SSE_RUN_ID_MISMATCH')
+    expect(() => validateV4PauseResumeSseEvidence([
+      { eventId: 'stale-1', runId: evidence.runId, sequence: 3, type: 'run.paused', payload: { reason: 'PAUSED_BY_USER', resumeState: 'EXECUTING' } },
+      { eventId: 'stale-2', runId: evidence.runId, sequence: 4, type: 'run.resumed', payload: { status: 'EXECUTING' } },
+    ], evidence)).toThrow('V4_EVAL_PAUSE_SSE_EVENT_MISSING')
+  })
+
   test('accepts coalesced complete frames larger than the aggregate buffer limit while bounding each frame', async () => {
     const requestId = 'v4-eval-sse-request-4'
     const eventCount = 3_000
@@ -363,7 +937,7 @@ describe('V4 real evaluation harness', () => {
         `id: 2\nevent: run.accounting.finalized\ndata: ${JSON.stringify(accounting)}\n`,
       ], requestId),
     })
-    const audit = { eventId: 'event-3', sequence: 3, type: 'tool.completed' }
+    const audit = { eventId: 'event-3', runId: 'run-sse-1', sequence: 3, type: 'tool.completed' }
     const reconciliation = reconcileV4SseEventStream(observed.events, [...observed.events, audit])
 
     expect(reconciliation).toEqual({
@@ -375,7 +949,7 @@ describe('V4 real evaluation harness', () => {
       terminalEventType: 'run.accounting.finalized',
     })
     expect(() => reconcileV4SseEventStream(observed.events, [...observed.events, {
-      eventId: 'event-3', sequence: 3, type: 'run.failed',
+      eventId: 'event-3', runId: 'run-sse-1', sequence: 3, type: 'run.failed',
     }])).toThrow('V4_EVAL_SSE_HISTORY_POST_TERMINAL_EVENT_INVALID')
   })
 

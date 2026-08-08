@@ -4,15 +4,20 @@ import path from 'node:path'
 import sharp from 'sharp'
 import {
   agentEventSchema,
+  agentEventHistoryEnvelopeSchema,
+  apiErrorSchema,
   createRunRequestSchema,
   deliveryAvailabilitySchema,
   issueSummarySchema,
+  runEnvelopeSchema,
   runSnapshotSchema,
   type CreateRunRequest,
+  type RunSnapshot,
 } from '../src/contracts'
 import { publicDeliveryRecordSchema, type DeliveryRecord } from '../src/presentation-contracts'
 import { hasExactVisualDeckV4AspectRatio } from '../src/core/image-aspect-policy'
 import { capabilitiesEnvelopeSchema } from '../src/run-query-contracts'
+import { runDetailEnvelopeSchema, type RunDetail as PublicRunDetail } from '../src/run-detail-contracts'
 
 export const V4_EVALUATION_DEFAULT_SERVICE_URL = 'http://127.0.0.1:4310'
 export const V4_EVALUATION_CANARY_PAGE_COUNTS = [1, 3, 10] as const
@@ -75,6 +80,7 @@ type RunDetail = Record<string, unknown> & Readonly<{
 
 type HistoryEvent = Readonly<{
   eventId: string
+  runId?: string
   sequence: number
   type: string
   payload?: unknown
@@ -84,6 +90,55 @@ export type V4EvaluationSseEvidence = Readonly<{
   requestId: string
   responseRequestId: string
   events: readonly HistoryEvent[]
+}>
+
+type V4EvaluationRunActionType = 'PAUSE' | 'RESUME'
+
+type V4EvaluationActionEventBoundary = Readonly<{
+  sequence: number
+  requestId: string
+  responseRequestId: string
+}>
+
+type V4EvaluationActionConflictEvidence = Readonly<{
+  type: V4EvaluationRunActionType
+  status: number
+  expectedVersion: number
+  idempotencyKey: string
+  requestId: string
+  responseRequestId: string
+  errorCode: string
+  errorRunId: string
+  beforeEvent: V4EvaluationActionEventBoundary
+}>
+
+type V4EvaluationActionConflictHandler = (
+  conflict: V4EvaluationActionConflictEvidence,
+) => Promise<void> | void
+
+type V4EvaluationRunActionEvidence = Readonly<{
+  type: V4EvaluationRunActionType
+  expectedVersion: number
+  allowedActionVersion: number
+  idempotencyKey: string
+  detailRequestId: string
+  detailResponseRequestId: string
+  detailVersion: number
+  beforeEvent: V4EvaluationActionEventBoundary
+  afterEvent: V4EvaluationActionEventBoundary
+  conflicts: readonly V4EvaluationActionConflictEvidence[]
+  requestId: string
+  responseRequestId: string
+  beforeStatus: string
+  status: string
+  responseVersion: number
+  resumeState: string | null
+}>
+
+export type V4EvaluationPauseResumeEvidence = Readonly<{
+  runId: string
+  pause: V4EvaluationRunActionEvidence
+  resume: V4EvaluationRunActionEvidence
 }>
 
 type V4EvaluationSseResult = Readonly<
@@ -213,6 +268,15 @@ export function v4EvaluationIdempotencyKey(
   batchKey: string,
 ) {
   return `v4-eval-${slideCount}-${caseId}-${sha256(batchKey).slice(0, 32)}`
+}
+
+export function v4EvaluationActionIdempotencyKey(
+  runId: string,
+  type: V4EvaluationRunActionType,
+  expectedVersion: number,
+  batchKey: string,
+) {
+  return `v4-eval-action-${type.toLowerCase()}-${sha256(`${runId}\0${type}\0${expectedVersion}\0${batchKey}`).slice(0, 32)}`
 }
 
 function evaluationConfig(): EvaluationConfig {
@@ -762,7 +826,7 @@ function redactedRunEvidence(run: RunDetail) {
 }
 
 function redactedEventHistory(events: readonly HistoryEvent[]) {
-  return events.map((event) => ({ eventId: event.eventId, sequence: event.sequence, type: event.type }))
+  return events.map((event) => ({ eventId: event.eventId, runId: event.runId, sequence: event.sequence, type: event.type }))
 }
 
 function redactedSseEvidence(evidence: V4EvaluationSseEvidence, reconciliation: ReturnType<typeof reconcileV4SseEventStream>) {
@@ -943,6 +1007,308 @@ async function getRun(config: EvaluationConfig, request: CreateRunRequest, runId
   return runSnapshotSchema.parse(body.data) as RunDetail
 }
 
+type ActionableRunDetail = Pick<PublicRunDetail, 'id' | 'status' | 'version' | 'resumeState' | 'allowedActions'>
+
+type ActionRunSnapshot = Pick<RunSnapshot, 'id' | 'status' | 'version' | 'resumeState'>
+
+type ActionableRunDetailRead = Readonly<{
+  detail: ActionableRunDetail
+  requestId: string
+  responseRequestId: string
+}>
+
+function actionableRunFields(run: PublicRunDetail): ActionableRunDetail {
+  return {
+    id: run.id,
+    status: run.status,
+    version: run.version,
+    resumeState: run.resumeState,
+    allowedActions: run.allowedActions,
+  }
+}
+
+function actionRunFields(run: RunSnapshot): ActionRunSnapshot {
+  return {
+    id: run.id,
+    status: run.status,
+    version: run.version,
+    resumeState: run.resumeState,
+  }
+}
+
+function assertResponseRequestIdentity(
+  expectedRequestId: string,
+  envelopeRequestId: string,
+  response: Response,
+  errorCode: string,
+) {
+  const responseRequestId = response.headers.get('X-Request-ID')
+  if (envelopeRequestId !== expectedRequestId || responseRequestId !== expectedRequestId) {
+    throw new Error(errorCode)
+  }
+  return expectedRequestId
+}
+
+function assertErrorRunIdentity(errorRunId: string | null, expectedRunId: string, errorCode: string) {
+  if (errorRunId !== expectedRunId) throw new Error(errorCode)
+  return expectedRunId
+}
+
+async function readActionableRunDetail(input: Readonly<{
+  serviceUrl: string
+  apiToken: string
+  request: CreateRunRequest
+  runId: string
+  fetch: FetchPort
+}>): Promise<ActionableRunDetailRead> {
+  const requestId = `v4-eval-detail-${randomUUID()}`
+  const response = await input.fetch(`${input.serviceUrl}/v1/runs/${encodeURIComponent(input.runId)}`, {
+    headers: requestHeaders(input.request, input.apiToken, false, requestId),
+  })
+  const body = await response.json().catch(() => null)
+  if (!response.ok) {
+    const parsedError = apiErrorSchema.safeParse(body)
+    if (!parsedError.success) throw new Error('V4_EVAL_RUN_ACTIONS_ERROR_CONTRACT_INVALID')
+    assertResponseRequestIdentity(
+      requestId,
+      parsedError.data.error.requestId,
+      response,
+      'V4_EVAL_RUN_ACTIONS_REQUEST_ID_MISMATCH',
+    )
+    assertErrorRunIdentity(
+      parsedError.data.error.runId,
+      input.runId,
+      'V4_EVAL_RUN_ACTIONS_RUN_ID_INVALID',
+    )
+    throw new Error(`V4_EVAL_RUN_ACTIONS_HTTP_${response.status}_${parsedError.data.error.code}`)
+  }
+  const parsed = runDetailEnvelopeSchema.safeParse(body)
+  if (!parsed.success) throw new Error('V4_EVAL_RUN_ACTIONS_CONTRACT_INVALID')
+  const responseRequestId = assertResponseRequestIdentity(
+    requestId,
+    parsed.data.requestId,
+    response,
+    'V4_EVAL_RUN_ACTIONS_REQUEST_ID_MISMATCH',
+  )
+  const detail = actionableRunFields(parsed.data.data)
+  if (detail.id !== input.runId) throw new Error('V4_EVAL_RUN_ACTIONS_RUN_ID_INVALID')
+  return { detail, requestId, responseRequestId }
+}
+
+async function applyV4RunAction(input: Readonly<{
+  serviceUrl: string
+  apiToken: string
+  request: CreateRunRequest
+  runId: string
+  type: V4EvaluationRunActionType
+  expectedVersion: number
+  idempotencyKey: string
+  fetch: FetchPort
+}>): Promise<
+  | Readonly<{ state: 'APPLIED'; run: ActionRunSnapshot; requestId: string; responseRequestId: string }>
+  | Readonly<{
+    state: 'VERSION_CONFLICT'
+    conflict: Readonly<{
+      requestId: string
+      responseRequestId: string
+      status: number
+      errorCode: string
+      errorRunId: string
+    }>
+  }>
+> {
+  const requestId = `v4-eval-action-${input.type.toLowerCase()}-${randomUUID()}`
+  const response = await input.fetch(`${input.serviceUrl}/v1/runs/${encodeURIComponent(input.runId)}/actions`, {
+    method: 'POST',
+    headers: {
+      ...requestHeaders(input.request, input.apiToken, true, requestId),
+      'Idempotency-Key': input.idempotencyKey,
+    },
+    body: JSON.stringify({ schemaVersion: '1', type: input.type, expectedVersion: input.expectedVersion }),
+  })
+  const body = await response.json().catch(() => null)
+  if (!response.ok) {
+    const parsedError = apiErrorSchema.safeParse(body)
+    if (!parsedError.success) throw new Error('V4_EVAL_ACTION_ERROR_CONTRACT_INVALID')
+    const responseRequestId = assertResponseRequestIdentity(
+      requestId,
+      parsedError.data.error.requestId,
+      response,
+      'V4_EVAL_ACTION_REQUEST_ID_MISMATCH',
+    )
+    const errorRunId = assertErrorRunIdentity(
+      parsedError.data.error.runId,
+      input.runId,
+      'V4_EVAL_ACTION_ERROR_RUN_ID_MISMATCH',
+    )
+    if (response.status === 409 && parsedError.data.error.code === 'RUN_VERSION_CONFLICT') {
+      return {
+        state: 'VERSION_CONFLICT',
+        conflict: {
+          requestId,
+          responseRequestId,
+          status: response.status,
+          errorCode: parsedError.data.error.code,
+          errorRunId,
+        },
+      }
+    }
+    throw new Error(`V4_EVAL_ACTION_HTTP_${response.status}_${parsedError.data.error.code}`)
+  }
+  const parsed = runEnvelopeSchema.safeParse(body)
+  if (!parsed.success) throw new Error('V4_EVAL_ACTION_CONTRACT_INVALID')
+  const responseRequestId = assertResponseRequestIdentity(
+    requestId,
+    parsed.data.requestId,
+    response,
+    'V4_EVAL_ACTION_REQUEST_ID_MISMATCH',
+  )
+  const run = actionRunFields(parsed.data.data)
+  if (run.id !== input.runId) throw new Error('V4_EVAL_ACTION_RUN_ID_INVALID')
+  return { state: 'APPLIED', run, requestId, responseRequestId }
+}
+
+const PAUSABLE_V4_RUN_STATUSES = new Set([
+  'EXECUTING',
+  'PAGE_REVIEW',
+  'DECK_REVIEW',
+  'AWAITING_REVISION_APPROVAL',
+  'REVISING',
+])
+
+function assertV4RunActionTransition(
+  type: V4EvaluationRunActionType,
+  before: ActionableRunDetail,
+  after: ActionRunSnapshot,
+  expectedVersion: number,
+) {
+  if (after.version !== expectedVersion + 1) {
+    throw new Error('V4_EVAL_ACTION_VERSION_TRANSITION_INVALID')
+  }
+  if (type === 'PAUSE') {
+    if (!PAUSABLE_V4_RUN_STATUSES.has(before.status)
+      || after.status !== 'PAUSED'
+      || after.resumeState !== before.status) {
+      throw new Error('V4_EVAL_PAUSE_ACTION_RESULT_INVALID')
+    }
+    return
+  }
+  if (before.status !== 'PAUSED' || before.resumeState === null
+    || after.status !== before.resumeState || after.resumeState !== null) {
+    throw new Error('V4_EVAL_RESUME_ACTION_RESULT_INVALID')
+  }
+}
+
+async function applyAllowedV4RunAction(input: Readonly<{
+  serviceUrl: string
+  apiToken: string
+  request: CreateRunRequest
+  runId: string
+  type: V4EvaluationRunActionType
+  batchKey: string
+  pollMs: number
+  timeoutMs: number
+  fetch: FetchPort
+  onConflict?: V4EvaluationActionConflictHandler
+}>) {
+  const deadline = Date.now() + input.timeoutMs
+  const conflicts: V4EvaluationActionConflictEvidence[] = []
+  while (Date.now() < deadline) {
+    const detailRead = await readActionableRunDetail(input)
+    const detail = detailRead.detail
+    const action = detail.allowedActions.find((candidate) => candidate.type === input.type)
+    if (!action) {
+      if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(detail.status)
+        || (input.type === 'PAUSE' && detail.status === 'PAUSED')) {
+        throw new Error(`V4_EVAL_${input.type}_ACTION_UNAVAILABLE:${detail.status}`)
+      }
+      await Bun.sleep(input.pollMs)
+      continue
+    }
+    if (action.expectedVersion !== detail.version) throw new Error('V4_EVAL_ACTION_EXPECTED_VERSION_INVALID')
+    const idempotencyKey = v4EvaluationActionIdempotencyKey(
+      input.runId,
+      input.type,
+      action.expectedVersion,
+      input.batchKey,
+    )
+    const beforeEvent = await readV4RunEventCursor({
+      serviceUrl: input.serviceUrl,
+      apiToken: input.apiToken,
+      request: input.request,
+      runId: input.runId,
+      timeoutMs: Math.max(1, Math.min(input.timeoutMs, deadline - Date.now())),
+      fetch: input.fetch,
+    })
+    const result = await applyV4RunAction({ ...input, expectedVersion: action.expectedVersion, idempotencyKey })
+    if (result.state === 'VERSION_CONFLICT') {
+      const conflict = {
+        type: input.type,
+        ...result.conflict,
+        expectedVersion: action.expectedVersion,
+        idempotencyKey,
+        beforeEvent,
+      } satisfies V4EvaluationActionConflictEvidence
+      conflicts.push(conflict)
+      await input.onConflict?.(conflict)
+      await Bun.sleep(input.pollMs)
+      continue
+    }
+    const afterEvent = await readV4RunEventCursor({
+      serviceUrl: input.serviceUrl,
+      apiToken: input.apiToken,
+      request: input.request,
+      runId: input.runId,
+      timeoutMs: Math.max(1, Math.min(input.timeoutMs, deadline - Date.now())),
+      fetch: input.fetch,
+    })
+    if (afterEvent.sequence <= beforeEvent.sequence) {
+      throw new Error('V4_EVAL_ACTION_EVENT_BOUNDARY_INVALID')
+    }
+    assertV4RunActionTransition(input.type, detail, result.run, action.expectedVersion)
+    return {
+      type: input.type,
+      expectedVersion: action.expectedVersion,
+      allowedActionVersion: action.expectedVersion,
+      idempotencyKey,
+      detailRequestId: detailRead.requestId,
+      detailResponseRequestId: detailRead.responseRequestId,
+      detailVersion: detail.version,
+      beforeEvent,
+      afterEvent,
+      conflicts,
+      requestId: result.requestId,
+      responseRequestId: result.responseRequestId,
+      beforeStatus: detail.status,
+      status: result.run.status,
+      responseVersion: result.run.version,
+      resumeState: result.run.resumeState,
+    } satisfies V4EvaluationRunActionEvidence
+  }
+  throw new Error(`V4_EVAL_${input.type}_ACTION_TIMEOUT`)
+}
+
+export async function exerciseV4PauseResume(input: Readonly<{
+  serviceUrl: string
+  apiToken: string
+  request: CreateRunRequest
+  runId: string
+  batchKey: string
+  pollMs: number
+  timeoutMs: number
+  fetch?: FetchPort
+  onConflict?: V4EvaluationActionConflictHandler
+}>): Promise<V4EvaluationPauseResumeEvidence> {
+  const fetchPort = input.fetch ?? fetch
+  const pause = await applyAllowedV4RunAction({ ...input, type: 'PAUSE', fetch: fetchPort })
+  const resume = await applyAllowedV4RunAction({ ...input, type: 'RESUME', fetch: fetchPort })
+  return {
+    runId: input.runId,
+    pause,
+    resume,
+  }
+}
+
 async function waitFor(
   config: EvaluationConfig,
   request: CreateRunRequest,
@@ -1005,7 +1371,7 @@ export function requireAvailableDelivery(run: RunDetail) {
   return delivery
 }
 
-function parseSseFrame(frame: string, after: number): HistoryEvent | null {
+function parseSseFrame(frame: string, after: number, expectedRunId: string): HistoryEvent | null {
   let id: string | null = null
   let type: string | null = null
   const data: string[] = []
@@ -1041,6 +1407,7 @@ function parseSseFrame(frame: string, after: number): HistoryEvent | null {
   if (!parsed.success || parsed.data.sequence !== sequence || parsed.data.type !== type) {
     throw new Error('V4_EVAL_SSE_EVENT_CONTRACT_INVALID')
   }
+  if (parsed.data.runId !== expectedRunId) throw new Error('V4_EVAL_SSE_RUN_ID_MISMATCH')
   return parsed.data
 }
 
@@ -1099,7 +1466,7 @@ export async function readV4RunEventStream(input: Readonly<{
         const frame = buffer.slice(0, boundary.index)
         buffer = buffer.slice(boundary.index + boundary[0].length)
         if (frame.length > MAX_SSE_EVENT_BUFFER_CHARS) throw new Error('V4_EVAL_SSE_FRAME_TOO_LARGE')
-        accept(parseSseFrame(frame, cursor))
+        accept(parseSseFrame(frame, cursor, input.runId))
       }
     }
     try {
@@ -1113,7 +1480,7 @@ export async function readV4RunEventStream(input: Readonly<{
       buffer += decoder.decode()
       consumeFrames()
       if (buffer.length > MAX_SSE_EVENT_BUFFER_CHARS) throw new Error('V4_EVAL_SSE_FRAME_TOO_LARGE')
-      if (buffer.trim()) accept(parseSseFrame(buffer, cursor))
+      if (buffer.trim()) accept(parseSseFrame(buffer, cursor, input.runId))
     } finally {
       await reader.cancel().catch(() => undefined)
     }
@@ -1131,12 +1498,98 @@ export async function readV4RunEventStream(input: Readonly<{
   }
 }
 
+async function readV4RunEventCursor(input: Readonly<{
+  serviceUrl: string
+  apiToken: string
+  request: CreateRunRequest
+  runId: string
+  timeoutMs: number
+  fetch: FetchPort
+}>): Promise<Readonly<{
+  sequence: number
+  requestId: string
+  responseRequestId: string
+}>> {
+  let after = 0
+  let sequence = 0
+  let pages = 0
+  let lastRequestId = ''
+  let lastResponseRequestId = ''
+  while (true) {
+    pages += 1
+    if (pages > MAX_SSE_EVENT_COUNT) throw new Error('V4_EVAL_ACTION_CURSOR_LIMIT_INVALID')
+    const requestId = `v4-eval-action-cursor-${randomUUID()}`
+    const response = await input.fetch(
+      `${input.serviceUrl}/v1/runs/${encodeURIComponent(input.runId)}/events/history?after=${after}`,
+      {
+        headers: requestHeaders(input.request, input.apiToken, false, requestId),
+        signal: AbortSignal.timeout(input.timeoutMs),
+      },
+    )
+    const body = await response.json().catch(() => null)
+    if (!response.ok) {
+      const parsedError = apiErrorSchema.safeParse(body)
+      if (!parsedError.success) throw new Error('V4_EVAL_ACTION_CURSOR_ERROR_CONTRACT_INVALID')
+      assertResponseRequestIdentity(
+        requestId,
+        parsedError.data.error.requestId,
+        response,
+        'V4_EVAL_ACTION_CURSOR_REQUEST_ID_MISMATCH',
+      )
+      assertErrorRunIdentity(
+        parsedError.data.error.runId,
+        input.runId,
+        'V4_EVAL_ACTION_CURSOR_RUN_ID_MISMATCH',
+      )
+      throw new Error(`V4_EVAL_ACTION_CURSOR_HTTP_${response.status}_${parsedError.data.error.code}`)
+    }
+    const parsed = agentEventHistoryEnvelopeSchema.safeParse(body)
+    if (!parsed.success) throw new Error('V4_EVAL_ACTION_CURSOR_CONTRACT_INVALID')
+    const responseRequestId = assertResponseRequestIdentity(
+      requestId,
+      parsed.data.requestId,
+      response,
+      'V4_EVAL_ACTION_CURSOR_REQUEST_ID_MISMATCH',
+    )
+    for (const event of parsed.data.data) {
+      if (event.runId !== input.runId) throw new Error('V4_EVAL_ACTION_CURSOR_RUN_ID_MISMATCH')
+      if (event.sequence <= after || event.sequence <= sequence) {
+        throw new Error('V4_EVAL_ACTION_CURSOR_SEQUENCE_INVALID')
+      }
+      sequence = event.sequence
+    }
+    lastRequestId = requestId
+    lastResponseRequestId = responseRequestId
+    const pageLastSequence = parsed.data.data.at(-1)?.sequence ?? after
+    if (parsed.data.pagination.nextAfter !== pageLastSequence) {
+      throw new Error('V4_EVAL_ACTION_CURSOR_SEQUENCE_INVALID')
+    }
+    if (!parsed.data.pagination.hasMore) {
+      return {
+        sequence,
+        requestId: lastRequestId,
+        responseRequestId: lastResponseRequestId,
+      }
+    }
+    if (parsed.data.pagination.nextAfter <= after) {
+      throw new Error('V4_EVAL_ACTION_CURSOR_STALLED')
+    }
+    after = parsed.data.pagination.nextAfter
+  }
+}
+
 export function reconcileV4SseEventStream(
   sseEvents: readonly HistoryEvent[],
   historyEvents: readonly HistoryEvent[],
 ) {
   if (sseEvents.length < 1 || sseEvents.length > historyEvents.length) {
     throw new Error('V4_EVAL_SSE_HISTORY_IDENTITY_MISMATCH')
+  }
+  const runId = sseEvents[0]!.runId
+  if (!runId
+    || sseEvents.some((event) => event.runId !== runId)
+    || historyEvents.some((event) => event.runId !== runId)) {
+    throw new Error('V4_EVAL_SSE_RUN_ID_MISMATCH')
   }
   for (let index = 0; index < sseEvents.length; index += 1) {
     const streamed = sseEvents[index]!
@@ -1161,6 +1614,37 @@ export function reconcileV4SseEventStream(
     firstSequence: first.sequence,
     lastSequence: last.sequence,
     terminalEventType: last.type,
+  }
+}
+
+export function validateV4PauseResumeSseEvidence(
+  events: readonly HistoryEvent[],
+  evidence: V4EvaluationPauseResumeEvidence,
+) {
+  if (events.some((event) => event.runId !== evidence.runId)) {
+    throw new Error('V4_EVAL_SSE_RUN_ID_MISMATCH')
+  }
+  const pauseEvent = events.find((event) => {
+    if (event.sequence <= evidence.pause.beforeEvent.sequence
+      || event.sequence > evidence.pause.afterEvent.sequence
+      || event.type !== 'run.paused'
+      || !event.payload
+      || typeof event.payload !== 'object') return false
+    const payload = event.payload as Readonly<Record<string, unknown>>
+    return payload.reason === 'PAUSED_BY_USER' && payload.resumeState === evidence.pause.resumeState
+  })
+  if (!pauseEvent) throw new Error('V4_EVAL_PAUSE_SSE_EVENT_MISSING')
+  const resumeEvent = events.find((event) => {
+    if (event.sequence <= evidence.resume.beforeEvent.sequence
+      || event.sequence > evidence.resume.afterEvent.sequence
+      || event.type !== 'run.resumed' || event.sequence <= pauseEvent.sequence
+      || !event.payload || typeof event.payload !== 'object') return false
+    return (event.payload as Readonly<Record<string, unknown>>).status === evidence.resume.status
+  })
+  if (!resumeEvent) throw new Error('V4_EVAL_RESUME_SSE_EVENT_MISSING')
+  return {
+    pauseEvent: { eventId: pauseEvent.eventId, sequence: pauseEvent.sequence, type: pauseEvent.type },
+    resumeEvent: { eventId: resumeEvent.eventId, sequence: resumeEvent.sequence, type: resumeEvent.type },
   }
 }
 
@@ -1201,6 +1685,9 @@ async function readEventHistory(
       headers: requestHeaders(request, config.apiToken),
     }, fetchPort)
     const parsed = body.data.map((event) => agentEventSchema.parse(event))
+    if (parsed.some((event) => event.runId !== runId)) {
+      throw new Error('V4_EVAL_EVENT_HISTORY_RUN_ID_MISMATCH')
+    }
     events.push(...parsed)
     if (!body.pagination.hasMore) return events
     if (body.pagination.nextAfter <= after) throw new Error('EVENT_HISTORY_CURSOR_STALLED')
@@ -1407,6 +1894,7 @@ async function runCase(
   caseId: string,
   request: CreateRunRequest,
   evaluationBatchKey: string,
+  exercisePauseResume: boolean,
   fetchPort: FetchPort = fetch,
 ) {
   const caseDirectory = path.join(config.outputRoot, String(slideCount), caseId)
@@ -1446,8 +1934,31 @@ async function runCase(
     (evidence) => ({ evidence } as const),
     (error) => ({ error } as const),
   )
+  const conflictJournal: V4EvaluationActionConflictEvidence[] = []
+  const persistActionConflict: V4EvaluationActionConflictHandler = async (conflict) => {
+    conflictJournal.push(conflict)
+    await writeJson(path.join(caseDirectory, 'pause-resume-journal.json'), {
+      schemaVersion: '1',
+      runId,
+      conflicts: conflictJournal,
+    })
+  }
 
   try {
+    const pauseResume = exercisePauseResume
+      ? await exerciseV4PauseResume({
+          serviceUrl: config.serviceUrl,
+          apiToken: config.apiToken,
+          request,
+          runId,
+          batchKey: evaluationBatchKey,
+          pollMs: config.pollMs,
+          timeoutMs: config.runTimeoutMs,
+          fetch: fetchPort,
+          onConflict: persistActionConflict,
+        })
+      : null
+    if (pauseResume) await writeJson(path.join(caseDirectory, 'pause-resume.json'), pauseResume)
     const planned = await waitFor(
       config,
       request,
@@ -1495,11 +2006,16 @@ async function runCase(
     const events = await readEventHistory(config, request, runId, fetchPort)
     const sseReconciliation = reconcileV4SseEventStream(observedSse.events, events)
     assertV4RunStatusMatchesSseTerminal(finalRun.status, sseReconciliation.terminalEventType)
+    const pauseResumeSse = pauseResume ? validateV4PauseResumeSseEvidence(observedSse.events, pauseResume) : null
     await Promise.all([
       writeJson(path.join(caseDirectory, 'final-run.json'), redactedRunEvidence(finalRun)),
       writeJson(path.join(caseDirectory, 'timeline.json'), timeline),
       writeJson(path.join(caseDirectory, 'events.json'), redactedEventHistory(events)),
       writeJson(path.join(caseDirectory, 'sse-events.json'), redactedSseEvidence(observedSse, sseReconciliation)),
+      ...(pauseResumeSse ? [writeJson(path.join(caseDirectory, 'pause-resume.json'), {
+        ...pauseResume,
+        sse: pauseResumeSse,
+      })] : []),
     ])
 
     let rasterGate: ReturnType<typeof validateRasterPages> = {
@@ -1547,6 +2063,7 @@ async function runCase(
       sseHistoryEventCount: sseReconciliation.historyEventCount,
       sseTrailingAuditEventCount: sseReconciliation.trailingAuditEventCount,
       sseTerminalEventType: sseReconciliation.terminalEventType,
+      pauseResumeVerified: pauseResumeSse !== null,
     }
     await Promise.all([
       writeJson(path.join(caseDirectory, 'quality-gate.json'), qualityGate),
@@ -1632,6 +2149,7 @@ async function main() {
           caseId,
           evaluationInputFor(evaluationInputs, slideCount, caseId).request,
           evaluationBatchKey,
+          slideCount === config.canaryPageCounts[0] && caseId === config.caseIds[0],
         )
       } catch (error) {
         const result = { passed: false, slideCount, caseId, errorCode: safeFailureCode(error) }
