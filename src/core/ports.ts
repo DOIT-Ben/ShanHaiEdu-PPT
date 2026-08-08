@@ -113,6 +113,25 @@ export interface StructuredModelMetricsPort {
   takeExecutionMetrics(idempotencyKey: string): StructuredModelExecutionMetrics | null
 }
 
+/**
+ * A Chain-4 planner persists only fingerprints of the adapter-owned request
+ * contract. The adapter never returns prompts, schemas, image bytes, or keys.
+ */
+export type StructuredGenerationRequestContract = Readonly<{
+  protocol: 'RESPONSES_JSON_SCHEMA'
+  transport: 'RESPONSES'
+  responseFormat: 'JSON_SCHEMA'
+  stream: true
+  promptContractHash: string
+  responseSchemaHash: string
+}>
+
+export interface StructuredGenerationRequestContractPort {
+  describeStructuredGenerationRequest(
+    input: Parameters<StructuredModelPort['execute']>[0],
+  ): Promise<StructuredGenerationRequestContract>
+}
+
 /** The protocol is selected once during V4 preflight and remains fixed for a run. */
 export type StructuredGenerationProtocol =
   | 'RESPONSES_JSON_SCHEMA'

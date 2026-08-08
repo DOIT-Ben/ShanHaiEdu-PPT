@@ -16,6 +16,7 @@ import {
 } from '../src/core/visual-deck-v4-planner'
 import {
   StructuredModelError,
+  type StructuredGenerationRequestContractPort,
   type StructuredModelMetricsPort,
   type StructuredModelPort,
 } from '../src/core/ports'
@@ -173,11 +174,22 @@ function stagedModel(
   const reflectionPayloads: unknown[] = []
   const model: StructuredModelPort & {
     preflightStructuredGeneration: () => Promise<{ protocol: 'RESPONSES_JSON_SCHEMA' }>
+    describeStructuredGenerationRequest: StructuredGenerationRequestContractPort['describeStructuredGenerationRequest']
     takeExecutionMetrics: StructuredModelMetricsPort['takeExecutionMetrics']
   } = {
     async preflightStructuredGeneration() {
       preflightCalls += 1
       return { protocol: 'RESPONSES_JSON_SCHEMA' }
+    },
+    async describeStructuredGenerationRequest(modelInput) {
+      return {
+        protocol: 'RESPONSES_JSON_SCHEMA',
+        transport: 'RESPONSES',
+        responseFormat: 'JSON_SCHEMA',
+        stream: true,
+        promptContractHash: hashInput({ adapter: 'staged-model', operation: modelInput.operation, payload: modelInput.payload }),
+        responseSchemaHash: hashInput({ adapter: 'staged-model', schemaName: modelInput.schemaName }),
+      }
     },
     takeExecutionMetrics(idempotencyKey) {
       return {
@@ -385,9 +397,267 @@ describe('visual deck v4 planning runner', () => {
     ))
     expect(creative?.output).not.toHaveProperty('slides.0.pageNumber')
     expect(review?.output).not.toHaveProperty('slides.0.sourceChunkId')
+    const requestEvidence = stages.filter((step) => step.tool === 'audit_v4_planning_request')
+    expect(requestEvidence).toHaveLength(2)
+    expect(requestEvidence.map((step) => step.output)).toEqual([
+      expect.objectContaining({
+        schemaVersion: '1',
+        stage: 'creative-manuscript',
+        operation: 'create_visual_deck_v4_creative_manuscript',
+        compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+        model: 'gpt-5.6-terra',
+        protocol: 'RESPONSES_JSON_SCHEMA',
+        transport: 'RESPONSES',
+        responseFormat: 'JSON_SCHEMA',
+        stream: true,
+        promptContractHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        responseSchemaHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        payloadHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        payloadCharacterCount: expect.any(Number),
+        evidenceWindow: expect.objectContaining({
+          selectedContentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          chunks: expect.arrayContaining([expect.objectContaining({
+            id: expect.any(String), sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+            includedCharacterCount: expect.any(Number),
+          })]),
+        }),
+        sourceAssetInputs: [],
+      }),
+      expect.objectContaining({
+        stage: 'review-manuscript',
+        sourceAssetInputs: [],
+        promptContractHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        responseSchemaHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ])
+    const serializedEvidence = JSON.stringify(requestEvidence.map((step) => step.output))
+    expect(serializedEvidence).not.toContain('教材解释百分数表示一个数是另一个数的百分之几')
+    expect(serializedEvidence).not.toContain('你是一位拥有 20 年经验的演示文稿创意作者')
     expect((await repository.listEvents(created.run.id))
       .filter((event) => event.type === 'tool.progress')
       .map((event) => event.type === 'tool.progress' ? event.payload.completed : null)).toEqual([1, 2])
+  })
+
+  test('fails closed before replaying a chain-4 request whose source asset summary drifted', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-request-drift-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let assetHash = 'a'.repeat(64)
+    let creativeCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript') {
+        creativeCalls += 1
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', null, null, 'UNKNOWN')
+      }
+      return execute(modelInput)
+    }
+    const sourceDocument = {
+      name: '含图片来源的教材包',
+      chunks: [{
+        id: 'source-chunk', sourceId: 'source', text: '百分数表示一个数是另一个数的百分之几。', sha256: 'c'.repeat(64),
+      }],
+      sources: [{ id: 'source', name: '教材.pdf', kind: 'PDF' as const, status: 'READY' as const }],
+      isComplete: true,
+      missingRanges: [],
+    }
+    const runner = new PlanningRunner({
+      repository,
+      documents: {
+        async resolve() {
+          return {
+            ...sourceDocument,
+            assets: [{
+              id: 'asset-1', sourceId: 'source', name: '教材插图.png', mimeType: 'image/png' as const,
+              byteLength: 1, sha256: assetHash, width: 1, height: 1, bytes: new Uint8Array([1]),
+            }],
+          }
+        },
+      },
+      model: staged.model,
+      clock,
+    })
+    const planInput = {
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    }
+
+    await expect(runner.plan(planInput)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'PROVIDER_UNAVAILABLE' },
+    })
+    expect(creativeCalls).toBe(1)
+    const initialEvidence = (await repository.listSteps(created.run.id))
+      .find((step) => step.tool === 'audit_v4_planning_request')
+    expect(initialEvidence?.output).toMatchObject({
+      sourceAssetInputs: [{ id: 'asset-1', sha256: 'a'.repeat(64), mimeType: 'image/png', byteLength: 1 }],
+    })
+
+    assetHash = 'b'.repeat(64)
+    clock.advance(2_000)
+    await repository.transact(created.run.id, (transaction) => resumeTechnicalRecovery(transaction, clock))
+    await expect(runner.plan(planInput)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'V4_PLANNING_REQUEST_REPLAY_MISMATCH' },
+    })
+
+    expect(creativeCalls).toBe(1)
+    expect(await repository.getRun(created.run.id)).toMatchObject({ status: 'FAILED' })
+  })
+
+  test('fails closed before a second model call when the chain-4 request contract drifts', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-adapter-drift-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript') {
+        creativeCalls += 1
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', null, null, 'UNKNOWN')
+      }
+      return execute(modelInput)
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+    const planInput = {
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    }
+
+    await expect(runner.plan(planInput)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'PROVIDER_UNAVAILABLE' },
+    })
+    expect(creativeCalls).toBe(1)
+
+    const describe = staged.model.describeStructuredGenerationRequest.bind(staged.model)
+    staged.model.describeStructuredGenerationRequest = async (modelInput) => ({
+      ...await describe(modelInput),
+      promptContractHash: 'f'.repeat(64),
+    })
+    clock.advance(2_000)
+    await repository.transact(created.run.id, (transaction) => resumeTechnicalRecovery(transaction, clock))
+    await expect(runner.plan(planInput)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'V4_PLANNING_REQUEST_REPLAY_MISMATCH' },
+    })
+
+    expect(creativeCalls).toBe(1)
+  })
+
+  test('fails closed before model submission when the chain-4 request descriptor is unavailable or invalid', async () => {
+    for (const kind of ['MISSING', 'NON_RESPONSES', 'NON_STREAMING'] as const) {
+      const repository = new InMemoryAgentRepository()
+      const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+      const service = runService(repository, clock)
+      const inputRequest = request()
+      const created = await service.create(inputRequest, `create-v4-chain-4-descriptor-${kind.toLowerCase()}-0001`)
+      const staged = stagedModel(created, inputRequest, clock)
+      const execute = staged.model.execute.bind(staged.model)
+      let executeCalls = 0
+      staged.model.execute = async (modelInput) => {
+        executeCalls += 1
+        return execute(modelInput)
+      }
+      if (kind === 'MISSING') {
+        delete (staged.model as StructuredModelPort & Partial<StructuredGenerationRequestContractPort>)
+          .describeStructuredGenerationRequest
+      } else {
+        const describe = staged.model.describeStructuredGenerationRequest.bind(staged.model)
+        staged.model.describeStructuredGenerationRequest = async (modelInput) => ({
+          ...await describe(modelInput),
+          ...(kind === 'NON_RESPONSES' ? { transport: 'CHAT_COMPLETIONS' as never } : { stream: false as never }),
+        })
+      }
+      const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+      const result = await runner.plan({
+        runId: created.run.id,
+        stepId: `step-${created.run.id}-plan`,
+        idempotencyKey: planningStepKey(created.run.id),
+        source: created.run.source,
+        slideCount: created.run.slideCount,
+        visualDirection: created.run.visualDirection,
+        presentationMode: inputRequest.presentationMode,
+        visualDeckV4: inputRequest.visualDeckV4,
+      })
+
+      expect(result).toMatchObject({
+        blueprint: null,
+        step: { status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED' },
+      })
+      expect(executeCalls).toBe(0)
+      expect((await repository.listSteps(created.run.id)).find((step) => step.idempotencyKey ===
+        visualDeckV4PlanningStageStepKey(created.run.id, 'creative-manuscript'))).toMatchObject({
+        status: 'FAILED', errorCode: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED',
+      })
+    }
+  })
+
+  test('fails closed before a second model call when the chain-4 response Schema contract drifts', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-schema-drift-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript') {
+        creativeCalls += 1
+        throw new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', null, null, 'UNKNOWN')
+      }
+      return execute(modelInput)
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+    const planInput = {
+      runId: created.run.id,
+      stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id),
+      source: created.run.source,
+      slideCount: created.run.slideCount,
+      visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode,
+      visualDeckV4: inputRequest.visualDeckV4,
+    }
+
+    await expect(runner.plan(planInput)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'PROVIDER_UNAVAILABLE' },
+    })
+    expect(creativeCalls).toBe(1)
+
+    const describe = staged.model.describeStructuredGenerationRequest.bind(staged.model)
+    staged.model.describeStructuredGenerationRequest = async (modelInput) => ({
+      ...await describe(modelInput),
+      responseSchemaHash: 'e'.repeat(64),
+    })
+    clock.advance(2_000)
+    await repository.transact(created.run.id, (transaction) => resumeTechnicalRecovery(transaction, clock))
+    await expect(runner.plan(planInput)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'V4_PLANNING_REQUEST_REPLAY_MISMATCH' },
+    })
+
+    expect(creativeCalls).toBe(1)
   })
 
   test('plans with a 200-chunk evidence window without demanding omitted chunk coverage', async () => {
@@ -631,6 +901,8 @@ describe('visual deck v4 planning runner', () => {
     const resumed = await repository.getRun(created.run.id)
     expect(resumed?.v4ModelSnapshot).toBeUndefined()
     expect(resumed?.v4StructuredGenerationProtocol).toBeUndefined()
+    expect((await repository.listSteps(created.run.id)).some((step) =>
+      step.tool === 'audit_v4_planning_request')).toBe(false)
   })
 
   test('fails a recovered chain-4 run closed when its persisted preflight protocol is legacy', async () => {

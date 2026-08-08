@@ -520,7 +520,7 @@ export function publicErrorCategoryForV4Failure(
 ): PublicErrorCategory {
   if (errorCode === 'QUALITY_REMEDIATION_EXHAUSTED'
     || errorCode === 'QUALITY_ISSUE_STATE_INCONSISTENT') return 'QUALITY'
-  if (['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED', 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE'].includes(errorCode)) return 'CONTRACT'
+  if (['V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE', 'V4_CHAIN4_PROTOCOL_UNSUPPORTED', 'V4_MANUSCRIPT_CONTEXT_TOO_LARGE', 'V4_PLANNING_REQUEST_REPLAY_MISMATCH'].includes(errorCode)) return 'CONTRACT'
   if (reason === 'DELIVERY_FAILED') return 'DELIVERY'
   if (errorCode === 'TECHNICAL_CONTRACT_INVALID') return 'CONTRACT'
   if (category) return category

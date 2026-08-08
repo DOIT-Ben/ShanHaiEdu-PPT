@@ -18,6 +18,8 @@ import type {
   RunRecord,
   StepRecord,
   StructuredModelExecutionMetrics,
+  StructuredGenerationRequestContract,
+  StructuredGenerationRequestContractPort,
   StructuredModelMetricsPort,
   StructuredModelPort,
 } from './ports'
@@ -131,18 +133,80 @@ const v4PlanningStageAuditSchema = z.object({
 
 type V4PlanningStageAttempt = z.infer<typeof v4PlanningStageAttemptSchema>
 
+const V4_PLANNING_REQUEST_EVIDENCE_TOOL = 'audit_v4_planning_request'
+const V4_PLANNING_REQUEST_REPLAY_MISMATCH = 'V4_PLANNING_REQUEST_REPLAY_MISMATCH'
+
+const structuredGenerationRequestContractSchema = z.object({
+  protocol: z.literal('RESPONSES_JSON_SCHEMA'),
+  transport: z.literal('RESPONSES'),
+  responseFormat: z.literal('JSON_SCHEMA'),
+  stream: z.literal(true),
+  promptContractHash: z.string().regex(/^[a-f0-9]{64}$/),
+  responseSchemaHash: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict()
+
+const v4PlanningRequestEvidenceSchema = z.object({
+  schemaVersion: z.literal('1'),
+  requestKeyHash: z.string().regex(/^[a-f0-9]{64}$/),
+  stage: z.enum(['creative-manuscript', 'review-manuscript']),
+  tool: z.enum(['compile_v4_creative_manuscript', 'review_v4_manuscript']),
+  operation: z.enum(['create_visual_deck_v4_creative_manuscript', 'review_visual_deck_v4_manuscript']),
+  schemaName: z.string().regex(/^[A-Za-z0-9_-]{1,120}$/),
+  compilerVersion: z.literal(VISUAL_DECK_V4_COMPILER_VERSION),
+  model: z.string().trim().min(1).max(120),
+  protocol: z.literal('RESPONSES_JSON_SCHEMA'),
+  transport: z.literal('RESPONSES'),
+  responseFormat: z.literal('JSON_SCHEMA'),
+  stream: z.literal(true),
+  promptContractHash: z.string().regex(/^[a-f0-9]{64}$/),
+  responseSchemaHash: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
+  payloadCharacterCount: z.number().int().nonnegative().max(240_000),
+  evidenceWindow: z.object({
+    version: z.string().min(1).max(80),
+    selectedContentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    chunks: z.array(z.object({
+      id: z.string().min(1).max(160),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      includedCharacterCount: z.number().int().positive().max(12_000),
+    }).strict()).min(1).max(200),
+    omittedChunkCount: z.number().int().nonnegative(),
+    characterCount: z.number().int().nonnegative(),
+    serializedByteCount: z.number().int().nonnegative(),
+  }).strict(),
+  sourceAssetInputs: z.array(z.object({
+    id: z.string().min(1).max(160),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    mimeType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
+    byteLength: z.number().int().positive(),
+  }).strict()),
+}).strict()
+
+type V4PlanningRequestEvidence = z.infer<typeof v4PlanningRequestEvidenceSchema>
+
 type V4ManuscriptStageRequest = Readonly<{
   stage: Extract<VisualDeckV4PlanningStage, 'creative-manuscript' | 'review-manuscript'>
   tool: string
   operation: string
   schemaName: string
   payload: Record<string, unknown>
+  evidenceWindow: V4EvidenceWindow
   sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
   protocol: StructuredGenerationProtocol
   compilerVersion: string
   repairAttempt?: number
   parse: (value: unknown) => unknown
 }>
+
+function v4PlanningRequestEvidenceKey(requestKey: string) {
+  return `${requestKey}:request-evidence`
+}
+
+function isV4ManuscriptStage(
+  stage: VisualDeckV4PlanningStage,
+): stage is V4ManuscriptStageRequest['stage'] {
+  return stage === 'creative-manuscript' || stage === 'review-manuscript'
+}
 
 export function approvedPageLayout(layoutIntent: string, pageIndex: number) {
   const visual = '(图|图片|插图|视觉|主视觉|场景|情境|照片)'
@@ -614,6 +678,7 @@ export class PlanningRunner {
       operation: 'create_visual_deck_v4_creative_manuscript',
       schemaName: 'ppt_agent_v4_creative_manuscript_v1',
       payload: manuscriptContext,
+      evidenceWindow,
       sourceAssets: input.document.assets ?? [],
       protocol: input.protocol,
       compilerVersion: input.compilerVersion,
@@ -625,6 +690,8 @@ export class PlanningRunner {
       operation: 'review_visual_deck_v4_manuscript',
       schemaName: 'ppt_agent_v4_review_manuscript_v1',
       payload: this.boundedV4ReviewPayload(manuscriptContext, creative),
+      evidenceWindow,
+      sourceAssets: input.document.assets ?? [],
       protocol: input.protocol,
       compilerVersion: input.compilerVersion,
       parse: visualDeckV4ReviewManuscriptSchema.parse,
@@ -972,6 +1039,7 @@ export class PlanningRunner {
     operation: string
     schemaName: string
     payload: unknown
+    evidenceWindow?: V4EvidenceWindow
     sourceAssets?: Parameters<StructuredModelPort['execute']>[0]['sourceAssets']
     protocol: StructuredGenerationProtocol | undefined
     compilerVersion: string
@@ -988,7 +1056,11 @@ export class PlanningRunner {
     const existing = await this.dependencies.repository.transact(input.runId, (transaction) => {
       const step = transaction.getStep(key)
       if (!step) return null
-      if (step.inputHash !== inputHash || step.tool !== request.tool) throw new Error('STEP_IDEMPOTENCY_CONFLICT')
+      if (step.inputHash !== inputHash || step.tool !== request.tool) {
+        throw new Error(request.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION
+          ? V4_PLANNING_REQUEST_REPLAY_MISMATCH
+          : 'STEP_IDEMPOTENCY_CONFLICT')
+      }
       if (step.status === 'COMPLETED') return step.output
       if (step.status === 'FAILED') {
         const now = this.dependencies.clock.now().toISOString()
@@ -1022,6 +1094,54 @@ export class PlanningRunner {
         payload: { stepId: step.id, tool: step.tool, label: `V4 规划阶段：${request.stage}` },
       })
     })
+    const run = await this.requireRun(input.runId)
+    const modelOverride = v4ModelOverride(run, 'TEXT', request.compilerVersion)
+    const modelInput: Parameters<StructuredModelPort['execute']>[0] = {
+      tenantId: run.host.tenantId,
+      operation: request.operation,
+      schemaName: request.schemaName,
+      payload: request.payload,
+      ...(request.sourceAssets ? { sourceAssets: request.sourceAssets } : {}),
+      idempotencyKey: key,
+      ...(modelOverride ? { modelOverride } : {}),
+      ...(request.protocol ? { structuredGenerationProtocol: request.protocol } : {}),
+    }
+    if (request.compilerVersion === VISUAL_DECK_V4_COMPILER_VERSION) {
+      if (!isV4ManuscriptStage(request.stage) || !request.evidenceWindow
+        || request.protocol !== 'RESPONSES_JSON_SCHEMA' || !modelOverride) {
+        throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+      }
+      try {
+        const requestContract = await this.describeV4PlanningRequestContract(modelInput)
+        await this.persistV4PlanningRequestEvidence({
+          runId: input.runId,
+          auditStageKey,
+          requestKey: key,
+          stage: request.stage,
+          tool: request.tool,
+          operation: request.operation,
+          schemaName: request.schemaName,
+          payload: request.payload,
+          evidenceWindow: request.evidenceWindow,
+          sourceAssets: request.sourceAssets ?? [],
+          model: modelOverride,
+          requestContract,
+        })
+      } catch (error) {
+        const failure = this.contractFailure(input, error, 1, 1, false)
+        await this.dependencies.repository.transact(input.runId, (transaction) => {
+          const step = transaction.getStep(key)
+          if (!step || step.status === 'FAILED') return
+          transaction.putStep({ ...step, status: 'FAILED', errorCode: failure.errorCode, updatedAt: this.dependencies.clock.now().toISOString() })
+          transaction.appendEvent({
+            schemaVersion: CONTRACT_VERSION,
+            type: 'tool.failed',
+            payload: { stepId: step.id, errorCode: failure.errorCode, retryable: failure.retryable },
+          })
+        })
+        throw new PlanningFailureError(failure)
+      }
+    }
     const providerAttempt = await this.beginV4PlanningStageAttempt(
       input.runId, auditStageKey, key, request.stage,
     )
@@ -1036,18 +1156,7 @@ export class PlanningRunner {
       return executionMetrics
     }
     try {
-      const run = await this.requireRun(input.runId)
-      const modelOverride = v4ModelOverride(run, 'TEXT', request.compilerVersion)
-      const raw = await this.dependencies.model.execute({
-        tenantId: run.host.tenantId,
-        operation: request.operation,
-        schemaName: request.schemaName,
-        payload: request.payload,
-        ...(request.sourceAssets ? { sourceAssets: request.sourceAssets } : {}),
-        idempotencyKey: key,
-        ...(modelOverride ? { modelOverride } : {}),
-        ...(request.protocol ? { structuredGenerationProtocol: request.protocol } : {}),
-      })
+      const raw = await this.dependencies.model.execute(modelInput)
       executionMetrics = consumeExecutionMetrics()
       const parsed = request.parse(raw)
       const output = this.withV4ReflectionAudit(
@@ -1131,6 +1240,111 @@ export class PlanningRunner {
       })
       throw new PlanningFailureError(failure)
     }
+  }
+
+  private async persistV4PlanningRequestEvidence(input: Readonly<{
+    runId: string
+    auditStageKey: string
+    requestKey: string
+    stage: V4ManuscriptStageRequest['stage']
+    tool: string
+    operation: string
+    schemaName: string
+    payload: unknown
+    evidenceWindow: V4EvidenceWindow
+    sourceAssets: NonNullable<Parameters<StructuredModelPort['execute']>[0]['sourceAssets']>
+    model: string
+    requestContract: StructuredGenerationRequestContract
+  }>) {
+    const serializedPayload = JSON.stringify(input.payload)
+    if (typeof serializedPayload !== 'string') throw new Error(V4_PLANNING_REQUEST_REPLAY_MISMATCH)
+    const evidence: V4PlanningRequestEvidence = v4PlanningRequestEvidenceSchema.parse({
+      schemaVersion: '1',
+      requestKeyHash: hashInput(input.requestKey),
+      stage: input.stage,
+      tool: input.tool,
+      operation: input.operation,
+      schemaName: input.schemaName,
+      compilerVersion: VISUAL_DECK_V4_COMPILER_VERSION,
+      model: input.model,
+      protocol: 'RESPONSES_JSON_SCHEMA',
+      transport: 'RESPONSES',
+      responseFormat: 'JSON_SCHEMA',
+      stream: true,
+      promptContractHash: input.requestContract.promptContractHash,
+      responseSchemaHash: input.requestContract.responseSchemaHash,
+      payloadHash: hashInput(input.payload),
+      payloadCharacterCount: serializedPayload.length,
+      evidenceWindow: {
+        version: input.evidenceWindow.audit.version,
+        selectedContentHash: input.evidenceWindow.audit.selectedContentHash,
+        chunks: input.evidenceWindow.chunks.map((chunk) => ({
+          id: chunk.id,
+          sha256: chunk.sha256,
+          includedCharacterCount: chunk.text.length,
+        })),
+        omittedChunkCount: input.evidenceWindow.audit.omittedChunkCount,
+        characterCount: input.evidenceWindow.audit.characterCount,
+        serializedByteCount: input.evidenceWindow.audit.serializedByteCount,
+      },
+      sourceAssetInputs: input.sourceAssets.map((asset) => ({
+        id: asset.id,
+        sha256: asset.sha256,
+        mimeType: asset.mimeType,
+        byteLength: asset.byteLength,
+      })),
+    })
+    const idempotencyKey = v4PlanningRequestEvidenceKey(input.requestKey)
+    const inputHash = hashInput(evidence)
+    await this.dependencies.repository.transact(input.runId, (transaction) => {
+      const existing = transaction.getStep(idempotencyKey)
+      if (existing) {
+        const persisted = v4PlanningRequestEvidenceSchema.safeParse(existing.output)
+        if (existing.tool !== V4_PLANNING_REQUEST_EVIDENCE_TOOL
+          || existing.status !== 'COMPLETED'
+          || existing.inputHash !== inputHash
+          || !persisted.success
+          || hashInput(persisted.data) !== hashInput(evidence)) {
+          throw new Error(V4_PLANNING_REQUEST_REPLAY_MISMATCH)
+        }
+        return
+      }
+      const audit = transaction.getStep(`${input.auditStageKey}:attempt-audit`)
+      const parsedAudit = audit ? v4PlanningStageAuditSchema.safeParse(audit.output) : null
+      const inFlight = parsedAudit?.success ? parsedAudit.data.attempts.at(-1) : null
+      if (audit && (!parsedAudit?.success
+        || (inFlight?.outcome === 'STARTED' && inFlight.requestKeyHash === evidence.requestKeyHash))) {
+        throw new Error(V4_PLANNING_REQUEST_REPLAY_MISMATCH)
+      }
+      const now = this.dependencies.clock.now().toISOString()
+      transaction.putStep({
+        id: `step-${hashInput({ idempotencyKey }).slice(0, 28)}`,
+        runId: input.runId,
+        idempotencyKey,
+        inputHash,
+        tool: V4_PLANNING_REQUEST_EVIDENCE_TOOL,
+        status: 'COMPLETED',
+        budgetUnits: 0,
+        budgetReservationId: null,
+        externalOperationId: null,
+        errorCode: null,
+        output: evidence,
+        createdAt: now,
+        updatedAt: now,
+      })
+    })
+  }
+
+  private async describeV4PlanningRequestContract(
+    input: Parameters<StructuredModelPort['execute']>[0],
+  ): Promise<StructuredGenerationRequestContract> {
+    const candidate = this.dependencies.model as StructuredModelPort & Partial<StructuredGenerationRequestContractPort>
+    if (!candidate.describeStructuredGenerationRequest) throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+    const parsed = structuredGenerationRequestContractSchema.safeParse(
+      await candidate.describeStructuredGenerationRequest(input),
+    )
+    if (!parsed.success) throw new Error('V4_CHAIN4_PROTOCOL_UNSUPPORTED')
+    return parsed.data
   }
 
   private async beginV4PlanningStageAttempt(
@@ -1651,13 +1865,15 @@ export class PlanningRunner {
                 ? 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
                 : message === 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
                   ? 'V4_LEGACY_MODEL_SNAPSHOT_UNAVAILABLE'
-              : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
-                ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
-              : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
-                ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
-              : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
-                ? 'MODEL_JSON_INVALID'
-                : 'BLUEPRINT_SCHEMA_INVALID'
+                  : message === V4_PLANNING_REQUEST_REPLAY_MISMATCH
+                    ? V4_PLANNING_REQUEST_REPLAY_MISMATCH
+                    : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+                      ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'
+                      : message === 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
+                        ? 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS'
+                        : message === 'MODEL_JSON_INVALID' || error instanceof SyntaxError
+                          ? 'MODEL_JSON_INVALID'
+                          : 'BLUEPRINT_SCHEMA_INVALID'
     const retryable = [
       'MODEL_JSON_INVALID',
       'BLUEPRINT_SLIDE_COUNT_MISMATCH',

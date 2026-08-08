@@ -507,6 +507,16 @@ describe('mock runtime', () => {
       async preflightStructuredGeneration() {
         return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
       },
+      async describeStructuredGenerationRequest(input: { operation: string; schemaName: string }) {
+        return {
+          protocol: 'RESPONSES_JSON_SCHEMA' as const,
+          transport: 'RESPONSES' as const,
+          responseFormat: 'JSON_SCHEMA' as const,
+          stream: true as const,
+          promptContractHash: hashInput({ adapter: 'runtime-metrics', operation: input.operation }),
+          responseSchemaHash: hashInput({ adapter: 'runtime-metrics', schemaName: input.schemaName }),
+        }
+      },
       async execute() {
         throw new StructuredModelError('MODEL_JSON_INVALID', true, 'gpt-5.6-terra', 'request-runtime-metrics', 200)
       },

@@ -51,6 +51,7 @@ import type {
   RunRecord,
   StructuredModelPort,
   StructuredModelMetricsPort,
+  StructuredGenerationRequestContractPort,
   StructuredGenerationPreflightPort,
   UsageAccountingPort,
   VisualReviewPort,
@@ -109,11 +110,25 @@ class DisabledV1Ports implements DocumentPort, BudgetPort, BatchBudgetPort {
 
 type MockReflectionFailureMode = 'NONE' | 'INVALID_SLIDE_CRITIC'
 
-class DeterministicPlanningModel implements StructuredModelPort, StructuredGenerationPreflightPort {
+class DeterministicPlanningModel implements
+  StructuredModelPort,
+  StructuredGenerationPreflightPort,
+  StructuredGenerationRequestContractPort {
   constructor(private readonly reflectionFailureMode: MockReflectionFailureMode = 'NONE') {}
 
   async preflightStructuredGeneration() {
     return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
+  }
+
+  async describeStructuredGenerationRequest(input: Parameters<StructuredModelPort['execute']>[0]) {
+    return {
+      protocol: 'RESPONSES_JSON_SCHEMA' as const,
+      transport: 'RESPONSES' as const,
+      responseFormat: 'JSON_SCHEMA' as const,
+      stream: true as const,
+      promptContractHash: hashInput({ adapter: 'deterministic-planning-model', operation: input.operation }),
+      responseSchemaHash: hashInput({ adapter: 'deterministic-planning-model', schemaName: input.schemaName }),
+    }
   }
 
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {
@@ -568,7 +583,10 @@ type RuntimeInput = Readonly<{
   candidateReviewer?: AssetCandidateReviewPort
   apiToken: string
   authentication?: HostAuthenticationPort
-  model: StructuredModelPort & Partial<StructuredGenerationPreflightPort> & Partial<StructuredModelMetricsPort>
+  model: StructuredModelPort
+    & Partial<StructuredGenerationPreflightPort>
+    & Partial<StructuredGenerationRequestContractPort>
+    & Partial<StructuredModelMetricsPort>
   visualReviewer: VisualReviewPort
   deckReviewer: DeckReviewPort
   revisionPlanner: RevisionPlanningPort
@@ -659,12 +677,17 @@ export function createAgentRuntime(input: RuntimeInput) {
   }
   const model: StructuredModelPort
     & Partial<StructuredGenerationPreflightPort>
+    & Partial<StructuredGenerationRequestContractPort>
     & Partial<StructuredModelMetricsPort> = {
     ...(input.model.modelName === undefined ? {} : { modelName: input.model.modelName }),
     execute: trackedCall(input.model.execute.bind(input.model)),
     ...('preflightStructuredGeneration' in input.model
       && typeof input.model.preflightStructuredGeneration === 'function'
       ? { preflightStructuredGeneration: trackedCall(input.model.preflightStructuredGeneration.bind(input.model)) }
+      : {}),
+    ...('describeStructuredGenerationRequest' in input.model
+      && typeof input.model.describeStructuredGenerationRequest === 'function'
+      ? { describeStructuredGenerationRequest: trackedCall(input.model.describeStructuredGenerationRequest.bind(input.model)) }
       : {}),
     ...('takeExecutionMetrics' in input.model
       && typeof input.model.takeExecutionMetrics === 'function'

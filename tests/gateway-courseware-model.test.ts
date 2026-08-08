@@ -617,6 +617,13 @@ describe('gateway courseware model', () => {
     }
     const review = { ...creative, revisionSuggestions: [] }
     const requests: Record<string, any>[] = []
+    const sourceAssetBytes = new Uint8Array(await sharp({
+      create: { width: 160, height: 90, channels: 3, background: '#9CC7D8' },
+    }).png().toBuffer())
+    const sourceAssets = [{
+      id: 'source-image-1', sourceId: 'source-1', name: '水循环示意图.png', mimeType: 'image/png' as const,
+      byteLength: sourceAssetBytes.length, sha256: 'a'.repeat(64), width: 160, height: 90, bytes: sourceAssetBytes,
+    }]
     const model = new GatewayCoursewareModel({
       baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
       artifacts: new MockArtifactPort(),
@@ -639,6 +646,7 @@ describe('gateway courseware model', () => {
       idempotencyKey: 'run-v4-manuscript-creative',
       structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
       payload,
+      sourceAssets,
     })
     await model.execute({
       operation: 'review_visual_deck_v4_manuscript',
@@ -646,6 +654,7 @@ describe('gateway courseware model', () => {
       idempotencyKey: 'run-v4-manuscript-review',
       structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
       payload: { ...payload, creativeManuscript: creative },
+      sourceAssets,
     })
 
     expect(model.takeExecutionMetrics('run-v4-manuscript-creative')).toMatchObject({
@@ -663,7 +672,133 @@ describe('gateway courseware model', () => {
       expect(JSON.stringify(body.text.format.schema)).not.toContain('sourceChunkId')
       expect(JSON.stringify(body.text.format.schema)).not.toContain('compilerVersion')
       expect(body.input[0].content[0].text).toContain('严禁输出 pageNumber')
+      const sourceImages = body.input[1].content.filter((part: { type: string }) => part.type === 'input_image')
+      expect(sourceImages).toHaveLength(1)
+      expect(body.input[1].content.some((part: { type: string; text?: string }) =>
+        part.type === 'input_text' && part.text?.includes('来源图片 source-image-1'))).toBe(true)
     }
+  })
+
+  test('describes the exact Creative and Review Responses contracts with source images without gateway calls', async () => {
+    const creative = {
+      title: '水循环', narrative: ['建立主题'], slides: [{
+        title: '水循环', narrative: '水持续循环。', userVisibleCopy: ['水循环'],
+        factualStatements: ['太阳加热水面形成水汽。'], visualDescription: '水面、云和降水',
+        sourceEvidence: [{ excerpt: '太阳加热水面形成水汽' }],
+      }],
+    }
+    const review = { ...creative, revisionSuggestions: [] }
+    const requestBodies: Record<string, any>[] = []
+    let requests = 0
+    const sourceAssetBytes = new Uint8Array(await sharp({
+      create: { width: 160, height: 90, channels: 3, background: '#9CC7D8' },
+    }).png().toBuffer())
+    const sourceAssets = [{
+      id: 'source-image-1', sourceId: 'source-1', name: '水循环示意图.png', mimeType: 'image/png' as const,
+      byteLength: sourceAssetBytes.length, sha256: 'a'.repeat(64), width: 160, height: 90, bytes: sourceAssetBytes,
+    }]
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requests += 1
+        const body = JSON.parse(String(init?.body))
+        requestBodies.push(body)
+        return streamedResponsesTextCompletion(JSON.stringify(
+          body.text.format.name === 'ppt_agent_v4_creative_manuscript_v1' ? creative : review,
+        ))
+      },
+    })
+    const payload = {
+      frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+      trustedEvidence: { sourceChunks: [{ id: 'chunk-1', text: '太阳加热水面形成水汽。' }] },
+    }
+    const inputs = [
+      {
+        operation: 'create_visual_deck_v4_creative_manuscript',
+        schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+        idempotencyKey: 'chain-4-creative-request-contract',
+        structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+        payload,
+        sourceAssets,
+      },
+      {
+        operation: 'review_visual_deck_v4_manuscript',
+        schemaName: 'ppt_agent_v4_review_manuscript_v1',
+        idempotencyKey: 'chain-4-review-request-contract',
+        structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA' as const,
+        payload: { ...payload, creativeManuscript: creative },
+        sourceAssets,
+      },
+    ]
+
+    for (const input of inputs) {
+      const before = requests
+      const contract = await model.describeStructuredGenerationRequest(input)
+      expect(requests).toBe(before)
+      expect(contract.protocol).toBe('RESPONSES_JSON_SCHEMA')
+      expect(contract.transport).toBe('RESPONSES')
+      expect(contract.responseFormat).toBe('JSON_SCHEMA')
+      expect(contract.stream).toBe(true)
+
+      await model.execute(input)
+      const requestBody = requestBodies.at(-1)!
+      expect(contract.promptContractHash).toBe(hashInput({ input: requestBody.input }))
+      expect(contract.responseSchemaHash).toBe(hashInput({
+        name: requestBody.text.format.name,
+        strict: requestBody.text.format.strict,
+        schema: requestBody.text.format.schema,
+      }))
+      expect(requestBody.input[1].content.filter((part: { type: string }) => part.type === 'input_image')).toHaveLength(1)
+    }
+    expect(requests).toBe(2)
+  })
+
+  test('shrinks a high-entropy source image into the Chain-4 full-request budget', async () => {
+    const pixels = Buffer.alloc(1_600 * 1_600 * 3)
+    let seed = 0x9e3779b9
+    for (let index = 0; index < pixels.length; index += 1) {
+      seed = (seed * 1664525 + 1013904223) >>> 0
+      pixels[index] = seed >>> 24
+    }
+    const sourceAssetBytes = new Uint8Array(await sharp(pixels, {
+      raw: { width: 1_600, height: 1_600, channels: 3 },
+    }).png().toBuffer())
+    const creative = {
+      title: '高熵来源图', narrative: ['保留来源视觉上下文'], slides: [{
+        title: '高熵来源图', narrative: '来源图片已在预算内编码。', userVisibleCopy: ['高熵来源图'],
+        factualStatements: ['来源图可用于规划。'], visualDescription: '单页来源图分析',
+        sourceEvidence: [{ excerpt: '来源图片已在预算内编码' }],
+      }],
+    }
+    let requestBody: Record<string, any> | null = null
+    const model = new GatewayCoursewareModel({
+      baseUrl: 'https://newapi.doitbenai.cloud/v1', apiKey: 'test-text-key', textModel: 'gpt-5.6-terra',
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body))
+        return streamedResponsesTextCompletion(JSON.stringify(creative))
+      },
+    })
+
+    await model.execute({
+      operation: 'create_visual_deck_v4_creative_manuscript',
+      schemaName: 'ppt_agent_v4_creative_manuscript_v1',
+      idempotencyKey: 'chain-4-high-entropy-source-image',
+      structuredGenerationProtocol: 'RESPONSES_JSON_SCHEMA',
+      payload: {
+        frozenConstraints: { slideCount: 1, sourceMode: 'SOURCE_GROUNDED' },
+        trustedEvidence: { sourceChunks: [{ id: 'chunk-1', text: '来源图片已在预算内编码。' }] },
+      },
+      sourceAssets: [{
+        id: 'high-entropy-image', sourceId: 'source-1', name: '高熵来源.png', mimeType: 'image/png',
+        byteLength: sourceAssetBytes.length, sha256: 'c'.repeat(64), width: 1_600, height: 1_600, bytes: sourceAssetBytes,
+      }],
+    })
+
+    const image = requestBody!.input[1].content.find((part: { type: string }) => part.type === 'input_image')
+    expect(image?.image_url.startsWith('data:image/jpeg;base64,')).toBe(true)
+    expect(JSON.stringify(requestBody).length).toBeLessThanOrEqual(220_000)
   })
 
   test('accepts a CJK chain-4 manuscript payload by characters rather than UTF-8 bytes', async () => {

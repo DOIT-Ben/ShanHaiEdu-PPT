@@ -9,6 +9,7 @@ import type {
   RevisionPlanningPort,
   RevisionApplicationPort,
   PresentationRendererPort,
+  StructuredGenerationRequestContractPort,
   StructuredModelPort,
   VisualReviewPort,
 } from '../core/ports'
@@ -220,7 +221,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
   }
 }
 
-export class MockStructuredModelPort implements StructuredModelPort {
+export class MockStructuredModelPort implements StructuredModelPort, StructuredGenerationRequestContractPort {
   readonly executions = new Map<string, unknown>()
   nextFailure: Error | null = null
 
@@ -228,6 +229,17 @@ export class MockStructuredModelPort implements StructuredModelPort {
 
   async preflightStructuredGeneration() {
     return { protocol: 'RESPONSES_JSON_SCHEMA' as const }
+  }
+
+  async describeStructuredGenerationRequest(input: Parameters<StructuredModelPort['execute']>[0]) {
+    return {
+      protocol: 'RESPONSES_JSON_SCHEMA' as const,
+      transport: 'RESPONSES' as const,
+      responseFormat: 'JSON_SCHEMA' as const,
+      stream: true as const,
+      promptContractHash: createHash('sha256').update(`mock:${input.operation}`).digest('hex'),
+      responseSchemaHash: createHash('sha256').update(`mock:${input.schemaName}`).digest('hex'),
+    }
   }
 
   async execute(input: Parameters<StructuredModelPort['execute']>[0]) {

@@ -98,6 +98,41 @@ describe('fallback courseware model', () => {
     expect(fallbackCalls).toBe(0)
   })
 
+  test('does not fallback a Chain-4 manuscript operation when protocol fields are absent', async () => {
+    let fallbackExecuteCalls = 0
+    let fallbackDescriptorCalls = 0
+    const original = new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'primary', 'primary-request')
+    const primary = Object.assign(
+      model('primary', async () => { throw original }),
+      { async describeStructuredGenerationRequest() { throw original } },
+    )
+    const fallback = Object.assign(
+      model('MiniMax-M3', async () => { fallbackExecuteCalls += 1; return {} }),
+      {
+        async describeStructuredGenerationRequest() {
+          fallbackDescriptorCalls += 1
+          return {
+            protocol: 'RESPONSES_JSON_SCHEMA' as const,
+            transport: 'RESPONSES' as const,
+            responseFormat: 'JSON_SCHEMA' as const,
+            stream: true as const,
+            promptContractHash: 'a'.repeat(64),
+            responseSchemaHash: 'b'.repeat(64),
+          }
+        },
+      },
+    )
+    const port = new FallbackCoursewareModel({ primary, fallback })
+    const input = {
+      operation: 'create_visual_deck_v4_creative_manuscript', schemaName: 'schema', payload: {}, idempotencyKey: 'chain-4-no-fields',
+    }
+
+    await expect(port.execute(input)).rejects.toBe(original)
+    await expect(port.describeStructuredGenerationRequest(input)).rejects.toBe(original)
+    expect(fallbackExecuteCalls).toBe(0)
+    expect(fallbackDescriptorCalls).toBe(0)
+  })
+
   test('does not replace a frozen V4 model route with the fallback', async () => {
     let fallbackCalls = 0
     const original = new StructuredModelError('PROVIDER_UNAVAILABLE', true, 'gpt-5.6-terra', 'primary-request')
