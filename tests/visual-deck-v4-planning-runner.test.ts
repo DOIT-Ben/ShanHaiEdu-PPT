@@ -1269,6 +1269,91 @@ describe('visual deck v4 planning runner', () => {
     expect(completionCalls).toBe(1)
   })
 
+  test('fails closed before reusing a completed Chain-4 manuscript when source asset evidence drifts', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-completed-asset-drift-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    let reviewCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript') creativeCalls += 1
+      if (modelInput.operation === 'review_visual_deck_v4_manuscript') reviewCalls += 1
+      return execute(modelInput)
+    }
+    let assetHash = 'a'.repeat(64)
+    let assetBytes = new Uint8Array([1])
+    const sourceDocument = {
+      name: '含图片来源的教材包',
+      chunks: [{
+        id: 'source-chunk', sourceId: 'source', text: '百分数表示一个数是另一个数的百分之几。', sha256: 'c'.repeat(64),
+      }],
+      sources: [{ id: 'source', name: '教材.pdf', kind: 'PDF' as const, status: 'READY' as const }],
+      isComplete: true,
+      missingRanges: [],
+    }
+    const originalTransact = repository.transact.bind(repository)
+    let crashAfterCreative = true
+    repository.transact = async (runId, operation) => {
+      const result = await originalTransact(runId, operation)
+      if (crashAfterCreative) {
+        const steps = await repository.listSteps(runId)
+        const creative = steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(
+          runId, 'creative-manuscript',
+        ))
+        const review = steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(
+          runId, 'review-manuscript',
+        ))
+        if (creative?.status === 'COMPLETED' && !review) {
+          crashAfterCreative = false
+          throw new Error('SIMULATED_PROCESS_CRASH_AFTER_CREATIVE')
+        }
+      }
+      return result
+    }
+    const runner = new PlanningRunner({
+      repository,
+      documents: {
+        async resolve() {
+          return {
+            ...sourceDocument,
+            assets: [{
+              id: 'asset-1', sourceId: 'source', name: '教材插图.png', mimeType: 'image/png' as const,
+              byteLength: assetBytes.byteLength, sha256: assetHash, width: 1, height: 1, bytes: assetBytes,
+            }],
+          }
+        },
+      },
+      model: staged.model,
+      clock,
+    })
+    const input = {
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    } as const
+
+    expect((await runner.plan(input)).blueprint).toBeNull()
+    expect(creativeCalls).toBe(1)
+    expect(reviewCalls).toBe(0)
+
+    assetHash = 'b'.repeat(64)
+    assetBytes = new Uint8Array([2, 3])
+    clock.advance(60_000)
+    await originalTransact(created.run.id, (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    await expect(runner.plan(input)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'V4_PLANNING_REQUEST_REPLAY_MISMATCH' },
+    })
+    expect(creativeCalls).toBe(1)
+    expect(reviewCalls).toBe(0)
+  })
+
   test('fails closed when a claimed semantic repair replays with a different request contract', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))

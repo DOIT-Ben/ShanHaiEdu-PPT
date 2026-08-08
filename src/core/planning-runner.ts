@@ -1217,14 +1217,14 @@ export class PlanningRunner {
           ? V4_PLANNING_REQUEST_REPLAY_MISMATCH
           : 'STEP_IDEMPOTENCY_CONFLICT')
       }
-      if (step.status === 'COMPLETED') return step.output
+      if (step.status === 'COMPLETED') return step
       if (step.status === 'FAILED') {
         const now = this.dependencies.clock.now().toISOString()
         transaction.putStep({ ...step, status: 'RUNNING', errorCode: null, updatedAt: now })
       }
       return null
     })
-    if (existing) return request.parse(existing)
+    if (existing && request.compilerVersion !== VISUAL_DECK_V4_COMPILER_VERSION) return request.parse(existing.output)
     await this.dependencies.repository.transact(input.runId, (transaction) => {
       if (transaction.getStep(key)) return
       const now = this.dependencies.clock.now().toISOString()
@@ -1282,6 +1282,7 @@ export class PlanningRunner {
           sourceAssets: request.sourceAssets ?? [],
           model: modelOverride,
           requestContract,
+          requireExistingEvidence: existing !== null,
         })
       } catch (error) {
         const failure = this.contractFailure(input, error, 1, 1, false)
@@ -1298,6 +1299,7 @@ export class PlanningRunner {
         throw new PlanningFailureError(failure)
       }
     }
+    if (existing) return request.parse(existing.output)
     const providerAttempt = await this.beginV4PlanningStageAttempt(
       input.runId, auditStageKey, key, request.stage,
     )
@@ -1412,6 +1414,7 @@ export class PlanningRunner {
     sourceAssets: NonNullable<Parameters<StructuredModelPort['execute']>[0]['sourceAssets']>
     model: string
     requestContract: StructuredGenerationRequestContract
+    requireExistingEvidence: boolean
   }>) {
     const serializedPayload = JSON.stringify(input.payload)
     if (typeof serializedPayload !== 'string') throw new Error(V4_PLANNING_REQUEST_REPLAY_MISMATCH)
@@ -1455,6 +1458,9 @@ export class PlanningRunner {
     const inputHash = hashInput(evidence)
     await this.dependencies.repository.transact(input.runId, (transaction) => {
       const existing = transaction.getStep(idempotencyKey)
+      if (!existing && input.requireExistingEvidence) {
+        throw new Error(V4_PLANNING_REQUEST_REPLAY_MISMATCH)
+      }
       if (existing) {
         const persisted = v4PlanningRequestEvidenceSchema.safeParse(existing.output)
         if (existing.tool !== V4_PLANNING_REQUEST_EVIDENCE_TOOL
