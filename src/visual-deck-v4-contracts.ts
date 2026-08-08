@@ -185,18 +185,31 @@ export function isSemanticManuscriptPlaceholder(value: string) {
   const normalized = value.normalize('NFKC').replace(/\s+/gu, '').toLocaleLowerCase()
   const content = normalized.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '')
   if (content.length === 0) return true
-  return /^(?:tbd|todo|n(?:[\/\-–—])?a|placeholder|待补充|待完善|待定|待补全|暂无|未定|待填)(?:[\p{P}\p{S}].*)?$/u.test(content)
+  return /^(?:tbd|todo|n(?:[.\/\-–—])?a|placeholder|待补充|待完善|待定|待补全|暂无|未定|待填)(?:[\p{P}\p{S}].*)?$/u.test(content)
+}
+
+function rejectSemanticManuscriptPlaceholder(
+  value: string,
+  path: readonly (string | number)[],
+  context: z.RefinementCtx,
+) {
+  if (!isSemanticManuscriptPlaceholder(value)) return
+  context.addIssue({
+    code: 'custom',
+    path,
+    message: 'semantic manuscript content cannot be a placeholder',
+  })
 }
 
 const visualDeckV4ManuscriptSlideSchema = z.object(visualDeckV4ManuscriptSlideShape).strict()
   .superRefine((value, context) => {
-    if (isSemanticManuscriptPlaceholder(value.visualDescription)) {
-      context.addIssue({
-        code: 'custom',
-        path: ['visualDescription'],
-        message: 'semantic manuscript content cannot be a placeholder',
-      })
-    }
+    rejectSemanticManuscriptPlaceholder(value.title, ['title'], context)
+    rejectSemanticManuscriptPlaceholder(value.narrative, ['narrative'], context)
+    value.userVisibleCopy.forEach((copy, index) =>
+      rejectSemanticManuscriptPlaceholder(copy, ['userVisibleCopy', index], context))
+    value.factualStatements.forEach((statement, index) =>
+      rejectSemanticManuscriptPlaceholder(statement, ['factualStatements', index], context))
+    rejectSemanticManuscriptPlaceholder(value.visualDescription, ['visualDescription'], context)
   })
 
 export const visualDeckV4CreativeManuscriptSchema = z.object({
@@ -207,6 +220,8 @@ export const visualDeckV4CreativeManuscriptSchema = z.object({
   if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {
     context.addIssue({ code: 'custom', message: V4_MANUSCRIPT_CONTEXT_TOO_LARGE })
   }
+  rejectSemanticManuscriptPlaceholder(value.title, ['title'], context)
+  value.narrative.forEach((item, index) => rejectSemanticManuscriptPlaceholder(item, ['narrative', index], context))
 })
 
 export const visualDeckV4ReviewManuscriptSchema = z.object({
@@ -218,6 +233,10 @@ export const visualDeckV4ReviewManuscriptSchema = z.object({
   if (visualDeckV4ManuscriptCharacterCount(value) > VISUAL_DECK_V4_MANUSCRIPT_MAX_CHARACTERS) {
     context.addIssue({ code: 'custom', message: V4_MANUSCRIPT_CONTEXT_TOO_LARGE })
   }
+  rejectSemanticManuscriptPlaceholder(value.title, ['title'], context)
+  value.narrative.forEach((item, index) => rejectSemanticManuscriptPlaceholder(item, ['narrative', index], context))
+  value.revisionSuggestions.forEach((suggestion, index) =>
+    rejectSemanticManuscriptPlaceholder(suggestion, ['revisionSuggestions', index], context))
 })
 
 export const visualDeckV4SlideBriefRevisionPatchSchema = z.object({

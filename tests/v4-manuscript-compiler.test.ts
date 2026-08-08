@@ -93,7 +93,7 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
 
   test('rejects every known placeholder form while keeping short meaningful descriptions valid', () => {
     for (const visualDescription of [
-      '...', '…', '待补全', '待补全。', 'TBD: ...', '暂无', 'N/A。', 'N-A', 'N–A', 'N—A', '???',
+      '...', '…', '待补全', '待补全。', 'TBD: ...', '暂无', 'N/A。', 'N.A', 'N.A.', 'N-A', 'N–A', 'N—A', '???',
     ]) {
       const invalid = {
         ...manuscript(),
@@ -107,6 +107,28 @@ describe('V4 chain-4 semantic manuscript compiler', () => {
       ...manuscript(),
       slides: [{ ...manuscript().slides[0]!, visualDescription: '水面、云和降水' }],
     })).not.toThrow()
+  })
+
+  test('rejects placeholders in every model-owned manuscript text field', () => {
+    const base = manuscript()
+    const mutations: Array<(value: ReturnType<typeof manuscript>) => unknown> = [
+      (value) => ({ ...value, title: 'TBD' }),
+      (value) => ({ ...value, narrative: ['待补全'] }),
+      (value) => ({ ...value, slides: [{ ...value.slides[0]!, title: 'N/A' }] }),
+      (value) => ({ ...value, slides: [{ ...value.slides[0]!, narrative: 'TODO' }] }),
+      (value) => ({ ...value, slides: [{ ...value.slides[0]!, userVisibleCopy: ['N.A'] }] }),
+      (value) => ({ ...value, slides: [{ ...value.slides[0]!, factualStatements: ['待定'] }] }),
+    ]
+
+    for (const mutate of mutations) {
+      expect(() => visualDeckV4CreativeManuscriptSchema.parse(mutate(structuredClone(base)))).toThrow(
+        'semantic manuscript content cannot be a placeholder',
+      )
+    }
+    expect(() => visualDeckV4ReviewManuscriptSchema.parse({
+      ...base,
+      revisionSuggestions: ['placeholder'],
+    })).toThrow('semantic manuscript content cannot be a placeholder')
   })
 
   test('derives a valid blueprint visual intent from a short meaningful semantic description', () => {
