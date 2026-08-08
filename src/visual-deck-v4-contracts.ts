@@ -190,7 +190,7 @@ export function isSemanticManuscriptPlaceholder(value: string) {
 
 function rejectSemanticManuscriptPlaceholder(
   value: string,
-  path: readonly (string | number)[],
+  path: (string | number)[],
   context: z.RefinementCtx,
 ) {
   if (!isSemanticManuscriptPlaceholder(value)) return
