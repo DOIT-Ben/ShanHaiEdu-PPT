@@ -368,6 +368,42 @@ describe('gateway image generation adapter', () => {
     ])
   })
 
+  test('continues polling a submitting unknown task until its image completes', async () => {
+    const artifacts = new MockArtifactPort()
+    const operationId = 'imgop_0123456789abcdef0123456789abcdef'
+    const output = await sharp({ create: { width: 1600, height: 900, channels: 3, background: '#2F7D8C' } }).png().toBuffer()
+    let inspectCalls = 0
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts,
+      fetchImpl: async (_url) => {
+        const call = inspectCalls++
+        return call === 0
+          ? Response.json({ id: operationId, status: 'SUBMITTING', submission_state: 'UNKNOWN' })
+          : Response.json({
+              id: operationId,
+              status: 'COMPLETED',
+              submission_state: 'SUBMITTED',
+              result: { data: [{ b64_json: output.toString('base64') }] },
+        })
+      },
+    })
+    const input = {
+      tenantId: 'frameflow',
+      operationId,
+      idempotencyKey: 'run-1:slide:1:image:r0:v1',
+      aspectRatio: '16:9' as const,
+      exactAspectRatio: true,
+    }
+
+    await expect(adapter.inspect(input)).resolves.toEqual({ state: 'QUEUED' })
+    const completed = await adapter.inspect(input)
+
+    expect(completed).toMatchObject({ state: 'COMPLETED' })
+    expect(inspectCalls).toBe(2)
+    expect(artifacts.artifacts.size).toBe(1)
+  })
+
   test.each([
     ['CREATED', 'QUEUED'],
     ['SUBMITTING', 'QUEUED'],
