@@ -28,6 +28,15 @@ const TERMINAL_STATUSES = new Set([
   'AWAITING_REVISION_APPROVAL',
   'PAUSED',
 ])
+const SSE_TERMINAL_EVENT_TYPES = new Set([
+  'run.completed',
+  'run.failed',
+  'run.cancelled',
+  'run.accounting.finalized',
+])
+const SSE_AWAITABLE_RUN_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELLED'])
+const MAX_SSE_EVENT_BUFFER_CHARS = 512 * 1024
+const MAX_SSE_EVENT_COUNT = 10_000
 
 export const REQUIRED_COMPLETED_LIFECYCLE = [
   'planning.started',
@@ -70,6 +79,17 @@ type HistoryEvent = Readonly<{
   type: string
   payload?: unknown
 }>
+
+export type V4EvaluationSseEvidence = Readonly<{
+  requestId: string
+  responseRequestId: string
+  events: readonly HistoryEvent[]
+}>
+
+type V4EvaluationSseResult = Readonly<
+  | { evidence: V4EvaluationSseEvidence }
+  | { error: unknown }
+>
 
 type RasterPageValidation = Readonly<{
   pageNumber: number
@@ -745,6 +765,15 @@ function redactedEventHistory(events: readonly HistoryEvent[]) {
   return events.map((event) => ({ eventId: event.eventId, sequence: event.sequence, type: event.type }))
 }
 
+function redactedSseEvidence(evidence: V4EvaluationSseEvidence, reconciliation: ReturnType<typeof reconcileV4SseEventStream>) {
+  return {
+    requestId: evidence.requestId,
+    responseRequestId: evidence.responseRequestId,
+    events: redactedEventHistory(evidence.events),
+    reconciliation,
+  }
+}
+
 export function validateCreatedV4RunIdentity(
   run: Readonly<{ slideCount: number; presentationMode?: unknown; imageModel?: unknown }>,
   request: CreateRunRequest,
@@ -755,13 +784,14 @@ export function validateCreatedV4RunIdentity(
   assert(run.imageModel === request.imageModel, 'V4_EVAL_CREATED_IMAGE_MODEL_INVALID')
 }
 
-function requestHeaders(request: CreateRunRequest, apiToken: string, json = false) {
+function requestHeaders(request: CreateRunRequest, apiToken: string, json = false, requestId?: string) {
   return {
     Authorization: `Bearer ${apiToken}`,
     'X-PPT-Agent-Tenant': request.host.tenantId,
     'X-PPT-Agent-User': request.host.externalUserId,
     ...(request.host.externalProjectId ? { 'X-PPT-Agent-Project': request.host.externalProjectId } : {}),
     ...(json ? { 'Content-Type': 'application/json' } : {}),
+    ...(requestId ? { 'X-Request-ID': requestId } : {}),
   }
 }
 
@@ -973,6 +1003,186 @@ export function requireAvailableDelivery(run: RunDetail) {
     throw new Error('DELIVERY_PUBLIC_IDENTITY_MISMATCH')
   }
   return delivery
+}
+
+function parseSseFrame(frame: string, after: number): HistoryEvent | null {
+  let id: string | null = null
+  let type: string | null = null
+  const data: string[] = []
+  for (const line of frame.split(/\r?\n/)) {
+    if (!line || line.startsWith(':')) continue
+    const separator = line.indexOf(':')
+    if (separator < 1) throw new Error('V4_EVAL_SSE_FRAME_INVALID')
+    const field = line.slice(0, separator)
+    const value = line.slice(separator + 1).replace(/^ /, '')
+    if (field === 'id') {
+      if (id !== null) throw new Error('V4_EVAL_SSE_FRAME_INVALID')
+      id = value
+    } else if (field === 'event') {
+      if (type !== null) throw new Error('V4_EVAL_SSE_FRAME_INVALID')
+      type = value
+    } else if (field === 'data') {
+      data.push(value)
+    } else if (field !== 'retry') {
+      throw new Error('V4_EVAL_SSE_FRAME_INVALID')
+    }
+  }
+  if (id === null && type === null && data.length === 0) return null
+  if (id === null || type === null || data.length === 0) throw new Error('V4_EVAL_SSE_FRAME_INVALID')
+  const sequence = Number(id)
+  if (!Number.isSafeInteger(sequence) || sequence <= after) throw new Error('V4_EVAL_SSE_SEQUENCE_INVALID')
+  let payload: unknown
+  try {
+    payload = JSON.parse(data.join('\n')) as unknown
+  } catch {
+    throw new Error('V4_EVAL_SSE_EVENT_JSON_INVALID')
+  }
+  const parsed = agentEventSchema.safeParse(payload)
+  if (!parsed.success || parsed.data.sequence !== sequence || parsed.data.type !== type) {
+    throw new Error('V4_EVAL_SSE_EVENT_CONTRACT_INVALID')
+  }
+  return parsed.data
+}
+
+export async function readV4RunEventStream(input: Readonly<{
+  serviceUrl: string
+  apiToken: string
+  request: CreateRunRequest
+  runId: string
+  after: number
+  requestId: string
+  timeoutMs: number
+  fetch: FetchPort
+  signal?: AbortSignal
+}>): Promise<V4EvaluationSseEvidence> {
+  if (!Number.isSafeInteger(input.after) || input.after < 0) throw new Error('V4_EVAL_SSE_CURSOR_INVALID')
+  if (!/^[A-Za-z0-9._:-]{1,160}$/.test(input.requestId)) throw new Error('V4_EVAL_SSE_REQUEST_ID_INVALID')
+  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1) throw new Error('V4_EVAL_SSE_TIMEOUT_INVALID')
+  const controller = new AbortController()
+  let timedOut = false
+  const timeout = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, input.timeoutMs)
+  const abortFromCaller = () => controller.abort()
+  if (input.signal?.aborted) abortFromCaller()
+  else input.signal?.addEventListener('abort', abortFromCaller, { once: true })
+
+  try {
+    const response = await input.fetch(`${input.serviceUrl}/v1/runs/${input.runId}/events?after=${input.after}`, {
+      headers: requestHeaders(input.request, input.apiToken, false, input.requestId),
+      signal: controller.signal,
+    })
+    if (response.status !== 200) throw new Error(`V4_EVAL_SSE_HTTP_${response.status}`)
+    if (!response.headers.get('Content-Type')?.toLowerCase().startsWith('text/event-stream')) {
+      throw new Error('V4_EVAL_SSE_CONTENT_TYPE_INVALID')
+    }
+    const responseRequestId = response.headers.get('X-Request-ID')
+    if (responseRequestId !== input.requestId) throw new Error('V4_EVAL_SSE_REQUEST_ID_MISMATCH')
+    if (!response.body) throw new Error('V4_EVAL_SSE_BODY_MISSING')
+
+    const decoder = new TextDecoder()
+    const reader = response.body.getReader()
+    const events: HistoryEvent[] = []
+    let cursor = input.after
+    let buffer = ''
+    const accept = (event: HistoryEvent | null) => {
+      if (!event) return
+      if (events.length >= MAX_SSE_EVENT_COUNT) throw new Error('V4_EVAL_SSE_EVENT_LIMIT_INVALID')
+      cursor = event.sequence
+      events.push(event)
+    }
+    const consumeFrames = () => {
+      while (true) {
+        const boundary = /\r?\n\r?\n/.exec(buffer)
+        if (!boundary || boundary.index === undefined) return
+        const frame = buffer.slice(0, boundary.index)
+        buffer = buffer.slice(boundary.index + boundary[0].length)
+        if (frame.length > MAX_SSE_EVENT_BUFFER_CHARS) throw new Error('V4_EVAL_SSE_FRAME_TOO_LARGE')
+        accept(parseSseFrame(frame, cursor))
+      }
+    }
+    try {
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        buffer += decoder.decode(chunk.value, { stream: true })
+        consumeFrames()
+        if (buffer.length > MAX_SSE_EVENT_BUFFER_CHARS) throw new Error('V4_EVAL_SSE_FRAME_TOO_LARGE')
+      }
+      buffer += decoder.decode()
+      consumeFrames()
+      if (buffer.length > MAX_SSE_EVENT_BUFFER_CHARS) throw new Error('V4_EVAL_SSE_FRAME_TOO_LARGE')
+      if (buffer.trim()) accept(parseSseFrame(buffer, cursor))
+    } finally {
+      await reader.cancel().catch(() => undefined)
+    }
+    if (!SSE_TERMINAL_EVENT_TYPES.has(events.at(-1)?.type ?? '')) {
+      throw new Error('V4_EVAL_SSE_TERMINAL_EVENT_MISSING')
+    }
+    return { requestId: input.requestId, responseRequestId, events }
+  } catch (error) {
+    if (timedOut) throw new Error('V4_EVAL_SSE_TIMEOUT')
+    if (input.signal?.aborted) throw new Error('V4_EVAL_SSE_ABORTED')
+    throw error
+  } finally {
+    clearTimeout(timeout)
+    input.signal?.removeEventListener('abort', abortFromCaller)
+  }
+}
+
+export function reconcileV4SseEventStream(
+  sseEvents: readonly HistoryEvent[],
+  historyEvents: readonly HistoryEvent[],
+) {
+  if (sseEvents.length < 1 || sseEvents.length > historyEvents.length) {
+    throw new Error('V4_EVAL_SSE_HISTORY_IDENTITY_MISMATCH')
+  }
+  for (let index = 0; index < sseEvents.length; index += 1) {
+    const streamed = sseEvents[index]!
+    const history = historyEvents[index]!
+    if (streamed.eventId !== history.eventId
+      || streamed.sequence !== history.sequence
+      || streamed.type !== history.type) {
+      throw new Error('V4_EVAL_SSE_HISTORY_IDENTITY_MISMATCH')
+    }
+  }
+  const first = sseEvents[0]!
+  const last = sseEvents.at(-1)!
+  if (!SSE_TERMINAL_EVENT_TYPES.has(last.type)) throw new Error('V4_EVAL_SSE_TERMINAL_EVENT_MISSING')
+  const trailingAuditEvents = historyEvents.slice(sseEvents.length)
+  if (trailingAuditEvents.some((event) => isLifecycleEvent(event.type) || SSE_TERMINAL_EVENT_TYPES.has(event.type))) {
+    throw new Error('V4_EVAL_SSE_HISTORY_POST_TERMINAL_EVENT_INVALID')
+  }
+  return {
+    eventCount: sseEvents.length,
+    historyEventCount: historyEvents.length,
+    trailingAuditEventCount: trailingAuditEvents.length,
+    firstSequence: first.sequence,
+    lastSequence: last.sequence,
+    terminalEventType: last.type,
+  }
+}
+
+export async function requireTerminalV4SseEvidence(
+  status: string,
+  evidenceResult: Promise<V4EvaluationSseResult>,
+  abort: () => void,
+) {
+  if (!SSE_AWAITABLE_RUN_STATUSES.has(status)) {
+    abort()
+    await evidenceResult
+    throw new Error(`V4_EVAL_SSE_RUN_NOT_TERMINAL:${status}`)
+  }
+  const observed = await evidenceResult
+  if ('error' in observed) throw observed.error
+  return observed.evidence
+}
+
+export function assertV4RunStatusMatchesSseTerminal(status: string, terminalEventType: string) {
+  if ((status === 'COMPLETED') !== (terminalEventType === 'run.completed')) {
+    throw new Error('V4_EVAL_RUN_STATUS_SSE_TERMINAL_MISMATCH')
+  }
 }
 
 async function readEventHistory(
@@ -1221,99 +1431,132 @@ async function runCase(
     run: redactedRunEvidence(createdRun),
   })
 
-  const planned = await waitFor(
-    config,
+  const sseAbortController = new AbortController()
+  const sseEvidenceResult = readV4RunEventStream({
+    serviceUrl: config.serviceUrl,
+    apiToken: config.apiToken,
     request,
     runId,
-    (run) => run.status !== 'PLANNING' || TERMINAL_STATUSES.has(run.status),
-    config.planningTimeoutMs,
-    timeline,
-    undefined,
-    fetchPort,
+    after: 0,
+    requestId: `v4-eval-sse-${randomUUID()}`,
+    timeoutMs: config.planningTimeoutMs + (config.runTimeoutMs * 2) + 30_000,
+    fetch: fetchPort,
+    signal: sseAbortController.signal,
+  }).then(
+    (evidence) => ({ evidence } as const),
+    (error) => ({ error } as const),
   )
-  await writeJson(path.join(caseDirectory, 'planning.json'), redactedRunEvidence(planned))
-  let finalRun = TERMINAL_STATUSES.has(planned.status)
-    ? planned
-    : await waitFor(
+
+  try {
+    const planned = await waitFor(
       config,
       request,
       runId,
-      (run) => TERMINAL_STATUSES.has(run.status),
-      config.runTimeoutMs,
+      (run) => run.status !== 'PLANNING' || TERMINAL_STATUSES.has(run.status),
+      config.planningTimeoutMs,
       timeline,
       undefined,
       fetchPort,
     )
-  let deliveryWaitState = deliveryAvailabilityWaitState(finalRun)
-  if (deliveryWaitState.state === 'WAIT') {
-    finalRun = await waitFor(
-      config,
-      request,
-      runId,
-      (run) => {
-        deliveryWaitState = deliveryAvailabilityWaitState(run)
-        return deliveryWaitState.state !== 'WAIT'
-      },
-      config.runTimeoutMs,
-      timeline,
-      () => `DELIVERY_AVAILABILITY_WAIT_TIMEOUT:${runId}:${deliveryWaitState.reason}`,
-      fetchPort,
+    await writeJson(path.join(caseDirectory, 'planning.json'), redactedRunEvidence(planned))
+    let finalRun = TERMINAL_STATUSES.has(planned.status)
+      ? planned
+      : await waitFor(
+        config,
+        request,
+        runId,
+        (run) => TERMINAL_STATUSES.has(run.status),
+        config.runTimeoutMs,
+        timeline,
+        undefined,
+        fetchPort,
+      )
+    let deliveryWaitState = deliveryAvailabilityWaitState(finalRun)
+    if (deliveryWaitState.state === 'WAIT') {
+      finalRun = await waitFor(
+        config,
+        request,
+        runId,
+        (run) => {
+          deliveryWaitState = deliveryAvailabilityWaitState(run)
+          return deliveryWaitState.state !== 'WAIT'
+        },
+        config.runTimeoutMs,
+        timeline,
+        () => `DELIVERY_AVAILABILITY_WAIT_TIMEOUT:${runId}:${deliveryWaitState.reason}`,
+        fetchPort,
+      )
+    }
+    const observedSse = await requireTerminalV4SseEvidence(
+      finalRun.status,
+      sseEvidenceResult,
+      () => sseAbortController.abort(),
     )
-  }
-  const events = await readEventHistory(config, request, runId, fetchPort)
-  await Promise.all([
-    writeJson(path.join(caseDirectory, 'final-run.json'), redactedRunEvidence(finalRun)),
-    writeJson(path.join(caseDirectory, 'timeline.json'), timeline),
-    writeJson(path.join(caseDirectory, 'events.json'), redactedEventHistory(events)),
-  ])
+    const events = await readEventHistory(config, request, runId, fetchPort)
+    const sseReconciliation = reconcileV4SseEventStream(observedSse.events, events)
+    assertV4RunStatusMatchesSseTerminal(finalRun.status, sseReconciliation.terminalEventType)
+    await Promise.all([
+      writeJson(path.join(caseDirectory, 'final-run.json'), redactedRunEvidence(finalRun)),
+      writeJson(path.join(caseDirectory, 'timeline.json'), timeline),
+      writeJson(path.join(caseDirectory, 'events.json'), redactedEventHistory(events)),
+      writeJson(path.join(caseDirectory, 'sse-events.json'), redactedSseEvidence(observedSse, sseReconciliation)),
+    ])
 
-  let rasterGate: ReturnType<typeof validateRasterPages> = {
-    passed: false,
-    continuous: false,
-    expectedPages: slideCount,
-    validPages: 0,
-  }
-  let pptxSha256: string | null = null
-  let pptxByteLength: number | null = null
-  if (finalRun.status === 'COMPLETED') {
-    const delivery = requireAvailableDelivery(finalRun)
-    const contentEvidence = await downloadDelivery(config, request, runId, delivery, caseDirectory, fetchPort)
-    await writeJson(path.join(caseDirectory, 'delivery-content.json'), {
-      schemaVersion: '1',
-      delivery,
-      content: contentEvidence,
-    })
-    const pptxPath = path.join(caseDirectory, 'presentation.pptx')
-    const pptxBytes = await Bun.file(pptxPath).bytes()
-    const pageValidation = await extractAndValidatePages(caseDirectory, pptxPath)
-    await writeJson(path.join(caseDirectory, 'pptx-validation.json'), pageValidation)
-    rasterGate = validateRasterPages(pageValidation, slideCount)
-    pptxSha256 = sha256(pptxBytes)
-    pptxByteLength = pptxBytes.byteLength
-  }
+    let rasterGate: ReturnType<typeof validateRasterPages> = {
+      passed: false,
+      continuous: false,
+      expectedPages: slideCount,
+      validPages: 0,
+    }
+    let pptxSha256: string | null = null
+    let pptxByteLength: number | null = null
+    if (finalRun.status === 'COMPLETED' && sseReconciliation.terminalEventType === 'run.completed') {
+      const delivery = requireAvailableDelivery(finalRun)
+      const contentEvidence = await downloadDelivery(config, request, runId, delivery, caseDirectory, fetchPort)
+      await writeJson(path.join(caseDirectory, 'delivery-content.json'), {
+        schemaVersion: '1',
+        delivery,
+        content: contentEvidence,
+      })
+      const pptxPath = path.join(caseDirectory, 'presentation.pptx')
+      const pptxBytes = await Bun.file(pptxPath).bytes()
+      const pageValidation = await extractAndValidatePages(caseDirectory, pptxPath)
+      await writeJson(path.join(caseDirectory, 'pptx-validation.json'), pageValidation)
+      rasterGate = validateRasterPages(pageValidation, slideCount)
+      pptxSha256 = sha256(pptxBytes)
+      pptxByteLength = pptxBytes.byteLength
+    }
 
-  const lifecycleGate = validateLifecycle(events, finalRun.status, finalRun.revisionRound)
-  const qualityGate = validateQualityGate(finalRun, rasterGate, lifecycleGate, slideCount)
-  const result = {
-    caseId,
-    slideCount,
-    runId,
-    status: finalRun.status,
-    presentationMode: finalRun.presentationMode ?? null,
-    imageModel: finalRun.imageModel ?? null,
-    passed: qualityGate.passed,
-    committedBudgetUnits: finalRun.committedBudgetUnits,
-    issueCount: finalRun.issues?.length ?? 0,
-    elapsedMs: Date.now() - startedAt,
-    pptxSha256,
-    pptxByteLength,
-    eventCount: events.length,
+    const lifecycleGate = validateLifecycle(events, finalRun.status, finalRun.revisionRound)
+    const qualityGate = validateQualityGate(finalRun, rasterGate, lifecycleGate, slideCount)
+    const result = {
+      caseId,
+      slideCount,
+      runId,
+      status: finalRun.status,
+      presentationMode: finalRun.presentationMode ?? null,
+      imageModel: finalRun.imageModel ?? null,
+      passed: qualityGate.passed,
+      committedBudgetUnits: finalRun.committedBudgetUnits,
+      issueCount: finalRun.issues?.length ?? 0,
+      elapsedMs: Date.now() - startedAt,
+      pptxSha256,
+      pptxByteLength,
+      eventCount: events.length,
+      sseEventCount: sseReconciliation.eventCount,
+      sseHistoryEventCount: sseReconciliation.historyEventCount,
+      sseTrailingAuditEventCount: sseReconciliation.trailingAuditEventCount,
+      sseTerminalEventType: sseReconciliation.terminalEventType,
+    }
+    await Promise.all([
+      writeJson(path.join(caseDirectory, 'quality-gate.json'), qualityGate),
+      writeJson(path.join(caseDirectory, 'result.json'), result),
+    ])
+    return result
+  } finally {
+    sseAbortController.abort()
+    await sseEvidenceResult
   }
-  await Promise.all([
-    writeJson(path.join(caseDirectory, 'quality-gate.json'), qualityGate),
-    writeJson(path.join(caseDirectory, 'result.json'), result),
-  ])
-  return result
 }
 
 export async function runV4EvaluationCanary(input: Readonly<{

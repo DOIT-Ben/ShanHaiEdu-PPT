@@ -13,7 +13,10 @@ import {
   presentationSlideEntries,
   referencedSlideImageEntry,
   requireAvailableDelivery,
+  requireTerminalV4SseEvidence,
   readV4EvaluationGatewayTarget,
+  readV4RunEventStream,
+  reconcileV4SseEventStream,
   REQUIRED_COMPLETED_LIFECYCLE,
   resolveV4EvaluationCanaryPageCounts,
   redactedEvaluationRequest,
@@ -22,6 +25,7 @@ import {
   validateQualityGate,
   validateRasterPages,
   validateCreatedV4RunIdentity,
+  assertV4RunStatusMatchesSseTerminal,
   v4EvaluationIdempotencyKey,
   type V4EvaluationRelease,
 } from '../scripts/run-v4-real-evaluation'
@@ -62,7 +66,7 @@ function requestForSlideCount(slideCount: 1 | 3 | 10) {
   value.slideCount = slideCount
   value.visualDeckV4.deckOptions.length = { slideCount }
   value.visualDeckV4.instruction = `请制作一套${slideCount}页课堂PPT。`
-  return value
+  return normalizeEvaluationRequest(value, slideCount)
 }
 
 function gatewayCapabilities(imageModel = 'gemini-3-pro-image-preview') {
@@ -121,6 +125,87 @@ function completedLifecycleEvents(): LifecycleEvent[] {
   })
 }
 
+function sseEvent(sequence: number, type: 'run.started' | 'run.completed' | 'run.failed') {
+  return {
+    schemaVersion: '1',
+    id: `event-${sequence}`,
+    eventId: `event-${sequence}`,
+    runId: 'run-sse-1',
+    sequence,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    type,
+    payload: type === 'run.started'
+      ? { status: 'PLANNING' }
+      : type === 'run.completed'
+        ? { deliveryId: 'run-sse-1:delivery:r0', qualityOverride: false }
+        : { errorCode: 'USAGE_V2_FINALIZATION_REJECTED' },
+  }
+}
+
+function sseUnknownEvent(sequence: number) {
+  return {
+    schemaVersion: '1',
+    id: `event-${sequence}`,
+    eventId: `event-${sequence}`,
+    runId: 'run-sse-1',
+    sequence,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    type: 'future.event',
+    payload: { index: sequence },
+  }
+}
+
+function sseAccountingFinalizedEvent(sequence: number) {
+  return {
+    schemaVersion: '1',
+    id: `event-${sequence}`,
+    eventId: `event-${sequence}`,
+    runId: 'run-sse-1',
+    sequence,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    type: 'run.accounting.finalized',
+    payload: {
+      presentationMode: 'VISUAL_DECK_V4',
+      stage: 'RUN',
+      completed: 1,
+      total: 1,
+      pageNumbers: [1],
+      revisionKind: null,
+      revisionRound: 0,
+      maxRevisionRounds: 2,
+      budgetUnits: 10,
+      committedBudgetUnits: 4,
+      reason: 'INTERNAL_FAILURE',
+      retryable: false,
+      requiresUserAction: false,
+      nextAction: null,
+      terminalAccounting: {
+        authorizedUnits: 10,
+        submittedUnits: 4,
+        settledUnits: 4,
+        releasedUnits: 6,
+        reconciliationUnits: 0,
+        accountingStatus: 'FINAL',
+      },
+    },
+  }
+}
+
+function streamedSseResponse(frames: readonly string[], requestId: string) {
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame))
+      controller.close()
+    },
+  }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'X-Request-ID': requestId,
+    },
+  })
+}
+
 describe('V4 real evaluation harness', () => {
   test('uses the main V4 service and only the fixed 1 -> 3 -> 10 canary sequence', () => {
     expect(V4_EVALUATION_DEFAULT_SERVICE_URL).toBe('http://127.0.0.1:4310')
@@ -150,6 +235,184 @@ describe('V4 real evaluation harness', () => {
     expect(manifest.contentHashes.visualDeckV4).toMatch(/^[a-f0-9]{64}$/)
   })
 
+  test('consumes fragmented SSE frames and flushes the terminal event at EOF with a caller-correlated request id', async () => {
+    const requestId = 'v4-eval-sse-request-1'
+    const started = sseEvent(1, 'run.started')
+    const completed = sseEvent(2, 'run.completed')
+    const startedFrame = `id: 1\nevent: run.started\ndata: ${JSON.stringify(started)}\n\n`
+    const observed = await readV4RunEventStream({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-sse-1',
+      after: 0,
+      requestId,
+      timeoutMs: 1_000,
+      fetch: async (url, init) => {
+        expect(new URL(url).pathname).toBe('/v1/runs/run-sse-1/events')
+        expect(new URL(url).searchParams.get('after')).toBe('0')
+        expect(new Headers(init?.headers).get('X-Request-ID')).toBe(requestId)
+        return streamedSseResponse([
+          ': heartbeat\n\n',
+          startedFrame.slice(0, 45),
+          startedFrame.slice(45),
+          `id: 2\nevent: run.completed\ndata: ${JSON.stringify(completed)}\n`,
+        ], requestId)
+      },
+    })
+
+    expect(observed.requestId).toBe(requestId)
+    expect(observed.responseRequestId).toBe(requestId)
+    expect(observed.events).toHaveLength(2)
+    expect(observed.events.map((event) => event.eventId)).toEqual(['event-1', 'event-2'])
+    expect(observed.events.map((event) => event.sequence)).toEqual([1, 2])
+    expect(observed.events.map((event) => event.type)).toEqual(['run.started', 'run.completed'])
+    expect(reconcileV4SseEventStream(observed.events, observed.events)).toEqual({
+      eventCount: 2,
+      historyEventCount: 2,
+      trailingAuditEventCount: 0,
+      firstSequence: 1,
+      lastSequence: 2,
+      terminalEventType: 'run.completed',
+    })
+  })
+
+  test('rejects an SSE response that cannot prove its request id, terminal frame, or history identity', async () => {
+    const started = sseEvent(1, 'run.started')
+    await expect(readV4RunEventStream({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-sse-1',
+      after: 0,
+      requestId: 'v4-eval-sse-request-2',
+      timeoutMs: 1_000,
+      fetch: async () => streamedSseResponse([
+        `id: 1\nevent: run.started\ndata: ${JSON.stringify(started)}\n\n`,
+      ], 'wrong-request-id'),
+    })).rejects.toThrow('V4_EVAL_SSE_REQUEST_ID_MISMATCH')
+
+    expect(() => reconcileV4SseEventStream([started], [{ ...started, eventId: 'different-event' }]))
+      .toThrow('V4_EVAL_SSE_HISTORY_IDENTITY_MISMATCH')
+  })
+
+  test('keeps consuming after a completed event until the stream closes at its effective terminal event', async () => {
+    const requestId = 'v4-eval-sse-request-3'
+    const started = sseEvent(1, 'run.started')
+    const completed = sseEvent(2, 'run.completed')
+    const failed = sseEvent(3, 'run.failed')
+    const observed = await readV4RunEventStream({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-sse-1',
+      after: 0,
+      requestId,
+      timeoutMs: 1_000,
+      fetch: async () => streamedSseResponse([
+        `id: 1\nevent: run.started\ndata: ${JSON.stringify(started)}\n\n`,
+        `id: 2\nevent: run.completed\ndata: ${JSON.stringify(completed)}\n\n`,
+        `id: 3\nevent: run.failed\ndata: ${JSON.stringify(failed)}\n`,
+      ], requestId),
+    })
+
+    expect(observed.events.map((event) => event.type)).toEqual(['run.started', 'run.completed', 'run.failed'])
+    expect(reconcileV4SseEventStream(observed.events, observed.events).terminalEventType).toBe('run.failed')
+  })
+
+  test('accepts coalesced complete frames larger than the aggregate buffer limit while bounding each frame', async () => {
+    const requestId = 'v4-eval-sse-request-4'
+    const eventCount = 3_000
+    const coalescedFrames = Array.from({ length: eventCount }, (_, index) => {
+      const event = sseUnknownEvent(index + 1)
+      return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+    }).join('')
+    const terminal = sseEvent(eventCount + 1, 'run.completed')
+    const terminalFrame = `id: ${terminal.sequence}\nevent: ${terminal.type}\ndata: ${JSON.stringify(terminal)}\n`
+    expect(coalescedFrames.length + terminalFrame.length).toBeGreaterThan(512 * 1024)
+
+    const observed = await readV4RunEventStream({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-sse-1',
+      after: 0,
+      requestId,
+      timeoutMs: 2_000,
+      fetch: async () => streamedSseResponse([coalescedFrames + terminalFrame], requestId),
+    })
+
+    expect(observed.events).toHaveLength(eventCount + 1)
+    expect(observed.events.at(-1)!.type).toBe('run.completed')
+  })
+
+  test('accepts the effective accounting terminal event and tolerates only post-terminal audit history', async () => {
+    const requestId = 'v4-eval-sse-request-5'
+    const started = sseEvent(1, 'run.started')
+    const accounting = sseAccountingFinalizedEvent(2)
+    const observed = await readV4RunEventStream({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-sse-1',
+      after: 0,
+      requestId,
+      timeoutMs: 1_000,
+      fetch: async () => streamedSseResponse([
+        `id: 1\nevent: run.started\ndata: ${JSON.stringify(started)}\n\n`,
+        `id: 2\nevent: run.accounting.finalized\ndata: ${JSON.stringify(accounting)}\n`,
+      ], requestId),
+    })
+    const audit = { eventId: 'event-3', sequence: 3, type: 'tool.completed' }
+    const reconciliation = reconcileV4SseEventStream(observed.events, [...observed.events, audit])
+
+    expect(reconciliation).toEqual({
+      eventCount: 2,
+      historyEventCount: 3,
+      trailingAuditEventCount: 1,
+      firstSequence: 1,
+      lastSequence: 2,
+      terminalEventType: 'run.accounting.finalized',
+    })
+    expect(() => reconcileV4SseEventStream(observed.events, [...observed.events, {
+      eventId: 'event-3', sequence: 3, type: 'run.failed',
+    }])).toThrow('V4_EVAL_SSE_HISTORY_POST_TERMINAL_EVENT_INVALID')
+  })
+
+  test('aborts SSE immediately for a non-terminal user-action state and maps caller cancellation', async () => {
+    let abortCount = 0
+    await expect(requireTerminalV4SseEvidence(
+      'PAUSED',
+      Promise.resolve({ error: new Error('stream still open') }),
+      () => { abortCount += 1 },
+    )).rejects.toThrow('V4_EVAL_SSE_RUN_NOT_TERMINAL:PAUSED')
+    expect(abortCount).toBe(1)
+
+    const controller = new AbortController()
+    controller.abort()
+    await expect(readV4RunEventStream({
+      serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+      apiToken: 'evaluation-api-token',
+      request: requestForSlideCount(1),
+      runId: 'run-sse-1',
+      after: 0,
+      requestId: 'v4-eval-sse-request-6',
+      timeoutMs: 1_000,
+      signal: controller.signal,
+      fetch: async (_url, init) => {
+        expect(init?.signal?.aborted).toBe(true)
+        throw new Error('caller aborted')
+      },
+    })).rejects.toThrow('V4_EVAL_SSE_ABORTED')
+  })
+
+  test('rejects a stale completed Run snapshot when SSE proves a different effective terminal event', () => {
+    expect(() => assertV4RunStatusMatchesSseTerminal('COMPLETED', 'run.failed'))
+      .toThrow('V4_EVAL_RUN_STATUS_SSE_TERMINAL_MISMATCH')
+    expect(() => assertV4RunStatusMatchesSseTerminal('COMPLETED', 'run.completed')).not.toThrow()
+    expect(() => assertV4RunStatusMatchesSseTerminal('FAILED', 'run.accounting.finalized')).not.toThrow()
+  })
+
   test('rejects an invalid later input before any canary preflight or submission can begin', async () => {
     const inputRoot = await mkdtemp(path.join(tmpdir(), 'ppt-agent-v4-eval-input-'))
     try {
@@ -157,7 +420,7 @@ describe('V4 real evaluation harness', () => {
         const caseDirectory = path.join(inputRoot, String(slideCount), 'case-a')
         await mkdir(caseDirectory, { recursive: true })
         const value = requestForSlideCount(slideCount)
-        if (slideCount === 10) value.visualDeckV4.deckOptions.length = { slideCount: 9 }
+        if (slideCount === 10) value.visualDeckV4!.deckOptions.length = { slideCount: 9 }
         await writeFile(path.join(caseDirectory, 'request.json'), JSON.stringify(value))
       }))
 
