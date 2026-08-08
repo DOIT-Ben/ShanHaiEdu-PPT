@@ -724,8 +724,11 @@ export class PlanningRunner {
           || !['V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS', 'V4_MANUSCRIPT_SOURCE_EVIDENCE_UNRESOLVED'].includes(repairError.code)) {
           throw repairError
         }
-        await this.markV4SemanticCompletion(input.input.runId, 'review-manuscript', input.input.attempt ?? 0, true)
-        throw new PlanningFailureError(this.terminalV4SemanticFailure(input.input, repairError))
+        const terminal = this.terminalV4SemanticFailure(input.input, repairError)
+        await this.markV4SemanticCompletion(
+          input.input.runId, 'review-manuscript', input.input.attempt ?? 0, true, terminal.errorCode,
+        )
+        throw new PlanningFailureError(terminal)
       }
     }
     return createVisualDeckV4BlueprintFromProposal(compilerInput, draft)
@@ -1036,25 +1039,40 @@ export class PlanningRunner {
     initialError: unknown,
     extraPayload: Readonly<Record<string, unknown>> = {},
   ) {
-    const claimed = await this.claimV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0)
+    const repairPayload = {
+      ...request.payload,
+      contentSlotCompletion: true,
+      ...extraPayload,
+    }
+    const repairKey = visualDeckV4PlanningStageStepKey(input.runId, request.stage, input.attempt ?? 0, 1)
+    const repairInputHash = hashInput({
+      tool: request.tool,
+      operation: request.operation,
+      schemaName: request.schemaName,
+      payload: repairPayload,
+      protocol: request.protocol,
+    })
+    const claimed = await this.claimV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, {
+      repairKey,
+      repairInputHash,
+      repairTool: request.tool,
+    })
     if (claimed === 'EXHAUSTED') {
-      await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true)
-      throw new PlanningFailureError(this.terminalV4SemanticFailure(input, initialError))
+      const terminal = this.terminalV4SemanticFailure(input, initialError)
+      await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true, terminal.errorCode)
+      throw new PlanningFailureError(terminal)
     }
     try {
       return await this.runV4PlanningStage(input, {
         ...request,
         repairAttempt: 1,
-        payload: {
-          ...request.payload,
-          contentSlotCompletion: true,
-          ...extraPayload,
-        },
+        payload: repairPayload,
       })
     } catch (repairError) {
       if (!this.isV4SemanticFailure(repairError)) throw repairError
-      await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true)
-      throw new PlanningFailureError(this.terminalV4SemanticFailure(input, repairError))
+      const terminal = this.terminalV4SemanticFailure(input, repairError)
+      await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true, terminal.errorCode)
+      throw new PlanningFailureError(terminal)
     }
   }
 
@@ -1084,6 +1102,7 @@ export class PlanningRunner {
     runId: string,
     stage: V4ManuscriptStageRequest['stage'],
     attempt: number,
+    repair: Readonly<{ repairKey: string; repairInputHash: string; repairTool: string }>,
   ): Promise<'CLAIMED' | 'RESUME' | 'EXHAUSTED'> {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const manuscriptStages: readonly V4ManuscriptStageRequest['stage'][] = [
@@ -1101,12 +1120,13 @@ export class PlanningRunner {
       if (!audit || !output) throw new Error('V4_PLANNING_STAGE_AUDIT_MISSING')
       if (audits.some((candidate) => candidate?.output.semanticCompletionExhausted)) return 'EXHAUSTED'
       if (output.semanticCompletionUsed) {
-        const repairKey = `${visualDeckV4PlanningStageStepKey(runId, stage, attempt, 1)}`
-        const repairStep = transaction.getStep(repairKey)
+        const repairStep = transaction.getStep(repair.repairKey)
         const repairError = repairStep?.errorCode ?? ''
-        if (!repairStep || repairStep.status === 'RUNNING'
+        const sameRepair = !repairStep
+          || (repairStep.inputHash === repair.repairInputHash && repairStep.tool === repair.repairTool)
+        if (sameRepair && (!repairStep || repairStep.status === 'RUNNING' || repairStep.status === 'COMPLETED'
           || (repairStep?.status === 'FAILED'
-            && technicalFailureDisposition(repairError) === 'RETRYABLE')) return 'RESUME'
+            && technicalFailureDisposition(repairError) === 'RETRYABLE'))) return 'RESUME'
         return 'EXHAUSTED'
       }
       if (audits.some((candidate) => candidate?.output.semanticCompletionUsed)) return 'EXHAUSTED'
@@ -1124,6 +1144,7 @@ export class PlanningRunner {
     stage: V4ManuscriptStageRequest['stage'],
     attempt: number,
     exhausted: boolean,
+    errorCode?: string,
   ) {
     await this.dependencies.repository.transact(runId, (transaction) => {
       const auditKey = `${visualDeckV4PlanningStageStepKey(runId, stage, attempt)}:attempt-audit`
@@ -1133,10 +1154,10 @@ export class PlanningRunner {
       transaction.putStep({
         ...audit,
         status: exhausted ? 'FAILED' : audit.status,
-        errorCode: exhausted ? 'MODEL_JSON_INVALID' : audit.errorCode,
+        errorCode: exhausted ? (errorCode ?? audit.errorCode ?? 'MODEL_JSON_INVALID') : audit.errorCode,
         output: {
           ...output,
-          semanticCompletionUsed: true,
+          semanticCompletionUsed: output.semanticCompletionUsed,
           semanticCompletionExhausted: exhausted || output.semanticCompletionExhausted,
         },
         updatedAt: this.dependencies.clock.now().toISOString(),

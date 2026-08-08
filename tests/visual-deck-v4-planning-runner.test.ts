@@ -1073,6 +1073,78 @@ describe('visual deck v4 planning runner', () => {
     expect(result.step.errorCode).toBe('MODEL_JSON_INVALID')
     expect(completionFlags).toEqual([false, true, false])
     expect((await repository.getRun(created.run.id))?.status).toBe('NEEDS_HUMAN')
+    const audits = await repository.listSteps(created.run.id)
+    expect(audits.find((step) => step.idempotencyKey === planningStageAuditKey(
+      created.run.id, 'creative-manuscript',
+    ))).toMatchObject({ output: { semanticCompletionUsed: true, semanticCompletionExhausted: false } })
+    expect(audits.find((step) => step.idempotencyKey === planningStageAuditKey(
+      created.run.id, 'review-manuscript',
+    ))).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'MODEL_JSON_INVALID',
+      output: { semanticCompletionUsed: false, semanticCompletionExhausted: true },
+    })
+  })
+
+  test('preserves a denied review source-evidence error without claiming a second completion', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-global-evidence-denial-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    const completionFlags: boolean[] = []
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation === 'create_visual_deck_v4_creative_manuscript'
+        || modelInput.operation === 'review_visual_deck_v4_manuscript') {
+        completionFlags.push(Boolean((modelInput.payload as { contentSlotCompletion?: boolean }).contentSlotCompletion))
+      }
+      const result = await execute(modelInput)
+      if (modelInput.operation !== 'create_visual_deck_v4_creative_manuscript') return result
+      creativeCalls += 1
+      if (creativeCalls > 1) return result
+      const manuscript = result as { slides: readonly Record<string, unknown>[] }
+      return {
+        ...(result as Record<string, unknown>),
+        slides: manuscript.slides.map((slide) => ({ ...slide, visualDescription: '待补全' })),
+      }
+    }
+    const common = '共同教材摘录用于制造歧义。'.repeat(8)
+    const runner = new PlanningRunner({
+      repository,
+      documents: { async resolve() { return {
+        name: '重复来源', isComplete: true, missingRanges: [], assets: [],
+        sources: [
+          { id: 'textbook', name: '教材.md', kind: 'TEXT' as const, status: 'READY' as const },
+          { id: 'design', name: '设计稿.md', kind: 'TEXT' as const, status: 'READY' as const },
+        ],
+        chunks: [
+          { id: 'chunk-a', sourceId: 'textbook', text: `${common}第一来源。`, sha256: 'a'.repeat(64) },
+          { id: 'chunk-b', sourceId: 'design', text: `${common}第二来源。`, sha256: 'b'.repeat(64) },
+        ],
+      } } },
+      model: staged.model,
+      clock,
+    })
+
+    const result = await runner.plan({
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    })
+
+    expect(result.step.errorCode).toBe('V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS')
+    expect(completionFlags).toEqual([false, true, false])
+    expect((await repository.listSteps(created.run.id)).find((step) =>
+      step.idempotencyKey === planningStageAuditKey(created.run.id, 'review-manuscript'),
+    )).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS',
+      output: { semanticCompletionUsed: false, semanticCompletionExhausted: true },
+    })
   })
 
   test('resumes a claimed semantic completion when the process stops before creating its repair step', async () => {
@@ -1136,6 +1208,65 @@ describe('visual deck v4 planning runner', () => {
     expect(resumed.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(VISUAL_DECK_V4_COMPILER_VERSION)
     expect(creativeCalls).toBe(3)
     expect(staged.operations.filter((operation) => operation === 'create_visual_deck_v4_creative_manuscript')).toHaveLength(3)
+  })
+
+  test('reuses a completed matching semantic repair after a crash before blueprint persistence', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-completion-output-crash-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    let completionCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation !== 'create_visual_deck_v4_creative_manuscript') return execute(modelInput)
+      creativeCalls += 1
+      if ((modelInput.payload as { contentSlotCompletion?: boolean }).contentSlotCompletion) {
+        completionCalls += 1
+        return execute(modelInput)
+      }
+      const result = await execute(modelInput)
+      const manuscript = result as { slides: readonly Record<string, unknown>[] }
+      return {
+        ...(result as Record<string, unknown>),
+        slides: manuscript.slides.map((slide) => ({ ...slide, visualDescription: '待补全' })),
+      }
+    }
+    const originalTransact = repository.transact.bind(repository)
+    let crashAfterRepair = true
+    repository.transact = async (runId, operation) => {
+      const result = await originalTransact(runId, operation)
+      if (crashAfterRepair) {
+        const repair = (await repository.listSteps(runId)).find((step) =>
+          step.idempotencyKey === visualDeckV4PlanningStageStepKey(runId, 'creative-manuscript', 0, 1),
+        )
+        if (repair?.status === 'COMPLETED') {
+          crashAfterRepair = false
+          throw new Error('SIMULATED_PROCESS_CRASH_AFTER_REPAIR')
+        }
+      }
+      return result
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+    const input = {
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    } as const
+
+    expect((await runner.plan(input)).blueprint).toBeNull()
+    expect(await repository.getRun(created.run.id)).toMatchObject({ status: 'RECOVERING' })
+
+    clock.advance(60_000)
+    await repository.transact(created.run.id, (transaction) => resumeTechnicalRecovery(transaction, clock))
+    const resumed = await runner.plan(input)
+
+    expect(resumed.blueprint?.visualDeckV4Proposal?.compilerVersion).toBe(VISUAL_DECK_V4_COMPILER_VERSION)
+    expect(creativeCalls).toBe(3)
+    expect(completionCalls).toBe(1)
   })
 
   test('reuses the semantic completion key after its first provider submission fails transiently', async () => {
@@ -1384,6 +1515,13 @@ describe('visual deck v4 planning runner', () => {
     })
     expect(result).toMatchObject({ blueprint: null, step: { errorCode: 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS' } })
     expect(reviewCalls).toBe(2)
+    expect((await repository.listSteps(created.run.id)).find((step) =>
+      step.idempotencyKey === planningStageAuditKey(created.run.id, 'review-manuscript'),
+    )).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'V4_MANUSCRIPT_SOURCE_EVIDENCE_AMBIGUOUS',
+      output: { semanticCompletionUsed: true, semanticCompletionExhausted: true },
+    })
   })
 
   test('persists a real ten-page plan as five recoverable structured stages', async () => {
