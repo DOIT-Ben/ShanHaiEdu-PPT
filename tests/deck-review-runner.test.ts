@@ -518,7 +518,10 @@ describe('deck review runner', () => {
     expect(events.some((event) => event.type === 'issue.resolved'
       && event.payload.resolution === 'ACCEPTED')).toBe(false)
     expect(events.at(-1)).toMatchObject({
-      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+      type: 'run.failed', payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
     })
   })
 
@@ -546,7 +549,68 @@ describe('deck review runner', () => {
     expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
     expect(events.some((event) => event.type === 'issue.resolved')).toBe(false)
     expect(events.at(-1)).toMatchObject({
-      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+      type: 'run.failed', payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
+    })
+  })
+
+  test('closes a completed final revision as quality remediation exhausted when hard deck findings remain', async () => {
+    const { repository, runner } = await fixture({
+      ...passingReview(),
+      qualityScore: 72,
+      issues: [
+        {
+          id: 'post-revision-curriculum-gap', category: 'CURRICULUM_GAP', severity: 'WARNING',
+          summary: '核心概念仍缺少教材要求的必要解释。', slideIds: ['run-1:slide:2'],
+          sourceChunkIds: ['chunk-2'], status: 'OPEN', repairDomain: 'KNOWLEDGE',
+        },
+        {
+          id: 'post-revision-sequence-break', category: 'SEQUENCE_BREAK', severity: 'WARNING',
+          summary: '第二页仍未建立前后知识点之间的递进关系。', slideIds: ['run-1:slide:1', 'run-1:slide:2'],
+          sourceChunkIds: [], status: 'OPEN', repairDomain: 'LAYOUT',
+        },
+        {
+          id: 'post-revision-composition-conflict', category: 'COMPOSITION_CONFLICT', severity: 'WARNING',
+          summary: '第二页构图层级仍有可见冲突。', slideIds: ['run-1:slide:2'],
+          sourceChunkIds: [], status: 'OPEN', repairDomain: 'LAYOUT',
+        },
+      ],
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.putRun({
+        ...transaction.run,
+        presentationMode: 'VISUAL_DECK_V4',
+        automationLevel: 'BOUNDED_AUTO',
+        revisionRound: 1,
+        maxRevisionRounds: 1,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.started', {
+        completed: 0, total: 1, pageNumbers: [2], revisionKind: 'DECK_VISUAL', revisionRound: 1,
+      })
+      appendV4LifecycleEvent(transaction, 'revision.completed', {
+        completed: 1, total: 1, pageNumbers: [2], revisionKind: 'DECK_VISUAL', revisionRound: 1,
+      })
+    })
+
+    expect(await runner.review('run-1')).toMatchObject({ passed: false, review: { qualityScore: 72 } })
+    expect(await repository.getRun('run-1')).toMatchObject({
+      status: 'FAILED', qualityDisposition: 'HARD_FAILURE', revisionRound: 1,
+    })
+    const events = await repository.listEvents('run-1')
+    expect(events.some((event) => event.type === 'delivery.started')).toBe(false)
+    expect(events.some((event) => event.type === 'issue.resolved'
+      && event.payload.resolution === 'ACCEPTED')).toBe(false)
+    expect(events.find((event) => event.type === 'deck_review.completed')).toMatchObject({
+      payload: { reason: 'DECK_REVIEW_REJECTED', retryable: false },
+    })
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
     })
   })
 
@@ -590,7 +654,10 @@ describe('deck review runner', () => {
     expect(reviewer.requests.size).toBe(1)
     expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED' })
     expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({
-      type: 'run.failed', payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+      type: 'run.failed', payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
     })
   })
 

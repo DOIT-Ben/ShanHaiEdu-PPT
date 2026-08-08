@@ -328,14 +328,16 @@ export class DeckReviewRunner {
           const replayHasHardBlocker = disposition.blockingIssueIds.length > 0
             || acceptedQuality.invalidIssueIds.length > 0
           const replayHasInconsistentPassingReview = passesDeckQuality(review) && !initiallyPassed
+          const replayFailure = replayHasHardBlocker || replayHasInconsistentPassingReview
+            ? terminalDeckQualityFailure(remediationExhausted, disposition.blockingIssueIds)
+            : null
           if (!initiallyPassed && isVisualDeckV4(transaction.run)
             && transaction.run.status === 'DECK_REVIEW' && !policyAcceptedForDelivery
-            && (replayHasHardBlocker || replayHasInconsistentPassingReview)) {
+            && replayFailure) {
             failVisualDeckV4Transaction({
               transaction,
               clock: this.dependencies.clock,
-              errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
-              reason: 'DECK_REVIEW_REJECTED',
+              ...replayFailure,
             })
           }
           return {
@@ -464,6 +466,9 @@ export class DeckReviewRunner {
         && (disposition.blockingIssueIds.length > 0
           || acceptedQuality.invalidIssueIds.length > 0
           || (requiresHuman && !policyAcceptedForDelivery))
+      const terminalFailure = requiresInternalFailure
+        ? terminalDeckQualityFailure(remediationExhausted, disposition.blockingIssueIds)
+        : null
       const policy = shouldDeliver
         ? transitionRun(transaction.run, 'DELIVERING')
         : requiresHuman && !requiresInternalFailure ? transitionRun(transaction.run, 'NEEDS_HUMAN') : transaction.run
@@ -487,7 +492,7 @@ export class DeckReviewRunner {
         total: 1,
         pageNumbers: allPageNumbers(transaction.run),
         reason: currentReviewPassed ? null : 'DECK_REVIEW_REJECTED',
-        retryable: currentReviewPassed ? null : policyAcceptedForDelivery ? false : !requiresHuman,
+        retryable: currentReviewPassed ? null : policyAcceptedForDelivery || terminalFailure ? false : !requiresHuman,
         requiresUserAction: requiresHuman && !requiresInternalFailure,
         nextAction: requiresHuman && !requiresInternalFailure ? 'REVIEW_RESULT' : null,
       })
@@ -502,12 +507,11 @@ export class DeckReviewRunner {
           total: 1,
           pageNumbers: allPageNumbers(transaction.run),
         })
-      } else if (requiresInternalFailure) {
+      } else if (terminalFailure) {
         failVisualDeckV4Transaction({
           transaction,
           clock: this.dependencies.clock,
-          errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
-          reason: 'DECK_REVIEW_REJECTED',
+          ...terminalFailure,
         })
       } else if (requiresHuman) {
         transaction.appendEvent({
@@ -795,6 +799,21 @@ export function deckReviewStepKey(run: Pick<RunRecord, 'id' | 'revisionRound'>) 
 export function passesDeckQuality(review: DeckReview) {
   return review.qualityScore >= DECK_QUALITY_THRESHOLD
     && review.issues.length === 0
+}
+
+function terminalDeckQualityFailure(
+  remediationExhausted: boolean,
+  blockingIssueIds: readonly string[],
+) {
+  return remediationExhausted && blockingIssueIds.length > 0
+    ? {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' as const,
+        reason: 'REVISION_LIMIT_REACHED' as const,
+      }
+    : {
+        errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' as const,
+        reason: 'DECK_REVIEW_REJECTED' as const,
+      }
 }
 
 function hasOpenBlockingIssues(events: readonly AgentEvent[]) {

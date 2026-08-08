@@ -261,6 +261,10 @@ Run 详情的 `qualityDisposition` 明确区分质量结果：
 - `TECHNICAL_CONTRACT_INVALID`
 - `WORKER_FATAL`
 
+`QUALITY_REMEDIATION_EXHAUSTED` 表示 `BOUNDED_AUTO` 已达到 `maxRevisionRounds`，但仍有不能由非阻断策略接受的质量问题；
+其 `run.failed.payload.reason` 固定为 `REVISION_LIMIT_REACHED`，符合恢复门禁时可走既有质量恢复合同。
+`QUALITY_ISSUE_STATE_INCONSISTENT` 仅表示质量事件、接受审计或状态机记录彼此矛盾，不能把正常的修订次数耗尽归入该错误。
+
 `TECHNICAL_CONTRACT_INVALID` 表示图片提示、来源引用、蓝图页、返修产物或交付输入等内部硬合同不合法；
 `TECHNICAL_CONFIGURATION_REQUIRED` 表示 Provider 权限、模型配置或宿主账务合同等需要运维修复的技术故障。
 两者都不要求普通用户确认，消费者只按版本化 `run.failed.payload.errorCode` 分支。

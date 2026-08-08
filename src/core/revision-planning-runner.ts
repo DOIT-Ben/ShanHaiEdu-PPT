@@ -532,37 +532,24 @@ export class RevisionPlanningRunner {
       && ['MAX_REVISION_ROUNDS_REACHED', 'REVISION_PLAN_HAS_NO_ISSUES', 'REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES'].includes(reason)) {
       const delivered = await this.dependencies.repository.transact(run.id, (transaction) => {
         if (this.acceptQualityAndStartDelivery(transaction)) return true
+        const terminalFailure = reason === 'MAX_REVISION_ROUNDS_REACHED'
+          ? {
+              errorCode: 'QUALITY_REMEDIATION_EXHAUSTED' as const,
+              reason: 'REVISION_LIMIT_REACHED' as const,
+            }
+          : {
+              errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' as const,
+              reason: 'DECK_REVIEW_REJECTED' as const,
+            }
         failVisualDeckV4Transaction({
           transaction,
           clock: this.dependencies.clock,
-          errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT',
-          reason: 'DECK_REVIEW_REJECTED',
+          ...terminalFailure,
         })
         return false
       })
       const latest = await this.requireRun(run.id)
       return { status: latest.status, step: null, plan: null, replayed: !delivered }
-    }
-    const terminalErrorCode = run.presentationMode === 'VISUAL_DECK_V4'
-      && run.automationLevel === 'BOUNDED_AUTO'
-      ? reason === 'MAX_REVISION_ROUNDS_REACHED'
-        ? 'QUALITY_REMEDIATION_EXHAUSTED' as const
-        : ['REVISION_PLAN_HAS_NO_ISSUES', 'REVISION_PLAN_HAS_NO_REPAIRABLE_ISSUES'].includes(reason)
-          ? 'QUALITY_ISSUE_STATE_INCONSISTENT' as const
-          : null
-      : null
-    if (terminalErrorCode) {
-      const failed = await this.dependencies.repository.transact(run.id, (transaction) =>
-        failVisualDeckV4Transaction({
-          transaction,
-          clock: this.dependencies.clock,
-          errorCode: terminalErrorCode,
-          reason: terminalErrorCode === 'QUALITY_REMEDIATION_EXHAUSTED'
-            ? 'REVISION_LIMIT_REACHED'
-            : 'DECK_REVIEW_REJECTED',
-        }))
-      const latest = await this.requireRun(run.id)
-      return { status: latest.status, step: null, plan: null, replayed: !failed }
     }
     if (run.status === 'NEEDS_HUMAN') return { status: run.status, step: null, plan: null, replayed: true }
     const updated = await this.dependencies.repository.transact(run.id, (transaction) => {

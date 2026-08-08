@@ -540,6 +540,39 @@ describe('revision planning runner', () => {
     expect(events.at(-1)).toMatchObject({ type: 'delivery.started' })
   })
 
+  test('closes a bounded v4 run with quality remediation exhausted when a hard finding remains at the revision limit', async () => {
+    const { repository, planner, runner } = await fixture({
+      revisionRound: 2,
+      maxRevisionRounds: 2,
+      presentationMode: 'VISUAL_DECK_V4',
+      automationLevel: 'BOUNDED_AUTO',
+      budgetUnits: 0,
+      committedBudgetUnits: 0,
+    })
+    await repository.transact('run-1', (transaction) => {
+      transaction.appendEvent({
+        schemaVersion: '1',
+        type: 'issue.detected',
+        payload: {
+          id: 'issue-1', category: 'FACTUAL_RISK', severity: 'CRITICAL',
+          summary: '最后一次返修后仍存在教材事实错误。', slideIds: ['run-1:slide:2'],
+          sourceChunkIds: ['chunk-2'], status: 'OPEN', repairDomain: 'KNOWLEDGE',
+        },
+      })
+    })
+
+    expect(await runner.plan('run-1')).toMatchObject({ status: 'FAILED', step: null, plan: null })
+    expect(planner.requests.size).toBe(0)
+    expect(await repository.getRun('run-1')).toMatchObject({ status: 'FAILED', qualityDisposition: 'HARD_FAILURE' })
+    expect((await repository.listEvents('run-1')).at(-1)).toMatchObject({
+      type: 'run.failed',
+      payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
+    })
+  })
+
   test('keeps a supervised v4 run behind internal review when revisions are disabled', async () => {
     const { repository, planner, runner } = await fixture({
       presentationMode: 'VISUAL_DECK_V4',

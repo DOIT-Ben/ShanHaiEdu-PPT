@@ -1275,7 +1275,10 @@ describe('mock runtime', () => {
       && event.payload.resolution === 'ACCEPTED')).toBe(false)
     expect(events.at(-1)).toMatchObject({
       type: 'run.failed',
-      payload: { errorCode: 'QUALITY_ISSUE_STATE_INCONSISTENT' },
+      payload: {
+        errorCode: 'QUALITY_REMEDIATION_EXHAUSTED',
+        reason: 'REVISION_LIMIT_REACHED',
+      },
     })
     const detail = await scenario.runtime.handler(request(`/v1/runs/${scenario.runId}`))
     expect(await detail.json()).toMatchObject({ data: { qualityDisposition: 'HARD_FAILURE' } })
