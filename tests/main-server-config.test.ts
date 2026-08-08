@@ -243,7 +243,11 @@ describe('main PPT Agent server configuration', () => {
         { model: 'gpt-image-2', roles: ['IMAGE', 'IMAGE_EDIT'], evaluationEnabled: true, published: false },
       ],
     })
-    const runtimePolicy = new V4ModelPolicy({ runtimeMode: 'MOCK', ...modelPolicy })
+    const runtimePolicy = new V4ModelPolicy({
+      runtimeMode: 'MOCK',
+      ...modelPolicy,
+      now: () => new Date('2026-08-07T12:00:00.000Z'),
+    })
     expect(runtimePolicy.evaluationModels('IMAGE')).toEqual(['gemini-3-pro-image-preview', 'gpt-image-2'])
     expect(runtimePolicy.publishedModels('IMAGE')).toEqual(['gemini-3-pro-image-preview'])
     expect(JSON.stringify(modelPolicy)).not.toContain('newapi.doitbenai.cloud')
