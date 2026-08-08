@@ -201,6 +201,8 @@ type V4ManuscriptStageRequest = Readonly<{
   parse: (value: unknown) => unknown
 }>
 
+type V4SemanticCompletionKind = 'CONTENT_SLOT' | 'SOURCE_EVIDENCE_DISAMBIGUATION'
+
 function v4PlanningRequestEvidenceKey(requestKey: string) {
   return `${requestKey}:request-evidence`
 }
@@ -716,6 +718,7 @@ export class PlanningRunner {
         reviewRequest,
         error,
         { sourceEvidenceDisambiguation: '每条来源摘录必须足够长，并且只能在一个受信 chunk 中出现。' },
+        'SOURCE_EVIDENCE_DISAMBIGUATION',
       ))
       try {
         draft = compiler.compilePlan(compilerInput, creative, review)
@@ -1038,6 +1041,7 @@ export class PlanningRunner {
     request: V4ManuscriptStageRequest,
     initialError: unknown,
     extraPayload: Readonly<Record<string, unknown>> = {},
+    completionKind: V4SemanticCompletionKind = 'CONTENT_SLOT',
   ) {
     const repairPayload = {
       ...request.payload,
@@ -1056,7 +1060,17 @@ export class PlanningRunner {
       repairKey,
       repairInputHash,
       repairTool: request.tool,
+      completionKind,
     })
+    if (claimed === 'REPLAY_MISMATCH') {
+      throw new PlanningFailureError(this.contractFailure(
+        input,
+        new Error(V4_PLANNING_REQUEST_REPLAY_MISMATCH),
+        1,
+        1,
+        false,
+      ))
+    }
     if (claimed === 'EXHAUSTED') {
       const terminal = this.terminalV4SemanticFailure(input, initialError)
       await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true, terminal.errorCode)
@@ -1102,8 +1116,13 @@ export class PlanningRunner {
     runId: string,
     stage: V4ManuscriptStageRequest['stage'],
     attempt: number,
-    repair: Readonly<{ repairKey: string; repairInputHash: string; repairTool: string }>,
-  ): Promise<'CLAIMED' | 'RESUME' | 'EXHAUSTED'> {
+    repair: Readonly<{
+      repairKey: string
+      repairInputHash: string
+      repairTool: string
+      completionKind: V4SemanticCompletionKind
+    }>,
+  ): Promise<'CLAIMED' | 'RESUME' | 'EXHAUSTED' | 'REPLAY_MISMATCH'> {
     return this.dependencies.repository.transact(runId, (transaction) => {
       const manuscriptStages: readonly V4ManuscriptStageRequest['stage'][] = [
         'creative-manuscript', 'review-manuscript',
@@ -1118,15 +1137,20 @@ export class PlanningRunner {
       const audit = audits[manuscriptStages.indexOf(stage)]?.audit
       const output = audits[manuscriptStages.indexOf(stage)]?.output
       if (!audit || !output) throw new Error('V4_PLANNING_STAGE_AUDIT_MISSING')
+      const repairStep = output.semanticCompletionUsed
+        ? transaction.getStep(repair.repairKey)
+        : null
+      if (repairStep && (repairStep.inputHash !== repair.repairInputHash || repairStep.tool !== repair.repairTool)) {
+        return repair.completionKind === 'SOURCE_EVIDENCE_DISAMBIGUATION'
+          ? 'EXHAUSTED'
+          : 'REPLAY_MISMATCH'
+      }
       if (audits.some((candidate) => candidate?.output.semanticCompletionExhausted)) return 'EXHAUSTED'
       if (output.semanticCompletionUsed) {
-        const repairStep = transaction.getStep(repair.repairKey)
         const repairError = repairStep?.errorCode ?? ''
-        const sameRepair = !repairStep
-          || (repairStep.inputHash === repair.repairInputHash && repairStep.tool === repair.repairTool)
-        if (sameRepair && (!repairStep || repairStep.status === 'RUNNING' || repairStep.status === 'COMPLETED'
+        if (!repairStep || repairStep.status === 'RUNNING' || repairStep.status === 'COMPLETED'
           || (repairStep?.status === 'FAILED'
-            && technicalFailureDisposition(repairError) === 'RETRYABLE'))) return 'RESUME'
+            && technicalFailureDisposition(repairError) === 'RETRYABLE')) return 'RESUME'
         return 'EXHAUSTED'
       }
       if (audits.some((candidate) => candidate?.output.semanticCompletionUsed)) return 'EXHAUSTED'

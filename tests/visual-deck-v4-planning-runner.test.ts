@@ -1269,6 +1269,92 @@ describe('visual deck v4 planning runner', () => {
     expect(completionCalls).toBe(1)
   })
 
+  test('fails closed when a claimed semantic repair replays with a different request contract', async () => {
+    const repository = new InMemoryAgentRepository()
+    const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
+    const service = runService(repository, clock)
+    const inputRequest = request()
+    const created = await service.create(inputRequest, 'create-v4-chain-4-completion-replay-mismatch-0001')
+    const staged = stagedModel(created, inputRequest, clock)
+    const execute = staged.model.execute.bind(staged.model)
+    let creativeCalls = 0
+    let completionCalls = 0
+    staged.model.execute = async (modelInput) => {
+      if (modelInput.operation !== 'create_visual_deck_v4_creative_manuscript') return execute(modelInput)
+      creativeCalls += 1
+      if ((modelInput.payload as { contentSlotCompletion?: boolean }).contentSlotCompletion) {
+        completionCalls += 1
+        return execute(modelInput)
+      }
+      const result = await execute(modelInput)
+      const manuscript = result as { slides: readonly Record<string, unknown>[] }
+      return {
+        ...(result as Record<string, unknown>),
+        slides: manuscript.slides.map((slide) => ({ ...slide, visualDescription: '待补全' })),
+      }
+    }
+    const originalTransact = repository.transact.bind(repository)
+    let crashAfterClaim = true
+    repository.transact = async (runId, operation) => {
+      const result = await originalTransact(runId, operation)
+      if (crashAfterClaim) {
+        const steps = await repository.listSteps(runId)
+        const audit = steps.find((step) => step.idempotencyKey === planningStageAuditKey(runId, 'creative-manuscript'))
+        const repair = steps.find((step) => step.idempotencyKey === visualDeckV4PlanningStageStepKey(
+          runId, 'creative-manuscript', 0, 1,
+        ))
+        const output = audit?.output as { semanticCompletionUsed?: boolean } | null
+        if (output?.semanticCompletionUsed && !repair) {
+          crashAfterClaim = false
+          throw new Error('SIMULATED_PROCESS_CRASH')
+        }
+      }
+      return result
+    }
+    const runner = new PlanningRunner({ repository, documents: documents(), model: staged.model, clock })
+    const input = {
+      runId: created.run.id, stepId: `step-${created.run.id}-plan`,
+      idempotencyKey: planningStepKey(created.run.id), source: created.run.source,
+      slideCount: created.run.slideCount, visualDirection: created.run.visualDirection,
+      presentationMode: inputRequest.presentationMode, visualDeckV4: inputRequest.visualDeckV4,
+    } as const
+
+    expect((await runner.plan(input)).blueprint).toBeNull()
+    expect(creativeCalls).toBe(1)
+
+    const repairKey = visualDeckV4PlanningStageStepKey(created.run.id, 'creative-manuscript', 0, 1)
+    await originalTransact(created.run.id, (transaction) => transaction.putStep({
+      id: `step-${hashInput({ repairKey }).slice(0, 28)}`,
+      runId: created.run.id,
+      idempotencyKey: repairKey,
+      inputHash: 'f'.repeat(64),
+      tool: 'unexpected_v4_repair',
+      status: 'COMPLETED',
+      budgetUnits: 0,
+      budgetReservationId: null,
+      externalOperationId: null,
+      errorCode: null,
+      output: null,
+      createdAt: clock.now().toISOString(),
+      updatedAt: clock.now().toISOString(),
+    }))
+    clock.advance(60_000)
+    await originalTransact(created.run.id, (transaction) => resumeTechnicalRecovery(transaction, clock))
+
+    await expect(runner.plan(input)).resolves.toMatchObject({
+      blueprint: null,
+      step: { status: 'FAILED', errorCode: 'V4_PLANNING_REQUEST_REPLAY_MISMATCH' },
+    })
+    expect(creativeCalls).toBe(2)
+    expect(completionCalls).toBe(0)
+    expect((await repository.listSteps(created.run.id)).find((step) =>
+      step.idempotencyKey === planningStageAuditKey(created.run.id, 'creative-manuscript'),
+    )).toMatchObject({ output: {
+      semanticCompletionUsed: true,
+      semanticCompletionExhausted: false,
+    } })
+  })
+
   test('reuses the semantic completion key after its first provider submission fails transiently', async () => {
     const repository = new InMemoryAgentRepository()
     const clock = new FixedClock(new Date('2026-08-07T00:00:00.000Z'))
