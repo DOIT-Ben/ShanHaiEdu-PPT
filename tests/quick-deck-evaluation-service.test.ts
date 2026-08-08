@@ -8,6 +8,7 @@ import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-rend
 import { LocalQuickDeckEvaluationArtifactCleanupPort } from '../src/adapters/quick-deck-evaluation-local-artifact-cleanup'
 import { InMemoryQuickDeckEvaluationRepository } from '../src/adapters/quick-deck-evaluation-in-memory-repository'
 import { MediaSubmissionError, type ImageAspectDiagnostics, type ImageGenerationPort, type StructuredModelPort } from '../src/core/ports'
+import type { QuickDeckEvaluationPageRecord } from '../src/core/quick-deck-evaluation-ports'
 import {
   QuickDeckEvaluationError,
   QuickDeckEvaluationService,
@@ -179,9 +180,13 @@ class PartialImages extends AsyncImages {
   }
 }
 
-class RejectedSecondPageImages extends AsyncImages {
+class RejectedPageImages extends AsyncImages {
+  constructor(artifacts: LocalArtifactPort, private readonly rejectedPageNumber: number) {
+    super(artifacts)
+  }
+
   override async submit(input: Parameters<ImageGenerationPort['submit']>[0]) {
-    if (input.idempotencyKey.includes(':slide:2:')) {
+    if (input.idempotencyKey.includes(`:slide:${this.rejectedPageNumber}:`)) {
       this.submissions.push(structuredClone(input))
       throw new MediaSubmissionError(
         oversizedProviderErrorCode,
@@ -195,6 +200,42 @@ class RejectedSecondPageImages extends AsyncImages {
   }
 }
 
+class CheckpointImages extends AsyncImages {
+  readonly checkpoints: Array<Readonly<{
+    pageNumber: number
+    status: QuickDeckEvaluationPageRecord['status']
+    submissionState: QuickDeckEvaluationPageRecord['submissionState']
+    billingState: QuickDeckEvaluationPageRecord['billingState']
+    laterPages: Array<Pick<QuickDeckEvaluationPageRecord, 'pageNumber' | 'status' | 'submissionState' | 'billingState'>>
+  }>> = []
+  #jobId: string | null = null
+
+  constructor(artifacts: LocalArtifactPort, private readonly repository: InMemoryQuickDeckEvaluationRepository) {
+    super(artifacts)
+  }
+
+  setJobId(jobId: string) {
+    this.#jobId = jobId
+  }
+
+  override async submit(input: Parameters<ImageGenerationPort['submit']>[0]): ReturnType<ImageGenerationPort['submit']> {
+    if (!this.#jobId) throw new Error('TEST_SUBMISSION_CHECKPOINT_JOB_MISSING')
+    const record = await this.repository.get(this.#jobId)
+    const current = record?.pages.find((page) => page.idempotencyKey === input.idempotencyKey)
+    if (!current) throw new Error('TEST_SUBMISSION_CHECKPOINT_PAGE_MISSING')
+    this.checkpoints.push({
+      pageNumber: current.pageNumber,
+      status: current.status,
+      submissionState: current.submissionState,
+      billingState: current.billingState,
+      laterPages: record!.pages
+        .filter((page) => page.pageNumber > current.pageNumber)
+        .map(({ pageNumber, status, submissionState, billingState }) => ({ pageNumber, status, submissionState, billingState })),
+    })
+    return await super.submit(input)
+  }
+}
+
 class FailOnceOutcomeSaveRepository extends InMemoryQuickDeckEvaluationRepository {
   #failed = false
 
@@ -204,6 +245,25 @@ class FailOnceOutcomeSaveRepository extends InMemoryQuickDeckEvaluationRepositor
       && input.record.pages.some((page) => page.submissionState === 'SUBMITTED')) {
       this.#failed = true
       throw new Error('TEST_IMAGE_OUTCOME_PERSISTENCE_INTERRUPTED')
+    }
+    await super.save(input)
+  }
+}
+
+class FailOnceDefiniteRejectionSaveRepository extends InMemoryQuickDeckEvaluationRepository {
+  #failed = false
+
+  override async save(input: Parameters<InMemoryQuickDeckEvaluationRepository['save']>[0]) {
+    const rejected = input.record.pages.find((page) => page.pageNumber === 2)
+    const unstarted = input.record.pages.find((page) => page.pageNumber === 3)
+    if (!this.#failed
+      && input.record.status === 'SUBMITTING_IMAGES'
+      && rejected?.status === 'FAILED'
+      && rejected.submissionState === 'NOT_SUBMITTED'
+      && unstarted?.status === 'PENDING'
+      && unstarted.submissionState === 'NOT_SUBMITTED') {
+      this.#failed = true
+      throw new Error('TEST_DEFINITE_REJECTION_PERSISTENCE_INTERRUPTED')
     }
     await super.save(input)
   }
@@ -635,6 +695,46 @@ describe('quick-deck evaluation service', () => {
         'packaging.started', 'packaging.completed',
       ])
       expect(events.terminalSequence).toBe(6)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('persists one recoverable checkpoint before each image provider submission', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-submission-checkpoint-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const images = new CheckpointImages(artifacts, repository)
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images,
+        renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(3))
+      images.setJobId(created.jobId)
+
+      await service.tick({ limit: 10 })
+
+      expect(images.checkpoints).toEqual([
+        {
+          pageNumber: 1, status: 'PENDING', submissionState: 'UNKNOWN', billingState: 'UNKNOWN',
+          laterPages: [
+            { pageNumber: 2, status: 'PENDING', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED' },
+            { pageNumber: 3, status: 'PENDING', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED' },
+          ],
+        },
+        {
+          pageNumber: 2, status: 'PENDING', submissionState: 'UNKNOWN', billingState: 'UNKNOWN',
+          laterPages: [{ pageNumber: 3, status: 'PENDING', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED' }],
+        },
+        {
+          pageNumber: 3, status: 'PENDING', submissionState: 'UNKNOWN', billingState: 'UNKNOWN',
+          laterPages: [],
+        },
+      ])
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -1121,12 +1221,12 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
-  test('persists every parallel submission outcome before draining a definite rejection', async () => {
+  test('stops later image submissions after a definite rejection and drains only accepted pages', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-partial-'))
     try {
       const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
       const repository = new InMemoryQuickDeckEvaluationRepository()
-      const images = new RejectedSecondPageImages(artifacts)
+      const images = new RejectedPageImages(artifacts, 2)
       const service = new QuickDeckEvaluationService({
         repository, artifacts, model: new CreativeModel(), images,
         renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
@@ -1141,7 +1241,6 @@ describe('quick-deck evaluation service', () => {
       expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual([
         expect.stringContaining(':slide:1:'),
         expect.stringContaining(':slide:2:'),
-        expect.stringContaining(':slide:3:'),
       ])
       expect(stored).toMatchObject({
         status: 'GENERATING',
@@ -1152,7 +1251,10 @@ describe('quick-deck evaluation service', () => {
       expect(stored?.pages).toEqual([
         expect.objectContaining({ submissionState: 'SUBMITTED', operationId: expect.any(String) }),
         expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_PROVIDER_ERROR' }),
-        expect.objectContaining({ submissionState: 'SUBMITTED', operationId: expect.any(String) }),
+        expect.objectContaining({
+          status: 'FAILED', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED',
+          operationId: null, errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED',
+        }),
       ])
 
       await service.tick({ limit: 10 })
@@ -1161,10 +1263,104 @@ describe('quick-deck evaluation service', () => {
         pages: [
           expect.objectContaining({ status: 'COMPLETED' }),
           expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', aspectDiagnostics: null }),
-          expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
         ],
       })
-      expect(images.submissions).toHaveLength(3)
+      expect(images.submissions).toHaveLength(2)
+      expect(images.lookups).toHaveLength(0)
+      expect(images.inspections.map((inspection) => inspection.operationId)).toEqual([stored!.pages[0]!.operationId!])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('keeps unstarted pages skipped when a definite rejection outcome save is interrupted', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-rejection-save-interruption-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new FailOnceDefiniteRejectionSaveRepository()
+      const images = new RejectedPageImages(artifacts, 2)
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images,
+        renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(3))
+
+      await service.tick({ limit: 10 })
+
+      const interrupted = await repository.get(created.jobId)
+      const rejectedPageKey = interrupted!.pages[1]!.idempotencyKey
+      const submittedPageOperationId = interrupted!.pages[0]!.operationId!
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual([
+        expect.stringContaining(':slide:1:'),
+        expect.stringContaining(':slide:2:'),
+      ])
+      expect(interrupted).toMatchObject({
+        status: 'GENERATING', pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+        pages: [
+          expect.objectContaining({ submissionState: 'SUBMITTED', operationId: expect.any(String) }),
+          expect.objectContaining({ status: 'PENDING', submissionState: 'UNKNOWN' }),
+          expect.objectContaining({
+            status: 'FAILED', submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED',
+            errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED',
+          }),
+        ],
+      })
+
+      await service.tick({ limit: 10 })
+
+      expect(images.submissions).toHaveLength(2)
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([rejectedPageKey])
+      expect(images.inspections.map((inspection) => inspection.operationId)).toEqual([submittedPageOperationId])
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'GENERATING', pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+        pages: [
+          expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
+          expect.objectContaining({ status: 'PENDING', submissionState: 'UNKNOWN' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
+        ],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('fails immediately without draining when the first image submission is definitely rejected', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-first-rejection-'))
+    try {
+      const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
+      const repository = new InMemoryQuickDeckEvaluationRepository()
+      const images = new RejectedPageImages(artifacts, 1)
+      const service = new QuickDeckEvaluationService({
+        repository, artifacts, model: new CreativeModel(), images,
+        renderer: new SharpPptxPresentationRenderer(), clock: new ControlledClock(),
+        textModel: 'gpt-5.6-terra', allowedImageModels: ['gemini-3-pro-image-preview'],
+        modelEligibility: readyModelEligibility,
+        maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 60_000,
+      })
+      const created = await service.create('evaluation-tenant', request(3))
+      await service.tick({ limit: 10 })
+
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual([
+        expect.stringContaining(':slide:1:'),
+      ])
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'FAILED',
+        phase: 'FAILED',
+        errorCode: 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+        pages: [
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_PROVIDER_ERROR' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
+        ],
+      })
+      expect(images.lookups).toHaveLength(0)
+      expect(images.inspections).toHaveLength(0)
+      expect((await repository.readEvents({ jobId: created.jobId, afterSequence: 0, limit: 20 })).events
+        .some((entry) => entry.type === 'images.draining')).toBe(false)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -1194,20 +1390,24 @@ describe('quick-deck evaluation service', () => {
         phase: 'IMAGE_GENERATION',
         pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
       })
-      expect(interrupted!.pages.every((page) => page.submissionState === 'UNKNOWN' && page.operationId === null)).toBe(true)
-      expect(images.submissions).toHaveLength(2)
+      expect(interrupted!.pages).toEqual([
+        expect.objectContaining({ status: 'PENDING', submissionState: 'UNKNOWN', operationId: null }),
+        expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
+      ])
+      expect(images.submissions).toHaveLength(1)
 
       await service.tick({ limit: 10 })
 
       expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual(originalKeys)
       expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual(originalKeys)
+      expect(images.inspections).toHaveLength(1)
       expect(await service.getOwned('evaluation-tenant', created.jobId)).toMatchObject({
         status: 'FAILED',
         phase: 'FAILED',
         failure: { code: 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN' },
         pages: [
           expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
-          expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
+          expect.objectContaining({ status: 'FAILED', submissionState: 'NOT_SUBMITTED', errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED' }),
         ],
       })
     } finally {
@@ -1389,7 +1589,7 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
-  test('resumes an interrupted partial drain by lookup and never creates another image submission', async () => {
+  test('continues after an unknown submission and resumes its partial drain without resubmitting', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-restart-drain-'))
     try {
       const artifacts = new LocalArtifactPort(join(directory, 'artifacts'))
@@ -1403,11 +1603,18 @@ describe('quick-deck evaluation service', () => {
         modelEligibility: readyModelEligibility,
         maxActiveJobs: 2, maxDailyJobs: 3, ttlMs: 30 * 60_000,
       })
-      const created = await firstService.create('evaluation-tenant', request(2))
+      const created = await firstService.create('evaluation-tenant', request(3))
       await firstService.tick({ limit: 10 })
-      expect(await repository.get(created.jobId)).toMatchObject({
+      const submitted = await repository.get(created.jobId)
+      expect(submitted).toMatchObject({
         status: 'GENERATING', pendingFailure: 'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
       })
+      expect(images.submissions.map((submission) => submission.idempotencyKey)).toEqual([
+        expect.stringContaining(':slide:1:'),
+        expect.stringContaining(':slide:2:'),
+        expect.stringContaining(':slide:3:'),
+      ])
+      expect(submitted!.pages[1]).toMatchObject({ status: 'PENDING', submissionState: 'UNKNOWN' })
 
       const resumedService = new QuickDeckEvaluationService({
         repository, artifacts, model: new CreativeModel(), images,
@@ -1420,12 +1627,18 @@ describe('quick-deck evaluation service', () => {
       clock.advance(20 * 60_000)
       await resumedService.tick({ limit: 10 })
 
-      expect(images.submissions).toHaveLength(2)
+      expect(images.submissions).toHaveLength(3)
+      expect(images.lookups.map((lookup) => lookup.idempotencyKey)).toEqual([submitted!.pages[1]!.idempotencyKey])
+      expect(images.inspections.map((inspection) => inspection.operationId)).toEqual([
+        submitted!.pages[0]!.operationId!,
+        submitted!.pages[2]!.operationId!,
+      ])
       expect(await repository.get(created.jobId)).toMatchObject({
         status: 'FAILED', errorCode: 'EVALUATION_IMAGE_DRAIN_TIMEOUT',
         pages: [
           expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
           expect.objectContaining({ status: 'FAILED', submissionState: 'UNKNOWN' }),
+          expect.objectContaining({ status: 'COMPLETED', submissionState: 'SUBMITTED' }),
         ],
       })
     } finally {

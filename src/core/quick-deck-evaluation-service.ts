@@ -231,6 +231,13 @@ type QuickDeckSlide = Readonly<{
   imageMimeType: string
 }>
 
+type QuickDeckImageRequirement = ReturnType<typeof blueprintImageRequirements>[number]
+
+type QuickDeckSubmissionOutcome = Readonly<{
+  pageNumber: number
+  page: QuickDeckEvaluationPageRecord
+}>
+
 function quickDeckArtifactKey(record: Pick<QuickDeckEvaluationRecord, 'id'>, kind: 'preview' | 'pptx') {
   return `${QUICK_DECK_EVALUATION_ARTIFACT_PREFIX}:${record.id}:${kind}`
 }
@@ -701,103 +708,50 @@ export class QuickDeckEvaluationService {
     const requirements = blueprintImageRequirements({ id: submitting.id, revisionRound: 0 }, blueprint)
     const preflighted: QuickDeckEvaluationRecord = {
       ...submitting,
-      pages: submitting.pages.map((page) => ({
-        ...page,
-        status: 'PENDING' as const,
-        submissionState: 'UNKNOWN' as const,
-        billingState: 'UNKNOWN' as const,
-        operationId: null,
-        providerRequestId: null,
-        errorCode: null,
-      })),
       nextAttemptAt: this.dependencies.clock.now().toISOString(),
       updatedAt: this.dependencies.clock.now().toISOString(),
     }
     // Persist every original idempotency key before a Provider can accept it.
     await this.saveClaimed({ record: preflighted }, claim)
-    const outcomes = await Promise.all(requirements.map(async (requirement) => {
-      const page = this.pageForRequirement(preflighted, requirement.pageNumber)
-      try {
-        await this.assertModelEligibility({
-          textModel: preflighted.textModel,
-          imageModels: [preflighted.imageModel],
-        })
-        const result = await this.dependencies.images.submit({
-          tenantId: preflighted.tenantId,
-          prompt: requirement.prompt,
-          ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
-          model: preflighted.imageModel,
-          aspectRatio: '16:9',
-          exactAspectRatio: true,
-          backgroundMode: 'OPAQUE',
-          operationMode: 'TEXT_TO_IMAGE',
-          idempotencyKey: page.idempotencyKey,
-        })
-        return {
-          pageNumber: page.pageNumber,
-          page: {
-            ...page,
-            status: result.state === 'PROCESSING' ? 'PROCESSING' as const : 'SUBMITTED' as const,
-            submissionState: 'SUBMITTED' as const,
-            billingState: 'UNKNOWN' as const,
-            operationId: result.operationId,
-            providerRequestId: result.providerRequestId ?? null,
-            aspectDiagnostics: boundedAspectDiagnostics(result.aspectDiagnostics) ?? page.aspectDiagnostics,
-            errorCode: null,
-          },
-        }
-      } catch (error) {
-        const eligibilityFailure = this.modelEligibilityFailureCode(error)
-        if (eligibilityFailure) {
-          return {
-            pageNumber: page.pageNumber,
-            page: {
-              ...page,
-              status: 'FAILED' as const,
-              submissionState: 'NOT_SUBMITTED' as const,
-              billingState: 'NOT_CHARGED' as const,
-              operationId: null,
-              providerRequestId: null,
-              errorCode: eligibilityFailure,
-            },
-          }
-        }
-        const mediaError = error instanceof MediaSubmissionError ? error : null
-        const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
-        const errorCode = storedDiagnosticCode(mediaError?.code) ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
-        const aspectDiagnostics = boundedAspectDiagnostics(mediaError?.aspectDiagnostics)
-        return {
-          pageNumber: page.pageNumber,
-          page: submissionState === 'NOT_SUBMITTED'
-            ? {
-                ...page,
-                status: 'FAILED' as const,
-                submissionState,
-                billingState: mediaError?.billingState ?? 'UNKNOWN',
-                operationId: null,
-                providerRequestId: mediaError?.providerRequestId ?? null,
-                aspectDiagnostics,
-                errorCode,
-              }
-            : {
-                ...page,
-                status: 'PENDING' as const,
-                submissionState,
-                billingState: mediaError?.billingState ?? 'UNKNOWN',
-                operationId: mediaError?.operationId ?? null,
-                providerRequestId: mediaError?.providerRequestId ?? null,
-                aspectDiagnostics,
-                errorCode,
-              },
-        }
-      }
-    }))
     let persisted = preflighted
-    for (const outcome of outcomes.sort((left, right) => left.pageNumber - right.pageNumber)) {
+    let skipRemainingSubmissions = false
+    for (const requirement of requirements) {
+      const page = this.pageForRequirement(persisted, requirement.pageNumber)
+      if (skipRemainingSubmissions) {
+        persisted = this.replacePage(persisted, {
+          ...page,
+          status: 'FAILED',
+          submissionState: 'NOT_SUBMITTED',
+          billingState: 'NOT_CHARGED',
+          operationId: null,
+          providerRequestId: null,
+          errorCode: 'EVALUATION_IMAGE_SUBMISSION_SKIPPED',
+        })
+        await this.saveClaimed({ record: persisted }, claim)
+        continue
+      }
+
+      // Only the page crossing the paid-call boundary is uncertain. Later
+      // pages remain NOT_SUBMITTED until their own attempt is persisted.
+      persisted = this.replacePage(persisted, {
+        ...page,
+        status: 'PENDING',
+        submissionState: 'UNKNOWN',
+        billingState: 'UNKNOWN',
+        operationId: null,
+        providerRequestId: null,
+        errorCode: null,
+      })
+      await this.saveClaimed({ record: persisted }, claim)
+
+      const outcome = await this.submitImageRequirement(persisted, requirement)
       persisted = this.replacePage(persisted, outcome.page)
       await this.saveClaimed({ record: persisted }, claim)
+      if (outcome.page.status === 'FAILED' && outcome.page.submissionState === 'NOT_SUBMITTED') {
+        skipRemainingSubmissions = true
+      }
     }
-    const submissionFailure = outcomes.some((outcome) => outcome.page.errorCode !== null)
+    const submissionFailure = persisted.pages.some((page) => page.errorCode !== null)
       ? quickDeckSubmissionFailureCode(persisted.pages)
       : null
     if (submissionFailure) {
@@ -830,6 +784,87 @@ export class QuickDeckEvaluationService {
         totalPages: generating.request.slideCount,
       }, generatingAt),
     }, claim)
+  }
+
+  private async submitImageRequirement(
+    record: QuickDeckEvaluationRecord,
+    requirement: QuickDeckImageRequirement,
+  ): Promise<QuickDeckSubmissionOutcome> {
+    const page = this.pageForRequirement(record, requirement.pageNumber)
+    try {
+      await this.assertModelEligibility({
+        textModel: record.textModel,
+        imageModels: [record.imageModel],
+      })
+      const result = await this.dependencies.images.submit({
+        tenantId: record.tenantId,
+        prompt: requirement.prompt,
+        ...(requirement.negativePrompt ? { negativePrompt: requirement.negativePrompt } : {}),
+        model: record.imageModel,
+        aspectRatio: '16:9',
+        exactAspectRatio: true,
+        backgroundMode: 'OPAQUE',
+        operationMode: 'TEXT_TO_IMAGE',
+        idempotencyKey: page.idempotencyKey,
+      })
+      return {
+        pageNumber: page.pageNumber,
+        page: {
+          ...page,
+          status: result.state === 'PROCESSING' ? 'PROCESSING' : 'SUBMITTED',
+          submissionState: 'SUBMITTED',
+          billingState: 'UNKNOWN',
+          operationId: result.operationId,
+          providerRequestId: result.providerRequestId ?? null,
+          aspectDiagnostics: boundedAspectDiagnostics(result.aspectDiagnostics) ?? page.aspectDiagnostics,
+          errorCode: null,
+        },
+      }
+    } catch (error) {
+      const eligibilityFailure = this.modelEligibilityFailureCode(error)
+      if (eligibilityFailure) {
+        return {
+          pageNumber: page.pageNumber,
+          page: {
+            ...page,
+            status: 'FAILED',
+            submissionState: 'NOT_SUBMITTED',
+            billingState: 'NOT_CHARGED',
+            operationId: null,
+            providerRequestId: null,
+            errorCode: eligibilityFailure,
+          },
+        }
+      }
+      const mediaError = error instanceof MediaSubmissionError ? error : null
+      const submissionState = mediaError?.submissionState ?? 'UNKNOWN'
+      const errorCode = storedDiagnosticCode(mediaError?.code) ?? 'EVALUATION_IMAGE_SUBMISSION_UNKNOWN'
+      const aspectDiagnostics = boundedAspectDiagnostics(mediaError?.aspectDiagnostics)
+      return {
+        pageNumber: page.pageNumber,
+        page: submissionState === 'NOT_SUBMITTED'
+          ? {
+              ...page,
+              status: 'FAILED',
+              submissionState,
+              billingState: mediaError?.billingState ?? 'UNKNOWN',
+              operationId: null,
+              providerRequestId: mediaError?.providerRequestId ?? null,
+              aspectDiagnostics,
+              errorCode,
+            }
+          : {
+              ...page,
+              status: 'PENDING',
+              submissionState,
+              billingState: mediaError?.billingState ?? 'UNKNOWN',
+              operationId: mediaError?.operationId ?? null,
+              providerRequestId: mediaError?.providerRequestId ?? null,
+              aspectDiagnostics,
+              errorCode,
+            },
+      }
+    }
   }
 
   private async inspectAndPackage(record: QuickDeckEvaluationRecord, claim: QuickDeckClaim) {
@@ -944,7 +979,7 @@ export class QuickDeckEvaluationService {
       ? {
           ...page,
           status: 'FAILED' as const,
-          errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+          errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_SKIPPED',
         }
       : page)
     const pendingFailure = record.pendingFailure ?? quickDeckSubmissionFailureCode(pages)
