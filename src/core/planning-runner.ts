@@ -1037,7 +1037,7 @@ export class PlanningRunner {
     extraPayload: Readonly<Record<string, unknown>> = {},
   ) {
     const claimed = await this.claimV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0)
-    if (!claimed) {
+    if (claimed === 'EXHAUSTED') {
       await this.markV4SemanticCompletion(input.runId, request.stage, input.attempt ?? 0, true)
       throw new PlanningFailureError(this.terminalV4SemanticFailure(input, initialError))
     }
@@ -1080,19 +1080,42 @@ export class PlanningRunner {
     }
   }
 
-  private async claimV4SemanticCompletion(runId: string, stage: V4ManuscriptStageRequest['stage'], attempt: number) {
+  private async claimV4SemanticCompletion(
+    runId: string,
+    stage: V4ManuscriptStageRequest['stage'],
+    attempt: number,
+  ): Promise<'CLAIMED' | 'RESUME' | 'EXHAUSTED'> {
     return this.dependencies.repository.transact(runId, (transaction) => {
-      const auditKey = `${visualDeckV4PlanningStageStepKey(runId, stage, attempt)}:attempt-audit`
-      const audit = transaction.getStep(auditKey)
-      if (!audit || audit.tool !== 'audit_v4_planning_stage') throw new Error('V4_PLANNING_STAGE_AUDIT_MISSING')
-      const output = v4PlanningStageAuditSchema.parse(audit.output)
-      if (output.semanticCompletionUsed || output.semanticCompletionExhausted) return false
+      const manuscriptStages: readonly V4ManuscriptStageRequest['stage'][] = [
+        'creative-manuscript', 'review-manuscript',
+      ]
+      const audits = manuscriptStages.map((candidateStage) => {
+        const auditKey = `${visualDeckV4PlanningStageStepKey(runId, candidateStage, attempt)}:attempt-audit`
+        const audit = transaction.getStep(auditKey)
+        return audit && audit.tool === 'audit_v4_planning_stage'
+          ? { audit, output: v4PlanningStageAuditSchema.parse(audit.output) }
+          : null
+      })
+      const audit = audits[manuscriptStages.indexOf(stage)]?.audit
+      const output = audits[manuscriptStages.indexOf(stage)]?.output
+      if (!audit || !output) throw new Error('V4_PLANNING_STAGE_AUDIT_MISSING')
+      if (audits.some((candidate) => candidate?.output.semanticCompletionExhausted)) return 'EXHAUSTED'
+      if (output.semanticCompletionUsed) {
+        const repairKey = `${visualDeckV4PlanningStageStepKey(runId, stage, attempt, 1)}`
+        const repairStep = transaction.getStep(repairKey)
+        const repairError = repairStep?.errorCode ?? ''
+        if (!repairStep || repairStep.status === 'RUNNING'
+          || (repairStep?.status === 'FAILED'
+            && technicalFailureDisposition(repairError) === 'RETRYABLE')) return 'RESUME'
+        return 'EXHAUSTED'
+      }
+      if (audits.some((candidate) => candidate?.output.semanticCompletionUsed)) return 'EXHAUSTED'
       transaction.putStep({
         ...audit,
         output: { ...output, semanticCompletionUsed: true },
         updatedAt: this.dependencies.clock.now().toISOString(),
       })
-      return true
+      return 'CLAIMED'
     })
   }
 
