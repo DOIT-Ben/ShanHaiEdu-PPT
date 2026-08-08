@@ -687,6 +687,7 @@ describe('gateway image generation adapter', () => {
     const adapter = new GatewayImageGenerationPort({
       ...config,
       artifacts,
+      imageEditBaseUrl: 'http://127.0.0.1:4010/v1',
       imageEditTaskEnabled: true,
       fetchImpl: async (url, init) => {
         captured = { url: String(url), init: init! }
@@ -706,7 +707,7 @@ describe('gateway image generation adapter', () => {
     })).resolves.toEqual({ operationId, state: 'QUEUED' })
 
     const request = captured as unknown as { url: string; init: RequestInit }
-    expect(request.url).toBe('https://newapi.doitbenai.cloud/v1/images/edits?response_mode=async')
+    expect(request.url).toBe('http://127.0.0.1:4010/v1/images/edits?response_mode=async')
     expect(new Headers(request.init.headers).get('X-Image-Operation-Mode')).toBe('IMAGE_EDIT')
     expect(new Headers(request.init.headers).has('Content-Type')).toBe(false)
     expect(request.init.body).toBeInstanceOf(FormData)

@@ -5,6 +5,7 @@ import {
   resolveGatewayCoursewareModelsConfig,
   resolveMainServerConfig,
   resolveQuickDeckEvaluationConfig,
+  resolveV4ImageEditGatewayBaseUrl,
   resolveV4ModelPolicyConfig,
   resolveV4RevisionImageModel,
 } from '../src/runtime/main-server-config'
@@ -172,9 +173,15 @@ describe('main PPT Agent server configuration', () => {
       PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
       PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'verified-image-edit-model',
     })).toBeNull()
+    expect(() => resolveV4RevisionImageModel({
+      PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
+      PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED: 'true',
+      PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'verified-image-edit-model',
+    })).toThrow('PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL_REQUIRED')
     expect(resolveV4RevisionImageModel({
       PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
       PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED: 'true',
+      PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL: 'http://127.0.0.1:4010/v1',
       PPT_AGENT_V4_REVISION_IMAGE_MODEL: 'verified-image-edit-model',
     })).toBe('verified-image-edit-model')
     expect(() => resolveV4RevisionImageModel({
@@ -188,6 +195,13 @@ describe('main PPT Agent server configuration', () => {
       PPT_AGENT_V4_IMAGE_EDIT_ENABLED: 'true',
       PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED: 'invalid',
     })).toThrow('PPT_AGENT_V4_IMAGE_EDIT_ASYNC_TASK_ENABLED_INVALID')
+    expect(resolveV4ImageEditGatewayBaseUrl({})).toBeNull()
+    expect(resolveV4ImageEditGatewayBaseUrl({
+      PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL: 'http://127.0.0.1:4010/v1/',
+    })).toBe('http://127.0.0.1:4010/v1')
+    expect(() => resolveV4ImageEditGatewayBaseUrl({
+      PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL: 'http://gateway.example/v1',
+    })).toThrow('PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL_INSECURE')
   })
 
   test('derives configured model roles and publication records without route or credential fields', () => {

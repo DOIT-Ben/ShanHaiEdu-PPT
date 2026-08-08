@@ -80,13 +80,40 @@ export function resolveV4ImageEditAsyncTaskEnabled(env: Environment = process.en
   return enabled === 'true'
 }
 
+/**
+ * Multipart async edits must target the media-router task API directly. The
+ * public NewAPI relay may normalize this endpoint to a synchronous response.
+ */
+export function resolveV4ImageEditGatewayBaseUrl(env: Environment = process.env) {
+  const value = env.PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL?.trim()
+  if (!value) return null
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL_INVALID')
+  }
+  const loopback = ['127.0.0.1', 'localhost', '::1'].includes(url.hostname)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+    throw new Error('PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL_INSECURE')
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL_INVALID')
+  }
+  return url.toString().replace(/\/$/, '')
+}
+
 export function resolveV4RevisionImageModel(env: Environment = process.env) {
   const enabled = env.PPT_AGENT_V4_IMAGE_EDIT_ENABLED?.trim()
   if (enabled && enabled !== 'true' && enabled !== 'false') {
     throw new Error('PPT_AGENT_V4_IMAGE_EDIT_ENABLED_INVALID')
   }
   if (enabled !== 'true' || !resolveV4ImageEditAsyncTaskEnabled(env)) return null
-  return required(env, 'PPT_AGENT_V4_REVISION_IMAGE_MODEL')
+  const model = required(env, 'PPT_AGENT_V4_REVISION_IMAGE_MODEL')
+  if (!resolveV4ImageEditGatewayBaseUrl(env)) {
+    throw new Error('PPT_AGENT_V4_IMAGE_EDIT_GATEWAY_BASE_URL_REQUIRED')
+  }
+  return model
 }
 
 function configuredModelList(value: string | undefined, fallback: readonly string[], name: string) {

@@ -41,6 +41,7 @@ import {
   resolveQuickDeckEvaluationConfig,
   assertQuickDeckEvaluationTokenIsolation,
   resolveV4ImageEditAsyncTaskEnabled,
+  resolveV4ImageEditGatewayBaseUrl,
   resolveV4ModelPolicyConfig,
   resolveV4RevisionImageModel,
 } from './runtime/main-server-config'
@@ -87,6 +88,7 @@ if (usageV2Runtime.requiresUsageV2Runtime && runtimeMode !== 'gateway') {
 }
 const revisionImageModel = resolveV4RevisionImageModel(process.env)
 const imageEditTaskEnabled = resolveV4ImageEditAsyncTaskEnabled(process.env)
+const imageEditGatewayBaseUrl = resolveV4ImageEditGatewayBaseUrl(process.env)
 const assetSearchEnabled = process.env.PPT_AGENT_ASSET_SEARCH_ENABLED?.trim() === 'true'
 const visualDeckV4Transport = visualDeckV4TextTransport(process.env.PPT_AGENT_V4_TEXT_TRANSPORT)
 const releaseIdentity = resolveRuntimeBuildIdentity({
@@ -259,6 +261,7 @@ const images = runtimeMode === 'gateway'
       baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
       apiKey: process.env.MODEL_GATEWAY_IMAGE_KEY?.trim() || '',
       artifacts,
+      ...(imageEditGatewayBaseUrl ? { imageEditBaseUrl: imageEditGatewayBaseUrl } : {}),
       imageEditTaskEnabled,
     })
   : undefined

@@ -280,6 +280,7 @@ async function removeConnectedNeutralBackdrop(image: Uint8Array) {
 
 export class GatewayImageGenerationPort implements ImageGenerationPort {
   private readonly baseUrl: string
+  private readonly imageEditBaseUrl: string
   private readonly fetchImpl: Fetch
 
   constructor(private readonly dependencies: Readonly<{
@@ -288,10 +289,14 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     artifacts: ArtifactPort
     fetchImpl?: Fetch
     timeoutMs?: number
+    imageEditBaseUrl?: string
     /** Explicitly enables the gateway's asynchronous IMAGE_EDIT contract. */
     imageEditTaskEnabled?: boolean
   }>) {
     this.baseUrl = normalizedBaseUrl(dependencies.baseUrl)
+    this.imageEditBaseUrl = dependencies.imageEditBaseUrl
+      ? normalizedBaseUrl(dependencies.imageEditBaseUrl)
+      : this.baseUrl
     if (dependencies.apiKey.trim().length < 8) throw new Error('GATEWAY_API_KEY_INVALID')
     this.fetchImpl = dependencies.fetchImpl ?? fetch
   }
@@ -530,7 +535,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       // Multipart edits are accepted only by the dedicated asynchronous edit
       // endpoint. JSON text-to-image requests remain on the task endpoint.
       const endpoint = input.operationMode === 'IMAGE_EDIT'
-        ? `${this.baseUrl}/images/edits?response_mode=async`
+        ? `${this.imageEditBaseUrl}/images/edits?response_mode=async`
         : `${this.baseUrl}/image-tasks`
       const response = await this.fetchImpl(endpoint, {
         method: 'POST',
