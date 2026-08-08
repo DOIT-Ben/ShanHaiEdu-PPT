@@ -280,17 +280,29 @@ export interface ImageGenerationPort {
     | Readonly<{ state: 'COMPLETED'; artifactId: string; providerRequestId?: string; aspectDiagnostics?: ImageAspectDiagnostics }>
     | Readonly<{
         state: 'FAILED'
+        /** The gateway proved whether the asynchronous task reached the Provider. */
+        submissionState: 'NOT_SUBMITTED' | 'SUBMITTED'
         errorCode: string
         billingState: MediaBillingState
         technicalFailure: TechnicalFailure
         providerRequestId?: string
         aspectDiagnostics?: ImageAspectDiagnostics
+        requiresIdempotencyDrain?: never
+      }>
+    | Readonly<{
+        state: 'FAILED'
         /**
          * The gateway explicitly reported `SUBMISSION_UNKNOWN`. Callers must
          * reconcile only through the original idempotency key and must not
          * treat this as an ordinary terminal provider failure.
          */
-        requiresIdempotencyDrain?: true
+        submissionState: 'UNKNOWN'
+        errorCode: string
+        billingState: MediaBillingState
+        technicalFailure: TechnicalFailure
+        providerRequestId?: string
+        aspectDiagnostics?: ImageAspectDiagnostics
+        requiresIdempotencyDrain: true
       }>
   >
 }

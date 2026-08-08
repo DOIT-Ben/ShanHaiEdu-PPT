@@ -215,6 +215,7 @@ function inspectedSubmissionFailure(operation: ImageOperation) {
     const unknownCode = errorCode === 'GATEWAY_OPERATION_FAILED' ? 'GATEWAY_SUBMISSION_UNKNOWN' : errorCode
     return {
       state: 'FAILED' as const,
+      submissionState: 'UNKNOWN' as const,
       errorCode: unknownCode,
       billingState: billingState(),
       technicalFailure: providerTechnicalFailure(unknownCode, { disposition: 'RETRYABLE' }),
@@ -224,6 +225,7 @@ function inspectedSubmissionFailure(operation: ImageOperation) {
   if (operation.submission_state === 'NOT_SUBMITTED') {
     return {
       state: 'FAILED' as const,
+      submissionState: 'NOT_SUBMITTED' as const,
       errorCode,
       billingState: 'NOT_CHARGED' as const,
       technicalFailure: providerTechnicalFailure(errorCode),
@@ -420,11 +422,12 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     if (artifactId) {
       const artifact = await this.dependencies.artifacts.get({ tenantId: input.tenantId, artifactId })
       return artifact
-        ? { state: 'COMPLETED' as const, artifactId }
-        : {
-            state: 'FAILED' as const,
-            errorCode: 'GATEWAY_ARTIFACT_MISSING',
-            billingState: 'UNKNOWN' as const,
+          ? { state: 'COMPLETED' as const, artifactId }
+          : {
+              state: 'FAILED' as const,
+              submissionState: 'SUBMITTED' as const,
+              errorCode: 'GATEWAY_ARTIFACT_MISSING',
+              billingState: 'UNKNOWN' as const,
             technicalFailure: providerTechnicalFailure('GATEWAY_ARTIFACT_MISSING'),
           }
     }
@@ -446,6 +449,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       const errorCode = gatewayErrorCode(payload, response.status)
       return {
         state: 'FAILED' as const,
+        submissionState: 'SUBMITTED' as const,
         errorCode,
         billingState: 'UNKNOWN' as const,
         technicalFailure: providerTechnicalFailure(errorCode, { httpStatus: response.status }),
@@ -456,6 +460,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     if (!parsed.success) {
       return {
         state: 'FAILED' as const,
+        submissionState: 'SUBMITTED' as const,
         errorCode: 'GATEWAY_OPERATION_INVALID',
         billingState: 'UNKNOWN' as const,
         technicalFailure: providerTechnicalFailure('GATEWAY_OPERATION_INVALID'),
@@ -471,6 +476,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
       if (!operation.result) {
         return {
           state: 'FAILED' as const,
+          submissionState: 'SUBMITTED' as const,
           errorCode: 'GATEWAY_OUTPUT_MISSING',
           billingState: 'UNKNOWN' as const,
           technicalFailure: providerTechnicalFailure('GATEWAY_OUTPUT_MISSING'),
@@ -494,6 +500,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
         const errorCode = contractError ? error.code : 'GATEWAY_OUTPUT_INVALID'
         return {
           state: 'FAILED' as const,
+          submissionState: 'SUBMITTED' as const,
           errorCode,
           billingState: 'UNKNOWN' as const,
           technicalFailure: providerTechnicalFailure(errorCode, contractError
@@ -508,6 +515,7 @@ export class GatewayImageGenerationPort implements ImageGenerationPort {
     const errorCode = operation.error?.code ?? (operation.status === 'EXPIRED' ? 'IDEMPOTENCY_RESPONSE_EXPIRED' : 'GATEWAY_OPERATION_FAILED')
     return {
       state: 'FAILED' as const,
+      submissionState: 'SUBMITTED' as const,
       errorCode,
       billingState: billingState(),
       technicalFailure: providerTechnicalFailure(errorCode),

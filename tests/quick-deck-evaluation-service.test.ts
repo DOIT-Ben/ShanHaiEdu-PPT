@@ -316,6 +316,7 @@ class FailedRatioImages extends AsyncImages {
     this.inspections.push(structuredClone(input))
     return {
       state: 'FAILED' as const,
+      submissionState: 'SUBMITTED' as const,
       errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
       billingState: 'UNKNOWN' as const,
       providerRequestId: 'provider-request-redacted-id',
@@ -324,6 +325,23 @@ class FailedRatioImages extends AsyncImages {
         category: 'CONTRACT' as const,
         disposition: 'NON_RETRYABLE' as const,
         diagnosticCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
+      },
+    }
+  }
+}
+
+class NotSubmittedInspectionImages extends AsyncImages {
+  override async inspect(input: Parameters<ImageGenerationPort['inspect']>[0]): ReturnType<ImageGenerationPort['inspect']> {
+    this.inspections.push(structuredClone(input))
+    return {
+      state: 'FAILED' as const,
+      submissionState: 'NOT_SUBMITTED' as const,
+      errorCode: 'PROVIDER_SUBMISSION_NOT_FOUND',
+      billingState: 'NOT_CHARGED' as const,
+      technicalFailure: {
+        category: 'PROVIDER' as const,
+        disposition: 'RETRYABLE' as const,
+        diagnosticCode: 'PROVIDER_SUBMISSION_NOT_FOUND',
       },
     }
   }
@@ -338,6 +356,7 @@ class UnknownInspectionImages extends AsyncImages {
     if (this.#inspectAttempts++ === 0) {
       return {
         state: 'FAILED' as const,
+        submissionState: 'UNKNOWN' as const,
         errorCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN',
         billingState: 'UNKNOWN' as const,
         technicalFailure: {
@@ -368,6 +387,7 @@ class PersistentUnknownInspectionImages extends AsyncImages {
     this.inspections.push(structuredClone(input))
     return {
       state: 'FAILED' as const,
+      submissionState: 'UNKNOWN' as const,
       errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
       billingState: 'UNKNOWN' as const,
       technicalFailure: {
@@ -414,6 +434,7 @@ class FailedAtExpiryImages extends AsyncImages {
     this.inspections.push(structuredClone(input))
     return {
       state: 'FAILED' as const,
+      submissionState: 'SUBMITTED' as const,
       errorCode: 'UPSTREAM_IMAGE_FAILED',
       billingState: 'CHARGED' as const,
       providerRequestId: 'provider-terminal-failure',
@@ -434,6 +455,7 @@ class FirstPageFailedAtExpiryImages extends AsyncImages {
     this.inspections.push(structuredClone(input))
     return {
       state: 'FAILED' as const,
+      submissionState: 'SUBMITTED' as const,
       errorCode: 'UPSTREAM_IMAGE_FAILED',
       billingState: 'CHARGED' as const,
       providerRequestId: 'provider-terminal-failure',
@@ -485,6 +507,26 @@ class CrashAfterFirstExpirySaveRepository extends InMemoryQuickDeckEvaluationRep
 
 class NotSubmittedLookupImages extends AsyncImages {
   override async lookupByIdempotency(input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0]) {
+    this.lookups.push(structuredClone(input))
+    return { state: 'NOT_SUBMITTED' as const }
+  }
+}
+
+class UnknownSubmissionWithOperationImages extends AsyncImages {
+  override async submit(input: Parameters<ImageGenerationPort['submit']>[0]): ReturnType<ImageGenerationPort['submit']> {
+    const accepted = await super.submit(input)
+    throw new MediaSubmissionError(
+      'IDEMPOTENCY_SUBMISSION_UNKNOWN',
+      'UNKNOWN',
+      'the gateway accepted an operation but did not confirm submission',
+      { category: 'PROVIDER', disposition: 'RETRYABLE', diagnosticCode: 'IDEMPOTENCY_SUBMISSION_UNKNOWN' },
+      { operationId: accepted.operationId },
+    )
+  }
+
+  override async lookupByIdempotency(
+    input: Parameters<NonNullable<ImageGenerationPort['lookupByIdempotency']>>[0],
+  ): ReturnType<NonNullable<ImageGenerationPort['lookupByIdempotency']>> {
     this.lookups.push(structuredClone(input))
     return { state: 'NOT_SUBMITTED' as const }
   }
@@ -1589,6 +1631,85 @@ describe('quick-deck evaluation service', () => {
     }
   })
 
+  test('clears a known operation when idempotency recovery proves it was not submitted', async () => {
+    const { directory, repository, images, service } = await fixture(undefined, false, false,
+      (artifacts) => new UnknownSubmissionWithOperationImages(artifacts))
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      const submitted = await repository.get(created.jobId)
+      expect(submitted?.pages[0]).toMatchObject({ submissionState: 'UNKNOWN', operationId: expect.any(String) })
+
+      await service.tick({ limit: 10 })
+
+      expect(images.lookups).toHaveLength(1)
+      expect(images.inspections).toHaveLength(0)
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'FAILED',
+        errorCode: 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+        pages: [expect.objectContaining({
+          status: 'FAILED',
+          submissionState: 'NOT_SUBMITTED',
+          billingState: 'NOT_CHARGED',
+          operationId: null,
+          providerRequestId: null,
+        })],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('preserves a terminal not-submitted image inspection during normal evaluation polling', async () => {
+    const { directory, repository, service } = await fixture(undefined, false, false,
+      (artifacts) => new NotSubmittedInspectionImages(artifacts))
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      await service.tick({ limit: 10 })
+
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'FAILED',
+        errorCode: 'EVALUATION_IMAGE_TASK_FAILED',
+        pages: [expect.objectContaining({
+          status: 'FAILED',
+          submissionState: 'NOT_SUBMITTED',
+          billingState: 'NOT_CHARGED',
+          operationId: null,
+          providerRequestId: null,
+          errorCode: 'EVALUATION_PROVIDER_ERROR',
+        })],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('preserves a terminal not-submitted image inspection during expiry cleanup', async () => {
+    const { directory, repository, clock, service } = await fixture(undefined, false, false,
+      (artifacts) => new NotSubmittedInspectionImages(artifacts))
+    try {
+      const created = await service.create('evaluation-tenant', request(1))
+      await service.tick({ limit: 10 })
+      clock.advance(60_001)
+      await service.tick({ limit: 10 })
+
+      expect(await repository.get(created.jobId)).toMatchObject({
+        status: 'EXPIRED',
+        pages: [expect.objectContaining({
+          status: 'FAILED',
+          submissionState: 'NOT_SUBMITTED',
+          billingState: 'NOT_CHARGED',
+          operationId: null,
+          providerRequestId: null,
+          errorCode: 'EVALUATION_PROVIDER_ERROR',
+        })],
+      })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test('continues after an unknown submission and resumes its partial drain without resubmitting', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-quick-deck-restart-drain-'))
     try {
@@ -1945,6 +2066,8 @@ describe('quick-deck evaluation service', () => {
             ...page,
             submissionState: 'UNKNOWN',
             billingState: 'UNKNOWN',
+            operationId: 'gateway-operation-before-expiry',
+            providerRequestId: 'provider-request-before-expiry',
           })),
         },
       })
@@ -1960,6 +2083,9 @@ describe('quick-deck evaluation service', () => {
           status: 'FAILED',
           submissionState: 'NOT_SUBMITTED',
           billingState: 'NOT_CHARGED',
+          operationId: null,
+          providerRequestId: null,
+          errorCode: 'EVALUATION_IMAGE_SUBMISSION_FAILED',
         })],
       })
     } finally {

@@ -176,8 +176,9 @@ export class MockImageGenerationPort implements ImageGenerationPort {
       if (this.inspectionDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.inspectionDelayMs))
       return structuredClone(this.statuses.get(input.operationId) ?? {
         state: 'FAILED' as const,
+        submissionState: 'NOT_SUBMITTED' as const,
         errorCode: 'OPERATION_NOT_FOUND',
-        billingState: 'UNKNOWN' as const,
+        billingState: 'NOT_CHARGED' as const,
         technicalFailure: providerTechnicalFailure('OPERATION_NOT_FOUND'),
       })
     } finally {
@@ -196,6 +197,7 @@ export class MockImageGenerationPort implements ImageGenerationPort {
     if (!operationId) throw new Error('mock operation not found')
     this.statuses.set(operationId, {
       state: 'FAILED',
+      submissionState: 'SUBMITTED',
       errorCode,
       billingState,
       technicalFailure: providerTechnicalFailure(errorCode),

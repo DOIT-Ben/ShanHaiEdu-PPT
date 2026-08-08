@@ -544,11 +544,34 @@ describe('gateway image generation adapter', () => {
       idempotencyKey: 'run-1:slide:1:image:r0:v1', aspectRatio: '16:9',
     })).resolves.toMatchObject({
       state: 'FAILED',
+      submissionState: 'UNKNOWN',
       errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
       billingState: 'UNKNOWN',
       requiresIdempotencyDrain: true,
     })
     expect(artifacts.artifacts.size).toBe(0)
+  })
+
+  test('preserves a terminal task that the gateway proves was not submitted', async () => {
+    const adapter = new GatewayImageGenerationPort({
+      ...config,
+      artifacts: new MockArtifactPort(),
+      fetchImpl: async () => Response.json({
+        id: 'imgop_0123456789abcdef0123456789abcdef',
+        status: 'FAILED',
+        submission_state: 'NOT_SUBMITTED',
+        error: { code: 'PROVIDER_SUBMISSION_NOT_FOUND' },
+      }),
+    })
+
+    await expect(adapter.inspect({
+      tenantId: 'frameflow', operationId: 'imgop_0123456789abcdef0123456789abcdef', aspectRatio: '16:9',
+    })).resolves.toMatchObject({
+      state: 'FAILED',
+      submissionState: 'NOT_SUBMITTED',
+      billingState: 'NOT_CHARGED',
+      errorCode: 'PROVIDER_SUBMISSION_NOT_FOUND',
+    })
   })
 
   test('uses a completed task result despite an unknown submission state', async () => {
@@ -586,6 +609,7 @@ describe('gateway image generation adapter', () => {
       aspectRatio: '16:9',
     })).resolves.toEqual({
       state: 'FAILED',
+      submissionState: 'SUBMITTED',
       errorCode: 'MODEL_FORBIDDEN',
       billingState: 'UNKNOWN',
       technicalFailure: {
@@ -612,6 +636,7 @@ describe('gateway image generation adapter', () => {
       aspectRatio: '16:9',
     })).resolves.toEqual({
       state: 'FAILED',
+      submissionState: 'SUBMITTED',
       errorCode: 'INVALID_REQUEST',
       billingState: 'UNKNOWN',
       technicalFailure: {

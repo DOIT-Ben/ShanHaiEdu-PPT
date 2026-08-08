@@ -149,7 +149,7 @@ async function usageFixture(overrides: Partial<RunRecord> = {}) {
     return originalSubmit(input)
   }
   return {
-    repository, budget, images, clock, usage,
+    repository, budget, images, clock, usage, usageV2,
     runner: new MediaStepRunner({ repository, budget, images, clock, usageV2 }),
   }
 }
@@ -589,6 +589,7 @@ describe('media step runner', () => {
     const providerOperationId = submitted.step.externalOperationId!
     images.statuses.set(providerOperationId, {
       state: 'FAILED',
+      submissionState: 'SUBMITTED',
       errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
       billingState: 'UNKNOWN',
       technicalFailure: providerTechnicalFailure('GATEWAY_IMAGE_ASPECT_RATIO_INVALID'),
@@ -842,9 +843,12 @@ describe('media step runner', () => {
     expect(await repository.getRun('run-1')).toMatchObject({ committedBudgetUnits: 10 })
   })
 
-  test('polls a known unknown-submission operation without sending a second image POST', async () => {
+  test('reconciles a known unknown-submission operation through its idempotency key before polling', async () => {
     const { repository, images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
     const submit = images.submit.bind(images)
+    const lookupByIdempotency = images.lookupByIdempotency.bind(images)
+    const inspect = images.inspect.bind(images)
+    const requestOrder: string[] = []
     let firstAttempt = true
     images.submit = async (input) => {
       const accepted = await submit(input)
@@ -858,6 +862,14 @@ describe('media step runner', () => {
         { operationId: accepted.operationId },
       )
     }
+    images.lookupByIdempotency = async (input) => {
+      requestOrder.push('lookup')
+      return await lookupByIdempotency(input)
+    }
+    images.inspect = async (input) => {
+      requestOrder.push('inspect')
+      return await inspect(input)
+    }
 
     const first = await runner.submitSlideImage(request)
     const operationId = images.operations.get(request.idempotencyKey)!
@@ -869,12 +881,16 @@ describe('media step runner', () => {
     })
     expect(images.submitCalls).toBe(1)
 
-    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 0 })
+    expect(await runner.reconcilePendingRun('run-1')).toEqual({ inspected: 1, changed: 1 })
+    expect(requestOrder).toEqual(['lookup', 'inspect'])
     expect(images.inspectCalls).toBe(1)
     expect(images.submitCalls).toBe(1)
-    expect(images.lookupRequests).toEqual([])
+    expect(images.lookupRequests).toEqual([expect.objectContaining({
+      idempotencyKey: request.idempotencyKey,
+      operationMode: 'TEXT_TO_IMAGE',
+    })])
     expect((await repository.listSteps('run-1'))[0]).toMatchObject({
-      status: 'SUBMISSION_UNKNOWN',
+      status: 'WAITING',
       externalOperationId: operationId,
     })
   })
@@ -1078,6 +1094,7 @@ describe('media step runner', () => {
     const operationId = images.operations.get(request.idempotencyKey)!
     images.statuses.set(operationId, {
       state: 'FAILED',
+      submissionState: 'SUBMITTED',
       errorCode: 'GATEWAY_IMAGE_ASPECT_RATIO_INVALID',
       billingState,
       technicalFailure: providerTechnicalFailure('GATEWAY_IMAGE_ASPECT_RATIO_INVALID'),
@@ -1091,6 +1108,81 @@ describe('media step runner', () => {
       output: { aspectDiagnostics: rejectedAspectDiagnostics },
     })
     expect(images.submitCalls).toBe(1)
+  })
+
+  test('retains a terminal not-submitted inspection instead of rewriting it as accepted media', async () => {
+    const { images, runner, budget } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+    await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+    images.statuses.set(operationId, {
+      state: 'FAILED',
+      submissionState: 'NOT_SUBMITTED',
+      errorCode: 'PROVIDER_SUBMISSION_NOT_FOUND',
+      billingState: 'NOT_CHARGED',
+      technicalFailure: providerTechnicalFailure('PROVIDER_SUBMISSION_NOT_FOUND'),
+    })
+
+    const failed = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+
+    expect(failed.step).toMatchObject({
+      status: 'FAILED',
+      errorCode: 'PROVIDER_SUBMISSION_NOT_FOUND',
+      output: { mediaFailure: { submissionState: 'NOT_SUBMITTED', billingState: 'NOT_CHARGED' } },
+    })
+    expect(budget.released.size).toBe(1)
+  })
+
+  test('keeps a terminal unknown inspection in submission reconciliation instead of billing-result handling', async () => {
+    const { images, runner } = await fixture({ presentationMode: 'VISUAL_DECK_V4' })
+    await runner.submitSlideImage(request)
+    const operationId = images.operations.get(request.idempotencyKey)!
+    images.statuses.set(operationId, {
+      state: 'FAILED',
+      submissionState: 'UNKNOWN',
+      errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
+      billingState: 'UNKNOWN',
+      technicalFailure: providerTechnicalFailure('GATEWAY_SUBMISSION_UNKNOWN', { disposition: 'RETRYABLE' }),
+      requiresIdempotencyDrain: true,
+    })
+
+    const pending = await runner.refreshSlideImage('run-1', request.idempotencyKey)
+
+    expect(pending.step).toMatchObject({
+      status: 'SUBMISSION_UNKNOWN',
+      externalOperationId: operationId,
+      output: { mediaFailure: { submissionState: 'UNKNOWN', billingState: 'UNKNOWN' } },
+    })
+    expect(images.submitCalls).toBe(1)
+  })
+
+  test('does not record a Usage V2 provider result for a terminal unknown inspection', async () => {
+    const { images, runner, usage, usageV2 } = await usageFixture()
+    await runner.submitSlideImage(usageRequest)
+    const operationId = images.operations.get(usageRequest.idempotencyKey)!
+    images.statuses.set(operationId, {
+      state: 'FAILED',
+      submissionState: 'UNKNOWN',
+      errorCode: 'GATEWAY_SUBMISSION_UNKNOWN',
+      billingState: 'UNKNOWN',
+      technicalFailure: providerTechnicalFailure('GATEWAY_SUBMISSION_UNKNOWN', { disposition: 'RETRYABLE' }),
+      requiresIdempotencyDrain: true,
+    })
+    let providerResultCalls = 0
+    const recordProviderResult = usageV2.recordProviderResult.bind(usageV2)
+    usageV2.recordProviderResult = async (input) => {
+      providerResultCalls += 1
+      return await recordProviderResult(input)
+    }
+
+    const pending = await runner.refreshSlideImage('run-1', usageRequest.idempotencyKey)
+
+    expect(pending.step).toMatchObject({
+      status: 'SUBMISSION_UNKNOWN',
+      externalOperationId: operationId,
+      output: { mediaFailure: { submissionState: 'UNKNOWN', billingState: 'UNKNOWN' } },
+    })
+    expect(providerResultCalls).toBe(0)
+    expect(usage.events).toEqual([expect.objectContaining({ eventType: 'OPERATION_OBSERVED', providerOperationId: operationId })])
   })
 
   test.each([

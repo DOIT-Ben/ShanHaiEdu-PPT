@@ -540,6 +540,7 @@ class LocalMockImageGeneration implements ImageGenerationPort {
       ? { state: 'COMPLETED' as const, artifactId }
       : {
           state: 'FAILED' as const,
+          submissionState: 'NOT_SUBMITTED' as const,
           errorCode: 'MOCK_IMAGE_NOT_FOUND',
           billingState: 'NOT_CHARGED' as const,
           technicalFailure: providerTechnicalFailure('MOCK_IMAGE_NOT_FOUND'),

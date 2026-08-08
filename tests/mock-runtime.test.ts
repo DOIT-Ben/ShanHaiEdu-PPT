@@ -95,6 +95,7 @@ class CountingCompletedImageGeneration implements ImageGenerationPort {
       ? { state: 'COMPLETED' as const, artifactId }
       : {
           state: 'FAILED' as const,
+          submissionState: 'NOT_SUBMITTED' as const,
           errorCode: 'COUNTING_IMAGE_NOT_FOUND',
           billingState: 'NOT_CHARGED' as const,
           technicalFailure: providerTechnicalFailure('COUNTING_IMAGE_NOT_FOUND'),

@@ -397,7 +397,8 @@ export class MediaStepRunner {
         changed: true,
       }
     }
-    if (['SUBMITTING', 'SUBMISSION_UNKNOWN'].includes(step.status) && !step.externalOperationId) {
+    if (step.status === 'SUBMISSION_UNKNOWN'
+      || (step.status === 'SUBMITTING' && !step.externalOperationId)) {
       return this.recoverUnacknowledgedSubmission(run, step)
     }
     if (!['WAITING', 'BILLING_UNKNOWN', 'SUBMISSION_UNKNOWN'].includes(step.status)) return { step, changed: false }
@@ -454,6 +455,25 @@ export class MediaStepRunner {
       }
     }
     if (status.state !== 'FAILED') return { step, changed: false }
+    const mediaFailure = { submissionState: status.submissionState, billingState: status.billingState } as const
+    // A terminal SUBMISSION_UNKNOWN has no Provider result to account for.
+    // Preserve the original idempotency key for reconciliation before any
+    // Usage V2 billing-result event can be emitted.
+    if (status.submissionState === 'UNKNOWN') {
+      return {
+        step: await this.markUnknown(
+          mediaInput,
+          step.budgetReservationId,
+          status.errorCode,
+          'MEDIA',
+          status.technicalFailure,
+          mediaFailure,
+          step.externalOperationId,
+          status.aspectDiagnostics,
+        ),
+        changed: true,
+      }
+    }
     if (usesUsageV2) {
       const failed = await this.recordUsageV2ProviderResult(
         runId,
@@ -468,7 +488,7 @@ export class MediaStepRunner {
     if (status.billingState === 'NOT_CHARGED' && step.budgetReservationId && !isBatchReserved(mediaInput)) {
       const input = this.reconstructInput(step, run)
       await this.markReleasing(
-        input, step.budgetReservationId, status.errorCode, status.technicalFailure, undefined, status.aspectDiagnostics,
+        input, step.budgetReservationId, status.errorCode, status.technicalFailure, mediaFailure, status.aspectDiagnostics,
       )
       await this.dependencies.budget.release({
         host: run.host,
@@ -477,7 +497,7 @@ export class MediaStepRunner {
       })
       return {
         step: await this.markDefiniteFailure(
-          input, step.budgetReservationId, status.errorCode, status.technicalFailure, undefined, status.aspectDiagnostics,
+          input, step.budgetReservationId, status.errorCode, status.technicalFailure, mediaFailure, status.aspectDiagnostics,
         ),
         changed: true,
       }
@@ -485,7 +505,7 @@ export class MediaStepRunner {
     if (status.billingState === 'NOT_CHARGED') {
       return {
         step: await this.markDefiniteFailure(
-          mediaInput, step.budgetReservationId, status.errorCode, status.technicalFailure, undefined, status.aspectDiagnostics,
+          mediaInput, step.budgetReservationId, status.errorCode, status.technicalFailure, mediaFailure, status.aspectDiagnostics,
         ),
         changed: true,
       }
@@ -507,7 +527,7 @@ export class MediaStepRunner {
         status.errorCode,
         status.billingState,
         status.technicalFailure,
-        { submissionState: 'SUBMITTED', billingState: status.billingState },
+        mediaFailure,
         null,
         status.aspectDiagnostics,
       ),

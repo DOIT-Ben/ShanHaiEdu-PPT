@@ -40,6 +40,11 @@ const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.
 const PREVIEW_MIME = 'image/png' as const
 const QUICK_DECK_DRAIN_TIMEOUT_MS = 15 * 60_000
 const QUICK_DECK_EVALUATION_LEASE_MS = 5 * 60_000
+const QUICK_DECK_SUBMISSION_FAILURE_CODES = new Set<QuickDeckEvaluationFailureCode>([
+  'EVALUATION_IMAGE_SUBMISSION_FAILED',
+  'EVALUATION_IMAGE_SUBMISSION_PARTIAL',
+  'EVALUATION_IMAGE_SUBMISSION_UNKNOWN',
+])
 
 export type QuickDeckEvidenceContext = Readonly<{
   runtimeMode: 'GATEWAY' | 'MOCK'
@@ -889,7 +894,7 @@ export class QuickDeckEvaluationService {
           : { ...page, status: 'FAILED' as const, errorCode: 'EVALUATION_IMAGE_DRAIN_TIMEOUT' })
         return await this.fail({ ...record, pages: timedOut, updatedAt: now.toISOString() }, 'EVALUATION_IMAGE_DRAIN_TIMEOUT', claim)
       }
-      const failure = record.pendingFailure ?? this.failureFromPages(pages)
+      const failure = this.reconciledFailure(record, pages)
       const progressAt = this.dependencies.clock.now()
       if (failure) {
         const draining = this.startDraining({ ...record, pages, updatedAt: progressAt.toISOString() }, failure, progressAt)
@@ -919,7 +924,7 @@ export class QuickDeckEvaluationService {
         }, generating.updatedAt),
       }, claim)
     }
-    const failure = record.pendingFailure ?? this.failureFromPages(pages)
+    const failure = this.reconciledFailure(record, pages)
     if (failure) return await this.fail({ ...record, pages, updatedAt: now.toISOString() }, failure, claim)
     const packagingAt = this.dependencies.clock.now().toISOString()
     const packaging: QuickDeckEvaluationRecord = {
@@ -952,17 +957,28 @@ export class QuickDeckEvaluationService {
     if (record.status !== 'SUBMITTING_IMAGES') {
       return false
     }
-    const submittedPages = record.pages.filter((page) => page.submissionState === 'SUBMITTED')
-    const hasOnlyPersistedSuccessfulSubmissions = record.pendingFailure === null
+    const pages = record.pages.map((page) => page.status === 'PENDING' && page.submissionState === 'NOT_SUBMITTED'
+      ? {
+          ...page,
+          status: 'FAILED' as const,
+          errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_SKIPPED',
+        }
+      : page)
+    const reconciledFailure = this.reconciledFailure(record, pages)
+    const submittedPages = pages.filter((page) => page.submissionState === 'SUBMITTED')
+    const hasOnlyPersistedSuccessfulSubmissions = reconciledFailure === null
       && submittedPages.length === record.request.slideCount
       && submittedPages.every((page) => page.operationId !== null && page.errorCode === null)
     if (hasOnlyPersistedSuccessfulSubmissions) {
       const generatingAt = this.dependencies.clock.now().toISOString()
       const generating: QuickDeckEvaluationRecord = {
         ...record,
+        pages,
         status: 'GENERATING',
         phase: 'IMAGE_GENERATION',
         pendingFailure: null,
+        drainStartedAt: null,
+        drainDeadline: null,
         nextAttemptAt: generatingAt,
         updatedAt: generatingAt,
       }
@@ -975,14 +991,7 @@ export class QuickDeckEvaluationService {
       }, claim)
       return true
     }
-    const pages = record.pages.map((page) => page.status === 'PENDING' && page.submissionState === 'NOT_SUBMITTED'
-      ? {
-          ...page,
-          status: 'FAILED' as const,
-          errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_SKIPPED',
-        }
-      : page)
-    const pendingFailure = record.pendingFailure ?? quickDeckSubmissionFailureCode(pages)
+    const pendingFailure = reconciledFailure ?? quickDeckSubmissionFailureCode(pages)
     if (!this.hasUnresolvedPages(pages)) {
       await this.fail({ ...record, pages }, pendingFailure, claim)
       return true
@@ -1041,6 +1050,25 @@ export class QuickDeckEvaluationService {
     return 'EVALUATION_IMAGE_TASK_FAILED'
   }
 
+  /**
+   * A submission failure is only provisional while its original idempotency
+   * key is unresolved. A later successful lookup does not erase that audit
+   * risk, but a lookup that proves the original key was never submitted does
+   * replace it with a deterministic submission failure.
+   */
+  private reconciledFailure(
+    record: QuickDeckEvaluationRecord,
+    pages: readonly QuickDeckEvaluationPageRecord[],
+  ): QuickDeckEvaluationFailureCode | null {
+    if (record.pendingFailure && QUICK_DECK_SUBMISSION_FAILURE_CODES.has(record.pendingFailure)) {
+      const provenNotSubmitted = pages.some((page) => page.status === 'FAILED'
+        && page.submissionState === 'NOT_SUBMITTED'
+        && page.errorCode === 'EVALUATION_IMAGE_SUBMISSION_FAILED')
+      return provenNotSubmitted ? quickDeckSubmissionFailureCode(pages) : record.pendingFailure
+    }
+    return record.pendingFailure ?? this.failureFromPages(pages)
+  }
+
   private startDraining(
     record: QuickDeckEvaluationRecord,
     pendingFailure: QuickDeckEvaluationFailureCode,
@@ -1051,7 +1079,7 @@ export class QuickDeckEvaluationService {
       status: 'GENERATING',
       phase: 'IMAGE_GENERATION',
       errorCode: null,
-      pendingFailure: record.pendingFailure ?? pendingFailure,
+      pendingFailure,
       drainStartedAt: record.drainStartedAt ?? now.toISOString(),
       drainDeadline: record.drainDeadline ?? new Date(now.getTime() + QUICK_DECK_DRAIN_TIMEOUT_MS).toISOString(),
       nextAttemptAt: now.toISOString(),
@@ -1096,7 +1124,11 @@ export class QuickDeckEvaluationService {
             status: 'FAILED' as const,
             submissionState: 'NOT_SUBMITTED' as const,
             billingState: 'NOT_CHARGED' as const,
-            errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+            operationId: null,
+            providerRequestId: null,
+            errorCode: page.submissionState === 'UNKNOWN'
+              ? 'EVALUATION_IMAGE_SUBMISSION_FAILED'
+              : page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
           }
         }
       } catch {
@@ -1148,23 +1180,9 @@ export class QuickDeckEvaluationService {
             retryAfterMs: 1_000,
           }
         }
-        const receivedAspectDiagnostics = result.aspectDiagnostics ?? null
-        const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
-        const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null
         return {
           page,
-          next: {
-            ...page,
-            status: 'FAILED',
-            submissionState: 'SUBMITTED',
-            billingState: result.billingState,
-            providerRequestId: result.providerRequestId ?? page.providerRequestId,
-            width: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedWidth ?? page.width,
-            height: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedHeight ?? page.height,
-            aspectRatioValidated: false,
-            aspectDiagnostics: invalidAspectDiagnostics ? null : aspectDiagnostics ?? page.aspectDiagnostics,
-            errorCode: invalidAspectDiagnostics ? 'EVALUATION_IMAGE_ARTIFACT_INVALID' : storedDiagnosticCode(result.errorCode) ?? 'EVALUATION_PROVIDER_ERROR',
-          },
+          next: this.failedInspectionPage(page, result, page.operationId),
           retryAfterMs: null,
         }
       }
@@ -1213,6 +1231,30 @@ export class QuickDeckEvaluationService {
         errorCode: aspectRatioValidated ? null : 'EVALUATION_IMAGE_RATIO_INVALID',
       },
       retryAfterMs: null,
+    }
+  }
+
+  private failedInspectionPage(
+    page: QuickDeckEvaluationPageRecord,
+    result: Extract<Awaited<ReturnType<ImageGenerationPort['inspect']>>, { state: 'FAILED' }>,
+    operationId: string,
+  ): QuickDeckEvaluationPageRecord {
+    const receivedAspectDiagnostics = result.aspectDiagnostics ?? null
+    const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
+    const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null
+    const notSubmitted = result.submissionState === 'NOT_SUBMITTED'
+    return {
+      ...page,
+      status: 'FAILED',
+      submissionState: result.submissionState,
+      billingState: result.billingState,
+      operationId: notSubmitted ? null : operationId,
+      providerRequestId: notSubmitted ? null : result.providerRequestId ?? page.providerRequestId,
+      width: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedWidth ?? page.width,
+      height: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedHeight ?? page.height,
+      aspectRatioValidated: false,
+      aspectDiagnostics: invalidAspectDiagnostics ? null : aspectDiagnostics ?? page.aspectDiagnostics,
+      errorCode: invalidAspectDiagnostics ? 'EVALUATION_IMAGE_ARTIFACT_INVALID' : storedDiagnosticCode(result.errorCode) ?? 'EVALUATION_PROVIDER_ERROR',
     }
   }
 
@@ -1421,7 +1463,11 @@ export class QuickDeckEvaluationService {
               status: 'FAILED',
               submissionState: 'NOT_SUBMITTED',
               billingState: 'NOT_CHARGED',
-              errorCode: page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
+              operationId: null,
+              providerRequestId: null,
+              errorCode: page.submissionState === 'UNKNOWN'
+                ? 'EVALUATION_IMAGE_SUBMISSION_FAILED'
+                : page.errorCode ?? 'EVALUATION_IMAGE_SUBMISSION_FAILED',
             })
           } else {
             cleanupPending = true
@@ -1444,23 +1490,8 @@ export class QuickDeckEvaluationService {
             cleanupPending = true
             continue
           }
-          const receivedAspectDiagnostics = inspected.aspectDiagnostics ?? null
-          const aspectDiagnostics = boundedAspectDiagnostics(receivedAspectDiagnostics)
-          const invalidAspectDiagnostics = receivedAspectDiagnostics !== null && aspectDiagnostics === null
           settledPages.set(page.pageNumber, {
-            ...page,
-            status: 'FAILED',
-            submissionState: 'SUBMITTED',
-            billingState: inspected.billingState,
-            operationId: lookupResult.operationId,
-            providerRequestId: inspected.providerRequestId ?? page.providerRequestId,
-            width: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedWidth ?? page.width,
-            height: invalidAspectDiagnostics ? null : aspectDiagnostics?.observedHeight ?? page.height,
-            aspectRatioValidated: false,
-            aspectDiagnostics: invalidAspectDiagnostics ? null : aspectDiagnostics ?? page.aspectDiagnostics,
-            errorCode: invalidAspectDiagnostics
-              ? 'EVALUATION_IMAGE_ARTIFACT_INVALID'
-              : storedDiagnosticCode(inspected.errorCode) ?? 'EVALUATION_PROVIDER_ERROR',
+            ...this.failedInspectionPage(page, inspected, lookupResult.operationId),
           })
         } else {
           cleanupPending = true
