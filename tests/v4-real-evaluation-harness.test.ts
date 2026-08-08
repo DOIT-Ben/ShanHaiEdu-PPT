@@ -1,18 +1,39 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import {
+  V4_EVALUATION_CANARY_PAGE_COUNTS,
+  V4_EVALUATION_DEFAULT_SERVICE_URL,
+  assertV4EvaluationRoots,
   evaluationInputContentHash,
   deliveryAvailabilityWaitState,
+  loadV4EvaluationInputs,
   normalizeEvaluationRequest,
   presentationSlideEntries,
   referencedSlideImageEntry,
   requireAvailableDelivery,
+  readV4EvaluationGatewayTarget,
   REQUIRED_COMPLETED_LIFECYCLE,
+  resolveV4EvaluationCanaryPageCounts,
+  redactedEvaluationRequest,
+  runV4EvaluationCanary,
   validateLifecycle,
   validateQualityGate,
   validateRasterPages,
+  validateCreatedV4RunIdentity,
+  v4EvaluationIdempotencyKey,
+  type V4EvaluationRelease,
 } from '../scripts/run-v4-real-evaluation'
+import { createPublicCapabilities } from '../src/run-query-contracts'
 
 type LifecycleEvent = Parameters<typeof validateLifecycle>[0][number]
+
+const releasedService: V4EvaluationRelease = {
+  softwareVersion: '4.4.0',
+  gitSha: 'a'.repeat(40),
+  releaseId: 'v4.4.0-aaaaaaaaaaaa',
+}
 
 function request() {
   return {
@@ -34,6 +55,44 @@ function request() {
       },
     },
   }
+}
+
+function requestForSlideCount(slideCount: 1 | 3 | 10) {
+  const value = request()
+  value.slideCount = slideCount
+  value.visualDeckV4.deckOptions.length = { slideCount }
+  value.visualDeckV4.instruction = `请制作一套${slideCount}页课堂PPT。`
+  return value
+}
+
+function gatewayCapabilities(imageModel = 'gemini-3-pro-image-preview') {
+  const textModel = 'gpt-5.6-terra'
+  return createPublicCapabilities({
+    runtimeMode: 'GATEWAY',
+    textModels: [textModel],
+    visionModels: [textModel],
+    imageModels: [imageModel],
+    modelAvailability: {
+      text: [{ model: textModel, state: 'HEALTHY', checkedAt: '2026-08-08T00:00:00.000Z' }],
+      vision: [{ model: textModel, state: 'HEALTHY', checkedAt: '2026-08-08T00:00:00.000Z' }],
+      image: [{ model: imageModel, state: 'HEALTHY', checkedAt: '2026-08-08T00:00:00.000Z' }],
+      imageEdit: [],
+    },
+  })
+}
+
+function readinessResponse(release = releasedService) {
+  return new Response(JSON.stringify({ service: 'ppt-agent', status: 'READY', release }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function capabilitiesResponse(capability: ReturnType<typeof gatewayCapabilities>) {
+  return new Response(JSON.stringify({ schemaVersion: '1', requestId: 'v4-eval-capabilities', data: capability }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
 }
 
 function completedLifecycleEvents(): LifecycleEvent[] {
@@ -62,6 +121,245 @@ function completedLifecycleEvents(): LifecycleEvent[] {
 }
 
 describe('V4 real evaluation harness', () => {
+  test('uses the main V4 service and only the fixed 1 -> 3 -> 10 canary sequence', () => {
+    expect(V4_EVALUATION_DEFAULT_SERVICE_URL).toBe('http://127.0.0.1:4310')
+    expect(resolveV4EvaluationCanaryPageCounts(undefined)).toEqual([1, 3, 10])
+    expect(resolveV4EvaluationCanaryPageCounts('1,3,10')).toEqual([1, 3, 10])
+    expect(() => resolveV4EvaluationCanaryPageCounts('3,10')).toThrow('V4_EVAL_PAGE_COUNTS_INVALID')
+    expect(() => resolveV4EvaluationCanaryPageCounts('1,10,3')).toThrow('V4_EVAL_PAGE_COUNTS_INVALID')
+  })
+
+  test('rejects production runtime paths before it can read inputs or write an evaluation report', () => {
+    expect(() => assertV4EvaluationRoots('/opt/ppt-agent/input', '/opt/ppt-agent-test/evaluation')).toThrow(
+      'V4_EVAL_INPUT_PRODUCTION_PATH_FORBIDDEN',
+    )
+    expect(() => assertV4EvaluationRoots('/srv/ppt-evaluation-input', '/opt/ppt-agent/reports')).toThrow(
+      'V4_EVAL_OUTPUT_PRODUCTION_PATH_FORBIDDEN',
+    )
+  })
+
+  test('writes only hashes for request source and model-facing instructions', () => {
+    const input = normalizeEvaluationRequest(request(), 10)
+    const manifest = redactedEvaluationRequest(input)
+    const serialized = JSON.stringify(manifest)
+
+    expect(serialized).not.toContain(input.source.kind === 'TEXT' ? input.source.text : '')
+    expect(serialized).not.toContain(input.visualDeckV4!.instruction)
+    expect(manifest.source.sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(manifest.contentHashes.visualDeckV4).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  test('rejects an invalid later input before any canary preflight or submission can begin', async () => {
+    const inputRoot = await mkdtemp(path.join(tmpdir(), 'ppt-agent-v4-eval-input-'))
+    try {
+      await Promise.all(V4_EVALUATION_CANARY_PAGE_COUNTS.map(async (slideCount) => {
+        const caseDirectory = path.join(inputRoot, String(slideCount), 'case-a')
+        await mkdir(caseDirectory, { recursive: true })
+        const value = requestForSlideCount(slideCount)
+        if (slideCount === 10) value.visualDeckV4.deckOptions.length = { slideCount: 9 }
+        await writeFile(path.join(caseDirectory, 'request.json'), JSON.stringify(value))
+      }))
+
+      await expect(loadV4EvaluationInputs({
+        inputRoot,
+        caseIds: ['case-a'],
+        pageCounts: V4_EVALUATION_CANARY_PAGE_COUNTS,
+      })).rejects.toThrow('v4 length must match slideCount')
+    } finally {
+      await rm(inputRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('proves the released gateway target before the first V4 submission', async () => {
+    const order: Array<string | number> = []
+    const observed = await runV4EvaluationCanary({
+      preflight: () => readV4EvaluationGatewayTarget({
+        serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+        apiToken: 'evaluation-api-token',
+        request: normalizeEvaluationRequest(request(), 10),
+        timeoutMs: 1_000,
+        expectedRelease: { gitSha: releasedService.gitSha, releaseId: releasedService.releaseId },
+        fetch: async (url, init) => {
+          order.push(new URL(url).pathname)
+          if (new URL(url).pathname === '/health/ready') return readinessResponse()
+          expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer evaluation-api-token')
+          expect(new Headers(init?.headers).get('X-PPT-Agent-Tenant')).toBe('phase5')
+          return capabilitiesResponse(gatewayCapabilities())
+        },
+      }),
+      persistPreflight: async () => { order.push('preflight.json') },
+      caseIds: ['case-a'],
+      runCase: async (slideCount, caseId) => {
+        order.push(slideCount)
+        return { passed: true, slideCount, caseId }
+      },
+    })
+
+    expect(order).toEqual(['/health/ready', '/v1/capabilities', 'preflight.json', ...V4_EVALUATION_CANARY_PAGE_COUNTS])
+    expect(observed).toMatchObject({
+      passed: true,
+      target: {
+        service: 'ppt-agent',
+        release: releasedService,
+        runtimeMode: 'GATEWAY',
+        models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
+        imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+      },
+    })
+  })
+
+  test('keeps each real evaluation idempotency key bounded while isolating fresh batches', () => {
+    const caseId = 'c'.repeat(80)
+    const first = v4EvaluationIdempotencyKey(10, caseId, 'batch-a')
+    const second = v4EvaluationIdempotencyKey(10, caseId, 'batch-b')
+
+    expect(first).toMatch(/^[A-Za-z0-9._:-]+$/)
+    expect(first.length).toBeLessThanOrEqual(160)
+    expect(second).not.toBe(first)
+  })
+
+  test('stops after a create response identifies the wrong page mode or image model', () => {
+    const input = normalizeEvaluationRequest(request(), 10)
+    expect(() => validateCreatedV4RunIdentity({
+      slideCount: 3,
+      presentationMode: 'VISUAL_DECK_V4',
+      imageModel: input.imageModel,
+    }, input, 10)).toThrow('V4_EVAL_CREATED_SLIDE_COUNT_INVALID')
+    expect(() => validateCreatedV4RunIdentity({
+      slideCount: 10,
+      presentationMode: 'SLIDE_IMAGE_V2',
+      imageModel: input.imageModel,
+    }, input, 10)).toThrow('V4_EVAL_CREATED_PRESENTATION_MODE_INVALID')
+    expect(() => validateCreatedV4RunIdentity({
+      slideCount: 10,
+      presentationMode: 'VISUAL_DECK_V4',
+      imageModel: 'other-image-model',
+    }, input, 10)).toThrow('V4_EVAL_CREATED_IMAGE_MODEL_INVALID')
+  })
+
+  test('blocks every submission when the target is a mock, non-image-task, or wrong release', async () => {
+    const requestValue = normalizeEvaluationRequest(request(), 10)
+    const failures: Array<Readonly<{ capability: unknown; expectedRelease: { gitSha: string | null; releaseId: string | null }; code: string }>> = [
+      {
+        capability: createPublicCapabilities(),
+        expectedRelease: { gitSha: releasedService.gitSha, releaseId: null },
+        code: 'V4_EVAL_RUNTIME_MODE_INVALID',
+      },
+      {
+        capability: {
+          ...gatewayCapabilities(),
+          visualDeckV4: {
+            ...gatewayCapabilities().visualDeckV4,
+            imageGeneration: { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
+          },
+        },
+        expectedRelease: { gitSha: releasedService.gitSha, releaseId: null },
+        code: 'V4_EVAL_IMAGE_PROTOCOL_INVALID',
+      },
+      {
+        capability: gatewayCapabilities(),
+        expectedRelease: { gitSha: 'b'.repeat(40), releaseId: null },
+        code: 'V4_EVAL_READY_GIT_SHA_MISMATCH',
+      },
+      {
+        capability: (() => {
+          const capability = gatewayCapabilities()
+          return {
+            ...capability,
+            visualDeckV4: {
+              ...capability.visualDeckV4,
+              modelAvailability: {
+                ...capability.visualDeckV4.modelAvailability!,
+                image: [{
+                  ...capability.visualDeckV4.modelAvailability!.image[0]!,
+                  state: 'DEGRADED',
+                }],
+              },
+            },
+          }
+        })(),
+        expectedRelease: { gitSha: releasedService.gitSha, releaseId: null },
+        code: 'V4_EVAL_IMAGE_MODEL_UNAVAILABLE',
+      },
+    ]
+
+    for (const failure of failures) {
+      let submissions = 0
+      await expect(runV4EvaluationCanary({
+        preflight: () => readV4EvaluationGatewayTarget({
+          serviceUrl: V4_EVALUATION_DEFAULT_SERVICE_URL,
+          apiToken: 'evaluation-api-token',
+          request: requestValue,
+          timeoutMs: 1_000,
+          expectedRelease: failure.expectedRelease,
+          fetch: async (url) => new URL(url).pathname === '/health/ready'
+            ? readinessResponse()
+            : new Response(JSON.stringify({ schemaVersion: '1', requestId: 'v4-eval-capabilities', data: failure.capability }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            }),
+        }),
+        caseIds: ['case-a'],
+        runCase: async (slideCount, caseId) => {
+          submissions += 1
+          return { passed: true, slideCount, caseId }
+        },
+      })).rejects.toThrow(failure.code)
+      expect(submissions).toBe(0)
+    }
+  })
+
+  test('stops the canary at the first failed case without submitting later pages', async () => {
+    const attempted: Array<string> = []
+    const result = await runV4EvaluationCanary({
+      preflight: async () => ({
+        service: 'ppt-agent',
+        release: releasedService,
+        runtimeMode: 'GATEWAY',
+        models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
+        imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+      }),
+      caseIds: ['case-a', 'case-b'],
+      runCase: async (slideCount, caseId) => {
+        attempted.push(`${slideCount}/${caseId}`)
+        return { passed: false, slideCount, caseId, errorCode: 'V4_EVAL_CASE_FAILED' }
+      },
+    })
+
+    expect(attempted).toEqual(['1/case-a'])
+    expect(result).toEqual({
+      target: {
+        service: 'ppt-agent',
+        release: releasedService,
+        runtimeMode: 'GATEWAY',
+        models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
+        imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+      },
+      passed: false,
+      results: [{ passed: false, slideCount: 1, caseId: 'case-a', errorCode: 'V4_EVAL_CASE_FAILED' }],
+    })
+  })
+
+  test('does not submit a run when preflight evidence cannot be persisted', async () => {
+    let submissions = 0
+    await expect(runV4EvaluationCanary({
+      preflight: async () => ({
+        service: 'ppt-agent',
+        release: releasedService,
+        runtimeMode: 'GATEWAY',
+        models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
+        imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
+      }),
+      persistPreflight: async () => { throw new Error('V4_EVAL_PREFLIGHT_PERSIST_FAILED') },
+      caseIds: ['case-a'],
+      runCase: async (slideCount, caseId) => {
+        submissions += 1
+        return { passed: true, slideCount, caseId }
+      },
+    })).rejects.toThrow('V4_EVAL_PREFLIGHT_PERSIST_FAILED')
+    expect(submissions).toBe(0)
+  })
+
   test('consumes only the exact delivery authorized by deliveryAvailability', () => {
     const delivery = {
       schemaVersion: '1' as const,
@@ -247,6 +545,10 @@ describe('V4 real evaluation harness', () => {
         imageYEmu: 0,
         imageWidthEmu: 12_192_000,
         imageHeightEmu: 6_858_000,
+        imageWidthPx: 1600,
+        imageHeightPx: 900,
+        imageRelativeAspectError: 0,
+        imageAspectRatioValidated: true,
         slideWidthEmu: 12_192_000,
         slideHeightEmu: 6_858_000,
         fullBleed: true,
@@ -422,6 +724,10 @@ describe('V4 real evaluation harness', () => {
       imageYEmu: 0,
       imageWidthEmu: 12_192_000,
       imageHeightEmu: 6_858_000,
+      imageWidthPx: 1600,
+      imageHeightPx: 900,
+      imageRelativeAspectError: 0,
+      imageAspectRatioValidated: true,
       slideWidthEmu: 12_192_000,
       slideHeightEmu: 6_858_000,
       fullBleed: index !== 5,
@@ -430,6 +736,37 @@ describe('V4 real evaluation harness', () => {
     expect(validateRasterPages(pages, 10)).toEqual({
       passed: false, continuous: false, expectedPages: 10, validPages: 10,
     })
+  })
+
+  test('records post-package image pixels and rejects a non-normalized final slide image', () => {
+    const page = {
+      pageNumber: 1,
+      mediaEntry: 'ppt/media/image-1.png',
+      sha256: 'a'.repeat(64),
+      byteLength: 100,
+      pictureObjects: 1,
+      nativeTextObjects: 0,
+      imageXEmu: 0,
+      imageYEmu: 0,
+      imageWidthEmu: 12_192_000,
+      imageHeightEmu: 6_858_000,
+      imageWidthPx: 1600,
+      imageHeightPx: 900,
+      imageRelativeAspectError: 0,
+      imageAspectRatioValidated: true,
+      slideWidthEmu: 12_192_000,
+      slideHeightEmu: 6_858_000,
+      fullBleed: true,
+    }
+
+    expect(validateRasterPages([page], 1)).toMatchObject({ passed: true, validPages: 1 })
+    expect(validateRasterPages([{
+      ...page,
+      imageWidthPx: 1376,
+      imageHeightPx: 768,
+      imageRelativeAspectError: 0.0078125,
+      imageAspectRatioValidated: false,
+    }], 1)).toMatchObject({ passed: false, validPages: 0 })
   })
 
   test('rejects low scores and open critical or factual issues directly', () => {

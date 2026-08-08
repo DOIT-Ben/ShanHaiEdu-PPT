@@ -106,6 +106,31 @@ PPT_AGENT_V2_PROVIDER_MODE=deterministic \
 bun run dev:v2
 ```
 
+## 隔离真实 V4 评测
+
+`bun run eval:v4` 只能在 `/opt/ppt-agent-test` 指向的隔离服务上执行。它会创建真实 V4 Run，并可能调用真实 Provider、消耗该隔离环境的预算与 Usage；不得把它用于正式服务或正式数据目录。脚本拒绝从或向 `/opt/ppt-agent` 读取/写入评测输入与报告，并在任何 `POST /v1/runs` 前完成以下门禁：全部输入文件本地校验、主服务 `ready` 身份与 release 比对、认证后的 `capabilities` 校验、网关模式、异步 `IMAGE_TASK`、封装后图片实际像素，以及文本、视觉和所选图片模型均为 `HEALTHY`。预检结果先写入输出目录的 `preflight.json`，再按固定顺序提交。
+
+| 变量 | 用途 |
+|---|---|
+| `V4_EVAL_SERVICE_URL` | 仅允许回环地址，默认主 V4 服务 `http://127.0.0.1:4310` |
+| `V4_EVAL_API_TOKEN` | 隔离验收服务的 V1 入站 Token，仅从受限环境文件注入 |
+| `V4_EVAL_KEY` | 本轮评测的受限输入种子；runner 会加入新的批次 nonce 并只记录指纹，避免重放旧 Run |
+| `V4_EVAL_INPUT_ROOT` / `V4_EVAL_OUTPUT_ROOT` | 受限输入和全新输出根；输出不得已存在或位于输入根内 |
+| `V4_EVAL_EXPECTED_GIT_SHA` / `V4_EVAL_EXPECTED_RELEASE_ID` | 至少设置一项，必须匹配 `/health/ready` 的 release，防止误测旧 release 或 V2 服务 |
+| `V4_EVAL_CASES` | 可选案例 ID 列表，默认三个受控案例，最多三个 |
+| `V4_EVAL_PAGE_COUNTS` | 只接受固定值 `1,3,10`；任何改序、删减或旧 `V4_EVAL_SLIDE_COUNT` 都会失败关闭 |
+
+输入必须按页数和案例隔离，且全矩阵在第一个真实调用前一起校验。所有输入使用同一个图片模型；若需要验收另一模型，使用新的输出根和新的评测批次：
+
+```text
+${V4_EVAL_INPUT_ROOT}/
+  1/<caseId>/request.json
+  3/<caseId>/request.json
+  10/<caseId>/request.json
+```
+
+任一案例失败后 runner 不再提交后续案例或页数。输出包含已脱敏的 release、模型身份、异步图片协议、封装后逐页实际像素/比例、请求内容哈希、PPTX 哈希和失败码。JSON 审计文件不包含 API Token、网关 Key、Prompt 或来源正文；下载的 PPTX、预览和来源清单仍是交付制品，应始终保存在权限 `0700/0600` 的隔离输出根内。
+
 ## 生产部署
 
 - 发布目录：`/opt/ppt-agent/releases/<timestamp>`，当前版本由 `/opt/ppt-agent/current` 原子软链接指向。
