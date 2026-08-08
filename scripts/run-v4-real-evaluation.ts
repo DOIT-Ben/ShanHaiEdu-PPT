@@ -121,6 +121,10 @@ export type V4EvaluationTarget = Readonly<{
   service: 'ppt-agent'
   release: V4EvaluationRelease
   runtimeMode: 'GATEWAY'
+  textGeneration: Readonly<{
+    protocol: 'RESPONSES_JSON_SCHEMA'
+    streaming: true
+  }>
   models: Readonly<{
     text: string
     vision: string
@@ -841,6 +845,9 @@ export async function readV4EvaluationGatewayTarget(input: Readonly<{
   assert(parsedCapabilities.success, 'V4_EVAL_CAPABILITIES_CONTRACT_INVALID')
   const capability = parsedCapabilities.data.data
   assert(capability.runtimeMode === 'GATEWAY', 'V4_EVAL_RUNTIME_MODE_INVALID')
+  assert(capability.visualDeckV4.textGeneration?.protocol === 'RESPONSES_JSON_SCHEMA'
+    && capability.visualDeckV4.textGeneration.streaming,
+  'V4_EVAL_TEXT_PROTOCOL_INVALID')
   assert(capability.visualDeckV4.imageGeneration.asynchronous
     && capability.visualDeckV4.imageGeneration.protocol === 'IMAGE_TASK'
     && capability.visualDeckV4.imageGeneration.validatesActualPixels,
@@ -871,6 +878,7 @@ export async function readV4EvaluationGatewayTarget(input: Readonly<{
     service: 'ppt-agent',
     release,
     runtimeMode: 'GATEWAY',
+    textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
     models: { text: textModel, vision: visionModel, image: imageModel },
     imageGeneration: {
       asynchronous: true,
@@ -1400,7 +1408,7 @@ async function main() {
     pageCounts: config.canaryPageCounts,
     cases: config.caseIds,
     executedRequestHash: evaluationExecutedRequestHash(evaluationInputs),
-    protocol: { image: 'IMAGE_TASK', imageRatio: '16:9' },
+    protocol: { text: 'RESPONSES_JSON_SCHEMA', textStreaming: true, image: 'IMAGE_TASK', imageRatio: '16:9' },
     results: canary.results,
   }
   await Promise.all([

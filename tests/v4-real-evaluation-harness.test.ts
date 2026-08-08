@@ -69,6 +69,7 @@ function gatewayCapabilities(imageModel = 'gemini-3-pro-image-preview') {
   const textModel = 'gpt-5.6-terra'
   return createPublicCapabilities({
     runtimeMode: 'GATEWAY',
+    textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
     textModels: [textModel],
     visionModels: [textModel],
     imageModels: [imageModel],
@@ -202,6 +203,7 @@ describe('V4 real evaluation harness', () => {
         service: 'ppt-agent',
         release: releasedService,
         runtimeMode: 'GATEWAY',
+        textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
         models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
         imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
       },
@@ -244,6 +246,20 @@ describe('V4 real evaluation harness', () => {
         capability: createPublicCapabilities(),
         expectedRelease: { gitSha: releasedService.gitSha, releaseId: null },
         code: 'V4_EVAL_RUNTIME_MODE_INVALID',
+      },
+      {
+        capability: (() => {
+          const capability = gatewayCapabilities()
+          return {
+            ...capability,
+            visualDeckV4: {
+              ...capability.visualDeckV4,
+              textGeneration: { protocol: 'UNAVAILABLE', streaming: false },
+            },
+          }
+        })(),
+        expectedRelease: { gitSha: releasedService.gitSha, releaseId: null },
+        code: 'V4_EVAL_TEXT_PROTOCOL_INVALID',
       },
       {
         capability: {
@@ -316,6 +332,7 @@ describe('V4 real evaluation harness', () => {
         service: 'ppt-agent',
         release: releasedService,
         runtimeMode: 'GATEWAY',
+        textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
         models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
         imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
       }),
@@ -332,6 +349,7 @@ describe('V4 real evaluation harness', () => {
         service: 'ppt-agent',
         release: releasedService,
         runtimeMode: 'GATEWAY',
+        textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
         models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
         imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
       },
@@ -347,6 +365,7 @@ describe('V4 real evaluation harness', () => {
         service: 'ppt-agent',
         release: releasedService,
         runtimeMode: 'GATEWAY',
+        textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
         models: { text: 'gpt-5.6-terra', vision: 'gpt-5.6-terra', image: 'gemini-3-pro-image-preview' },
         imageGeneration: { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true },
       }),

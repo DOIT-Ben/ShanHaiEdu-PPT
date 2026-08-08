@@ -108,7 +108,7 @@ bun run dev:v2
 
 ## 隔离真实 V4 评测
 
-`bun run eval:v4` 只能在 `/opt/ppt-agent-test` 指向的隔离服务上执行。它会创建真实 V4 Run，并可能调用真实 Provider、消耗该隔离环境的预算与 Usage；不得把它用于正式服务或正式数据目录。脚本拒绝从或向 `/opt/ppt-agent` 读取/写入评测输入与报告，并在任何 `POST /v1/runs` 前完成以下门禁：全部输入文件本地校验、主服务 `ready` 身份与 release 比对、认证后的 `capabilities` 校验、网关模式、异步 `IMAGE_TASK`、封装后图片实际像素，以及文本、视觉和所选图片模型均为 `HEALTHY`。预检结果先写入输出目录的 `preflight.json`，再按固定顺序提交。
+`bun run eval:v4` 只能在 `/opt/ppt-agent-test` 指向的隔离服务上执行。它会创建真实 V4 Run，并可能调用真实 Provider、消耗该隔离环境的预算与 Usage；不得把它用于正式服务或正式数据目录。脚本拒绝从或向 `/opt/ppt-agent` 读取/写入评测输入与报告，并在任何 `POST /v1/runs` 前完成以下门禁：全部输入文件本地校验、主服务 `ready` 身份与 release 比对、认证后的 `capabilities` 校验、`textGeneration.protocol=RESPONSES_JSON_SCHEMA` 且 `streaming=true`、网关模式、异步 `IMAGE_TASK`、封装后图片实际像素，以及文本、视觉和所选图片模型均为 `HEALTHY`。缺少该文本协议声明时立即失败关闭，不产生 Run。预检结果先写入输出目录的 `preflight.json`，再按固定顺序提交。
 
 | 变量 | 用途 |
 |---|---|

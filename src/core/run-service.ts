@@ -141,7 +141,9 @@ export class RunService {
           ? 'image model is not allowed for new V4 runs'
           : error.code === 'V4_MODEL_NOT_READY'
             ? 'a required V4 model has not passed current readiness requirements'
-            : 'a required V4 model is temporarily unavailable'
+          : error.code === 'V4_CHAIN4_PROTOCOL_UNSUPPORTED'
+            ? 'V4 Chain-4 requires streamed Responses JSON Schema'
+          : 'a required V4 model is temporarily unavailable'
         throw new RunServiceError(error.status, error.code, message)
       }
       throw error

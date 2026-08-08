@@ -347,6 +347,38 @@ describe('run service', () => {
       code: 'V4_MODEL_POLICY_REQUIRED',
     })
   })
+
+  test('rejects a gateway Chain-4 Run before persistence when the text transport is unavailable', async () => {
+    const repository = new InMemoryAgentRepository()
+    const service = new RunService({
+      repository,
+      clock: new FixedClock(),
+      v4ModelPolicy: new V4ModelPolicy({
+        runtimeMode: 'GATEWAY',
+        textGeneration: { protocol: 'UNAVAILABLE', streaming: false },
+        models: [
+          { model: 'text', roles: ['TEXT'], evaluationEnabled: true, published: true, readiness: v4Readiness },
+          { model: 'vision', roles: ['VISION'], evaluationEnabled: true, published: true, readiness: v4Readiness },
+          { model: 'image', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness: v4Readiness },
+        ],
+      }),
+    })
+
+    await expect(service.create({
+      ...request,
+      imageModel: 'image',
+      presentationMode: 'VISUAL_DECK_V4',
+      visualDeckV4: {
+        instruction: '根据来源生成两页演示',
+        sourceMode: 'SOURCE_GROUNDED',
+        deckOptions: { length: { slideCount: 2 }, aspectRatio: '16:9' },
+      },
+    }, 'v4-chain4-protocol-create-0001')).rejects.toMatchObject({
+      status: 422,
+      code: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED',
+    })
+    expect(await repository.listRuns()).toHaveLength(0)
+  })
   test('creates and safely replays a host-scoped Run', async () => {
     const { repository, service } = fixture()
     const first = await service.create(request, 'frameflow-create-0001')

@@ -49,6 +49,11 @@ describe('OpenAPI v1 contract', () => {
     expect(capabilities.properties.models.properties.image.minItems).toBe(0)
     expect(capabilities.required).not.toContain('modelAvailability')
     expect(capabilities.properties.modelAvailability.description).toContain('same order')
+    expect(capabilities.properties.textGeneration.oneOf).toEqual([
+      expect.objectContaining({ properties: { protocol: { const: 'RESPONSES_JSON_SCHEMA' }, streaming: { const: true } } }),
+      expect.objectContaining({ properties: { protocol: { const: 'LOCAL_MOCK' }, streaming: { const: false } } }),
+      expect.objectContaining({ properties: { protocol: { const: 'UNAVAILABLE' }, streaming: { const: false } } }),
+    ])
     for (const role of ['text', 'vision', 'image', 'imageEdit']) {
       const entries = capabilities.properties.modelAvailability.properties[role]
       expect(entries.items.required).toEqual(['model', 'state', 'checkedAt'])
@@ -471,6 +476,7 @@ describe('OpenAPI v1 contract', () => {
     expect(capabilitiesContract).toContain('LOCAL_MOCK')
     expect(capabilitiesContract).toContain('runtimeMode')
     expect(capabilitiesContract).toContain('validatesActualPixels')
+    expect(capabilitiesContract).toContain('RESPONSES_JSON_SCHEMA')
     expect(capabilitiesContract).not.toContain('baseUrl')
     expect(capabilitiesContract).not.toContain('apiKey')
     const capabilitiesSchema = document.components.schemas.PptAgentCapabilities as any

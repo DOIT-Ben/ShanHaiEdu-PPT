@@ -1,6 +1,11 @@
 import type { CreateRunRequest } from '../contracts'
 import { VISUAL_DECK_V4_COMPILER_VERSION } from '../release-identity'
-import { createPublicCapabilities, type PublicCapabilities } from '../run-query-contracts'
+import {
+  createPublicCapabilities,
+  v4TextGenerationCapabilitySchema,
+  type PublicCapabilities,
+  type V4TextGenerationCapability,
+} from '../run-query-contracts'
 import type { StructuredGenerationProtocol } from './ports'
 
 export type V4RuntimeMode = 'GATEWAY' | 'MOCK'
@@ -167,7 +172,8 @@ export interface V4ModelAvailabilityProbe {
 
 export class V4ModelPolicyError extends Error {
   constructor(
-    readonly code: 'V4_IMAGE_MODEL_NOT_ALLOWED' | 'V4_MODEL_NOT_READY' | 'V4_MODEL_UNAVAILABLE',
+    readonly code: 'V4_IMAGE_MODEL_NOT_ALLOWED' | 'V4_MODEL_NOT_READY' | 'V4_MODEL_UNAVAILABLE'
+      | 'V4_CHAIN4_PROTOCOL_UNSUPPORTED',
     readonly status: 422 | 503,
   ) {
     super(code)
@@ -190,6 +196,7 @@ type ModelAvailabilityRequirement = Readonly<{
 type V4ModelPolicyInput = Readonly<{
   runtimeMode: V4RuntimeMode
   models: readonly V4ConfiguredModel[]
+  textGeneration?: V4TextGenerationCapability
   availabilityProbes?: Readonly<Partial<Record<AvailabilityGroup, V4ModelAvailabilityProbe>>>
   availabilityTtlMs?: number
   now?: () => Date
@@ -243,6 +250,7 @@ export class V4ModelPolicy {
   private readonly availability = new Map<string, ModelAvailabilitySnapshot>()
   private readonly nextRefreshAt = new Map<AvailabilityGroup, number>()
   private readonly refreshing = new Map<AvailabilityGroup, Promise<void>>()
+  private readonly textGeneration: V4TextGenerationCapability
 
   constructor(input: V4ModelPolicyInput) {
     if (input.models.length < 1 || input.models.length > 20) throw new Error('V4_MODEL_POLICY_MODELS_INVALID')
@@ -272,6 +280,11 @@ export class V4ModelPolicy {
       }
     })
     this.runtimeMode = input.runtimeMode
+    this.textGeneration = v4TextGenerationCapabilitySchema.parse(input.textGeneration ?? (
+      input.runtimeMode === 'MOCK'
+        ? { protocol: 'LOCAL_MOCK', streaming: false }
+        : { protocol: 'UNAVAILABLE', streaming: false }
+    ))
     this.availabilityProbes = input.availabilityProbes ?? {}
     this.availabilityTtlMs = input.availabilityTtlMs ?? 120_000
     this.now = input.now ?? (() => new Date())
@@ -326,6 +339,10 @@ export class V4ModelPolicy {
 
   async createNewRunSnapshot(request: CreateRunRequest): Promise<V4RunModelSnapshot | null> {
     if (request.presentationMode !== 'VISUAL_DECK_V4') return null
+    if (this.runtimeMode === 'GATEWAY'
+      && this.textGeneration.protocol !== 'RESPONSES_JSON_SCHEMA') {
+      throw new V4ModelPolicyError('V4_CHAIN4_PROTOCOL_UNSUPPORTED', 422)
+    }
     const image = this.models.find((model) => model.model === request.imageModel && model.roles.includes('IMAGE'))
     if (!image || !image.published) {
       throw new V4ModelPolicyError('V4_IMAGE_MODEL_NOT_ALLOWED', 422)
@@ -383,6 +400,7 @@ export class V4ModelPolicy {
         image: this.publicAvailability(image, 'image'),
         imageEdit: this.publicAvailability(imageEdit, 'image'),
       },
+      textGeneration: this.textGeneration,
       quickDeckAvailable,
     })
   }
@@ -489,6 +507,7 @@ export class V4ModelPolicy {
     }
     return new V4ModelPolicy({
       runtimeMode: 'MOCK',
+      textGeneration: { protocol: 'LOCAL_MOCK', streaming: false },
       models: [
         { model: 'local-mock-text', roles: ['TEXT'], evaluationEnabled: true, published: true, readiness: ready },
         { model: 'local-mock-vision', roles: ['VISION'], evaluationEnabled: true, published: true, readiness: ready },

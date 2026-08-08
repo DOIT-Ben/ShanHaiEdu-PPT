@@ -199,6 +199,20 @@ const publicModelAvailabilitySchema = z.object({
 
 export type PublicModelAvailability = z.output<typeof publicModelAvailabilitySchema>
 
+export const v4TextGenerationCapabilitySchema = z.object({
+  protocol: z.enum(['RESPONSES_JSON_SCHEMA', 'LOCAL_MOCK', 'UNAVAILABLE']),
+  streaming: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.protocol === 'RESPONSES_JSON_SCHEMA' && !value.streaming) {
+    context.addIssue({ code: 'custom', path: ['streaming'], message: 'Responses JSON Schema requires streaming' })
+  }
+  if (value.protocol !== 'RESPONSES_JSON_SCHEMA' && value.streaming) {
+    context.addIssue({ code: 'custom', path: ['streaming'], message: 'only Responses JSON Schema may advertise streaming' })
+  }
+})
+
+export type V4TextGenerationCapability = z.output<typeof v4TextGenerationCapabilitySchema>
+
 export const publicCapabilitiesSchema = z.object({
   runtimeMode: z.enum(['GATEWAY', 'MOCK']),
   visualDeckV4: z.object({
@@ -213,6 +227,7 @@ export const publicCapabilitiesSchema = z.object({
       imageEdit: optionalUniqueModelListSchema,
     }).strict(),
     modelAvailability: publicModelAvailabilitySchema.optional(),
+    textGeneration: v4TextGenerationCapabilitySchema.optional(),
     imageGeneration: z.object({
       asynchronous: z.boolean(),
       protocol: z.enum(['IMAGE_TASK', 'LOCAL_MOCK']),
@@ -250,6 +265,7 @@ export function createPublicCapabilities(input: Readonly<{
   imageModels?: readonly string[]
   imageEditModels?: readonly string[]
   modelAvailability?: PublicModelAvailability
+  textGeneration?: V4TextGenerationCapability
   quickDeckAvailable?: boolean
 }> = {}): PublicCapabilities {
   const runtimeMode = input.runtimeMode ?? 'MOCK'
@@ -257,6 +273,9 @@ export function createPublicCapabilities(input: Readonly<{
   const visionModels = input.visionModels ?? ['local-mock-vision']
   const imageModels = input.imageModels ?? ['local-mock-image']
   const imageEditModels = input.imageEditModels ?? []
+  const textGeneration = input.textGeneration ?? (runtimeMode === 'GATEWAY'
+    ? { protocol: 'UNAVAILABLE' as const, streaming: false }
+    : { protocol: 'LOCAL_MOCK' as const, streaming: false })
   const defaultAvailabilityState = runtimeMode === 'MOCK' ? 'HEALTHY' as const : 'UNKNOWN' as const
   const modelAvailability = input.modelAvailability ?? {
     text: textModels.map((model) => ({ model, state: defaultAvailabilityState, checkedAt: null })),
@@ -278,6 +297,7 @@ export function createPublicCapabilities(input: Readonly<{
         imageEdit: imageEditModels,
       },
       modelAvailability,
+      textGeneration,
       imageGeneration: runtimeMode === 'GATEWAY'
         ? { asynchronous: true, protocol: 'IMAGE_TASK', validatesActualPixels: true }
         : { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },

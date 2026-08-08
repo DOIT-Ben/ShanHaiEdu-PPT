@@ -38,6 +38,7 @@ function probe(models: readonly string[]): V4ModelAvailabilityProbe {
 function policy(input: Partial<ConstructorParameters<typeof V4ModelPolicy>[0]> = {}) {
   return new V4ModelPolicy({
     runtimeMode: 'GATEWAY',
+    textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
     models: [
       { model: 'gpt-5.6-terra', roles: ['TEXT', 'VISION'], evaluationEnabled: true, published: true, readiness },
       { model: 'gemini-3-pro-image-preview', roles: ['IMAGE'], evaluationEnabled: true, published: true, readiness },
@@ -75,6 +76,26 @@ describe('V4 model policy', () => {
         },
       },
     })
+  })
+
+  test('derives the public text transport from the policy-owned runtime contract', async () => {
+    const unavailable = policy({ textGeneration: { protocol: 'UNAVAILABLE', streaming: false } })
+
+    await expect(unavailable.publicCapabilities(false)).resolves.toMatchObject({
+      visualDeckV4: { textGeneration: { protocol: 'UNAVAILABLE', streaming: false } },
+    })
+    await expect(policy().publicCapabilities(false)).resolves.toMatchObject({
+      visualDeckV4: { textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true } },
+    })
+  })
+
+  test('rejects a new gateway V4 Run before model or availability work when Chain-4 is not Responses', async () => {
+    const configured = policy({ textGeneration: { protocol: 'UNAVAILABLE', streaming: false } })
+
+    await expect(configured.createNewRunSnapshot(request)).rejects.toEqual(expect.objectContaining({
+      code: 'V4_CHAIN4_PROTOCOL_UNSUPPORTED',
+      status: 422,
+    }))
   })
 
   test('freezes exactly one ready route for every V4 model role', async () => {

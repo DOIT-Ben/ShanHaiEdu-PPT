@@ -2425,6 +2425,14 @@
                   "imageEdit": { "type": "array", "maxItems": 20, "uniqueItems": true, "items": { "type": "object", "additionalProperties": false, "required": ["model", "state", "checkedAt"], "properties": { "model": { "type": "string", "minLength": 1, "maxLength": 120 }, "state": { "enum": ["UNKNOWN", "HEALTHY", "DEGRADED", "UNAVAILABLE"] }, "checkedAt": { "type": ["string", "null"], "format": "date-time" } } } }
                 }
               },
+              "textGeneration": {
+                "description": "Current V4 structured text transport. RESPONSES_JSON_SCHEMA is the only live streaming gateway protocol; LOCAL_MOCK and UNAVAILABLE are not real Provider evidence.",
+                "oneOf": [
+                  { "type": "object", "additionalProperties": false, "required": ["protocol", "streaming"], "properties": { "protocol": { "const": "RESPONSES_JSON_SCHEMA" }, "streaming": { "const": true } } },
+                  { "type": "object", "additionalProperties": false, "required": ["protocol", "streaming"], "properties": { "protocol": { "const": "LOCAL_MOCK" }, "streaming": { "const": false } } },
+                  { "type": "object", "additionalProperties": false, "required": ["protocol", "streaming"], "properties": { "protocol": { "const": "UNAVAILABLE" }, "streaming": { "const": false } } }
+                ]
+              },
               "imageGeneration": { "type": "object", "additionalProperties": false, "required": ["asynchronous", "protocol", "validatesActualPixels"], "properties": { "asynchronous": { "type": "boolean" }, "protocol": { "enum": ["IMAGE_TASK", "LOCAL_MOCK"] }, "validatesActualPixels": { "const": true } } },
               "delivery": { "type": "object", "additionalProperties": false, "required": ["formats", "rasterSlides"], "properties": { "formats": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "enum": ["PPTX", "PREVIEW_PNG", "SOURCES_JSON"] } }, "rasterSlides": { "const": true } } }
             }

@@ -82,6 +82,7 @@ describe('public run query contracts', () => {
           image: [{ model: 'local-mock-image', state: 'HEALTHY', checkedAt: null }],
           imageEdit: [],
         },
+        textGeneration: { protocol: 'LOCAL_MOCK', streaming: false },
         imageGeneration: { asynchronous: false, protocol: 'LOCAL_MOCK', validatesActualPixels: true },
         delivery: { formats: ['PPTX', 'PREVIEW_PNG', 'SOURCES_JSON'], rasterSlides: true },
       },
@@ -90,6 +91,19 @@ describe('public run query contracts', () => {
     expect(serialized).not.toContain('baseUrl')
     expect(serialized).not.toContain('apiKey')
     expect(createPublicCapabilities({ imageEditModels: [] }).visualDeckV4.models.imageEdit).toEqual([])
+  })
+
+  test('requires an explicit gateway declaration before advertising streaming Responses JSON Schema', () => {
+    expect(createPublicCapabilities({ runtimeMode: 'GATEWAY' }).visualDeckV4.textGeneration)
+      .toEqual({ protocol: 'UNAVAILABLE', streaming: false })
+    expect(createPublicCapabilities({
+      runtimeMode: 'GATEWAY',
+      textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true },
+    }).visualDeckV4.textGeneration).toEqual({ protocol: 'RESPONSES_JSON_SCHEMA', streaming: true })
+    expect(() => createPublicCapabilities({
+      runtimeMode: 'GATEWAY',
+      textGeneration: { protocol: 'RESPONSES_JSON_SCHEMA', streaming: false },
+    })).toThrow('Responses JSON Schema requires streaming')
   })
 
   test('rejects a model availability list that is unique but not aligned with its published-model order', () => {

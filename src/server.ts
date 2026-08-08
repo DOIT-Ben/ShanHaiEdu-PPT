@@ -123,6 +123,9 @@ const v4ModelPolicy = v4ModelPolicyConfig
   ? new V4ModelPolicy({
       runtimeMode: 'GATEWAY',
       ...v4ModelPolicyConfig,
+      textGeneration: visualDeckV4Transport === 'RESPONSES'
+        ? { protocol: 'RESPONSES_JSON_SCHEMA', streaming: true }
+        : { protocol: 'UNAVAILABLE', streaming: false },
       availabilityProbes: {
         text: new GatewayModelAvailabilityProbe({
           baseUrl: process.env.MODEL_GATEWAY_BASE_URL?.trim() || '',
