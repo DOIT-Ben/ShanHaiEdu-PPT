@@ -134,6 +134,7 @@ describe('visual deck v4 execution', () => {
     const first = await sharp(previews[0]!.image).raw().toBuffer({ resolveWithObject: true })
     expect(first.info).toMatchObject({ width: 1600, height: 900 })
     expect([...first.data.subarray(0, 3)]).toEqual([229, 72, 77])
+    expect(await sharp(await renderer.renderPreview(input)).metadata()).toMatchObject({ width: 1032, height: 318 })
 
     const pptx = await renderer.renderPptx(input)
     const directory = await mkdtemp(join(tmpdir(), 'ppt-agent-v4-raster-'))
@@ -151,15 +152,39 @@ describe('visual deck v4 execution', () => {
     }
   })
 
-  test('rejects a V4 raster that bypasses exact aspect-ratio normalization', async () => {
+  test('rejects a V4 raster that bypasses exact aspect-ratio normalization in every render path', async () => {
     const renderer = new SharpPptxPresentationRenderer()
     const image = await sharp({
       create: { width: 1376, height: 768, channels: 3, background: '#E5484D' },
     }).png().toBuffer()
-
-    await expect(renderer.renderPptx({
+    const input = {
       blueprint: blueprint(1),
       slides: [{ pageNumber: 1, image, imageMimeType: 'image/png' }],
+    }
+
+    await expect(renderer.renderSlidePreviews(input)).rejects.toThrow('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
+    await expect(renderer.renderPreview(input)).rejects.toThrow('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
+    await expect(renderer.renderPptx(input)).rejects.toThrow('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
+  })
+
+  test('validates a V4 JPEG against its auto-oriented display dimensions', async () => {
+    const renderer = new SharpPptxPresentationRenderer()
+    const portraitAfterRotation = await sharp({
+      create: { width: 1600, height: 900, channels: 3, background: '#E5484D' },
+    }).withMetadata({ orientation: 6 }).jpeg().toBuffer()
+    const landscapeAfterRotation = await sharp({
+      create: { width: 900, height: 1600, channels: 3, background: '#1F6FEB' },
+    }).withMetadata({ orientation: 6 }).jpeg().toBuffer()
+
+    await expect(renderer.renderSlidePreviews({
+      blueprint: blueprint(1),
+      slides: [{ pageNumber: 1, image: portraitAfterRotation, imageMimeType: 'image/jpeg' }],
     })).rejects.toThrow('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
+
+    const previews = await renderer.renderSlidePreviews({
+      blueprint: blueprint(1),
+      slides: [{ pageNumber: 1, image: landscapeAfterRotation, imageMimeType: 'image/jpeg' }],
+    })
+    expect(await sharp(previews[0]!.image).metadata()).toMatchObject({ width: 1600, height: 900 })
   })
 })

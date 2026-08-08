@@ -81,7 +81,9 @@ async function normalizedPng(image: Uint8Array) {
 
 async function normalizedVisualDeckV4Png(image: Uint8Array) {
   const metadata = await sharp(image).metadata()
-  if (!metadata.width || !metadata.height || !hasExactVisualDeckV4AspectRatio(metadata.width, metadata.height)) {
+  const width = metadata.autoOrient?.width ?? metadata.width
+  const height = metadata.autoOrient?.height ?? metadata.height
+  if (!width || !height || !hasExactVisualDeckV4AspectRatio(width, height)) {
     throw new Error('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
   }
   return normalizedPng(image)
@@ -207,7 +209,7 @@ export class SharpPptxPresentationRenderer implements PresentationRendererPort {
         if (!blueprint.layeredDesign) throw new Error(`RENDER_LAYERED_DESIGN_MISSING:${blueprint.pageNumber}`)
         return renderLayeredSlide(source, blueprint.layeredDesign.elements, blueprint.layeredDesign.backgroundColor)
       }
-      if (input.blueprint.renderMode === 'VISUAL_DECK_V4') return normalizedPng(source.image)
+      if (input.blueprint.renderMode === 'VISUAL_DECK_V4') return normalizedVisualDeckV4Png(source.image)
       return renderSlide({
         image: source.image,
         deckTitle: input.blueprint.title,

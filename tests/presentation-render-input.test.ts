@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import sharp from 'sharp'
 import { MockArtifactPort, MockPresentationRendererPort } from '../src/adapters/mock-ports'
+import { SharpPptxPresentationRenderer } from '../src/adapters/presentation-renderer'
 import { renderAndStoreSlidePreviews } from '../src/core/presentation-render-input'
+import { hashInput } from '../src/core/hash'
 import type { RunRecord } from '../src/core/ports'
+import type { PresentationBlueprint } from '../src/presentation-contracts'
 
 const run: RunRecord = {
   id: 'run-cache', creationKey: 'create-cache', requestHash: 'request-cache',
@@ -46,5 +50,49 @@ describe('presentation render input', () => {
 
     expect(replay).toEqual(first)
     expect(renderer.slidePreviewCalls).toBe(1)
+  })
+
+  test('does not reuse a legacy cropped preview cache for a V4 source that now fails the exact aspect gate', async () => {
+    const artifacts = new MockArtifactPort()
+    const v4Blueprint = {
+      ...blueprint,
+      slides: blueprint.slides.slice(0, 1),
+      renderMode: 'VISUAL_DECK_V4',
+      visualDeckV4Proposal: {},
+    } as unknown as PresentationBlueprint
+    const source = await artifacts.put({
+      tenantId: run.host.tenantId,
+      runId: run.id,
+      name: 'near-16-by-9.png',
+      mimeType: 'image/png',
+      bytes: new Uint8Array(await sharp({
+        create: { width: 1376, height: 768, channels: 3, background: '#E5484D' },
+      }).png().toBuffer()),
+      idempotencyKey: 'v4-near-aspect-source',
+    })
+    const references = [{ pageNumber: 1, artifactId: source.artifactId }]
+    const legacyPrefix = `${run.id}:slide-previews:${hashInput({
+      previewFormat: 'classroom-v4',
+      blueprint: v4Blueprint,
+      references,
+    }).slice(0, 28)}`
+    await artifacts.put({
+      tenantId: run.host.tenantId,
+      runId: run.id,
+      name: 'legacy-cropped-preview.png',
+      mimeType: 'image/png',
+      bytes: new Uint8Array(await sharp({
+        create: { width: 1600, height: 900, channels: 3, background: '#E5484D' },
+      }).png().toBuffer()),
+      idempotencyKey: `${legacyPrefix}:slide:1:composite`,
+    })
+
+    await expect(renderAndStoreSlidePreviews({
+      artifacts,
+      renderer: new SharpPptxPresentationRenderer(),
+      run,
+      blueprint: v4Blueprint,
+      references,
+    })).rejects.toThrow('V4_RENDER_SOURCE_ASPECT_RATIO_INVALID')
   })
 })

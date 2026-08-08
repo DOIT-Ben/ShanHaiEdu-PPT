@@ -4,6 +4,13 @@ import { hashInput } from './hash'
 import type { AgentRepository, ArtifactPort, PresentationRendererPort, RunRecord, StepRecord } from './ports'
 
 const PRESENTATION_PREVIEW_FORMAT = 'classroom-v4'
+const VISUAL_DECK_V4_PREVIEW_FORMAT = 'visual-deck-v4-exact-aspect-v1'
+
+function presentationPreviewFormat(blueprint: PresentationBlueprint) {
+  return blueprint.renderMode === 'VISUAL_DECK_V4'
+    ? VISUAL_DECK_V4_PREVIEW_FORMAT
+    : PRESENTATION_PREVIEW_FORMAT
+}
 
 export type PresentationArtifactReference = Readonly<{
   pageNumber: number
@@ -91,7 +98,7 @@ export async function renderAndStoreSlidePreviews(input: Readonly<{
   references: readonly PresentationArtifactReference[]
 }>) {
   const cachePrefix = `${input.run.id}:slide-previews:${hashInput({
-    previewFormat: PRESENTATION_PREVIEW_FORMAT,
+    previewFormat: presentationPreviewFormat(input.blueprint),
     blueprint: input.blueprint,
     references: input.references,
   }).slice(0, 28)}`
